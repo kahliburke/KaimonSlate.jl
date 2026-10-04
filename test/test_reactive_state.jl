@@ -152,7 +152,7 @@ end
         NS.set_cell_tags!(nb, cid, ["region=ghost"])
 
         # No such region: the sweep must not touch the cell, and must not throw looking for one.
-        RE.mark_blocked!(cell(), "queued", "login")
+        RE.mark_blocked!(cell(), "queued", "login", "ghost")
         NS._reconcile_blocked_regions!(nb)
         @test cell().state == RE.BLOCKED
 
@@ -165,13 +165,13 @@ end
         # scheduler. Asking the cluster about it on a timer answers a question nobody asked.
         RE.region_set!("ghost"; host = "nowhere.invalid", transport = :tunnel, scheduler = :pbs)
         empty!(NS._REPLACE_AT)
-        RE.mark_blocked!(cell(), "not_signed_in", "login")
+        RE.mark_blocked!(cell(), "not_signed_in", "login", "ghost")
         NS._reconcile_blocked_regions!(nb)
         @test isempty(NS._REPLACE_AT)
 
         # A QUEUE wait with no node placed: nobody is asking the cluster any more, so the sweep
         # restarts the placement task. That is the only branch here that costs a round trip.
-        RE.mark_blocked!(cell(), "queued", "login")
+        RE.mark_blocked!(cell(), "queued", "login", "ghost")
         NS._reconcile_blocked_regions!(nb)
         @test haskey(NS._REPLACE_AT, (nb.id, "ghost"))
         stamp0 = NS._REPLACE_AT[(nb.id, "ghost")]
@@ -199,7 +199,7 @@ end
         # distinguishes a first re-arm from a fifth — without this a cell that cannot start for some
         # OTHER reason would be re-armed on every 5 s sweep forever.
         stamp = NS._REARM_AT[(nb.id, "ghost")]
-        RE.mark_blocked!(cell(), "queued", "login")
+        RE.mark_blocked!(cell(), "queued", "login", "ghost")
         NS._reconcile_blocked_regions!(nb)
         @test NS._REARM_AT[(nb.id, "ghost")] == stamp     # the sweep declined to act again
     finally

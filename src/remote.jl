@@ -830,6 +830,17 @@ function _env_fingerprint(envdir::AbstractString, infra::AbstractString)
 end
 
 const _ENV_STAMP = ".slate-env"   # beside the remote env's Project.toml
+
+# What a host records of an environment it built: the fingerprint of its inputs, the host's own Julia
+# (`julia --version` there, which the hub's version does not determine), and whether its packages
+# were precompiled as part of the build.
+_env_stamp(fp::AbstractString, julia::AbstractString, precompiled::Bool) =
+    string(bytes2hex(_SHA.sha1(string(fp, "\n", strip(julia)))), precompiled ? "+pc" : "")
+
+# Whether an environment stamped `had` serves a build that would be stamped `want`. A precompiled build
+# serves a request that did not need one; a download-only build does not serve one that does.
+_env_stamp_serves(had::AbstractString, want::AbstractString) =
+    had == want || (!endswith(want, "+pc") && had == want * "+pc")
 # What the host last received of the worker payload and of the extension SDK, as their content SHAs.
 # Written after a send succeeds, so a matching stamp means that exact content is already there.
 const _PAYLOAD_STAMP = "$_REMOTE_WORKER/.slate-payload"
@@ -952,7 +963,7 @@ Idempotent. Ensure the host can run a SlateWorker: (1) send Slate's worker paylo
 reruns (the env instantiate is skipped once `.ready` exists).
 """
 function provision_remote!(t::RemoteTarget, parent_project::AbstractString; precompile::Bool = true,
-                           seen = nothing)
+                           seen = nothing, rebuild::Bool = false)
     host = t.ssh_host
     _rlog("provision START host=$host transport=$(t.transport) project=$(t.project) parent=$parent_project")
     # Reachability precheck FIRST — a clear message beats a cryptic transfer failure ten steps in when the
@@ -1007,12 +1018,13 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # Resolving and instantiating is minutes on a cluster filesystem, and it is the same work every
     # time nothing changed. The host keeps the fingerprint of what it last built; when it matches, only
     # the sources travel. The environment files stay as they are, since the ones there were rewritten
-    # for the host's own paths.
+    # for the host's own paths. `rebuild` builds regardless, for a prepare: a stamp says what was built,
+    # not that the depot still holds it.
     envdir = !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml")) ? t.origin_env :
              (!isempty(parent_project) && isdir(parent_project) ? String(parent_project) : "")
-    fp = _env_fingerprint(envdir, infra)
-    had = get(st, "env", "")
-    built = strip(had) != fp
+    stamp = _env_stamp(_env_fingerprint(envdir, infra), get(st, "julia", ""), precompile)
+    had = strip(get(st, "env", ""))
+    built = rebuild || !_env_stamp_serves(had, stamp)
     if !built
         _rlog("provision [3/3] environment unchanged on $host (skip resolve) — sending sources only")
         if !isempty(envdir)
@@ -1022,9 +1034,9 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             _send_dev_deps!(t, envdir)
         end
     else
-        rec = strip(had)
-        _rlog("provision [3/3] " * (isempty(rec) ? "no environment recorded on $host" :
-                                    "environment on $host differs (recorded $(first(rec, 12)), now $(first(fp, 12)))") *
+        _rlog("provision [3/3] " * (rebuild ? "rebuilding the environment on $host" :
+                                    isempty(had) ? "no environment recorded on $host" :
+                                    "environment on $host differs (recorded $(first(had, 12)), now $(first(stamp, 12)))") *
               " — building")
         _prep_stage("Building package environment on $host")
         try
@@ -1039,7 +1051,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             _ssh_ok(host, `rm -f $rel/Project.toml $rel/Manifest.toml $rel/$_ENV_STAMP`)
             build_env!()
         end
-        _put_file(host, Vector{UInt8}(codeunits(fp)), "$rel/$_ENV_STAMP") ||
+        _put_file(host, Vector{UInt8}(codeunits(stamp)), "$rel/$_ENV_STAMP") ||
             _rlog("provision: could not record the environment fingerprint on $host (next start rebuilds)")
     end
     # WHERE rg is, written down once. `ripgrep_jll` is provisioned into the worker env, but a JLL
@@ -1531,9 +1543,15 @@ end
 const _SYNCERS = Dict{String,SyncWatcher}()   # keyed by "host:remote_project"
 const _SYNC_LOCK = ReentrantLock()
 
+# A syncer's key: the host and project it sends to, and the scheduler job when the host is a granted
+# node, so a released allocation stops its own syncers and no one else's on a node of the same name.
+_sync_base(t::RemoteTarget) = isempty(t.job) ? string(t.ssh_host, ":", t.project) :
+                                               string(_sync_job_prefix(t.ssh_host, t.job), t.project)
+_sync_job_prefix(host, job) = string(host, "#", job, ":")
+
 function start_sync!(t::RemoteTarget, parent_project::AbstractString)
     (isempty(parent_project) && !isdir(parent_project)) && return
-    base = string(t.ssh_host, ":", t.project)
+    base = _sync_base(t)
     lock(_SYNC_LOCK) do
         # 1. the notebook's parent project /src → t.project (project code hot-reload). NEVER the env
         #    files, or we'd clobber the replicated Project/Manifest (the exact env provisioning set up).
@@ -1592,7 +1610,7 @@ end
 # Stop every syncer for this target — the parent-project watcher AND each dev-dep watcher (keyed
 # `<base>:dev:<name>`), so a teardown leaves no orphaned sync loops.
 function stop_sync!(t::RemoteTarget)
-    base = string(t.ssh_host, ":", t.project)
+    base = _sync_base(t)
     lock(_SYNC_LOCK) do
         for key in collect(keys(_SYNCERS))
             (key == base || startswith(key, base * ":")) || continue
@@ -1603,10 +1621,10 @@ function stop_sync!(t::RemoteTarget)
     return nothing
 end
 
-# Every syncer pointed at `host`, whatever project it watches — for when the HOST is what went
-# away rather than one target on it, which is what releasing a scheduler node means.
-function stop_sync_host!(host::AbstractString)
-    pre = string(host, ":")
+# Every syncer sending to a node within scheduler job `job`, whatever project it watches: for when
+# the allocation is what went away rather than one target on it.
+function stop_sync_job!(host::AbstractString, job::AbstractString)
+    pre = _sync_job_prefix(host, job)
     lock(_SYNC_LOCK) do
         for key in collect(keys(_SYNCERS))
             startswith(key, pre) || continue
@@ -3869,6 +3887,9 @@ function parse_region_options(text::AbstractString)
             throw(ArgumentError("'$e' is not key=value (a key is letters, digits, '_' or '-')"))
         k in Sweep._FIELD_OWNED &&
             throw(ArgumentError("'$k' is a region field of its own; set it with $k=, not in options"))
+        Sweep._request_owned(k) &&
+            throw(ArgumentError("'$k' would override what the node request sets itself (its job name, " *
+                                "time limit, output or size), so it cannot be an option"))
         out[String(k)] = String(v)
     end
     return out
@@ -4249,7 +4270,7 @@ function _placement(r::Region)
     route!(p.host, "")
     # The file syncers go too, as in `region_forget_placement!`: left running, the next local save
     # sends the project to a node the scheduler has already handed to someone else.
-    stop_sync_host!(p.host)
+    stop_sync_job!(p.host, p.job)
     # The data forwards go with the route: their far end is gone, and the login node's session
     # carries every other command to the cluster. Spawned because this runs under `region_host`,
     # which the UI polls and which must not wait on a session queue.
@@ -4369,7 +4390,7 @@ function region_forget_placement!(r::Region)
     held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
     held === nothing && return false
     route!(held.host, "")
-    stop_sync_host!(held.host)
+    stop_sync_job!(held.host, held.job)
     # The data forwards go with the route, for the same reason `_placement` drops them when a lease
     # runs out: their far end is a node we no longer hold. A forward left open to a node that is gone
     # is not idle — the session pumps every forward at every wait, so a dead one is swept forever and

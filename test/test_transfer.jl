@@ -129,8 +129,15 @@ end
             got = _kept(d)
             @test "Manifest.toml" in got && "JuliaManifest-v1.12.toml" in got
             @test !("src/Manifest.toml" in got)
-            # A caller that means the far side to resolve its own still says so, and that wins.
-            @test !("Manifest.toml" in _kept(d; excludes = ["Manifest.toml"]))
+            # A caller that means the far side to resolve its own still says so, and that wins, for
+            # every name Julia would read a manifest by.
+            ex = _kept(d; excludes = ["Manifest.toml"])
+            @test !("Manifest.toml" in ex) && !("JuliaManifest-v1.12.toml" in ex)
+            @test "Project.toml" in ex
+            @test SW._env_family("Manifest-v1.12.toml") === :manifest
+            @test SW._env_family("JuliaProject.toml") === :project
+            @test SW._env_family("Project-v1.12.toml") === nothing
+            @test SW._env_family("Manifest.toml.bak") === nothing
         end
     end
 

@@ -5806,6 +5806,7 @@ function _reap_agents!(nb::LiveNotebook; keep_log::Bool = false)
             delete!(_AGENT_ROUTES, aid); delete!(_AGENT_CREW, aid); delete!(_AGENT_PERM, aid)
         end
         empty!(nb.agents)
+        delete!(_AGENT_SHOWN, nb.id)
         keep_log || delete!(_AGENT_LOG, nb.id)
         ids
     end
@@ -5818,6 +5819,34 @@ function _reap_agents!(nb::LiveNotebook; keep_log::Bool = false)
     return nothing
 end
 _close_agent!(nb::LiveNotebook) = _reap_agents!(nb; keep_log = false)   # on notebook close
+
+# What the chat shows for a prompt the hub wrapped before sending: the text that was typed and the
+# cell the turn is scoped to. The agent echoes the whole prompt back as its `user_text` event, and
+# the wrapping (cell context, inlined `@id` mentions) is for the agent, not the transcript. Keyed by
+# notebook id, then by the prompt sent; an entry is used once, by the echo it was recorded for.
+const _AGENT_SHOWN = Dict{String,Dict{String,Tuple{String,String}}}()
+
+_remember_shown!(nb::LiveNotebook, prompt::AbstractString, typed::AbstractString, scope::AbstractString) =
+    lock(_AGENT_LOCK) do
+        get!(Dict{String,Tuple{String,String}}, _AGENT_SHOWN, nb.id)[String(prompt)] = (String(typed), String(scope))
+        nothing
+    end
+
+# Put what was typed, and the cell, on a `user_text` event for a prompt the hub wrapped.
+function _attach_shown!(nb::LiveNotebook, env::AbstractDict)
+    d = get(env, "data", nothing)
+    d isa AbstractDict || return env
+    c = get(d, "content", nothing)
+    prompt = c isa AbstractDict ? get(c, "text", "") : ""
+    prompt isa AbstractString || return env
+    hit = lock(_AGENT_LOCK) do
+        m = get(_AGENT_SHOWN, nb.id, nothing)
+        m === nothing ? nothing : pop!(m, prompt, nothing)
+    end
+    hit === nothing && return env
+    d["shown"], d["scope"] = hit
+    return env
+end
 
 # Last turn-start time per notebook id — so a `result`'s delayed busy-clear can't clobber the
 # busy flag of a NEWER turn that started inside its window (which would mislabel that turn's edits).
@@ -5844,6 +5873,7 @@ function relay_agent_event(channel::AbstractString, data)
     # agents (and replay stays attributed). Re-serialize only when we parsed cleanly.
     if env !== nothing
         env["crew"] = crew
+        kind == "user_text" && _attach_shown!(nb, env)
         s = JSON.json(env)
     end
     # Mark the agent busy across a turn so the file-watcher attributes the edits it

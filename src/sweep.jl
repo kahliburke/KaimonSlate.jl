@@ -1664,8 +1664,11 @@ store_size(s::LocalSource) = store_size(s.root)
 function store_size(s::SshSource)
     d = joinpath(s.root, "blobs")
     # `du -sk`, not `-sb`: the byte form is GNU-only, and a KiB is finer than this figure is read to.
+    # Their complaints go to /dev/null: the output is stderr-merged, and a blob renamed away during
+    # the walk would otherwise put a line ahead of the counts.
     ok, out = run_there(s.host,
-        "d=" * shq(d) * "; if [ -d \"\$d\" ]; then find \"\$d\" -type f | wc -l; du -sk \"\$d\" | cut -f1; " *
+        "d=" * shq(d) * "; if [ -d \"\$d\" ]; then find \"\$d\" -type f 2>/dev/null | wc -l; " *
+        "du -sk \"\$d\" 2>/dev/null | cut -f1; " *
         "else echo 0; echo 0; fi")
     ok || return (; bytes = 0, blobs = 0)
     ns = [tryparse(Int, strip(l)) for l in split(strip(out), '\n') if !isempty(strip(l))]

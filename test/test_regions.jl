@@ -371,13 +371,21 @@ const RE = KaimonSlate.ReportEngine
                         own = try; NS._region_kernel!(nb, "gpu"; preparing = true); ""
                               catch e; e isa NS.RegionWaiting ? e.why : "error"; end
                         @test own != NS.WAIT_PREPARING && own != NS.WAIT_NEEDS_PREPARE
-                        RE.mark_blocked!(c, NS.WAIT_PREPARING, "login")
+                        RE.mark_blocked!(c, NS.WAIT_PREPARING, "login", "gpu")
                         @test isempty(NS._prepared_regions_waiting(nb))          # still preparing
                     finally
                         lock(RE._PREPARING_LOCK) do; delete!(RE._PREPARING, RE._fold_region("gpu")); end
                         NS._forget_region_kernel!(nb, "gpu")
                     end
                     @test NS._prepared_regions_waiting(nb) == Set(["gpu"])     # done: they run
+                    # Told a prepare was needed, a cell waits for one to succeed, started from
+                    # anywhere, rather than being re-run into the same answer every tick.
+                    RE.mark_blocked!(c, NS.WAIT_NEEDS_PREPARE, "login", "gpu")
+                    @test isempty(NS._prepared_regions_waiting(nb))
+                    RE.region_set!("gpu"; readiness = Dict{String,Any}("ok" => false, "prepared_at" => time() + 1))
+                    @test isempty(NS._prepared_regions_waiting(nb))              # a failed one does not count
+                    RE.region_set!("gpu"; readiness = Dict{String,Any}("ok" => true, "prepared_at" => time() + 1))
+                    @test NS._prepared_regions_waiting(nb) == Set(["gpu"])
                 finally
                     lock(NS._OPENING_RUN_LOCK) do; delete!(NS._OPENING_RUN, "needsprep"); end
                     RE.region_set!("gpu"; readiness = saved)
@@ -391,12 +399,31 @@ const RE = KaimonSlate.ReportEngine
                                      String[], String[], ReentrantLock(), Channel{String}[],
                                      ReentrantLock(), "", false, Dict{String,String}())
                 a, b, c = rep.cells
-                RE.mark_blocked!(a, NS.WAIT_NOT_REQUESTED, "login")
+                RE.mark_blocked!(a, NS.WAIT_NOT_REQUESTED, "login", "gpu")
                 # Run, `b` could only fail on the `x` its upstream has not produced.
                 NS._eval_one!(nb, b)
                 @test b.state == RE.BLOCKED && b.blocked == NS.WAIT_NOT_REQUESTED && b.blocked_host == "login"
                 NS._eval_one!(nb, c)                   # …and the wait carries down the chain
                 @test c.state == RE.BLOCKED && c.blocked == NS.WAIT_NOT_REQUESTED
+                # …for the region it is waiting on, whatever region (if any) the reader runs on, so the
+                # supervisors ask for and keep that node rather than one the reader is tagged with.
+                @test b.blocked_region == "gpu" && c.blocked_region == "gpu"
+                hub = (lock = ReentrantLock(), notebooks = Dict{String,Any}("waits" => nb))
+                @test "gpu" in last(NS._regions_in_use(hub))
+
+                # ▶ on the reader asks for the node: the force passes to the cell that needs it,
+                # and the reader's own marker is used up rather than left behind.
+                lock(nb.lock) do; push!(get!(Set{String}, NS._FORCE_RUN, "waits"), "b"); end
+                lock(NS._RUNNER_LOCK) do; NS._RUNNERS["waits"] = true; end   # no runner spawned here
+                try
+                    NS._eval_one!(nb, b)
+                    @test b.state == RE.BLOCKED
+                    @test a.state == RE.STALE
+                    @test get(NS._FORCE_RUN, "waits", Set{String}()) == Set(["a"])
+                finally
+                    lock(NS._RUNNER_LOCK) do; delete!(NS._RUNNERS, "waits"); end
+                    lock(nb.lock) do; delete!(NS._FORCE_RUN, "waits"); end
+                end
             end
 
             @testset "a node just granted is not released for having no worker" begin
@@ -406,12 +433,21 @@ const RE = KaimonSlate.ReportEngine
                     RE._REGION_PLACE["gpu"] = (host = "c9", job = "77", ts = ts,
                                                checked = time(), until = time() + 600)
                 end
+                # No open notebook uses it, so only the region's own state can keep it.
+                nohub = (lock = ReentrantLock(), notebooks = Dict{String,Any}())
+                busy() = last(NS._regions_in_use(nohub))
                 try
                     at(time())
                     @test NS._granted_within(RE.region_get("gpu"), NS._GRANT_GRACE_S)
+                    @test "gpu" in busy()              # both the idle release and the sweep skip it
                     at(time() - NS._GRANT_GRACE_S - 1)
                     @test !NS._granted_within(RE.region_get("gpu"), NS._GRANT_GRACE_S)
+                    @test !("gpu" in busy())
+                    # A prepare installing onto the node holds it, started from a notebook or not.
+                    lock(RE._PREPARING_LOCK) do; RE._PREPARING["gpu"] = Dict{String,Any}("running" => true); end
+                    @test "gpu" in busy()
                 finally
+                    lock(RE._PREPARING_LOCK) do; delete!(RE._PREPARING, "gpu"); end
                     lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
                 end
                 @test !NS._granted_within(RE.region_get("gpu"), NS._GRANT_GRACE_S)   # nothing held
@@ -508,6 +544,30 @@ const RE = KaimonSlate.ReportEngine
                 # here rather than stored where it does nothing.
                 @test_throws ArgumentError RE.parse_region_options("qos=debug; account=m1")
                 @test_throws ArgumentError RE.parse_region_options("=gpu")
+                # So is anything the request sets itself, under any spelling sbatch would accept for
+                # it: a second job name would hide the job from the lookup by name.
+                for bad in ("job-name=x", "job=x", "J=x", "time=2:00:00", "t=5", "output=o.log",
+                            "cpus-per-task=4", "ntasks=2", "select=1:ncpus=4")
+                    @test_throws ArgumentError RE.parse_region_options(bad)
+                end
+                @test RE.parse_region_options("time-min=10; mem-per-cpu=2G; ntasks-per-node=1") ==
+                      Dict("time-min" => "10", "mem-per-cpu" => "2G", "ntasks-per-node" => "1")
+                # A stored one is dropped from the request rather than emitted.
+                req = RE.Sweep._slurm_request_script("j"; walltime = "01:00:00", partition = "", cpus = 0,
+                                              mem = "", gpus = "", account = "", extra = "",
+                                              options = Dict("job-name" => "other", "qos" => "high"))
+                @test !occursin("other", req) && occursin("--qos='high'", req)
+            end
+
+            @testset "a duration is read whole or refused" begin
+                SW = RE.Sweep
+                for (s, secs) in (("10m", 600), ("1h30m", 5400), ("90", 5400), ("2 h", 7200), ("0", 0), ("45s", 45))
+                    @test SW.is_duration(s) && SW.parse_duration(s) == secs
+                end
+                # `parse_duration` adds up whatever parts it finds; these would have read as 5 minutes.
+                for s in ("abc5m", "-5m", "5m later", "5x", "", "m")
+                    @test !SW.is_duration(s)
+                end
             end
 
             @testset "a region's prologue runs where it can matter" begin
@@ -750,9 +810,13 @@ const RE = KaimonSlate.ReportEngine
                 @test occursin("through login", msg) && occursin("padlock", msg)
                 @test !occursin("ssh/config", msg) && !occursin("key-based", msg)
 
-                # A file syncer pointed at the node, as a worker on it would have started.
+                # A file syncer pointed at the node, as a worker on it would have started, and one
+                # sending to a host of the same name outside the job (a single-node cluster's login).
+                jobkey = RE._sync_base(RE.RemoteTarget("c9"; project = "proj", job = "77"))
+                @test jobkey == "c9#77:proj"
                 lock(RE._SYNC_LOCK) do
-                    RE._SYNCERS["c9:proj"] = RE.SyncWatcher(Task(() -> nothing), true)
+                    RE._SYNCERS[jobkey] = RE.SyncWatcher(Task(() -> nothing), true)
+                    RE._SYNCERS["c9:other"] = RE.SyncWatcher(Task(() -> nothing), true)
                 end
                 lock(RE._REGION_PLACE_LOCK) do
                     RE._REGION_PLACE["leased"] =
@@ -761,7 +825,9 @@ const RE = KaimonSlate.ReportEngine
                 @test RE.region_host(r) == "login"             # past it: nothing placed, ask again
                 @test !RE._region_holds_node(r)
                 @test RE.via("c9") === nothing                 # the route goes with the allocation
-                @test !haskey(RE._SYNCERS, "c9:proj")          # …and so does the syncer
+                @test !haskey(RE._SYNCERS, jobkey)             # …and so does the job's syncer
+                @test haskey(RE._SYNCERS, "c9:other")          # …and only the job's
+                lock(RE._SYNC_LOCK) do; delete!(RE._SYNCERS, "c9:other"); end
                 @test !haskey(RE._REGION_PLACE, "leased")
                 # An unrouted host keeps the plain advice — that one really is an ssh/config problem.
                 @test occursin("~/.ssh/config", RE._unreachable("workstation"))
@@ -898,6 +964,28 @@ const RE = KaimonSlate.ReportEngine
             @test fp3 != fp2                                              # the Manifest
             write(joinpath(env, "notebook.jl"), "1\n")
             @test RE._env_fingerprint(env, "[infra]") == fp3              # sources are not the environment
+
+            # What the host records adds its own Julia, and whether the build precompiled.
+            s(j, pc) = RE._env_stamp(fp3, j, pc)
+            @test s("julia version 1.12.7", true) != s("julia version 1.12.6", true)
+            @test RE._env_stamp_serves(s("julia version 1.12.7", true), s("julia version 1.12.7", false))
+            @test !RE._env_stamp_serves(s("julia version 1.12.7", false), s("julia version 1.12.7", true))
+            @test !RE._env_stamp_serves("", s("julia version 1.12.7", false))
+        end
+    end
+
+    @testset "a prepare tests the environment a start would install" begin
+        mktempdir() do d
+            nbp = joinpath(d, "loose.jl"); write(nbp, "1\n")
+            # Outside any project and with no environment of its own: the runtime is what there is.
+            Base.current_project(d) === nothing && @test RE._reference_env(nbp) == ("", "")
+            envdir = RE.notebook_env_dir(nbp)
+            mkpath(envdir); write(joinpath(envdir, "Project.toml"), "")
+            @test first(RE._reference_env(nbp)) == envdir      # its own environment, no project above
+            write(joinpath(d, "Project.toml"), "name = \"P\"\n")
+            @test RE._reference_env(nbp) == (envdir, d)
+            rm(envdir; recursive = true)
+            @test RE._reference_env(nbp) == (d, d)
         end
     end
 
