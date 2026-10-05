@@ -1297,11 +1297,8 @@ function create_tools(GateTool::Type)
         SW = ReportEngine.Sweep
         for (k, v) in ((:idle_release, idle_release), (:idle_warn, idle_warn), (:liveness_grace, liveness_grace))
             given(v) || continue
-            # `parse_duration` reads anything it cannot parse as 0, which here would mean "off".
-            s = SW.parse_duration(strip(v))
-            (s > 0 || occursin(r"^\s*0+(\.0*)?\s*[smhdw]?\s*$", v)) ||
-                return "⛔ $k must be a duration like 10m or 1h, not '$v'"
-            kw[k] = round(Int, s)
+            SW.is_duration(v) || return "⛔ $k must be a duration like 10m or 1h, not '$v'"
+            kw[k] = round(Int, SW.parse_duration(strip(v)))
         end
         if haskey(kw, :idle_release) || haskey(kw, :idle_warn)
             cur = ReportEngine.region_get(nm)

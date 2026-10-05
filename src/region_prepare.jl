@@ -163,18 +163,19 @@ function prepare_report(name, id::AbstractString)
     return rep
 end
 
-# The environment a reference project stands for, as a start would install it: a notebook's own
-# environment when it has one, else the project it sits in; a folder is taken as a project. Returns
-# `(origin_env, parent_project)`, or two empty strings when there is nothing to test with.
+# The environment a reference project stands for, as a start would install it (`_region_kernel!`): a
+# notebook's own environment when it has one, else the project it sits in, else none, which leaves the
+# worker runtime as all there is to test. A folder is taken as a project. Returns
+# `(origin_env, parent_project)`, empty where there is none.
 function _reference_env(p::AbstractString)
     isempty(strip(p)) && return ("", "")
     path = abspath(expanduser(strip(p)))
     if isfile(path)
         proj = Base.current_project(dirname(path))
-        proj === nothing && error("no Project.toml above $path")
-        parent = dirname(proj)
+        parent = proj === nothing ? "" : dirname(proj)
         envdir = notebook_env_dir(path)
-        return (isfile(joinpath(envdir, "Project.toml")) ? envdir : parent, parent)
+        isfile(joinpath(envdir, "Project.toml")) && return (envdir, parent)
+        return (parent, parent)
     end
     isfile(joinpath(path, "Project.toml")) || error("$path has no Project.toml")
     return (path, path)
@@ -455,6 +456,8 @@ end
 
 function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Bool = false, note = _ -> nothing,
                            worker = nothing)
+    # A node held before the prepare started belongs to whoever is using it, and stays theirs.
+    held_before = _region_holds_node(r)
     got = step("Get a node from $(r.scheduler)") do
         deadline = time() + 30 * 60
         t0 = time()
@@ -493,11 +496,12 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
             facts["home_shared"] ? ("ok", "") :
                 ("warn", "the node does not see files written on $(r.host); Julia and packages install on the node itself")
         end
-        # With the notebook's worker to start, its start is the runtime's load, timed for real.
+        # With the notebook's worker to start, its start is the runtime's load, timed for real. A node
+        # with a different CPU from the one that built the package images recompiles them here.
         worker === nothing && step("Load the worker runtime") do
             t0 = time()
             ok, out = _run_on(node, _prepare_shell(r) * _julia_sh("julia --startup-file=no --project=\$HOME/$_REMOTE_KGATE_ENV " *
-                                                    "-e 'using KaimonGate, Revise'"))
+                                                    "-e 'using KaimonGate, Revise'"); timeout = 1800.0)
             secs = round(time() - t0; digits = 1)
             ok || return ("fail", first(strip(out), 400))
             measured["runtime_load_s"] = secs
@@ -505,10 +509,15 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
         end
         _prepare_env!(r, step, measured, ref, node, pro; worker)
     finally
-        keep_node ? step(() -> ("ok", region_host(r) * (haskey(measured, "worker_start_s") ? " · its worker is up" : "")),
-                         "Keep the node for the notebook") :
-        step("Give the node back") do
-            region_release!(r) ? ("ok", "") : ("warn", "nothing to release")
+        if keep_node
+            step(() -> ("ok", region_host(r) * (haskey(measured, "worker_start_s") ? " · its worker is up" : "")),
+                 "Keep the node for the notebook")
+        elseif held_before
+            step(() -> ("ok", "$(region_host(r)) was held before the prepare"), "Leave the node as it was")
+        else
+            step("Give the node back") do
+                region_release!(r) ? ("ok", "") : ("warn", "nothing to release")
+            end
         end
     end
     return nothing
@@ -542,7 +551,7 @@ function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothi
     t = _region_target(r; origin_env = ref[1])
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     got = step("Install $name") do
-        provision_remote!(t, ref[2])
+        provision_remote!(t, ref[2]; rebuild = true)
         ("ok", "")
     end
     got == "fail" && return nothing

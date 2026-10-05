@@ -166,7 +166,7 @@ function _run_sshop(op::Symbol, a)
     op === :connected  && return S.connected(a.host)
     op === :connect    && return S.connect!(a.host; interactive = a.interactive === true)
     op === :disconnect && return S.disconnect!(a.host)
-    op === :exec       && return S.run_there(a.host, a.script)
+    op === :exec       && return S.run_there(a.host, a.script; timeout = a.timeout)
     op === :io         && return S.run_io(a.host, a.script, a.input)
     op === :forward    && return S.forward!(a.host, a.localport, a.target, a.targetport)
     op === :unforward  && return S.unforward!(a.host, a.localport)
@@ -589,13 +589,8 @@ function _boot_and_run!(nb::LiveNotebook; autorun::Bool = true)
             if autorun
                 lock(nb.lock) do; delete!(nb.report.meta, "hydratingKind"); end   # boot done → falls back to the (bannerless) "run" default
                 try; _broadcast(nb, string(nb.version)); catch; end   # worker is up → refresh the dot to "connected" BEFORE the (possibly long) run, so it's not stale
-                lock(_OPENING_RUN_LOCK) do; push!(_OPENING_RUN, nb.id); end
-                try
-                    _drain!(nb)                      # initial full run — WAIT for it to fully complete, so
+                _opening_drain!(nb)                  # initial full run — WAIT for it to fully complete, so
                                                      # `hydrating` stays up for it (no banner though, see above)
-                finally
-                    lock(_OPENING_RUN_LOCK) do; delete!(_OPENING_RUN, nb.id); end
-                end
                 lock(nb.lock) do
                     delete!(nb.report.meta, "hydrating")
                     delete!(nb.report.meta, "hydratingKind")
@@ -708,7 +703,7 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
             end
         end
         pending isa PendingKernel && ReportEngine._resolve!(pending, kernel)   # unblock anyone who raced the boot window
-        _drain!(nb)                                  # run everything + WAIT, so `hydrating` stays up for it
+        _opening_drain!(nb)                          # run everything + WAIT, so `hydrating` stays up for it
         lock(nb.lock) do
             delete!(nb.report.meta, "hydrating")
             delete!(nb.report.meta, "hydratingKind")
@@ -1185,6 +1180,16 @@ const _OPENING_RUN = Set{String}()
 const _OPENING_RUN_LOCK = ReentrantLock()
 _in_opening_run(nbid) = lock(_OPENING_RUN_LOCK) do; String(nbid) in _OPENING_RUN; end
 
+# The run a notebook gets when it opens, whichever way it was opened.
+function _opening_drain!(nb::LiveNotebook)
+    lock(_OPENING_RUN_LOCK) do; push!(_OPENING_RUN, nb.id); end
+    try
+        _drain!(nb)
+    finally
+        lock(_OPENING_RUN_LOCK) do; delete!(_OPENING_RUN, nb.id); end
+    end
+end
+
 # Cells left waiting are picked up by an explicit run of the notebook. Without this a run request
 # skips them, since the runner only takes STALE cells and a waiting cell is BLOCKED.
 function _restale_blocked!(nb::LiveNotebook)
@@ -1202,7 +1207,7 @@ function _restale_blocked!(nb::LiveNotebook)
 end
 
 """
-    RegionWaiting(why, note = "")
+    RegionWaiting(why, host, region)
 
 A region cell cannot run YET, and nothing is wrong. Thrown where the wait is discovered (under
 `nb.lock`, which must never block), caught where the cell's state is set, and turned into `BLOCKED`
@@ -1212,14 +1217,14 @@ A distinct TYPE rather than a message match: the same call path also raises genu
 region that is not defined, a worker that could not start — and telling them apart by reading the
 text would go wrong the first time someone rewords one.
 
-`why` is a code and `host` is the machine it is about. Neither is written for a reader: the page
-words the wait, beside the chip that shows it.
+`why` is a code, `host` is the machine it is about and `region` the region waited for. None is
+written for a reader: the page words the wait, beside the chip that shows it.
 """
 struct RegionWaiting <: Exception
     why::String
     host::String
+    region::String
 end
-RegionWaiting(why::AbstractString) = RegionWaiting(String(why), "")
 Base.showerror(io::IO, e::RegionWaiting) =
     print(io, e.why, isempty(e.host) ? "" : " (" * e.host * ")")
 
@@ -1838,7 +1843,7 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
         isempty(r.host) && error("region '$name' has no host — set one in the Regions manager")
         # While the region is being prepared its cells wait for it: a prepare for this notebook starts
         # the worker they will use, and a second one started beside it competes for the same node.
-        (!preparing && ReportEngine.prepare_running(r.name)) && throw(RegionWaiting(WAIT_PREPARING, r.host))
+        (!preparing && ReportEngine.prepare_running(r.name)) && throw(RegionWaiting(WAIT_PREPARING, r.host, r.name))
         at = ReportEngine.region_where(r)
         k = get(_REGION_KERNELS, (nb.id, name), nothing)
         # A cached kernel's target names the node it runs on and, on a scheduler region, the job that
@@ -1868,7 +1873,7 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
         why = preparing ? "" : _prepare_reason(r, origin_env)
         if !isempty(why)
             (_in_opening_run(nb.id) && isempty(get(_FORCE_RUN, nb.id, ()))) || _announce_prepare!(nb, r; reason = why)
-            throw(RegionWaiting(WAIT_NEEDS_PREPARE, r.host))
+            throw(RegionWaiting(WAIT_NEEDS_PREPARE, r.host, r.name))
         end
         # Where the worker goes. On a scheduler region `r.host` is the front door, not the address —
         # the node is granted, not configured. Getting one can mean queueing, and on a gated cluster
@@ -1882,7 +1887,7 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
             if !ReportEngine._region_holds_node(r)   # nothing placed yet
                 # A cell someone ran by hand during the opening run is a request all the same.
                 (_in_opening_run(nb.id) && isempty(get(_FORCE_RUN, nb.id, ()))) &&
-                    throw(RegionWaiting(WAIT_NOT_REQUESTED, r.host))
+                    throw(RegionWaiting(WAIT_NOT_REQUESTED, r.host, r.name))
                 # Asking for a node needs the cluster, and reaching the cluster may need a password
                 # that only a person can supply — which background work is not allowed to ask for.
                 # A host that takes a key needs nobody, so that is tried first, in the background
@@ -1890,14 +1895,14 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
                 # on a sign-in; queueing and signing in need different things from you.
                 if !ReportEngine.Sweep.connected(r.host)
                     ReportEngine.Sweep.connect_failed_recently(r.host) &&
-                        throw(RegionWaiting(WAIT_NOT_SIGNED_IN, r.host))
+                        throw(RegionWaiting(WAIT_NOT_SIGNED_IN, r.host, r.name))
                     _connect_in_background!(name, nb, r.host)
-                    throw(RegionWaiting(WAIT_CONNECTING, r.host))
+                    throw(RegionWaiting(WAIT_CONNECTING, r.host, r.name))
                 end
                 _place_in_background!(name, nb)
                 # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
                 # placement task re-runs this cell itself when the scheduler grants a node.
-                throw(RegionWaiting(WAIT_QUEUED, r.host))
+                throw(RegionWaiting(WAIT_QUEUED, r.host, r.name))
             end
         end
         target = ReportEngine._region_target(r; origin_env = origin_env, at = at)   # transport/datadir/region from the def; env = the notebook's
@@ -2550,8 +2555,7 @@ function _reconcile_blocked_regions!(nb::LiveNotebook)
     lock(nb.lock) do
         for c in nb.report.cells
             (c.state == BLOCKED && c.blocked == WAIT_QUEUED) || continue
-            r = _cell_region(c)
-            isempty(r) || push!(names, r)
+            isempty(c.blocked_region) || push!(names, c.blocked_region)
         end
     end
     for name in names
@@ -2586,17 +2590,31 @@ function _rearm_after_prepare!(nb::LiveNotebook)
     return nothing
 end
 
-# Regions with cells still waiting on a prepare that has ended.
+# Regions with cells still waiting on a prepare that has ended: one that was running when they met
+# it, or one they were told was needed and that has since succeeded.
 function _prepared_regions_waiting(nb::LiveNotebook)
     done = Set{String}()
     lock(nb.lock) do
         for c in nb.report.cells
-            (c.state == BLOCKED && c.blocked == WAIT_PREPARING) || continue
-            r = _cell_region(c)
-            (isempty(r) || ReportEngine.prepare_running(r)) || push!(done, r)
+            c.state == BLOCKED || continue
+            r = c.blocked_region
+            (isempty(r) || ReportEngine.prepare_running(r)) && continue
+            if c.blocked == WAIT_PREPARING
+                push!(done, r)
+            elseif c.blocked == WAIT_NEEDS_PREPARE
+                _prepared_since(r, c.blocked_at) && push!(done, r)
+            end
         end
     end
     return done
+end
+
+# Whether region `name` has a successful prepare recorded after time `t`.
+function _prepared_since(name::AbstractString, t::Real)
+    r = ReportEngine.region_get(name)
+    r === nothing && return false
+    rec = r.readiness
+    return get(rec, "ok", false) === true && Float64(get(rec, "prepared_at", 0.0)) > t
 end
 
 # Give a node back when nothing is left on it. `_region_reconcile_impl!` releases a scheduler region
@@ -2792,21 +2810,7 @@ function _sweep_stale_conn_state!(h)
 end
 
 function _sweep_idle_regions!(h)
-    busy = lock(_PLACING_LOCK) do; Set{String}(_PLACING); end
-    nbs_of = Dict{String,Vector{LiveNotebook}}()      # region → the open notebooks using it
-    for nb in lock(h.lock) do; collect(values(h.notebooks)); end
-        lock(nb.lock) do
-            for c in nb.report.cells
-                r = _cell_region(c)
-                isempty(r) && continue
-                let v = get!(Vector{LiveNotebook}, nbs_of, r); nb in v || push!(v, nb); end
-                # A cell that is RUNNING on the region, or waiting for it, means the region is in
-                # use whatever the clock says.
-                (c.state == BLOCKED || c.state == RUNNING) && push!(busy, r)
-                c.state == RUNNING && _region_used!(r)
-            end
-        end
-    end
+    nbs_of, busy = _regions_in_use(h)
     _warn_expiring_regions!(nbs_of)
     _release_idle_regions!(nbs_of, busy)
     # Reaching the cluster to reconcile a region that holds a node with nothing on it is the one
@@ -2816,6 +2820,37 @@ function _sweep_idle_regions!(h)
         _sweep_dead_regions!(busy)
     end
     return nothing
+end
+
+# The open notebooks using each region, and the regions whose node must not be given back now.
+function _regions_in_use(h)
+    busy = lock(_PLACING_LOCK) do; Set{String}(_PLACING); end
+    nbs_of = Dict{String,Vector{LiveNotebook}}()      # region → the open notebooks using it
+    for nb in lock(h.lock) do; collect(values(h.notebooks)); end
+        lock(nb.lock) do
+            for c in nb.report.cells
+                r = _cell_region(c)
+                isempty(r) && continue
+                let v = get!(Vector{LiveNotebook}, nbs_of, r); nb in v || push!(v, nb); end
+                # A cell that is RUNNING on the region means the region is in use whatever the clock
+                # says.
+                c.state == RUNNING && (push!(busy, r); _region_used!(r))
+            end
+            # So does a cell waiting for one, which may be a cell on another region, or on none,
+            # reading a value this one produces.
+            for c in nb.report.cells
+                (c.state == BLOCKED && !isempty(c.blocked_region)) && push!(busy, c.blocked_region)
+            end
+        end
+    end
+    # A node is in use while a prepare installs onto it, which may have been started from the panel
+    # with no notebook's cells involved, and in the minutes after its grant, before the cells that
+    # waited for it reach the runner.
+    for r in ReportEngine.regions()
+        r.scheduler === :none && continue
+        (ReportEngine.prepare_running(r.name) || _granted_within(r, _GRANT_GRACE_S)) && push!(busy, r.name)
+    end
+    return nbs_of, busy
 end
 
 # How much warning a walltime gets. Unlike the idle timer this is not opt-in: the job ends whatever
@@ -2996,7 +3031,6 @@ function _sweep_dead_regions!(busy)
     for r in ReportEngine.regions()
         (r.scheduler === :none || r.name in busy) && continue
         ReportEngine._region_holds_node(r) || continue
-        _granted_within(r, _GRANT_GRACE_S) && continue
         # Reconciling lists the workers on the node, which on a scheduler is a job step: a request to
         # the site's controller and a row in its accounting, every minute the node is held. A node
         # with one of our workers connected to it is in use, and its wire says so already.
@@ -3707,22 +3741,27 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # A cell whose input is waiting waits too, for the same thing. Run now it could only fail on a
     # name its upstream has not produced. Whatever re-runs the upstream re-runs this cell with it:
     # a granted node re-arms the region's dependents, and a run of the notebook takes up every wait.
-    up = lock(nb.lock) do
+    # Checked and marked under one hold of the lock, so a grant re-arming the region's cells cannot
+    # land between the two and leave this cell marked after its re-arm.
+    waits, passed_on = lock(nb.lock) do
+        u = nothing
         for d in cell.deps
-            i = _index_of(nb.report.cells, d)
-            i === nothing && continue
-            u = nb.report.cells[i]
-            u.state == BLOCKED && return u
+            j = _index_of(nb.report.cells, d)
+            (j !== nothing && nb.report.cells[j].state == BLOCKED) && (u = nb.report.cells[j]; break)
         end
-        nothing
+        u === nothing && return (false, false)
+        ReportEngine.mark_blocked!(cell, u.blocked, u.blocked_host, u.blocked_region)
+        _broadcast_progress(nb, cell)
+        # A ▶ on this cell asks for what it waits on. A node nobody has asked for yet is asked for by
+        # running the cell that needs it, so the force passes to that cell.
+        forced = _take_force!(nb.id, cell.id)
+        (forced && u.blocked == WAIT_NOT_REQUESTED && ReportEngine.restale!(u)) || return (true, false)
+        push!(get!(Set{String}, _FORCE_RUN, nb.id), u.id)
+        nb.version += 1
+        (true, true)
     end
-    if up !== nothing
-        lock(nb.lock) do
-            ReportEngine.mark_blocked!(cell, up.blocked, up.blocked_host)
-            _broadcast_progress(nb, cell)
-        end
-        return nothing
-    end
+    passed_on && _ensure_runner!(nb)
+    waits && return nothing
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
     #
@@ -3741,7 +3780,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         wait = e isa RegionWaiting
         ReportEngine._rlog("region: " * (wait ? "holding " : "cannot route ") * cell.id * ": " * msg)
         lock(nb.lock) do
-            wait ? ReportEngine.mark_blocked!(cell, e.why, e.host) :
+            wait ? ReportEngine.mark_blocked!(cell, e.why, e.host, e.region) :
                    ReportEngine.mark_errored!(cell, msg)
             _broadcast_progress(nb, cell)
         end
@@ -3782,7 +3821,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         wait && ReportEngine._rlog("region: holding " * cell.id * " (input transfer): " *
                                    sprint(showerror, presync_err))
         lock(nb.lock) do
-            wait ? ReportEngine.mark_blocked!(cell, presync_err.why, presync_err.host) :
+            wait ? ReportEngine.mark_blocked!(cell, presync_err.why, presync_err.host, presync_err.region) :
                    ReportEngine.mark_errored!(cell, "region boundary transfer failed: " *
                                                     sprint(showerror, presync_err))
             _broadcast_progress(nb, cell)
@@ -3802,10 +3841,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         ReportEngine.mark_running!(cell)
         _broadcast_progress(nb, cell)
         s = (:trace in cell.flags) ? string("@trace begin ", cell.source, "\nend") : cell.source
-        frc = let ids = get(_FORCE_RUN, nb.id, nothing)   # consume a one-shot ▶ force marker
-            ids !== nothing && cell.id in ids ?
-                (delete!(ids, cell.id); isempty(ids) && delete!(_FORCE_RUN, nb.id); true) : false
-        end
+        frc = _take_force!(nb.id, cell.id)   # consume a one-shot ▶ force marker
         # The cell's genuinely-DEFINED names: writes minus `provides` (names brought in by
         # `using`/`import`) and minus @bind CONTROL variables. A provided name is a function/module
         # reference, not a value to cache; a bind variable is a UI `Choice`/value that the `@bind` REPLAY
@@ -4027,6 +4063,15 @@ const _PARALLEL_CANCEL = Dict{String,Bool}()
 # consumed (under nb.lock) by _eval_one!'s memo build. Dependents are NOT registered: they restale
 # normally and may restore when their inputs are unchanged.
 const _FORCE_RUN = Dict{String,Set{String}}()
+
+# Consume cell `cid`'s force marker, if it has one (call with nb.lock held).
+function _take_force!(nbid::AbstractString, cid::AbstractString)
+    ids = get(_FORCE_RUN, nbid, nothing)
+    (ids !== nothing && cid in ids) || return false
+    delete!(ids, cid)
+    isempty(ids) && delete!(_FORCE_RUN, nbid)
+    return true
+end
 
 # Preempt superseded in-flight cells: an edit/delete of a RUNNING cell makes the computation in
 # flight worthless — its result is already version-guarded away on completion (the src_hash compare

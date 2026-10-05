@@ -99,6 +99,10 @@ function parse_duration(s)
     return seen ? total : 0.0
 end
 
+"Whether `s` is a whole duration `parse_duration` reads exactly: a number of minutes, or `1h30m`-style parts."
+is_duration(s::AbstractString) =
+    occursin(r"^\s*(?:\d+(?:\.\d+)?|(?:\d+(?:\.\d+)?\s*[smhdw]\s*)+)\s*$"i, s)
+
 """
     format_duration(secs) -> String
 
@@ -253,13 +257,29 @@ end
 # asked for. The BOX wins, because it is the one visible in the region's summary.
 const _FIELD_OWNED = Set(["cpus", "mem", "walltime", "partition", "account", "gpus"])
 
+# What the request scripts below set themselves, spelled as the option key that would reach it. An
+# option naming one would put a second job name, time limit or output file on the command line, and
+# the scheduler would take the last: a job not called what `find_allocation` looks it up by is never
+# found, so every placement attempt would submit another. sbatch accepts any unambiguous prefix of a
+# long option (`--job` is `--job-name`), so a key that is a prefix of one of these is refused too.
+const _REQUEST_OWNED = ["job-name", "time", "output", "error", "partition", "mem", "gpus", "account",
+                        "cpus-per-task", "ntasks", "select", "walltime"]
+
+"Whether option `key` would set something a region's own fields or its request already set."
+function _request_owned(key::AbstractString)
+    k = replace(String(key), '_' => '-')
+    k in _FIELD_OWNED && return true
+    length(k) == 1 && return true                # a single letter is a short flag: -J, -t, -o, -N
+    return any(f -> startswith(f, k), _REQUEST_OWNED)
+end
+
 function _option_args(kind::Symbol, options)
     args = String[]
     isempty(options) && return args
     for k in sort!(collect(keys(options)))              # sorted: a stable command for a stable request
         key = strip(String(k)); isempty(key) && continue
         # Dropped rather than merged: a stored duplicate is stale config, not an override.
-        key in _FIELD_OWNED && continue
+        _request_owned(key) && continue
         v = strip(String(get(options, k, "")))
         sym = Symbol(replace(key, '-' => '_'))
         if kind === :slurm

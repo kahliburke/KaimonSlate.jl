@@ -183,6 +183,8 @@ mutable struct Cell
     blocked_host::String          # the host `blocked` is about, for the page to name.
                                   # For the LOG (see `showerror` on RegionWaiting) — the UI shows the
                                   # status and the facts behind it, never a sentence.
+    blocked_region::String        # the region the wait is for. Not necessarily the cell's own: a cell
+                                  # whose input is waiting waits for the region that input runs on.
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -190,7 +192,7 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0, "", 0.0, "")
+                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0, "", 0.0, "", "")
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation

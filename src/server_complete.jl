@@ -3114,10 +3114,11 @@ function _make_router(h::Hub)
         crew = String(get(_body(req), "crew", ""))     # crew label → route to that crew member's agent ("" = solo)
         model = String(get(_body(req), "model", ""))   # agent model ("" = service default = sonnet); binds at spawn
         perm = String(get(_body(req), "permission", "")) # preset (notebook/lab/auto/default/bypass); binds at spawn
+        typed = text
         ment = _mention_context(nb, text)              # @id cell references → inline those cells' context
         isempty(ment) || (text = ment * "\n\n" * text)
-        # The chat shows only what follows the marker (agent.js `_yourTurn`).
         isempty(tgt) || (text = _cell_context(nb, tgt) * "\n\nUSER REQUEST:\n" * text)
+        text == typed || _remember_shown!(nb, text, typed, tgt)
         let d = get(_body(req), "dark", nothing)       # browser's UI theme → plot-theme hint in the system prompt
             d === nothing || (nb.report.meta["ui_dark"] = d === true)
         end
@@ -4151,6 +4152,9 @@ function close_notebook!(h::Hub, id::AbstractString)
     # An id is REUSED when the same file is reopened, so a leftover re-run marker would make the
     # reopened notebook restale a cell once for no reason (see `_DIRTY_WHILE_RUNNING`).
     delete!(_DIRTY_WHILE_RUNNING, id)
+    # …and the ▶ force markers of cells that were still waiting: one left over would make the reopen
+    # look like a run someone asked for, and its region cells would request their nodes.
+    lock(nb.lock) do; delete!(_FORCE_RUN, id); end
     # …and the session-state digests, for the same reason: the reopened notebook's reactives are back
     # at their declared initial values, so last session's identities describe values that no longer
     # exist (see `_STATE_DIGESTS`).

@@ -637,14 +637,6 @@ function _argCid(args) {
   }
   return '';
 }
-// A turn scoped to a cell (✨) reaches the agent as that cell's context, then the marker, then what
-// was typed (`/api/chat`, server_complete.jl). The transcript shows what was typed and the cell.
-const _SCOPED_MARK = '\n\nUSER REQUEST:\n';
-function _yourTurn(raw) {
-  const i = raw.indexOf(_SCOPED_MARK);
-  if (!raw.startsWith('══ SCOPED TURN') || i < 0) return { text: raw, scope: '' };
-  return { text: raw.slice(i + _SCOPED_MARK.length), scope: (raw.match(/on cell `([^`]+)`/) || [])[1] || '' };
-}
 function agentEvent(env) {
   if (!env) return;
   // The debugger's focus view keeps its OWN transcript of the specialist working, rendered for a
@@ -657,10 +649,11 @@ function agentEvent(env) {
   if (k === 'user_text') {
     // Your own turn. It is in the log, so a reload has to rebuild it — without this the transcript
     // came back as the agent answering nothing. Live, `agentSend` has already shown it, so the
-    // event adopts that copy rather than appending a second one.
-    const raw = (d.content && d.content.text) || '';
-    if (!raw) return;
-    const { text: txt, scope } = _yourTurn(raw);
+    // event adopts that copy rather than appending a second one. A prompt the hub wrapped (a ✨ cell's
+    // context, inlined `@id` mentions) carries what was typed as `shown` and the cell as `scope`.
+    const txt = d.shown != null ? d.shown : ((d.content && d.content.text) || '');
+    if (!txt) return;
+    const scope = d.scope || '';
     const mine = agentMsgs.find(m => m.role === 'user' && m.local && m.text === txt);
     if (mine) delete mine.local;
     else agentMsgs.push({ role: 'user', text: txt, scope });

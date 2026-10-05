@@ -233,12 +233,13 @@ function connect_waiting!(host::AbstractString; wait_s::Real = 60)
         sleep(0.5)
     end
     connected(h) && return (true, "")
+    SshTransport.opening(h) && return (false, "a sign-in to $h is still under way")
     lock(_CONNECT_LOCK) do; delete!(_CONNECT_FAILED, h); end   # asked for: no backoff applies
     # A session left over from a failed attempt (the host was down, or restarting) answers with that
     # attempt's failure. Asked for explicitly, it is opened fresh, as the padlock's sign-in does.
     SshTransport.opening(h) || SshTransport.disconnect!(h)
     ok = connect!(h)
-    return (ok, ok ? "" : something(last_connect_failure(h), ""))
+    return (ok, ok ? "" : last_connect_failure(h))
 end
 
 "Whether a non-interactive `connect!` to `host` failed recently enough that it is still being left alone."
@@ -263,7 +264,7 @@ function run_there(host::AbstractString, script::AbstractString; timeout::Real =
         return (ok, String(take!(buf)))
     end
     has_delegate() && return _via(() -> (false, _offline(host)), :exec,
-                                  (; host = String(host), script = String(script)))
+                                  (; host = String(host), script = String(script), timeout = Float64(timeout)))
     connect!(host) || return (false, _offline(host))
     ok, out = SshTransport.exec(String(host), String(script); ask = _ask, timeout, online)
     # A session can die between one command and the next — the far side reboots, a NAT drops the
@@ -345,15 +346,28 @@ end
 # expect.
 
 # `tar --exclude` semantics for the patterns actually used — a bare name (`.git`, `Manifest.toml`)
-# or a suffix glob (`*.cov`) — matched against every component of the path.
+# or a suffix glob (`*.cov`) — matched against every component of the path. An environment file
+# name stands for every name Julia reads that file by, so excluding `Manifest.toml` also excludes
+# `JuliaManifest.toml` and `Manifest-v1.12.toml`.
 function _excluded(rel::AbstractString, pats)
     isempty(pats) && return false
     for c in split(String(rel), '/'; keepempty = false), p in pats
         ps = String(p)
         ps == c && return true
         startswith(ps, "*") && endswith(c, SubString(ps, 2)) && return true
+        fam = _env_family(c)
+        fam !== nothing && fam === _env_family(ps) && return true
     end
     return false
+end
+
+# Which environment file a name is, under any name Julia reads one by: `:project`, `:manifest`, or
+# `nothing` for anything else.
+function _env_family(name::AbstractString)
+    m = match(r"^(?:Julia)?(Project|Manifest)(?:-v\d+\.\d+)?\.toml$", name)
+    m === nothing && return nothing
+    m[1] == "Project" && occursin("-v", name) && return nothing   # Julia reads no versioned Project
+    return m[1] == "Project" ? :project : :manifest
 end
 
 # ── What travels ─────────────────────────────────────────────────────────────────────────────
@@ -624,8 +638,7 @@ function _ignored(rules, rel::AbstractString, isdir::Bool, gitignored::Bool)
 end
 
 # A project environment file at the top of a directory, under any name Julia reads one by.
-_is_env_file(rel::AbstractString) =
-    occursin(r"^(Julia)?(Project|Manifest)\.toml$", rel) || occursin(r"^(Julia)?Manifest-v\d+\.\d+\.toml$", rel)
+_is_env_file(rel::AbstractString) = _env_family(rel) !== nothing
 
 """
     transfer_keep(dir; region, excludes) -> (rel -> Bool)

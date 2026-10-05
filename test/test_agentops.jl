@@ -359,6 +359,24 @@ const NS = KaimonSlate.NotebookServer
             NS.note_external_tool!(nb, "slate-other-nb", "add_cell", Dict{String,Any}("source" => "3"), "added id=z3")
             @test loglen() == n1 + 2
             empty!(nb.agents)
+
+            # A prompt the hub wrapped comes back from the agent whole. Its echo carries what was
+            # typed and the cell, so the chat never has to find them inside the cell's context, which
+            # may itself contain the wrapping's marker text.
+            prompt = "context of cell c1\n\nUSER REQUEST:\nmore context\n\nUSER REQUEST:\nfix it"
+            echo = NS.JSON.json(Dict("kind" => "user_text", "data" => Dict("content" => Dict("text" => prompt))))
+            lastlog() = lock(NS._AGENT_LOCK) do; NS.JSON.parse(last(NS._AGENT_LOG[nb.id]))["data"]; end
+            lock(NS._AGENT_LOCK) do; NS._AGENT_ROUTES["shown-1"] = nb; end
+            try
+                NS._remember_shown!(nb, prompt, "fix it", "c1")
+                NS.relay_agent_event("agent:shown-1", echo)
+                @test (lastlog()["shown"], lastlog()["scope"]) == ("fix it", "c1")
+                # Used once: a second echo of the same text is shown as sent.
+                NS.relay_agent_event("agent:shown-1", echo)
+                @test !haskey(lastlog(), "shown")
+            finally
+                lock(NS._AGENT_LOCK) do; delete!(NS._AGENT_ROUTES, "shown-1"); end
+            end
         end
     finally
         NS.stop_hub(hub)
