@@ -17,9 +17,9 @@ ripgrep_jll = "e10fc14b-37cd-5cbc-b289-ad01b12ebaad"
 
 [compat]
 ExpressionExplorer = "1.1.4"   # keep in lockstep with the engine's pin (macroexpand.jl)
-SlateExtensionsBase = "0.10.5"   # DTYPES/dtype_js — the worker encodes frames the hub's table must
-                                 # match; 0.10.5 also for the control accessors, which a cell reaches
-                                 # through the worker's copy, not the hub's
+SlateExtensionsBase = "0.11"   # the worker loggers, DTYPES/dtype_js (frames the hub's table must
+                              # match) and the control accessors a cell reaches through the worker's
+                              # copy, not the hub's; the same floor as the package's own compat
 ripgrep_jll = "13"   # log search reads files that can reach a gigabyte; rg does it in one pass
 
 [sources]

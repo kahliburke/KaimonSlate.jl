@@ -275,10 +275,13 @@ const RE = KaimonSlate.ReportEngine
                     @test NS._region_kernel!(nb, "gpu") === k2
                     # The new worker holds nothing yet, so only the region's sync record goes.
                     @test synced() == ["main:y:g1"]
-                    # A grant on another node rebuilds too.
+                    # A grant on another node rebuilds too, even when the old kernel's session was lost:
+                    # its node went with its allocation, so there is nothing there to sign in to again.
+                    lock(NS._LOST_SESSION_LOCK) do; NS._LOST_SESSION[k2] = "c9"; end
                     place!("79"; host = "c10")
                     k3 = NS._region_kernel!(nb, "gpu")
                     @test k3 !== k2 && (k3.target.ssh_host, k3.target.job) == ("c10", "79")
+                    @test lock(() -> !haskey(NS._LOST_SESSION, k2), NS._LOST_SESSION_LOCK)
                     # Released: no job left, so no cached kernel can match it.
                     lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
                     @test RE.region_where(RE.region_get("gpu")) == ("login", "")
@@ -753,11 +756,11 @@ const RE = KaimonSlate.ReportEngine
             @testset "the watchdog judges by capacity and behaviour" begin
                 GiB = Int64(2)^30
                 function smp(t; cpu = 50.0, running = String[], memmax = -1, memcur = -1, avail = -1,
-                             total = 0, gpus = "[]", psi = 0.0, gc = 0)
+                             total = 0, gpus = "[]", psi = 0.0, gc = 0, rss = 0)
                     job = memmax > 0 ? ",\"job\":{\"mem_max\":$memmax,\"mem_cur\":$memcur}" : ""
                     host = ",\"host\":{\"mem_avail\":$avail,\"psi_mem\":$psi}"
                     run = "[" * join(("\"$r\"" for r in running), ",") * "]"
-                    x = RE._parse_telemetry("{\"cpu\":$cpu,\"gc_ms\":$gc,\"running\":$run,\"sys_mem_total\":$total," *
+                    x = RE._parse_telemetry("{\"cpu\":$cpu,\"gc_ms\":$gc,\"rss\":$rss,\"running\":$run,\"sys_mem_total\":$total," *
                                             "\"gpus\":$gpus$job$host,\"ts\":1}")
                     merge(x, (rcv = t,))
                 end
@@ -774,6 +777,16 @@ const RE = KaimonSlate.ReportEngine
                 @test kinds(NS._kernel_alerts("pm", h; now = T)) == [("memory-low", "warn")]
                 # Growing toward the limit fast enough to run out within a minute.
                 h = [smp(T - (30 - k) * 2.0; memmax = 56GiB, memcur = 20GiB + k * GiB) for k in 1:30]
+                al = NS._kernel_alerts("pm", h; now = T)
+                @test kinds(al) == [("memory-low", "crit")] && occursin("out in about", only(al).detail)
+                # On a shared host, other programs taking memory are not this kernel running out: the
+                # host's use climbs, with a GiB of jitter, while the kernel holds steady.
+                h = [smp(T - (30 - k) * 2.0; avail = (26 + (isodd(k) ? 1 : -1) - k ÷ 5) * GiB, total = 64GiB,
+                         rss = 2GiB) for k in 1:30]
+                @test isempty(NS._kernel_alerts("pm", h; now = T))
+                # …and the kernel itself growing is.
+                h = [smp(T - (30 - k) * 2.0; avail = (30 - k) * GiB ÷ 2 + 8GiB, total = 64GiB,
+                         rss = 2GiB + k * GiB ÷ 2) for k in 1:30]
                 al = NS._kernel_alerts("pm", h; now = T)
                 @test kinds(al) == [("memory-low", "crit")] && occursin("out in about", only(al).detail)
                 # Busy with nothing running; and a cell running with nothing happening.
@@ -845,7 +858,16 @@ const RE = KaimonSlate.ReportEngine
                     push!(get!(Set{String}, NS._FORCE_RUN, "waits"), "b")
                     NS._eval_one!(nb, b)
                     @test a.state == RE.BLOCKED && !haskey(NS._FORCE_RUN, "waits")
+                    # A forced cell that errors before it reaches a kernel has had its run.
+                    rep2 = RE.parse_report("#%% code id=e region=nosuchregion\n1\n")
+                    nb2 = NS.LiveNotebook("errs", joinpath(mktempdir(), "errs.jl"), rep2, RE.InProcessKernel(), 1,
+                                          String[], String[], ReentrantLock(), Channel{String}[],
+                                          ReentrantLock(), "", false, Dict{String,String}())
+                    push!(get!(Set{String}, NS._FORCE_RUN, "errs"), "e")
+                    NS._eval_one!(nb2, only(rep2.cells))
+                    @test only(rep2.cells).state == RE.ERRORED && !haskey(NS._FORCE_RUN, "errs")
                 finally
+                    delete!(NS._FORCE_RUN, "errs")
                     lock(NS._RUNNER_LOCK) do; delete!(NS._RUNNERS, "waits"); end
                     lock(nb.lock) do; delete!(NS._FORCE_RUN, "waits"); end
                 end

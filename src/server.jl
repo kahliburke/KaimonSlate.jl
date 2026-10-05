@@ -2044,14 +2044,6 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
         (!preparing && ReportEngine.prepare_running(r.name)) && throw(RegionWaiting(WAIT_PREPARING, r.host, r.name))
         at = ReportEngine.region_where(r)
         k = get(_REGION_KERNELS, (nb.id, name), nothing)
-        # A kernel whose wire went down with a lost ssh session is reached again through a new one. A
-        # key sign-in is tried once, in the background (this runs under `nb.lock`), for every cell
-        # waiting on the host, and they are re-run when it ends.
-        if (sh = _lost_session_of(k)) != ""
-            ReportEngine.Sweep.connect_failed_recently(sh) && throw(RegionWaiting(WAIT_NOT_SIGNED_IN, sh))
-            _connect_in_background!(name, nb, sh)
-            throw(RegionWaiting(WAIT_CONNECTING, sh))
-        end
         # A cached kernel's target names the node it runs on and, on a scheduler region, the job that
         # node was granted in. Either can go stale: the next allocation may land on another node, or on
         # the same one (a single-node cluster grants its only node every time, so the name alone cannot
@@ -2059,7 +2051,19 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
         # worker ended with its allocation, so the kernel is rebuilt rather than retried forever.
         if k !== nothing
             tgt = k.target
-            (!(tgt isa ReportEngine.RemoteTarget) || (tgt.ssh_host, tgt.job) == at) && return k
+            if !(tgt isa ReportEngine.RemoteTarget) || (tgt.ssh_host, tgt.job) == at
+                # Still where it should be, but its wire went down with a lost ssh session: it is
+                # reached again through a new one. A key sign-in is tried once, in the background (this
+                # runs under `nb.lock`), for every cell waiting on the host, and they are re-run when it
+                # ends. A kernel whose node is gone is not reconnected; it is rebuilt below.
+                if (sh = _lost_session_of(k)) != ""
+                    ReportEngine.Sweep.connect_failed_recently(sh) &&
+                        throw(RegionWaiting(WAIT_NOT_SIGNED_IN, sh, r.name))
+                    _connect_in_background!(name, nb, sh)
+                    throw(RegionWaiting(WAIT_CONNECTING, sh, r.name))
+                end
+                return k
+            end
             ReportEngine._rlog("region: '$name' moved off $(_at_label(tgt.ssh_host, tgt.job)) " *
                                "to $(_at_label(at...)) — rebuilding its kernel")
             _forget_region_kernel!(nb, name)
@@ -2136,7 +2140,10 @@ _at_label(host, job) = isempty(job) ? String(host) : "$host (job $job)"
 function _forget_region_kernel!(nb::LiveNotebook, side::AbstractString)
     lock(_REGION_LOCK) do
         k = pop!(_REGION_KERNELS, (nb.id, String(side)), nothing)
-        k === nothing || delete!(_REGION_PRIMED, (nb.id, _worker_key(k)))
+        if k !== nothing
+            delete!(_REGION_PRIMED, (nb.id, _worker_key(k)))
+            lock(_LOST_SESSION_LOCK) do; delete!(_LOST_SESSION, k); end   # its session is no one's to wait on now
+        end
         synced = get(_REGION_SYNCED, nb.id, nothing)
         synced === nothing || filter!(kv -> !startswith(kv[1], side * ":"), synced)
         return k
@@ -3536,6 +3543,18 @@ function _memory_state(s)
     return nothing
 end
 
+# The least-squares rate of change of `f` over samples `win`, per second; 0 when fewer than three
+# samples have a value or they span under ten seconds.
+function _rate(win, f)
+    pts = [(s.rcv, f(s)) for s in win]
+    filter!(p -> isfinite(p[2]), pts)
+    length(pts) >= 3 || return 0.0
+    t̄ = sum(first, pts) / length(pts); ȳ = sum(last, pts) / length(pts)
+    stt = sum(p -> (p[1] - t̄)^2, pts)
+    (last(pts)[1] - first(pts)[1] >= 10 && stt > 0) || return 0.0
+    return sum(p -> (p[1] - t̄) * (p[2] - ȳ), pts) / stt
+end
+
 # Whether anything was happening in a sample: CPU, a GPU, or storage I/O.
 function _active(s)
     s.cpu >= 3 && return true
@@ -3567,9 +3586,12 @@ function _kernel_alerts(side::AbstractString, hist; now::Real = time(), quiet_ce
     m = _memory_state(l)
     if m !== nothing && m.limit > 0
         free = (m.limit - m.used) / m.limit
-        m0 = _memory_state(win[1])
-        dt = l.rcv - win[1].rcv
-        slope = (m0 !== nothing && dt > 10) ? (m.used - m0.used) / dt : 0.0
+        # Where growth is heading, fitted over the window rather than read off its two ends. Against a
+        # job's limit the job's own total is the right figure. Against the host's, only this kernel's
+        # growth is: the host total moves with every other program on the machine, and its swings
+        # read as a deadline that comes and goes every few seconds.
+        slope = m.of == "job" ? _rate(win, s -> (x = _memory_state(s); x === nothing ? NaN : x.used)) :
+                                _rate(win, s -> s.rss > 0 ? Float64(s.rss) : NaN)
         eta = slope > 0 ? (m.limit - m.used) / slope : Inf
         what = "$(m.of == "job" ? "job" : "host") memory $(_gib(m.used)) of $(_gib(m.limit)) ($(round(Int, 100 * free))% free)"
         if free < _WD_MEM_CRIT || eta < _WD_MEM_ETA_CRIT
@@ -4231,7 +4253,18 @@ function _rearm_locked!(nb::LiveNotebook, side::AbstractString, kernel)
     return n
 end
 
+# A ▶ force marker is for one run of the cell. A cell left waiting keeps it, so the run it waits for
+# is forced as asked; every other way out of the run, an error before the cell reached its kernel
+# included, uses it up.
 function _eval_one!(nb::LiveNotebook, cell::Cell)
+    try
+        _eval_one_run!(nb, cell)
+    finally
+        lock(nb.lock) do; cell.state == BLOCKED || _take_force!(nb.id, cell.id); end
+    end
+end
+
+function _eval_one_run!(nb::LiveNotebook, cell::Cell)
     # A cell whose input is waiting waits too, for the same thing. Run now it could only fail on a
     # name its upstream has not produced. Whatever re-runs the upstream re-runs this cell with it:
     # a granted node re-arms the region's dependents, and a run of the notebook takes up every wait.
