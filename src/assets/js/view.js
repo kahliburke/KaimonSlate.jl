@@ -343,7 +343,7 @@ function _cellRegionSet() {
 // itself rather than as nothing, so a new one is visible instead of silently blank.
 const BLOCKED_TEXT = { queued: 'queued', not_signed_in: 'not signed in', connecting: 'connecting',
                        not_requested: 'run to request a node', needs_prepare: 'prepare the region',
-                       preparing: 'preparing' };
+                       preparing: 'preparing', locked: 'locked' };
 function blockedText(c) {
   const code = (c && c.blocked) || '';
   return BLOCKED_TEXT[code] || code.replace(/_/g, ' ');
@@ -352,6 +352,15 @@ function blockedText(c) {
 function cellRegionChip(c) {
   const set = _cellRegionSet();
   const blocked = !!(c && c.state === 'blocked' && c.blocked);
+  // A locked cell with nothing to restore, or a cell reading one: not a wait on a machine, so no
+  // place and no clock, just which cell's ▶ ends it.
+  if (blocked && c.blocked === 'locked') {
+    const own = !c.blockedHost || c.blockedHost === c.id;
+    const tip = own ? 'Locked, with no stored result to restore. Its own ▶ computes it.'
+                    : 'Reads ' + c.blockedHost + ', a locked cell not computed yet. Its ▶ computes it.';
+    return `<span class="cregion blocked" data-bkey="${_esc(_blockedKey(c))}" title="${_esc(tip)}">🔒` +
+      ` <span class="cregst">${own ? '▶ to compute' : 'waits on ' + _esc(c.blockedHost)}</span></span>`;
+  }
   if (!blocked && set.size < 2 && set.has('local')) return '';
   const loc = _cellRunLoc(c);
   if (!loc) return '';
@@ -369,7 +378,7 @@ function cellRegionChip(c) {
       ((c.blocked === 'needs_prepare' || c.blocked === 'preparing')
         ? ` onmousedown="window.openPrepare && window.openPrepare('${_esc(loc.name || '')}', event)">`
         : ` onmousedown="window.openRegionPanel('${c.id}', event)">`) +
-      `${loc.local ? '💻' : '🖧'} ${_esc(loc.name || 'local')}` +
+      `${loc.local ? '💻' : _regIcon(loc.name)} ${_esc(loc.name || 'local')}` +
       ` <span class="cregst">${_esc(blockedText(c))}${w ? ` <span class="blockwait">${w}</span>` : ''}</span></span>`;
   }
   // `onmousedown`, not `onclick`: clicking a header selects the cell, which re-renders it and
@@ -384,10 +393,12 @@ function cellRegionChip(c) {
   return `<span class="cregion${cls.cls}" data-reg="${_esc(loc.name)}"` +
     (cls.cls ? '' : ` style="color:${hue};border-color:${hue}"`) +
     ` onmousedown="window.openRegionPanel('${c.id}', event)"` +
-    ` title="${_esc(cls.title || ('runs on ‘' + loc.name + '’ — click for the region'))}">🖧 ${_esc(loc.name)}` +
+    ` title="${_esc(cls.title || ('runs on ‘' + loc.name + '’ — click for the region'))}">${_regIcon(loc.name)} ${_esc(loc.name)}` +
     (cls.word ? ` <span class="cregst">${_esc(cls.word)}</span>` : '') + '</span>';
 }
 
+// 🖥 for a machine used as a region, 🖧 for any other region.
+const _regIcon = reg => window.slateModel.regionIcon(_regDef(reg));
 // How a region's worker is doing, for the chip. Read from the shared model, so the chip, the topbar
 // pill and the worker popup cannot disagree about the same worker.
 //
@@ -404,7 +415,7 @@ function _regChipStatus(name) {
   return {
     cls: st === 'degraded' ? ' degraded' : ' unwell',
     word: word,
-    title: 'runs on ‘' + name + '’ — ' + (w.note || word) + ' (click for the region)',
+    title: 'runs on ‘' + name + '’ — ' + (M.workerNote(w) || word) + ' (click for the region)',
   };
 }
 
@@ -429,6 +440,14 @@ window.refreshRegionChips = function () {
     if (st.textContent !== s.word) st.textContent = s.word;
   });
 };
+// Any change to the worker model repaints them, whichever way it arrived: the workers push, a full
+// state render (which draws the cells before it feeds the model the new list), or a telemetry frame.
+// Once per frame, however many changes land in it.
+let _chipFrame = 0;
+window.slateModel.subscribe(() => {
+  if (_chipFrame) return;
+  _chipFrame = requestAnimationFrame(() => { _chipFrame = 0; window.refreshRegionChips(); });
+});
 
 // ── Cell kinds ────────────────────────────────────────────────────────────────────────────────
 // The ONE description of what a cell can be — read by the kind switcher in every cell header, and
@@ -443,8 +462,8 @@ window.CELL_KINDS = [
     desc: 'HTML, CSS and JS panes. The cell owns its output and can call back into Julia.' },
   { k: 'tool',  glyph: '⌁',     name: 'Tool call',
     desc: 'A call OUT of the notebook. Never runs on open — it has effects in the world.' },
-  { k: 'sweep', glyph: '🛰',    name: 'Batch sweep',
-    desc: 'A parameter grid fanned out to a cluster. Resumable, watchable, never blocks.' },
+  { k: 'job',   glyph: '🛰',    name: 'Job',
+    desc: 'Work that lands over time, in the background or on a cluster: a sweep, a campaign. Resumable, watchable, never blocks.' },
 ];
 window.kindOf = k => window.CELL_KINDS.find(x => x.k === k) || window.CELL_KINDS[0];
 
@@ -513,19 +532,23 @@ function closeKindPicker() {
   if (p) p.classList.remove('show');
 }
 
-// A sweep cell's compute target, named in its header — the sibling of `cellRegionChip`, and for the
+// A job cell's compute target, named in its header — the sibling of `cellRegionChip`, and for the
 // same reason: WHERE a cell's work happens is not a setting you go looking for, it is something you
 // need to see while reading. A chip rather than an icon because the answer is a NAME; an icon would
-// mean clicking every sweep cell to find out where it goes.
+// mean clicking every job cell to find out where it goes.
 //
-// Unconfigured reads as an invitation, not an error: a sweep cell with no target is the normal state
+// Unconfigured reads as an invitation, not an error: a job cell with no target is the normal state
 // of a cell you just added, and "set a cluster" says what to do about it.
 function cellClusterChip(c) {
-  if (c.kind !== 'sweep') return '';
+  if (c.kind !== 'job') return '';
   const tags = c.tags || [];
   const get = k => { const t = tags.find(x => x.startsWith(k + '=')); return t ? t.slice(k.length + 1) : ''; };
   const name = get('cluster');
   if (!name) {
+    // A campaign with no target runs in the background here; a sweep has to be sent somewhere.
+    if (/@campaign\b/.test(c.source || ''))
+      return `<span class="cregion cluster here" onclick="openSweepConfig('${c.id}', event)"
+        title="runs in the background on this machine — click to send its rounds to a compute target">here</span>`;
     return `<span class="cregion cluster unset" onclick="openSweepConfig('${c.id}', event)"
       title="this sweep has no compute target — click to pick one">＋ set cluster</span>`;
   }
@@ -612,13 +635,16 @@ function _effectBadge(c) {
   return `<span class="effectbadge" title="${_esc(tip)}">⚙ ${_esc(label + shown)}</span>`;
 }
 function cellHeaderInner(c) {
-  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool' || c.kind === 'sweep') && !hasBinds(c);   // web/tool/sweep cells run too (▶)
+  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool' || c.kind === 'job') && !hasBinds(c);   // web/tool/job cells run too (▶)
   // ✎ edit source — on EVERY cell. md/@bind hide their source behind a rendered view, so it reveals the
   // source overlay; code/web edit inline, so it just focuses the editor (see editCellSource). NOT </> —
   // that's the "convert to web cell" glyph below, and both show on a @bind cell, so a shared icon would
   // read as the same action.
   const editSrc = `<button onclick="editCellSource('${c.id}','${c.kind}')" title="edit source">✎</button>`;
-  const run = isCode ? `<button class="run" data-run="${c.id}" onclick="runCell('${c.id}', true)" title="run this cell (always re-evaluates; ⇧⏎ runs only if changed)">▶</button>` : '';
+  // On mousedown, as the region chip is: an update to the header between mousedown and mouseup
+  // replaces this button, and the click is then never delivered — the cell needed a second click.
+  // The click handler is for the keyboard (Enter/Space reports `detail` 0), so a mouse runs it once.
+  const run = isCode ? `<button class="run" data-run="${c.id}" onmousedown="if (event.button === 0) { event.preventDefault(); runCell('${c.id}', true); }" onclick="if (event.detail === 0) runCell('${c.id}', true)" title="run this cell (always re-evaluates; ⇧⏎ runs only if changed)">▶</button>` : '';
   const bu = surfaceableNames(c);
   const _present = new Set([].concat(...((c.controls || []).map(col => col.map(s => s.name)))));
   const _someOn = bu.some(n => _present.has(n));
@@ -715,7 +741,7 @@ function _blockedWaited(c) {
 function _blockedKey(c) {
   if (!c || c.state !== 'blocked' || !c.blocked) return '';
   const l = _cellRunLoc(c);
-  return [c.blocked, +(c.blockedAt) || 0, (l && l.key) || ''].join('\x1f');
+  return [c.blocked, c.blockedHost || '', +(c.blockedAt) || 0, (l && l.key) || ''].join('\x1f');
 }
 // One timer for the page, not one per cell: it only rewrites the elapsed text, and stops costing
 // anything when nothing is waiting.
@@ -734,12 +760,35 @@ setInterval(() => {
 // none of that fits a tooltip.
 let _blkPanel = null, _blkTimer = 0, _blkFor = '';
 const _blkLoad = new Map();     // region → {at, data} — a hover is a round trip to a login node
-function _blkFmtQ(q) {
-  const bits = [`${q.cpus_free}/${q.cpus_total} cpus free`];
-  if (q.nodes_total > 0) bits.push(`${q.nodes_free}/${q.nodes_total} nodes`);
-  if (q.down > 0) bits.push(`${q.down} down`);
-  if (q.queued > 0) bits.push(`${q.queued} job${q.queued === 1 ? '' : 's'} queued`);
-  return `<div class="blkq"><span class="blkqn">${_esc(q.name)}</span>${_esc(bits.join(' · '))}</div>`;
+// The cluster's load, compactly: the scheduler-wide figures once, then one row per distinct set of
+// nodes (a scheduler lists the same nodes under several partition names, which read as duplicates),
+// the ones this region can use first and the rest folded away. `load.partition` names the region's
+// own partition; without one, its GPU ask picks the GPU partitions.
+const _num = (n) => (+n || 0).toLocaleString();
+function _blkCluster(load) {
+  const qs = (load && load.rows) || [];
+  const q0 = qs[0] || {};
+  const head = [q0.queued > 0 ? _num(q0.queued) + ' job' + (q0.queued === 1 ? '' : 's') + ' queued' : '',
+                q0.down > 0 ? _num(q0.down) + ' node' + (q0.down === 1 ? '' : 's') + ' down' : ''].filter(Boolean).join(' · ');
+  const groups = new Map();
+  for (const q of qs) {
+    const k = [q.cpus_free, q.cpus_total, q.nodes_free, q.nodes_total].join('/');
+    groups.has(k) ? groups.get(k).names.push(q.name) : groups.set(k, { q, names: [q.name] });
+  }
+  const want = load.partition ? (g) => g.names.includes(load.partition)
+             : (g) => (!!load.gpus && load.gpus !== '0') === g.names.some(n => /gpu/i.test(n));
+  const all = [...groups.values()].sort((a, b) => b.q.cpus_free - a.q.cpus_free);
+  const mine = all.filter(want), rest = all.filter(g => !want(g));
+  const row = (g) => `<tr><td title="${_esc(g.names.join(', '))}">${_esc(g.names.join(', '))}</td>` +
+    `<td>${_num(g.q.cpus_free)} / ${_num(g.q.cpus_total)}</td>` +
+    `<td>${g.q.nodes_total > 0 ? _num(g.q.nodes_free) + ' / ' + _num(g.q.nodes_total) : ''}</td></tr>`;
+  const table = (gs) => '<table class="blkqt"><tr><th>partition</th><th>cpus free</th><th>nodes free</th></tr>' +
+    gs.map(row).join('') + '</table>';
+  return '<div class="blkrow blkq1"><span>Cluster</span><div>' +
+    (head ? `<div class="blkqhead">${_esc(head)}</div>` : '') +
+    ((mine.length ? mine : all).length ? table(mine.length ? mine : all) : '') +
+    ((mine.length && rest.length) ? `<details class="blkqmore"><summary>${rest.length} other partition${rest.length === 1 ? '' : 's'}</summary>${table(rest)}</details>` : '') +
+    '</div></div>';
 }
 // The region's host, which the chip does not show — the chip names the REGION, and on a cluster the
 // two differ (`pbsnode` is asked for on `slate-pbs`).
@@ -764,7 +813,7 @@ function _blkRender(c, reg, load) {
   if (load === undefined) rows.push('<div class="blkrow blkdim"><span>Cluster</span><div>asking…</div></div>');
   else if (load === null) rows.push('<div class="blkrow blkdim"><span>Cluster</span><div>no answer</div></div>');
   else if (!qs || !qs.length) rows.push('<div class="blkrow blkdim"><span>Cluster</span><div>nothing reported</div></div>');
-  else rows.push('<div class="blkrow blkq1"><span>Cluster</span><div>' + qs.map(_blkFmtQ).join('') + '</div></div>');
+  else rows.push(_blkCluster(load));
   return rows.join('');
 }
 window.blockInfo = function (el, id) {
@@ -778,16 +827,21 @@ window.blockInfo = function (el, id) {
   const fresh = cached && (Date.now() - cached.at < 15000);
   _blkPanel.innerHTML = _blkRender(c, reg, fresh ? cached.data : undefined);
   const r = el.getBoundingClientRect();
-  _blkPanel.style.left = Math.round(Math.min(r.left, window.innerWidth - 340)) + 'px';
+  _blkPanel.style.left = Math.round(Math.max(10, Math.min(r.left, window.innerWidth - _blkPanel.offsetWidth - 10))) + 'px';
   _blkPanel.style.top = Math.round(r.bottom + 6) + 'px';
   _blkPanel.classList.add('on');
   if (!reg || fresh) return;
   fetch('/api/region-load?region=' + encodeURIComponent(reg))
     .then(r => r.json())
     .then(j => {
-      const data = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [] };
+      const data = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [], gpus: j && j.gpus, partition: (j && j.partition) || '' };
       _blkLoad.set(reg, { at: Date.now(), data });
-      if (_blkFor === id && _blkPanel && _blkPanel.classList.contains('on')) _blkPanel.innerHTML = _blkRender(c, reg, data);
+      if (_blkFor === id && _blkPanel && _blkPanel.classList.contains('on')) {
+        _blkPanel.innerHTML = _blkRender(c, reg, data);
+        // The table can widen it: keep it on screen.
+        const l = parseFloat(_blkPanel.style.left) || 0, over = l + _blkPanel.offsetWidth + 10 - window.innerWidth;
+        if (over > 0) _blkPanel.style.left = Math.max(10, l - over) + 'px';
+      }
     })
     .catch(() => { if (_blkFor === id && _blkPanel) _blkPanel.innerHTML = _blkRender(c, reg, null); });
 };
@@ -857,11 +911,15 @@ window.releaseRegionAlloc = async function (reg) {
 // region is the one tag with a reason to be edited from the header.
 function _regPicker(c, reg) {
   const regs = (typeof nbState !== 'undefined' && nbState && nbState.regions) || [];
-  const opts = ['', ...regs.map(r => r.name)];
-  const sel = opts.map(n =>
-    `<option value="${_esc(n)}"${n === reg ? ' selected' : ''}>${n ? _esc(n) : 'local (main kernel)'}</option>`).join('');
+  const M = window.slateModel;
+  const opt = (n, label) => `<option value="${_esc(n)}"${n === reg ? ' selected' : ''}>${_esc(label)}</option>`;
+  const group = (label, rs) => rs.length
+    ? `<optgroup label="${label}">${rs.map(r => opt(r.name, M.regionLabel(r))).join('')}</optgroup>` : '';
+  const machines = regs.filter(r => M.regionKind(r) === 'machine');
+  const sel = opt('', 'local (main kernel)') + group('Machines', machines) +
+              group('Regions', regs.filter(r => M.regionKind(r) !== 'machine'));
   return `<div class="blkrow"><span>Runs on</span><div>` +
-         `<select class="regpick" onchange="window.setCellRegion('${c.id}', this.value)">${sel}</select></div></div>`;
+         `<select class="regpick" onchange="window.pickCellRegion('${c.id}', this.value)">${sel}</select></div></div>`;
 }
 // The region's definition as the notebook knows it, or null for the main kernel.
 function _regDef(reg) {
@@ -874,7 +932,7 @@ const _regIsCluster = reg => { const r = _regDef(reg); return !!(r && r.schedule
 // absent there; everything else is the same panel.
 function _regRender(c, reg, load, alloc) {
   const r = _regDef(reg);
-  let h = `<div class="regphead">${reg ? '🖧 ' + _esc(reg) : '💻 local'}</div>`;
+  let h = `<div class="regphead">${reg ? _regIcon(reg) + ' ' + _esc(window.slateModel.regionLabel(r || { name: reg })) : '💻 local'}</div>`;
   if (!reg) {
     h += _regRow('Kernel', 'this notebook’s own worker, on this machine');
   } else {
@@ -893,7 +951,7 @@ function _regRender(c, reg, load, alloc) {
       const qs = load && load.rows;
       if (load === undefined) h += '<div class="blkrow blkdim"><span>Cluster</span><div>asking…</div></div>';
       else if (!qs || !qs.length) h += '<div class="blkrow blkdim"><span>Cluster</span><div>nothing reported</div></div>';
-      else h += '<div class="blkrow blkq1"><span>Cluster</span><div>' + qs.map(_blkFmtQ).join('') + '</div></div>';
+      else h += _blkCluster(load);
     } else {
       h += _regRow('Warm workers', String((r.warm | 0) || 0));
     }
@@ -902,9 +960,9 @@ function _regRender(c, reg, load, alloc) {
   h += `<div class="regpfoot"><a href="/#remotes">Manage regions and workers in Remotes</a></div>`;
   return h;
 }
-window.setCellRegion = function (id, name) {
-  const keep = (typeof _curTags === 'function' ? _curTags(id) : []).filter(t => !t.startsWith('region='));
-  if (typeof setTags === 'function') setTags(id, name ? [...keep, 'region=' + name] : keep);
+// The panel's picker: the one way a cell's region is set (`setCellRegion`, regions.js), then the panel goes.
+window.pickCellRegion = function (id, name) {
+  setCellRegion(id, name);
   _regClose();
 };
 function _regClose() { if (_regPanel) _regPanel.classList.remove('on'); _regFor = ''; }
@@ -938,7 +996,7 @@ window.openRegionPanel = function (id, ev) {
   };
   let L = fresh ? cached.data : undefined, A;
   if (!fresh) fetch('/api/region-load?region=' + encodeURIComponent(reg)).then(r => r.json())
-    .then(j => { L = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [] };
+    .then(j => { L = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [], gpus: j && j.gpus, partition: (j && j.partition) || '' };
                  _blkLoad.set(reg, { at: Date.now(), data: L }); paint(L, A); })
     .catch(() => paint(null, A));
   // Through the shared cache, so releasing from the Remotes roster invalidates what this panel would
@@ -1510,10 +1568,14 @@ function updateStates(state) { _publishState(state); window.loadScratch && windo
 // drawn — leaving that cell blank until its next change. A stamp is spent only where the payload
 // actually reaches the DOM.
 const _cellRev = {};
-function revIsNew(c) {
+// `out`, the cell's output element, is what decides a payload at the revision already applied: if the
+// element does not hold that output, it was replaced after the payload landed (a re-render that built
+// the cell's elements again) and the payload has to be drawn again. An OLDER revision stays stale.
+function revIsNew(c, out) {
   if (!c || typeof c.rev !== 'number') return true;   // a server without revs, or a synthetic payload
   const seen = _cellRev[c.id];
-  return seen === undefined || c.rev > seen;
+  if (seen === undefined || c.rev > seen) return true;
+  return c.rev === seen && !!out && out.__slateOut !== c.output;
 }
 function revMark(c) { if (c && typeof c.rev === 'number') _cellRev[c.id] = c.rev; }
 
@@ -1548,7 +1610,7 @@ function markBlank(el, c) {
   el.classList.toggle('cell-blank', blank);
 }
 window.slateMarkBlank = markBlank;
-function resetCellRevs() { for (const k in _cellRev) delete _cellRev[k]; }
+function resetCellRevs() { for (const k in _cellRev) delete _cellRev[k]; _stateVersion = -1; }
 window.slateRevIsNew = revIsNew;
 window.slateRevMark = revMark;
 window.slateResetCellRevs = resetCellRevs;
@@ -1679,7 +1741,16 @@ function backrefInfo(ev, cellId) {
 }
 window.backrefInfo = backrefInfo;
 
+// The newest full state applied. A full state is the answer to a request, and an answer can arrive
+// after one to a later request: a state GET started before an edit, answered after the edit's own
+// reply. Applying it would put the page back to before the edit. `version` only rises within a hub
+// process; a reconnect clears this (`resetCellRevs`), as the hub may have restarted.
+let _stateVersion = -1;
 function _publishState(state) {
+  if (state && typeof state.version === 'number') {
+    if (state.version < _stateVersion) return;
+    _stateVersion = state.version;
+  }
   nbState = state;
   // Remember this notebook's file path so a reconnect after a server restart can ask the server
   // to re-open it by path (the in-memory registry is empty after a restart — see panels.js _probe).
@@ -1738,21 +1809,27 @@ function updateChrome(state) {
               : 'in-process kernel';
   }
   window.renderRunLoc && window.renderRunLoc(state);   // toolbar run-location pill (session/notebook/global)
-  window.renderWorkers && window.renderWorkers(state); // per-region worker pills next to it (click → log/status popup)
   window.renderRunPill && window.renderRunPill();      // error pill reads live state → clears when a cell is fixed/removed
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   const hb = document.getElementById('hydbanner');
   // "run" (the plain initial autorun) gets NO banner — cells are fully interactive and each shows
-  // its own running/stale state, exactly like any later manual run; a special top banner just for
-  // the FIRST run would be an arbitrary inconsistency now that it's not gating anything. "boot"
-  // (cold local worker spawn), "remote" (worker provisioning), and "env" (bundle reconstruction)
-  // have no per-cell equivalent — there's no worker yet to show per-cell progress against — so
-  // those keep a status banner, narrated live by the same `bringup:` stream in all three cases.
-  // An app hides the code cells, so the per-cell running state the "run" case relies on below is
-  // invisible to its reader — a cold start reads as a page of headings that does nothing for
-  // minutes. There, and only there, the plain autorun gets a banner too.
+  // its own running/stale state, exactly like any later manual run. "boot" (cold local worker spawn)
+  // and "remote" (worker provisioning) are narrated in the WORKER PANEL instead (workers.js), where the
+  // worker's pill already says it is starting: the progress line and build log belong to that worker,
+  // and a bar across the notebook for them pushed every cell down. "env" (bundle reconstruction)
+  // keeps the banner: it replaces the cells with a frozen preview, which needs saying up top.
+  // An app hides the code cells and its reader has no worker panel, so there every kind (the plain
+  // autorun included) gets the banner — otherwise a cold start reads as a page that does nothing.
   const _isApp = _APPMODE;
-  if (state.hydrating && (_isApp || state.hydratingKind !== 'run')) {
+  const bringup = !!state.hydrating && !_isApp && (state.hydratingKind === 'boot' || state.hydratingKind === 'remote');
+  const was = window.__slateBringup;
+  window.__slateBringup = bringup ? { kind: state.hydratingKind, host: state.hydratingHost || '', side: state.hydratingSide || '' } : null;
+  if ((!!was) !== bringup || (was && bringup && was.side !== window.__slateBringup.side))
+    window.wpBringupChanged && window.wpBringupChanged();
+  if (bringup) {
+    hb.style.display = 'none'; document.body.classList.remove('hyd-preview');
+    window.renderPrepare && window.renderPrepare();   // into the worker panel, when it shows that worker
+  } else if (state.hydrating && (_isApp || state.hydratingKind !== 'run')) {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
     // Short headline per kind — shown only until structured status arrives, then prepare.js hides it so the
     // banner stays compact (the #hydprep line becomes the headline). Specifics (precompile k/N, current
@@ -1842,10 +1919,8 @@ async function _sharedDocDialog(state) {
 // one, so it can't go through api() — that injects this notebook's id into the path.
 async function _openOther(path) {
   try {
-    const r = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                         body: JSON.stringify({ path }) });
-    const d = await r.json();
-    if (d && d.url) window.open(d.url, '_blank'); else await alertDark('Could not open ' + path);
+    const d = await slateOpenPath(path);
+    if (d && d.url) window.open(d.url, '_blank');
   } catch (_) { await alertDark('Could not open ' + path); }
 }
 // Give this notebook a fresh identity, copying the stores across so both sides keep their lineage.

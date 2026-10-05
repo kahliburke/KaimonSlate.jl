@@ -39,7 +39,7 @@ end
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
-export MARKDOWN, CODE, WEB, TOOL, SWEEP, FRESH, STALE, RUNNING, ERRORED, BLOCKED
+export MARKDOWN, CODE, WEB, TOOL, JOB, FRESH, STALE, RUNNING, ERRORED, BLOCKED
 # Kind predicates, exported alongside the kinds themselves: sibling modules (`ReportRender`,
 # `NotebookServer`) reach the enum by `using ..ReportEngine`, so a helper that is not exported is
 # invisible to exactly the code that classifies cells.
@@ -59,17 +59,17 @@ export standalone!
 # effects out in the world — it starts a job, writes a file, spends money — so reopening a notebook must not fire
 # it. It runs when someone, or some agent, asks for it.
 #
-# SWEEP is the same shape again: its source is a runnable `@sweep` call, it participates in the
-# dependency graph, and it produces a value. What it buys is a LIFECYCLE that CODE cannot express.
-# A code cell's contract is "runs, produces a value, done"; a sweep's work is decomposed into units
-# that execute elsewhere and over time, so its value arrives progressively and may be permanently
-# partial (some units failed, and that is a finished outcome, not a broken one).
+# JOB is the same shape again: its source is a runnable call (`@sweep`, `@campaign`), it participates
+# in the dependency graph, and it produces a value. What it buys is a LIFECYCLE that CODE cannot
+# express. A code cell's contract is "runs, produces a value, done"; a job's work is decomposed into
+# units that execute elsewhere or in the background and over time, so its value arrives
+# progressively and may be permanently partial (some units failed, and that is a finished outcome,
+# not a broken one).
 #
-# Unlike TOOL it is NOT excluded from automatic runs, because evaluating a sweep cell RECONCILES
-# rather than submits: it reads the store and the scheduler and reports what is there. Submitting is
-# a separate, explicit action. That is what makes reopening a notebook safe while still letting it
-# pick the monitor back up on work that is still in flight.
-@enum CellKind MARKDOWN CODE WEB TOOL SWEEP
+# Unlike TOOL it is NOT excluded from automatic runs, because evaluating a job cell RECONCILES rather
+# than recomputes: it reads what the work has produced and reports what is there. That is what makes
+# reopening a notebook safe while still letting it pick the monitor back up on work in flight.
+@enum CellKind MARKDOWN CODE WEB TOOL JOB
 # BLOCKED is a WAIT, not a failure: the cell cannot run yet for a reason outside it — a scheduler
 # queue that has not granted a node, a host nobody has signed in to. It is separate from ERRORED
 # because the two need opposite handling. An error is the cell's own, is worth showing in red, and is
@@ -373,7 +373,7 @@ const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :cache, :resource,
 "Parse a header line's trailing tokens into (kind, id, controls, tags::Vector{Symbol}). Every token
 that isn't `id=`/`controls=`/`code`/`md` becomes a tag flag (known ones drive behaviour; the rest are
 free-form metadata that round-trips)."
-function _parse_header(rest::AbstractString)
+function _parse_header(rest::AbstractString; format::Int = FORMAT, changes::Vector{String} = String[])
     kind = CODE
     id = nothing
     controls = Vector{String}[]
@@ -387,8 +387,12 @@ function _parse_header(rest::AbstractString)
             kind = MARKDOWN
         elseif tok == "web"
             kind = WEB
-        elseif tok == "sweep"
-            kind = SWEEP
+        elseif tok == "job"
+            kind = JOB
+        elseif tok == "sweep" && format < 2
+            # Format 1 called the job kind `sweep`.
+            kind = JOB
+            push!(changes, "sweep")
         elseif tok == "tool"
             kind = TOOL
         elseif tok == "code"
@@ -409,7 +413,7 @@ A cell's `key=value` header tokens, read back as attributes.
 round-trips through the `.jl` with no schema to maintain. Read as a dict they become the cell's
 CONFIGURATION — the settings that belong to the cell rather than to its code:
 
-    #%% sweep id=scan walltime=02:00:00 partition=gpu mem=16G
+    #%% job id=scan walltime=02:00:00 partition=gpu mem=16G
 
 A batch sweep is the case that needs this. Walltime, memory and partition are the settings you
 change WHILE a job is queued or after it was killed, and burying them in a Julia keyword argument
@@ -549,6 +553,11 @@ implicit content after a header is taken as that explicit cell's verbatim body.)
 function parse_report(text::AbstractString; id::AbstractString = "r", title::AbstractString = "")
     report = Report(id, title)
     lines = split(text, '\n')
+    # The file's format decides how its headers and footers read; what an update to the current
+    # format would change is gathered as they are read (`format_changes`).
+    format = _file_format(lines)
+    report.meta["format"] = format
+    changes = String[]
     # Split off any Slate footer block (always terminal: the `env` delta and/or a standalone
     # `bundle`) before cell parsing, so their comment lines aren't taken for a markdown cell.
     fi = findfirst(l -> startswith(l, "# ╔═╡ Slate."), lines)
@@ -560,8 +569,9 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         for (k, v) in _parse_config_footer(@view lines[fi:end])   # Slate.config: per-notebook settings
             report.meta[k] = v
         end
-        sw = _parse_sweep_footer(@view lines[fi:end])             # Slate.sweep: per-cell scheduler options
-        isempty(sw) || (report.meta["sweepopts"] = sw)
+        sw = _parse_job_footer(@view lines[fi:end]; format)       # Slate.job: per-cell scheduler options
+        isempty(sw) || (report.meta["jobopts"] = sw)
+        format < 2 && any(l -> startswith(l, _JOB_MARK_OPEN_V1), @view lines[fi:end]) && push!(changes, "footer")
         lines = lines[1:(fi - 1)]
     end
 
@@ -580,7 +590,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
     firsthdr = findfirst(l -> match(_HEADER, l) !== nothing, lines)
     implicit_end = firsthdr === nothing ? length(lines) : firsthdr - 1
     _append_implicit_cells!(report, view(lines, 1:implicit_end), used_ids)
-    firsthdr === nothing && return report
+    firsthdr === nothing && (_note_format_changes!(report, changes); return report)
 
     kind::CellKind = CODE
     cid::Union{String,Nothing} = nothing
@@ -594,6 +604,10 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
             idx = length(report.cells) + 1
             src = join(trimmed, "\n")
             kind === MARKDOWN && (src = _unwrap_md(src))   # strip the `@md\"\"\"…\"\"\"` runnable skin, if present
+            # Format 1 ran a campaign in a code cell; it is a job, as a sweep is.
+            if format < 2 && kind === CODE && occursin(r"@campaign\b", src)
+                kind = JOB; push!(changes, "campaign")
+            end
             id_ = cid === nothing ? _unique_auto_id(kind, src, idx, used_ids) : cid
             push!(used_ids, id_)
             cell = Cell(id_, kind, src)
@@ -611,13 +625,14 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         m = match(_HEADER, line)
         if m !== nothing                  # explicit header → start a new explicit cell
             flush!()
-            kind, cid, ctrls, tags = _parse_header(m.captures[1])
+            kind, cid, ctrls, tags = _parse_header(m.captures[1]; format, changes)
             had_header = true
         else                              # verbatim body of the current explicit cell
             push!(body, line)
         end
     end
     flush!()                              # close the final cell
+    _note_format_changes!(report, changes)
     return report
 end
 
@@ -662,6 +677,44 @@ function _parse_env_footer(lines)::Vector{Dict{String,Any}}
     return sort(out; by = p -> p["name"])
 end
 
+# ── The notebook file format ──────────────────────────────────────────────────────────────────────
+# A notebook file says which format it is written in (`format = N` in its Slate.config footer); a
+# file that says nothing is format 1. The parser reads each format's grammar, and the serializer
+# writes the current one, so updating a notebook is reading it and writing it again. What an update
+# would change is recorded as the file is read (`format_changes`): when there is something, the
+# notebook is not opened until someone agrees to the update, which keeps a copy of the original.
+#
+#   1  cells whose work arrives over time are `#%% sweep`, their scheduler options `Slate.sweep`
+#   2  they are job cells (`#%% job`, `Slate.job`): a sweep and a campaign are both jobs
+const FORMAT = 2
+
+function _file_format(lines)::Int
+    fi = findfirst(l -> startswith(l, "# ╔═╡ Slate."), lines)
+    fi === nothing && return 1
+    f = get(_parse_config_footer(@view lines[fi:end]), "format", nothing)
+    return f isa Int && f >= 1 ? f : 1
+end
+
+# What an update to the current format changes in this notebook, in words for the dialog that asks.
+function _note_format_changes!(report::Report, changes::Vector{String})
+    out = String[]
+    n = count(==("sweep"), changes)
+    n > 0 && push!(out, "$(n) `sweep` cell$(n == 1 ? " becomes a `job` cell" : "s become `job` cells")")
+    k = count(==("campaign"), changes)
+    k > 0 && push!(out, "$(k) cell$(k == 1 ? " running a campaign becomes a `job` cell" : "s running a campaign become `job` cells")")
+    "footer" in changes && push!(out, "the `Slate.sweep` scheduler options become `Slate.job`")
+    isempty(out) || (report.meta["format_changes"] = out)
+    return nothing
+end
+
+"""
+    format_changes(report) -> Vector{String}
+
+What updating the notebook to the current file format would change, in words; empty when there is
+nothing to ask about (a current file, or an older one whose update only stamps the format).
+"""
+format_changes(report::Report) = get(report.meta, "format_changes", String[])
+
 # ── Per-notebook config footer (Slate.config) ────────────────────────────────────────────────────
 # Durable per-notebook settings (worker threads, parallel execution) travel with the `.jl` in a small
 # human-readable footer — so they survive reopen/restart and move with the file, instead of living only
@@ -683,7 +736,9 @@ const _CONFIG_KEYS = ("sharefindings", "parallel", "threads", "hotreload", "macr
                       # `.jl` rather than living in one person's browser.
                       "replaystrides",
                       "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
-                      "publishrepo", "publishslug", "series", "docid")
+                      "publishrepo", "publishslug", "series", "docid",
+                      # `format` = the notebook file format this file is written in (see `FORMAT`).
+                      "format")
 const _CONFIG_TYPES = Dict("sharefindings" => :bool, "parallel" => :bool, "threads" => :string, "hotreload" => :bool,
                            # `macroexpand` = macro-aware dependency analysis (expand unknown macros in
                            # the kernel to recover their true reads/writes). Off = conservative static
@@ -703,7 +758,7 @@ const _CONFIG_TYPES = Dict("sharefindings" => :bool, "parallel" => :bool, "threa
                            "publishrepo" => :string, "publishslug" => :string, "series" => :string,
                            # `docid` = the notebook's STABLE publish-ledger identity, generated once and
                            # carried in the file so it never flips when the path/repo/origin changes.
-                           "docid" => :string)
+                           "docid" => :string, "format" => :int)
 
 
 # ── findings footer ───────────────────────────────────────────────────────────────────────────────
@@ -752,6 +807,8 @@ end
 function _render_config_footer(meta)::String
     items = Tuple{String,String}[]
     for k in _CONFIG_KEYS
+        # Written in the current format, whatever format it was read in.
+        k == "format" && (push!(items, (k, string(FORMAT))); continue)
         haskey(meta, k) || continue
         v = meta[k]
         sv = v isa Bool ? string(v) : String(string(v))
@@ -786,8 +843,8 @@ function _parse_config_footer(lines)::Dict{String,Any}
     return out
 end
 
-# ── Per-cell scheduler options (Slate.sweep) ─────────────────────────────────────────────────────
-# A sweep cell's scheduler options used to ride its header as `key=value` tags. That is a good place
+# ── Per-cell scheduler options (Slate.job) ───────────────────────────────────────────────────────
+# A job cell's scheduler options used to ride its header as `key=value` tags. That is a good place
 # for a walltime — readable in a diff, editable in the UI — and an impossible one for half of what a
 # scheduler accepts: header keys must be `[A-Za-z][A-Za-z0-9_]*` and values lose anything outside
 # `[A-Za-z0-9_.:+/@-]` (the tag sanitiser), so `--licenses=ansys@srv` or a constraint expression
@@ -796,7 +853,7 @@ end
 #
 # So they live here instead, as JSON — one object per cell, one line each:
 #
-#     # ╔═╡ Slate.sweep
+#     # ╔═╡ Slate.job
 #     #   {"cell":"scan","options":{"constraint":"(avx512|avx2)&!gpu","licenses":"ansys@srv"}}
 #     # ╚═╡
 #
@@ -809,13 +866,14 @@ end
 # One line per CELL: a cell's options are edited together, and this keeps a diff to the cell that
 # changed. Header attrs still work — the footer is merged OVER them (`_attr_args`), so an existing
 # notebook keeps behaving while the editor writes only here.
-const _SWEEP_MARK_OPEN = "# ╔═╡ Slate.sweep"
+const _JOB_MARK_OPEN = "# ╔═╡ Slate.job"
+const _JOB_MARK_OPEN_V1 = "# ╔═╡ Slate.sweep"             # format 1's name for the same block
 
 # Sorted keys, so the bytes are a function of the content rather than of Dict iteration order.
 _json_obj(d) = "{" * join([JSON.json(String(k)) * ":" * JSON.json(String(d[k]))
                            for k in sort!(collect(keys(d)))], ",") * "}"
 
-function _render_sweep_footer(opts)::String
+function _render_job_footer(opts)::String
     (opts === nothing || isempty(opts)) && return ""
     lines = String[]
     for cid in sort!(collect(keys(opts)))
@@ -825,17 +883,18 @@ function _render_sweep_footer(opts)::String
     end
     isempty(lines) && return ""
     io = IOBuffer()
-    println(io, _SWEEP_MARK_OPEN, " · per-cell scheduler options (the ⎈ on a sweep cell)")
+    println(io, _JOB_MARK_OPEN, " · per-cell scheduler options (the ⎈ on a job cell)")
     for l in lines; println(io, l); end
     print(io, _ENV_MARK_CLOSE)
     return String(take!(io))
 end
 
-function _parse_sweep_footer(lines)::Dict{String,Dict{String,String}}
+function _parse_job_footer(lines; format::Int = FORMAT)::Dict{String,Dict{String,String}}
     out = Dict{String,Dict{String,String}}()
+    mark = format < 2 ? _JOB_MARK_OPEN_V1 : _JOB_MARK_OPEN
     insw = false
     for l in lines
-        startswith(l, _SWEEP_MARK_OPEN) && (insw = true; continue)
+        startswith(l, mark) && (insw = true; continue)
         insw || continue
         startswith(l, _ENV_MARK_CLOSE) && break
         m = match(r"^#\s+(\{.*\})\s*$", l)
@@ -860,21 +919,21 @@ end
 # ── Serialization ────────────────────────────────────────────────────────────
 
 _kind_token(k::CellKind) = k === MARKDOWN ? "md" : k === WEB ? "web" :
-                           k === TOOL ? "tool" : k === SWEEP ? "sweep" : "code"
+                           k === TOOL ? "tool" : k === JOB ? "job" : "code"
 
-"""A cell whose source is Julia the engine evaluates. TOOL and SWEEP join CODE here: everything
+"""A cell whose source is Julia the engine evaluates. TOOL and JOB join CODE here: everything
 about evaluation, dependencies and capture is identical, and only presentation, WHEN it runs, and
-(for SWEEP) how long its value takes to arrive differ."""
-is_code_kind(k::CellKind) = k === CODE || k === WEB || k === TOOL || k === SWEEP
+(for JOB) how long its value takes to arrive differ."""
+is_code_kind(k::CellKind) = k === CODE || k === WEB || k === TOOL || k === JOB
 
 """Whether a cell's source is analyzed for reads/writes and joins the dependency graph.
 
 NOT the same question as `is_code_kind`, which is about EVALUATION. `deps.jl` gates its analysis on
 this: a WEB cell contributes only its `{{ }}` interpolations, and a TOOL cell is deliberately opaque
-(its source is a recorded call, not something whose bindings should drive reactivity). SWEEP joins
-CODE because a sweep cell reads its grid and writes its result like any other cell — being able to
+(its source is a recorded call, not something whose bindings should drive reactivity). JOB joins
+CODE because a job cell reads its inputs and writes its result like any other cell — being able to
 say "this plot depends on that sweep" is most of the point of it being a cell at all."""
-analyzes_like_code(k::CellKind) = k === CODE || k === SWEEP
+analyzes_like_code(k::CellKind) = k === CODE || k === JOB
 
 """Kinds excluded from automatic runs. A tool call reaches outside the notebook, so opening a
 document, or recomputing a stale neighbour, must never fire one on the reader's behalf."""
@@ -926,7 +985,7 @@ function serialize_report(report::Report)
     # so the order here only has to be stable — not any particular one.
     parts = filter(!isempty, [_render_env_footer(get(report.meta, "env", Dict{String,Any}[])),
                               _render_config_footer(report.meta),
-                              _render_sweep_footer(get(report.meta, "sweepopts", nothing)),
+                              _render_job_footer(get(report.meta, "jobopts", nothing)),
                               _render_findings_footer(report.meta)])
     isempty(parts) && return body
     return body * "\n" * join(parts, "\n") * "\n"
@@ -970,6 +1029,8 @@ include(joinpath(@__DIR__, "gate_kernel.jl"))   # GateKernel (used when Main.Kai
 include(joinpath(@__DIR__, "remote.jl"))        # RunTarget + remote worker (provision/sync/CURVE); uses gate_kernel helpers
 include(joinpath(@__DIR__, "region_prepare.jl"))  # preparing a region: site setup + node check, kept in Region.readiness
 include(joinpath(@__DIR__, "clusters.jl"))      # named compute targets, kept with the machines (not per notebook); needs remote.jl's _slate_config_dir
+include(joinpath(@__DIR__, "machines.jl"))      # a machine (a clusters.json entry) and what preparing found on its host
+include(joinpath(@__DIR__, "batch_prepare.jl")) # preparing a machine for a project's sweeps: one test task first
 include(joinpath(@__DIR__, "peer_mesh.jl"))     # friend-group SSH mesh (introduce/teardown/peer_plan) for the :ssh blob bridge
 
 end # module ReportEngine

@@ -20,8 +20,11 @@ import Logging    # to capture a cell's `@warn`/`@info` onto the redirected stde
 # method is captured as a component descriptor / HTML fragment IN PREFERENCE to text/html or text/plain —
 # the richest representation wins, exactly like VS Code's `DISPLAYABLE_MIMES` scan. A plain value isn't
 # `showable` for them (its `slate_render` returns nothing), so it falls through to the standard MIMEs.
+# `text/markdown` comes last: a value that has nothing richer to show is prose, which renders through
+# the markdown pipeline (in a code cell's output, and spliced into a markdown cell by `{{ }}`) and so
+# reaches a PDF as typeset text rather than as a screenshot of HTML.
 const _RICH_MIMES = ("application/vnd.kaimonslate.component+json", "application/vnd.kaimonslate.html+html",
-                     "image/svg+xml", "image/png", "text/html", "text/latex")
+                     "image/svg+xml", "image/png", "text/html", "text/latex", "text/markdown")
 
 # ── Output size caps ─────────────────────────────────────────────────────────
 # A cell that accidentally produces a giant result (a printed 10⁷-element loop, the text repr of a
@@ -399,13 +402,15 @@ end
 #
 # 2. RE-RUN NOISE. A warning that only fires because a cell ran twice is not telling the reader
 #    anything — re-running is the normal operation here, not a mistake. See `_rerun_noise`.
-struct _CellLogger <: Logging.AbstractLogger
-    parent::Logging.AbstractLogger
-    sink                       # (id, frac::Float64, msg::String, done::Bool) -> Any  (cell progress channel)
-end
-Logging.shouldlog(::_CellLogger, _...) = true                          # filter in handle_message
-Logging.min_enabled_level(l::_CellLogger) = min(Logging.LogLevel(-1), Logging.min_enabled_level(l.parent))
-Logging.catch_exceptions(l::_CellLogger) = Logging.catch_exceptions(l.parent)
+#
+# A `SlateExtensionsBase.HookLogger` rather than a logger type of its own: a worker booted from a
+# sysimage has package compilers in it (GPUCompiler) that ask the current logger for its level from
+# the world the image was built in, where a type defined here does not exist yet.
+# `sink` is (id, frac::Float64, msg::String, done::Bool) -> Any, the cell's progress channel.
+_CellLogger(parent::Logging.AbstractLogger, sink) =
+    SlateExtensionsBase.HookLogger(parent, (inner, args...; kwargs...) -> _cell_log(inner, sink, args...; kwargs...);
+        min_level = min(Logging.LogLevel(-1), Logging.min_enabled_level(parent)),
+        shouldlog = (_...) -> true)                                     # filter in `_cell_log`
 
 _progress_frac(p) = p === nothing                  ? 0.0 :
                     p isa AbstractString           ? (p == "done" ? 1.0 : 0.0) :
@@ -425,19 +430,19 @@ _progress_frac(p) = p === nothing                  ? 0.0 :
 _rerun_noise(_module, message) =
     _module === Base.Docs && startswith(string(message), "Replacing docs for")
 
-function Logging.handle_message(l::_CellLogger, level, message, _module, group, id, file, line; kwargs...)
+function _cell_log(parent, sink, level, message, _module, group, id, file, line; kwargs...)
     if haskey(kwargs, :progress)                                            # a progress record → cell meter
         p = kwargs[:progress]
         # The log `id` keys the bar — each `@withprogress` scope (nested loops, parallel tasks) has
         # its own, so they render as separate bars. `progress="done"` ends a scope → remove its bar
         # (else each new nested scope's fresh id would pile up).
         bid = id === nothing ? "" : string(id)
-        try; l.sink(bid, _progress_frac(p), message === nothing ? "" : string(message), p === "done"); catch; end
+        try; sink(bid, _progress_frac(p), message === nothing ? "" : string(message), p === "done"); catch; end
         return nothing                                                      # consume (don't echo to stderr)
     end
     _rerun_noise(_module, message) && return nothing
-    Logging.shouldlog(l.parent, level, _module, group, id) &&
-        Logging.handle_message(l.parent, level, message, _module, group, id, file, line; kwargs...)
+    Logging.shouldlog(parent, level, _module, group, id) &&
+        Logging.handle_message(parent, level, message, _module, group, id, file, line; kwargs...)
     return nothing
 end
 
@@ -809,6 +814,10 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
     return (; region   = isempty(region) ? nothing : Symbol(region),
               notebook = String(notebook),
               docid    = String(docid),
+              # The notebook's directory and the cell being evaluated, read when asked: a package that
+              # records where a result came from (an experiment tracker) needs both.
+              dir      = () -> (_ns_defined(mod, :__slate_nbdir) ? String(_ns_read(mod, :__slate_nbdir)()) : ""),
+              cell     = () -> String(get(task_local_storage(), :slate_cell, "")),
               side     = String(region),
               emit     = emit,
               regions  = Symbol[Symbol(r) for r in regions],
@@ -831,7 +840,7 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
               # here. Empty for any cell that declares none.
               attrs    = _attr_dict(attrs),
               # This machine's named compute targets (clusters.jl's registry), referenced by name
-              # from any number of sweep cells — so three cells on the same partition say so once,
+              # from any number of job cells — so three cells on the same partition say so once,
               # and the notebook carries the name rather than the address.
               clusters = _cluster_dict(clusters))
 end
@@ -1034,6 +1043,12 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
             value_repr = _cap_keep!(overflow, "value", value_repr, "txt")
         catch
         end
+    end
+    # A markdown value keeps its text as the value too, whole: the paths that splice a `{{ }}` from
+    # the value text (the PDF, a docs bundle) then get all of it, where `show` under `:limit` would
+    # have shortened a long text to a "⋯ N bytes ⋯" stub.
+    if err === nothing && isempty(value_repr) && (i = findfirst(ch -> ch[1] == "text/markdown", chunks)) !== nothing
+        value_repr = _cap_keep!(overflow, "value", String(copy(chunks[i][2])), "md")
     end
     # A cell's runtime error may still arrive wrapped in a LoadError (defensive — unwrap to the
     # REAL error: UndefVarError, DomainError, …). Parse errors arrive as `ParseError` directly.

@@ -110,10 +110,12 @@ end
 
 """
 Markdown source → HTML (live notebook + md cells). `interps` are the captured
-outputs of the cell's `{{ expr }}` blocks, spliced in document order.
+outputs of the cell's `{{ expr }}` blocks, spliced in document order. `prose` is applied to each
+markdown value spliced in, as the caller already applied it to the source (the live view's citation
+links, say), so spliced prose gets the same treatment as written prose.
 """
-markdown_html(src::AbstractString) = _md_html(src, CellOutput[])
-markdown_html(src::AbstractString, interps) = _md_html(src, interps)
+markdown_html(src::AbstractString; prose = identity) = _md_html(src, CellOutput[]; prose)
+markdown_html(src::AbstractString, interps; prose = identity) = _md_html(src, interps; prose)
 
 """
     output_html(cell) -> String
@@ -378,12 +380,31 @@ _is_empty_output(o) =
     o.exception === nothing && isempty(o.display) && isempty(o.echarts) && isempty(o.tables) &&
     (isempty(o.value_repr) || o.value_repr == "nothing")
 
-# Render markdown, splicing each `{{ expr }}` capture in. Self-contained outputs
-# (image / HTML / LaTeX / scalar) embed directly; echarts & interactive tables
-# emit a host placeholder (`.ichart`/`.itable` keyed by index) that the SPA
-# hydrates from the cell's collected `echarts`/`tables` — same order as here.
-function _md_html(src::AbstractString, interps = CellOutput[])
+# The text of an output whose only rich form is markdown, or `nothing`.
+function _markdown_output(o)
+    (o === nothing || o.exception !== nothing || length(o.display) != 1) && return nothing
+    ch = only(o.display)
+    return ch.mime == "text/markdown" ? String(copy(ch.data)) : nothing
+end
+
+# The markdown template with each markdown-valued `{{ expr }}` capture's text in place (passed through
+# `prose`); the other interpolations stay as tokens. Returns `(template, exprs)`.
+function _md_spliced(src::AbstractString, interps = CellOutput[]; prose = identity)
     tmpl, exprs = ReportEngine._md_template(src)
+    for i in 1:length(exprs)
+        md = _markdown_output(i <= length(interps) ? interps[i] : nothing)
+        md === nothing || (tmpl = replace(tmpl, ReportEngine._interp_token(i) => prose(md)))
+    end
+    return tmpl, exprs
+end
+
+# Render markdown, splicing each `{{ expr }}` capture in. A markdown value is prose: its text goes
+# into the source before parsing, so its headings, lists, tables and links are the cell's own.
+# Other self-contained outputs (image / HTML / LaTeX / scalar) embed directly; echarts & interactive
+# tables emit a host placeholder (`.ichart`/`.itable` keyed by index) that the SPA hydrates from the
+# cell's collected `echarts`/`tables` — same order as here.
+function _md_html(src::AbstractString, interps = CellOutput[]; prose = identity)
+    tmpl, exprs = _md_spliced(src, interps; prose)
     frags = String[]; ec = 0; tc = 0
     for i in 1:length(exprs)
         o = i <= length(interps) ? interps[i] : nothing
@@ -392,7 +413,9 @@ function _md_html(src::AbstractString, interps = CellOutput[])
         # indistinguishable from one that was never rewritten. Checked before the empty-output cases
         # below, which would otherwise swallow the block entirely.
         fence = ReportEngine._fence_call(exprs[i])
-        if fence !== nothing && (o === nothing || _is_empty_output(o))
+        if _markdown_output(o) !== nothing
+            push!(frags, "")                                        # already spliced into the source
+        elseif fence !== nothing && (o === nothing || _is_empty_output(o))
             push!(frags, "<pre><code class=\"language-" * _esc(fence.lang) * "\">" *
                          _esc(fence.body) * "</code></pre>")
         elseif o === nothing
@@ -593,6 +616,9 @@ function _render_chunks(chunks)
         elseif ch.mime == "application/vnd.kaimonslate.html+html"
             # A self-contained HTML fragment (the `slate_render` escape hatch) — trusted, injected as-is.
             print(io, "<div class=\"disp html\">", String(copy(ch.data)), "</div>")
+        elseif ch.mime == "text/markdown"
+            # Prose, rendered as a markdown cell's would be.
+            print(io, "<div class=\"disp md\">", _md_html(String(copy(ch.data))), "</div>")
         end
     end
     return String(take!(io))

@@ -168,7 +168,7 @@ end
 # for an app's own controls: `@bind` and `@onclick` are `slate_on` handlers, and refusing them would
 # leave an app with nothing working.
 #
-# A sweep cell is the exception, because Slate registers its action channel rather than the author
+# A job cell is the exception, because Slate registers its action channel rather than the author
 # — nobody chose to publish it — and what it does is submit and cancel work on a cluster and read
 # that cluster's job logs. The status channel stays open: the card polls it, and the two are
 # separate names precisely so a poll can never be a mutation (`Sweep.action_channel`).
@@ -554,6 +554,7 @@ function _status_worker(nb::LiveNotebook, k)
         d["sysCpu"] = round(l.sys_cpu; digits = 1)
         d["sysMemUsedMB"] = _mb(max(0, l.sys_mem_total - l.sys_mem_free))
         d["sysMemTotalMB"] = _mb(l.sys_mem_total)
+        d["gpus"] = [Dict(pairs(g)) for g in _sample_gpus(l)]
         d["lastSampleAgo"] = round(time() - l.rcv; digits = 1)
         # A short RSS/CPU trail so a slow leak or a pinned core is visible as a shape, not one number.
         hist = st.history

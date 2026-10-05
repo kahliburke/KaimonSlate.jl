@@ -266,6 +266,29 @@ mean(data)
         @test ReportEngine._progress_sink(Module(:Bare))("", 0.5, "x", false) === nothing   # no slate_progress → no-op
     end
 
+    @testset "a cell's stamp is newer than any from an earlier hub process" begin
+        # A page left open over a hub restart keeps the stamps it was sent before; every stamp the new
+        # process sends has to read as newer, or the page drops the update.
+        # So stamps count up from the clock (microseconds) at the process's first one, not from zero.
+        c = only(ReportEngine.parse_report("#%% code id=a\n1\n").cells)
+        ReportEngine.bump_rev!(c); first_rev = c.rev
+        ReportEngine.bump_rev!(c)
+        @test 1_700_000_000 * 10^6 < first_rev <= round(Int, time() * 1e6) + 10^9 && c.rev == first_rev + 1
+    end
+
+    @testset "a cell's logger answers code running in an older world" begin
+        # A package compiler baked into a sysimage asks the current logger for its level from the
+        # world the image was built in. The cell logger's handler is made after that world; its
+        # level still has to be readable from there.
+        w0 = Base.get_world_counter()
+        lg = ReportEngine._CellLogger(Logging.NullLogger(), (_...) -> nothing)
+        @test Base.invoke_in_world(w0, Base.CoreLogging._invoked_min_enabled_level, lg) == Logging.LogLevel(-1)
+        # A logger type of its own, defined after that world, is what failed.
+        T = Core.eval(Module(:Late), :(struct LateLogger <: $(Logging.AbstractLogger) end; LateLogger))
+        Core.eval(parentmodule(T), :(Base.CoreLogging.min_enabled_level(::$T) = $(Logging.Info)))
+        @test_throws MethodError Base.invoke_in_world(w0, Base.CoreLogging._invoked_min_enabled_level, Base.invokelatest(T))
+    end
+
     @testset "a re-run does not warn about replacing its own docs" begin
         # Defining a documented function and running the cell again makes `@doc` warn that it is
         # replacing the docstring. Re-running is the normal operation in a reactive notebook, so
@@ -418,8 +441,10 @@ end
     rf = parse_report("#%% code id=a\nx = 1"); rf.meta["parallel"] = false
     @test parse_report(serialize_report(rf)).meta["parallel"] === false
 
-    # no settings → no config footer
-    @test !occursin("Slate.config", serialize_report(parse_report("#%% code id=a\nx = 1")))
+    # no settings → a config footer carrying only the file format (every file written says its format)
+    bare = serialize_report(parse_report("#%% code id=a\nx = 1"))
+    @test occursin("# ╔═╡ Slate.config", bare) && occursin("#   format = $(ReportEngine.FORMAT)", bare)
+    @test count(l -> startswith(l, "#   "), split(bare, '\n')) == 1
 
     # A docid ALONE renders and round-trips. `export_standalone` emits exactly this footer, so a
     # downloaded bundle stays the same document as the one that was published instead of being read
@@ -484,9 +509,9 @@ end
         end
     end
 
-    # A sweep cell names its target in its OWN header, which is notebook business and unchanged.
-    r = parse_report("#%% sweep id=scan cluster=hpc walltime=04:00:00\nr = 1")
-    @test length(r.cells) == 1 && r.cells[1].kind == ReportEngine.SWEEP
+    # A job cell names its target in its OWN header, which is notebook business and unchanged.
+    r = parse_report("#%% job id=scan cluster=hpc walltime=04:00:00\nr = 1")
+    @test length(r.cells) == 1 && r.cells[1].kind == ReportEngine.JOB
     a = cell_attrs(r.cells[1])
     @test a["cluster"] == "hpc" && a["walltime"] == "04:00:00"
     s = serialize_report(r)

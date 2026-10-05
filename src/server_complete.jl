@@ -159,6 +159,9 @@ function restart_kernel!(nb::LiveNotebook)
         ReportEngine.reset!(nb.kernel, report)
         build_dependencies!(report)
         report.meta["hydrating"] = true
+        # A restart is not a ▶ on any cell. A ▶ still waiting to be served would make the re-run below
+        # compute a locked cell nobody just asked for.
+        delete!(_FORCE_RUN, nb.id)
         nb.version += 1
     end
     _broadcast(nb, "restart")
@@ -805,6 +808,59 @@ end
 # (a notebook's main and region kernels each get their own series), so the port — which is what the
 # monitor UI carries — has to be resolved back to a live kernel first. `[]` if it's gone or never
 # streamed a sample. Mirrors `ReportEngine.worker_stats_history` for the remote case.
+# The telemetry of a notebook's worker for `side` ("" the main kernel), whichever process that is now. A
+# restart puts a new worker on another port, so a view that names the side keeps following it; the
+# answer says where it runs now, and whether it is connected yet.
+function _side_telemetry(h::Hub, nbid::AbstractString, side::AbstractString, since::Real)
+    nb = lock(h.lock) do; get(h.notebooks, String(nbid), nothing); end
+    nb === nothing && return Dict("ok" => false, "error" => "the notebook is not open")
+    k = isempty(side) ? nb.kernel : lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
+    k isa ReportEngine.GateKernel || return Dict("ok" => false, "error" => "no worker for this side")
+    conn = k.conn
+    cn = conn === nothing ? "" : (try; String(conn.name); catch; ""; end)
+    st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
+    hist = st === nothing ? Any[] : st.history
+    runs = _runs_since(nb.id, isempty(side) ? "local" : side, since)
+    return Dict("ok" => true, "connected" => conn !== nothing, "port" => k.port,
+                "host" => k.target isa ReportEngine.RemoteTarget ? k.target.ssh_host : "local",
+                "samples" => [_sample_full(s) for s in hist if s.rcv > since],
+                "runs" => [Dict("id" => r.id, "t0" => r.t0, "t1" => r.t1, "memo" => r.memo, "err" => r.err) for r in runs])
+end
+
+# The cell runs that ended after `since` on the worker at `host`:`port`, from the open notebook whose
+# kernel it is. `host` is "local" for this machine, else the host the worker runs on or is reached
+# through.
+function _worker_runs(h::Hub, host::AbstractString, port::Int, since::Real)
+    nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+    for nb in nbs, k in _nb_kernels(nb)
+        (k isa ReportEngine.GateKernel && k.port == port) || continue
+        t = k.target
+        if host == "local"
+            t isa ReportEngine.RemoteTarget && continue
+        else
+            t isa ReportEngine.RemoteTarget || continue
+            (t.ssh_host == host || (v = ReportEngine.via(t.ssh_host); v !== nothing && v.host == host)) || continue
+        end
+        return _runs_since(nb.id, _kernel_side_label(nb, k), since)
+    end
+    return Any[]
+end
+
+# Stop the worker process an open notebook's kernel spawned on this machine. The kernel stays: its
+# next run finds the process gone and starts a new one with every cell stale, the same recovery as a
+# worker that crashed. Kills only a process this hub spawned, found by its gate port.
+function _reap_local_worker!(h::Hub, port::Int)
+    nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+    for nb in nbs, k in _nb_kernels(nb)
+        (k isa ReportEngine.GateKernel && k.port == port && !(k.target isa ReportEngine.RemoteTarget)) || continue
+        p = k.proc
+        (p === nothing || !process_running(p)) && return false
+        kill(p)
+        return true
+    end
+    return false
+end
+
 function _local_kernel_history(h::Hub, port::Int)
     nbs = lock(h.lock) do; collect(values(h.notebooks)); end
     for nb in nbs, k in _nb_kernels(nb)
@@ -817,13 +873,15 @@ function _local_kernel_history(h::Hub, port::Int)
     return Any[]
 end
 
-# A region's worker state changed → tell the pages that care. "Care" is having a cell on that region;
-# a notebook that never mentions it has nothing to redraw.
+# A region's worker state changed: the facts are refreshed, and `f`, when given, runs for each notebook
+# with a cell on that region (an event its page shows, beside the facts).
 #
 # Off the request, because it takes each notebook's lock and the caller must not wait on that. At
 # module scope rather than inside `_make_router`, where every handler closes over one shared scope
 # and a loop variable would be an assignment they all see.
-function _announce_region_change!(h, name::AbstractString, f = _workers_push!)
+function _announce_region_change!(h, name::AbstractString, f = nothing)
+    facts_changed!()
+    f === nothing && return nothing
     Threads.@spawn try
         for anb in lock(h.lock) do; collect(values(h.notebooks)); end
             uses = lock(anb.lock) do; any(c -> _cell_region(c) == name, anb.report.cells); end
@@ -855,7 +913,7 @@ function _register_diag_gauges!(h)
     reg("kernel_stats",     () -> length(RE._KERNEL_STATS))
     reg("kernel_samples",   () -> sum(length(v) for v in values(RE._KERNEL_STATS); init = 0))
     reg("clock_tracks",     () -> length(RE.ClockTrack._TRACKS))
-    reg("syncers",          () -> length(RE._SYNCERS))
+    reg("syncers",          () -> length(RE._SYNC_SOURCES))
     reg("via_routes",       () -> length(RE._VIA))
     reg("routed_ever",      () -> length(RE._ROUTED_EVER))
     reg("data_tunnels",     () -> length(RE._DATA_TUNNELS))
@@ -1075,9 +1133,18 @@ function _make_router(h::Hub)
         # `inactive=true` opens DORMANT: show the embedded frozen render, spawn no worker, and wait for a
         # click on the "Inactive — click to launch" pill (`/api/launch`). The default for downloaded/
         # uploaded standalones (see run.jl); the author's own files open live.
-        id = open_notebook!(h, path; runon = strip(String(get(b, "runon", ""))),
-                            autorun = get(b, "autorun", true) !== false,
-                            inactive = get(b, "inactive", false) === true)
+        # `update=true`: the notebook is in an older file format and the person opening it agreed to
+        # the update (a copy of the original is kept beside it). Without it such a notebook is
+        # refused with 409 and what the update would change, for the page to ask.
+        id = try
+            open_notebook!(h, path; runon = strip(String(get(b, "runon", ""))),
+                           autorun = get(b, "autorun", true) !== false,
+                           inactive = get(b, "inactive", false) === true,
+                           update = get(b, "update", false) === true)
+        catch e
+            e isa NotebookNeedsUpdate || rethrow()
+            return HTTP.Response(409, ["Content-Type" => "application/json"], JSON.json(_needs_update_json(e)))
+        end
         _json(Dict("id" => id, "url" => "/n/$id", "path" => abspath(path)))
     end)
     # Launch an INACTIVE (dormant) notebook: flip it to hydrating and kick off the standard standalone
@@ -1226,141 +1293,20 @@ function _make_router(h::Hub)
         isempty(host) && return _json(Dict("host" => "", "workers" => []))
         _json(Dict("host" => host, "workers" => ReportEngine.list_remote_workers(host)))
     end)
-    # The hub's OWN workers — one process per open notebook, plus any region kernel that runs on this
-    # machine. Deliberately the SAME entry shape as /api/remote-workers (port/alive/state/manifest/stats)
-    # so the activity monitor renders local and remote rows through one component; a local worker has no
-    # on-host manifest, so the equivalent fields are synthesized from the kernel. Pure in-memory state —
-    # no ssh, no worker round-trip — so it's safe on the monitor's poll interval.
-    HTTP.register!(router, "GET", "/api/local-workers", _ -> begin
-        nbs = lock(h.lock) do; collect(values(h.notebooks)); end
-        out = Any[]
-        for nb in nbs, k in _nb_kernels(nb)
-            k isa ReportEngine.GateKernel || continue
-            (k.remote || k.target isa ReportEngine.RemoteTarget) && continue   # off-machine: the host roster owns it
-            k.port == 0 && continue                                            # never spawned (dormant notebook)
-            cn = try; k.conn === nothing ? "" : String(k.conn.name); catch; ""; end
-            st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
-            side = _kernel_side_label(nb, k)
-            running = (try; Base.process_running(k.proc); catch; false; end)
-            push!(out, Dict{String,Any}(
-                "port" => k.port,
-                "alive" => running || k.conn !== nothing,
-                "lastActivity" => st === nothing ? 0 : round(Int, st.latest.rcv),
-                "logBytes" => (try; isfile(k.logpath) ? filesize(k.logpath) : 0; catch; 0; end),
-                # A local worker only exists while its notebook is open, so "attached" is the steady state;
-                # a live process with no wire is mid-(re)connect, which reads as idle.
-                "state" => k.conn === nothing ? "idle" : "attached",
-                "stateSince" => 0,
-                "manifest" => JSON.json(Dict("notebook" => basename(nb.path), "nbid" => nb.id,
-                    # No "region" key: a local kernel isn't a region worker, and tagging it would both
-                    # mis-group it in the monitor and offer a region-config link that goes nowhere.
-                    "side" => side, "transport" => "local",
-                    "project" => k.project, "port" => string(k.port), "stream_port" => string(k.stream_port),
-                    "pid" => (try; k.proc === nothing ? "" : string(Base.getpid(k.proc)); catch; ""; end),
-                    "hub" => gethostname(), "path" => abspath(nb.path))),
-                "stats" => st === nothing ? "" : JSON.json(_json_finite(Dict(
-                    "cpu" => st.latest.cpu, "rss" => st.latest.rss, "gc_ms" => st.latest.gc_ms,
-                    "evals" => st.latest.evals, "running" => st.latest.running, "warm" => st.latest.warm,
-                    "memo_bytes" => st.latest.memo, "sys_cpu" => st.latest.sys_cpu, "load1" => st.latest.load1,
-                    "sys_mem_total" => st.latest.sys_mem_total, "sys_mem_free" => st.latest.sys_mem_free,
-                    "ts" => st.latest.ts))),
-            ))
-        end
-        sort!(out; by = d -> d["port"])
-        _json(Dict("host" => "local", "workers" => out))
-    end)
-    # The hub's OFF-MACHINE kernels — the mirror image of /api/local-workers: every kernel of an open
-    # notebook that runs on another machine, whether it serves the notebook itself (run-on host, no region)
-    # or a region. This is what the host rosters alone cannot tell you: /api/remote-workers is a per-host
-    # ssh probe, and the monitor only knows to probe hosts that appear in the region registry — so a
-    # notebook launched on a plain ssh host was invisible. It is also hub truth, so a worker still shows
-    # (with its notebook) when the host is unreachable or its manifest was never written. Same entry shape
-    # as the other two rosters, plus `host`/`region`, and pure in-memory — safe on the poll interval.
-    HTTP.register!(router, "GET", "/api/remote-notebook-workers", _ -> begin
-        nbs = lock(h.lock) do; collect(values(h.notebooks)); end
-        out = Any[]
-        for nb in nbs, k in _nb_kernels(nb)
-            k isa ReportEngine.GateKernel || continue
-            tgt = k.target isa ReportEngine.RemoteTarget ? k.target : nothing
-            (tgt !== nothing || k.remote) || continue   # on this machine: /api/local-workers owns it
-            k.port == 0 && continue
-            # A `remoteworker` attach has no target: the hub only holds a forwarded wire, so there is no
-            # host to probe or reap on. Empty host marks it as such for the UI.
-            host = tgt === nothing ? "" : tgt.ssh_host
-            region = tgt === nothing ? "" : tgt.region
-            cn = try; k.conn === nothing ? "" : String(k.conn.name); catch; ""; end
-            st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
-            side = _kernel_side_label(nb, k)
-            # Where a HOST ROSTER would file this worker. A scheduler region's worker runs on the
-            # granted node, but its manifest lives on the shared filesystem and is probed through the
-            # login node — so the roster calls it `login:port` and this record calls it `node:port`.
-            # Two names for one worker, and the monitor merges on that name: without this it lists a
-            # region worker twice, once live from here and once as the stale manifest the roster
-            # found. Absent for an ordinary host, where both views already agree.
-            v = try; ReportEngine.via(host); catch; nothing; end
-            push!(out, Dict{String,Any}(
-                "host" => host, "region" => region,
-                "port" => k.port,
-                # NOT a replacement for `host`: reaching this worker still means addressing the node,
-                # which the transport routes through the login session on its own.
-                (v === nothing ? () : ("viaHost" => String(v.host),))...,
-                # No local process to inspect — the wire IS the liveness signal here, and the liveness
-                # sweep drops a dead one, so a kernel mid-redial reads as idle rather than dead.
-                "alive" => true,
-                "lastActivity" => st === nothing ? 0 : round(Int, st.latest.rcv),
-                "logBytes" => 0,
-                "state" => k.conn === nothing ? "idle" : "attached",
-                "stateSince" => 0,
-                # `region` is "" for a notebook's own remote kernel — the marker the monitor groups on.
-                "manifest" => JSON.json(Dict("notebook" => basename(nb.path), "nbid" => nb.id,
-                    "region" => region, "side" => side,
-                    "transport" => tgt === nothing ? "forwarded" : String(tgt.transport),
-                    "project" => tgt === nothing ? k.project : tgt.project,
-                    "port" => string(k.port), "stream_port" => string(k.stream_port),
-                    "hub" => gethostname(), "path" => abspath(nb.path))),
-                "stats" => st === nothing ? "" : JSON.json(_json_finite(Dict(
-                    "cpu" => st.latest.cpu, "rss" => st.latest.rss, "gc_ms" => st.latest.gc_ms,
-                    "evals" => st.latest.evals, "running" => st.latest.running, "warm" => st.latest.warm,
-                    "memo_bytes" => st.latest.memo, "sys_cpu" => st.latest.sys_cpu, "load1" => st.latest.load1,
-                    "sys_mem_total" => st.latest.sys_mem_total, "sys_mem_free" => st.latest.sys_mem_free,
-                    "ts" => st.latest.ts))),
-            ))
-        end
-        sort!(out; by = d -> (d["host"], d["port"]))
-        _json(Dict("workers" => out))
-    end)
-    # Global region registry (named compute defs) + parked wires — the hub's own view, NO ssh. Per-host
-    # live rosters come from /api/remote-workers. Feeds the home-page Regions manager + Destinations picker.
+    # The region registry as pages read it: the same records the facts carry (`_region_entry`), with the
+    # reconcile outcome's age worked out for a caller that is not keeping time.
     HTTP.register!(router, "GET", "/api/regions", _ -> _json(Dict(
         "regions" => [begin
-            st = ReportEngine.region_status(r.name)
-            Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
-                 "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
-                 "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
-                 # What to ask a scheduler for, when `host` is one's front door. The editor seeds
-                 # its fields from these, so they have to come back out.
-                 "scheduler" => String(r.scheduler), "partition" => r.partition,
-                 "walltime" => r.walltime, "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus,
-                 "account" => r.account, "alloc_name" => r.alloc_name,
-                 # As the user wrote them, so the form shows "1h" rather than 3600.
-                 "idle_release" => ReportEngine.Sweep.format_duration(r.idle_release),
-                 "idle_warn" => ReportEngine.Sweep.format_duration(r.idle_warn),
-                 # Everything the fixed fields cannot say, as the sweep cell's editor stores it,
-                 # plus the shell to run before a worker boots.
-                 "options" => r.options, "prologue" => r.prologue,
-                 "liveness_grace" => r.liveness_grace > 0 ? ReportEngine.Sweep.format_duration(r.liveness_grace) : "",
-                 # What preparing the region found, and whether a prepare is running now.
-                 "readiness" => ReportEngine.readiness_view(r), "preparing" => ReportEngine.preparing(r.name),
-                 # Where the workers actually ARE. For a scheduler region that is the granted node,
-                 # and it is the thing worth showing — `host` is only where the asking happens.
-                 # Read from the hub's cached placement: listing regions must never queue for a node.
-                 "node" => ReportEngine.region_host(r),
-                 # Last reconcile outcome — so a silent background spawn failure is visible.
-                 "status" => st === nothing ? nothing :
-                             Dict("ok" => st.ok, "msg" => st.msg, "age" => round(Int, time() - st.ts)))
+            d = _region_entry(r)
+            st = d["status"]
+            st === nothing || (d["status"] = merge(st, Dict("age" => round(Int, time() - st["ts"]))))
+            d
         end for r in ReportEngine.regions()],
-        "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
-                          "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))
+        "parked" => [begin
+            d = _parked_entry(p)
+            d["idle_s"] = round(Int, time() - d["since"])
+            d
+        end for p in ReportEngine.parked_wires()])))
     # ── What gets sent to a remote ───────────────────────────────────────────────────────────
     # Scoped to the PROJECT, and written INTO it. `.slateignore` sits beside `Project.toml`, so it
     # is version-controlled, every notebook in that project obeys it, and a collaborator who clones
@@ -1555,6 +1501,7 @@ function _make_router(h::Hub)
                                      r.mem, isempty(r.gpus) ? "" : "$(r.gpus) gpu",
                                      r.walltime, r.partition]), " · ")
         _json(Dict("ok" => true, "scheduler" => String(kind), "host" => r.host, "ask" => ask,
+                   "gpus" => r.gpus, "partition" => r.partition,
                    "queues" => [Dict("name" => q.name, "nodes_free" => q.nodes_free,
                                      "nodes_total" => q.nodes_total, "cpus_free" => q.cpus_free,
                                      "cpus_total" => q.cpus_total, "queued" => q.queued,
@@ -1658,6 +1605,7 @@ function _make_router(h::Hub)
                                      gpus = strip(String(get(b, "gpus", ""))),
                                      account = strip(String(get(b, "account", ""))),
                                      alloc_name = strip(String(get(b, "alloc_name", ""))),
+                                     submit = strip(String(get(b, "submit", ""))),
                                      idle_release = idle_s, idle_warn = warn_s,
                                      # A name with no value is a switch (`--exclusive`), so an empty value is kept. Only a
                                      # NAMELESS entry is dropped, which is what a half-typed row in the editor is.
@@ -1668,6 +1616,7 @@ function _make_router(h::Hub)
                                              Dict{String,String}()
                                      end,
                                      prologue = strip(String(get(b, "prologue", ""))),
+                                     machine = strip(String(get(b, "machine", ""))),
                                      liveness_grace = round(Int, SW.parse_duration(get(b, "liveness_grace", 0))))
         do_reconcile && Threads.@spawn try
             ReportEngine.region_reconcile!(r.name)   # no-op when warm==0 except draining excess
@@ -1686,7 +1635,9 @@ function _make_router(h::Hub)
     # `local_procs` rides along so the editor's placeholder can say what a target that sets nothing
     # will actually get, rather than the word "auto".
     HTTP.register!(router, "GET", "/api/clusters", _ ->
-        _json(Dict("clusters" => ReportEngine.clusters_all(),
+        # Each with its scheduler options as one map, whatever form the entry wrote them in.
+        _json(Dict("clusters" => [merge(Dict{String,Any}(c), Dict{String,Any}("options" => ReportEngine.machine_options(c)))
+                                  for c in ReportEngine.clusters_all()],
                    "local_procs" => ReportEngine.Sweep.local_procs())))
     HTTP.register!(router, "POST", "/api/clusters", req -> begin
         b = _body(req)
@@ -1697,7 +1648,7 @@ function _make_router(h::Hub)
         end
         _json(Dict("ok" => true, "name" => String(get(c, "name", name))))
     end)
-    # The scheduler options a sweep cell's editor suggests. A catalogue, not a permitted set — the
+    # The scheduler options a job cell's editor suggests. A catalogue, not a permitted set — the
     # editor warns outside it and forwards the name anyway. Served rather than duplicated in JS so
     # what the UI offers and what Slate types cannot drift.
     # Machine-wide, so deliberately NOT `/api/sweep-options`: the page's `api()` helper rewrites any
@@ -1713,41 +1664,12 @@ function _make_router(h::Hub)
     end)
 
     # ── Signing in to the hosts this machine actually uses ───────────────────────────────────
-    # One list, keyed by HOST rather than by cluster or region. Whether a host wants a password and
-    # a second factor is a property of its sshd, not of what you use it for: a cluster can take keys
-    # and a plain remote can demand 2FA. So the panel lists hosts and shows what each one is FOR.
-    #
+    # One list, keyed by HOST rather than by cluster or region (`_session_hosts`, server_facts.jl).
     # Sessions live in this process (see remotestore.jl), so this is machine-wide — one sign-in
-    # covers every notebook, its sweeps and its regions.
-    # `nb === nothing` is the machine-wide view (the home page). Given a notebook, only the hosts IT
-    # names — a notebook that sweeps on one cluster has no business showing a control for another.
-    function _session_hosts(nb::Union{LiveNotebook,Nothing} = nothing)
-        wanted = nb === nothing ? nothing : begin
-            cl, rg = Set{String}(), Set{String}()
-            lock(nb.lock) do
-                for c in nb.report.cells
-                    n = get(ReportEngine.cell_attrs(c), "cluster", ""); isempty(n) || push!(cl, n)
-                    r = _cell_region(c); isempty(r) || push!(rg, r)
-                end
-            end
-            (cl, rg)
-        end
-        seen = Dict{String,Vector{String}}()
-        add!(h, use) = isempty(strip(String(h))) ||
-            push!(get!(seen, strip(String(h)), String[]), use)
-        for c in ReportEngine.clusters_all()
-            String(get(c, "kind", "")) == "local" && continue   # nothing to sign in to
-            name = String(get(c, "name", "?"))
-            (wanted === nothing || name in wanted[1]) || continue
-            add!(get(c, "host", ""), "cluster " * name)
-        end
-        for r in ReportEngine.regions()
-            (wanted === nothing || r.name in wanted[2]) || continue
-            add!(r.host, "region " * r.name)
-        end
-        return seen
-    end
-
+    # covers every notebook, its sweeps and its regions. Pages read it from the facts; this route
+    # answers the same thing for a caller that asks.
+    # Brought up to date first: a page asks after changing something, and wants the result of it.
+    HTTP.register!(router, "GET", "/api/facts", req -> (facts_refresh!(); _json(_json_finite(facts_snapshot()))))
     HTTP.register!(router, "GET", "/api/sessions", req -> begin
         doc = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "doc", "")))
         nb = isempty(doc) ? nothing : lock(h.lock) do; get(h.notebooks, doc, nothing); end
@@ -1772,11 +1694,10 @@ function _make_router(h::Hub)
         p = try; ReportEngine.Sweep.SshTransport.probe(host)
         catch e; return _json(Dict("ok" => false, "error" => first(sprint(showerror, e), 200))); end
         ms = String[String(m) for m in p.methods]
-        _json(Dict("ok" => p.reachable, "host" => host, "methods" => ms, "error" => p.error,
-                   "auth" => !p.reachable ? "unreachable" :
-                             ("already-authenticated" in ms) ? "connected" :
-                             ("publickey" in ms) ? "key" :
-                             ("keyboard-interactive" in ms) ? "interactive" : "unknown"))
+        auth = !p.reachable ? "unreachable" : ("already-authenticated" in ms) ? "connected" :
+               ("publickey" in ms) ? "key" : ("keyboard-interactive" in ms) ? "interactive" : "unknown"
+        auth == "connected" || session_probed!(host, auth, something(p.error, ""))
+        _json(Dict("ok" => p.reachable, "host" => host, "methods" => ms, "error" => p.error, "auth" => auth))
     end)
 
     # ── Logging in to a host ─────────────────────────────────────────────────────────────────
@@ -1836,6 +1757,8 @@ function _make_router(h::Hub)
         project = strip(String(get(b, "project", "")))
         try; ReportEngine._reference_env(isempty(project) ? r.preload : project)
         catch e; return _json(Dict("ok" => false, "error" => sprint(showerror, e))); end
+        nb = node === false ? nothing : _open_notebook_at(h, project)
+        nb === nothing || (_prepare_for_notebook!(nb, r.name); return _json(Dict("ok" => true, "notebook" => nb.id)))
         Threads.@spawn try
             ReportEngine.prepare_region!(r.name; node = node, project = project)
         catch e
@@ -1852,6 +1775,50 @@ function _make_router(h::Hub)
         (st !== nothing && st["running"] === true) || _prepare_for_notebook!(nb, r.name)
         _json(Dict("ok" => true))
     end))
+    # A machine: what preparing it found, what has passed a test task there, and preparing it.
+    HTTP.register!(router, "GET", "/api/machines/view", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        _json(ReportEngine.machine_view(String(get(q, "name", ""))))
+    end)
+    HTTP.register!(router, "POST", "/api/machines/prepare", req -> begin
+        name = strip(String(get(_body(req), "name", "")))
+        ReportEngine.cluster_get(name) === nothing && return _json(Dict("ok" => false, "error" => "no machine `$name`"))
+        key = ReportEngine._machine_key(name)
+        st = ReportEngine.preparing(key)
+        (st !== nothing && st["running"] === true) && return _json(Dict("ok" => true, "key" => key))
+        Threads.@spawn try
+            ReportEngine.prepare_machine!(name)
+        catch e
+            ReportEngine.prepare_failed_to_start!(key, e)
+        end
+        _json(Dict("ok" => true, "key" => key))
+    end)
+    # A sweep card's Prepare: test the notebook's environment on the machine its job cell names, with
+    # the cell's node type. The cell runs again when it ends, so the card picks up the result.
+    HTTP.register!(router, "POST", "/api/{id}/prepare-batch", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        machine = strip(String(get(b, "machine", "")))
+        ReportEngine.cluster_get(machine) === nothing &&
+            return _json(Dict("ok" => false, "error" => "no machine `$machine`"))
+        key = ReportEngine._batch_key(machine)
+        st = ReportEngine.preparing(key)
+        (st !== nothing && st["running"] === true) && return _json(Dict("ok" => true, "key" => key))
+        cid = String(get(b, "cell", ""))
+        cell = lock(nb.lock) do; findfirst(c -> c.id == cid, nb.report.cells); end
+        attrs = cell === nothing ? Dict{String,String}() : ReportEngine.cell_attrs(nb.report.cells[cell])
+        res = something(ReportEngine.Sweep.attr_resources(attrs), NamedTuple())
+        Threads.@spawn try
+            ReportEngine.prepare_batch!(machine; project = nb.path, resources = res)
+            again = lock(nb.lock) do
+                i = findfirst(c -> c.id == cid, nb.report.cells)
+                i !== nothing && ReportEngine.restale!(nb.report.cells[i])
+            end
+            again === true && _ensure_runner!(nb)
+        catch e
+            ReportEngine.prepare_failed_to_start!(key, e)
+        end
+        _json(Dict("ok" => true, "key" => key))
+    end))
     # Every prepare a region has had, newest first, and one of them in full. Kept, never rewritten.
     HTTP.register!(router, "GET", "/api/regions/prepare/reports", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
@@ -1865,7 +1832,18 @@ function _make_router(h::Hub)
     end)
     HTTP.register!(router, "GET", "/api/regions/prepare", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
-        r = ReportEngine.region_get(get(q, "name", ""))
+        name = String(get(q, "name", ""))
+        r = ReportEngine.region_get(name)
+        if r === nothing && startswith(name, "batch_")
+            # A machine prepared for batch work has no region record; its latest report stands in.
+            st = ReportEngine.preparing(name)
+            reps = ReportEngine.prepare_reports(name)
+            last = isempty(reps) ? nothing : ReportEngine.prepare_report(name, String(reps[1]["id"]))
+            rec = last === nothing ? Dict{String,Any}() : get(last, "record", Dict{String,Any}())
+            return _json(Dict("ok" => true, "preparing" => st, "readiness" => rec,
+                              "last_log" => (last === nothing || (st !== nothing && st["running"] === true)) ?
+                                            Any[] : get(last, "log", Any[])))
+        end
         r === nothing && return _json(Dict("ok" => false, "error" => "no such region"))
         st = ReportEngine.preparing(r.name)
         # Not running: the latest report's whole log, for the Activity view of a finished prepare.
@@ -1887,6 +1865,10 @@ function _make_router(h::Hub)
             @warn "slate: region delete failed" region = name exception = (e, catch_backtrace())
             return _json(Dict("ok" => false, "error" => "could not delete `$name`"))
         end
+        # A machine's own region outlives this: what was dropped is only what had been changed in it,
+        # and its workers and node stay.
+        ReportEngine.region_get(name) === nothing ||
+            return _json(Dict("ok" => true, "name" => name, "reset" => true))
         Threads.@spawn try; ReportEngine.region_reap!(rec, name); catch e
             @warn "slate: region teardown failed" region = name exception = (e, catch_backtrace())
         end
@@ -1909,6 +1891,7 @@ function _make_router(h::Hub)
         host = strip(String(get(b, "host", "")))
         port = tryparse(Int, string(get(b, "port", "")))
         (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
+        host == "local" && return _json(Dict("ok" => _reap_local_worker!(h, port)))
         try; _drop_kernels_for_worker!(h, host, port); catch; end   # wake any eval bound to this worker before it dies
         _json(Dict("ok" => ReportEngine.reap_remote_worker(host, port)))
     end)
@@ -1928,32 +1911,37 @@ function _make_router(h::Hub)
     # hub isn't connected to that worker (only its point-in-time `.stats` is then available via the roster).
     HTTP.register!(router, "GET", "/api/worker-stats", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
+        # A notebook's worker named by its side follows that side through restarts.
+        haskey(q, "nb") && return _json(_json_finite(_side_telemetry(h, String(q["nb"]), String(get(q, "side", "")),
+            something(tryparse(Float64, String(get(q, "since", ""))), -Inf))))
         host = strip(String(get(q, "host", ""))); port = tryparse(Int, String(get(q, "port", "")))
         (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
         # host="local" is the hub's own machine (see /api/local-workers): its telemetry ring is keyed by
         # connection name, not host:port, so resolve the port back to its kernel's conn first.
         hist = host == "local" ? _local_kernel_history(h, port) : ReportEngine.worker_stats_history(host, port)
+        # `full=1`: every field of every sample, for the telemetry view; with `since=<t>`, only the
+        # samples after hub time `t`, so the open view adds what is new instead of refetching an hour.
+        if get(q, "full", "") == "1"
+            since = something(tryparse(Float64, String(get(q, "since", ""))), -Inf)
+            runs = [Dict("id" => r.id, "t0" => r.t0, "t1" => r.t1, "memo" => r.memo, "err" => r.err)
+                    for r in _worker_runs(h, host, port, since)]
+            return _json(_json_finite(Dict("ok" => true, "host" => host, "port" => port,
+                                           "samples" => [_sample_full(s) for s in hist if s.rcv > since],
+                                           "runs" => runs)))
+        end
         _json(Dict("ok" => true, "host" => host, "port" => port,
                    "samples" => [Dict("t" => round(s.rcv), "cpu" => s.cpu, "rss" => s.rss, "memo" => s.memo,
-                                      "sys_cpu" => s.sys_cpu, "load1" => s.load1) for s in hist]))
+                                      "sys_cpu" => s.sys_cpu, "load1" => s.load1,
+                                      "gpu" => _gpu_util(s), "gpu_mem" => _gpu_mem(s)) for s in hist]))
     end)
     # Sysimage build state for a region's env — one ssh to the host: is it built (key/size/age), building
     # now, is there a compiler. Feeds the Regions UI sysimage panel. Query {region}.
     HTTP.register!(router, "GET", "/api/sysimage", req -> begin
         name = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")))
         isempty(name) && return _json(Dict("ok" => false, "error" => "need a region"))
-        st = ReportEngine.sysimage_status_for_region(name)
-        st === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
-        _json(merge(Dict("ok" => true), st))
-    end)
-    # Explicitly (re)build a region's worker sysimage — forced past the per-region opt-in. Provisions (idempotent)
-    # then launches the detached build; returns at once, the UI polls GET /api/sysimage. Body {region}.
-    HTTP.register!(router, "POST", "/api/sysimage/build", req -> begin
-        b = _body(req)
-        name = strip(String(get(b, "region", "")))
-        isempty(name) && return _json(Dict("ok" => false, "error" => "need a region"))
-        r = ReportEngine.sysimage_build_for_region!(name)
-        _json(Dict("ok" => r.ok, "error" => get(r, :error, nothing), "host" => get(r, :host, nothing)))
+        r = ReportEngine.region_get(name)
+        r === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
+        _json(ReportEngine.sysimage_view(r))
     end)
     HTTP.register!(router, "GET", "/n/{id}", req -> begin
         id = HTTP.getparam(req, "id")
@@ -1975,10 +1963,10 @@ function _make_router(h::Hub)
         _html(_inject_app(_inject_imports(read(_ASSET, String), _effective_imports(nb)), h, nb;
                           preview = _app_preview(req.target)))
     end)
-    # A sweep cell's scheduler options, read and written as a MAP rather than as header tags: half of
+    # A job cell's scheduler options, read and written as a MAP rather than as header tags: half of
     # what a scheduler accepts cannot survive a header (`--licenses=ansys@srv` loses its `=` to the
     # tag sanitiser), and an option a cell cannot express is a batch script a notebook cannot
-    # replace. Stored in the `Slate.sweep` footer, merged over the header attrs when the cell runs.
+    # replace. Stored in the `Slate.job` footer, merged over the header attrs when the cell runs.
     # Body {cell, options: {k: v}}; a key with an empty value is removed.
     HTTP.register!(router, "POST", "/api/{id}/sweep-options", req -> _withnb(h, req, nb -> begin
         b = _body(req)
@@ -1994,21 +1982,26 @@ function _make_router(h::Hub)
             clean[ks] = vs
         end
         lock(nb.lock) do
-            all = Dict{String,Dict{String,String}}(get(nb.report.meta, "sweepopts", Dict{String,Dict{String,String}}()))
+            all = Dict{String,Dict{String,String}}(get(nb.report.meta, "jobopts", Dict{String,Dict{String,String}}()))
             isempty(clean) ? delete!(all, cid) : (all[cid] = clean)
-            isempty(all) ? delete!(nb.report.meta, "sweepopts") : (nb.report.meta["sweepopts"] = all)
+            isempty(all) ? delete!(nb.report.meta, "jobopts") : (nb.report.meta["jobopts"] = all)
         end
         _persist!(nb; label = "sweep options · $cid")
         _json(Dict("ok" => true, "cell" => cid, "options" => clean))
     end))
     HTTP.register!(router, "GET", "/api/{id}/sweep-options", req -> _withnb(h, req, nb -> begin
         cid = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "cell", "")))
-        all = lock(nb.lock) do; get(nb.report.meta, "sweepopts", Dict{String,Dict{String,String}}()); end
+        all = lock(nb.lock) do; get(nb.report.meta, "jobopts", Dict{String,Dict{String,String}}()); end
         _json(Dict("ok" => true, "options" => isempty(cid) ? all : get(all, cid, Dict{String,String}())))
     end))
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
     # A worker's log tail + status for the topbar worker/region status popup. `?side=` selects the
     # worker (""=main, else a region); local reads the log file, remote ssh-tails it. Polled while open.
+    HTTP.register!(router, "POST", "/api/{id}/worker-log-io", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        opts = (; (Symbol(k) => v for (k, v) in b)...)
+        _json(_worker_log_io(nb, String(get(b, "side", "")), String(get(b, "action", "")), opts))
+    end))
     HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
         side = get(q, "side", "")
@@ -2197,7 +2190,7 @@ function _make_router(h::Hub)
     # across and returns what comes back. Read-only, and off `nb.lock` like every kernel round trip.
     HTTP.register!(router, "GET", "/api/{id}/cluster-status", req -> _withnb(h, req, nb -> begin
         name = get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")
-        spec = ReportEngine.cluster_get(name)
+        spec = ReportEngine.cluster_get_resolved(name)
         spec === nothing &&
             return _json(Dict("error" => "no compute target named `$name` on this machine"))
         # A worker that is starting or being reprovisioned is not a failure, and saying so in the
@@ -2223,7 +2216,7 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/cluster-forget", req -> _withnb(h, req, nb -> begin
         b = _body(req)
         name = String(get(b, "name", "")); sweep = String(get(b, "sweep", ""))
-        spec = ReportEngine.cluster_get(name)
+        spec = ReportEngine.cluster_get_resolved(name)
         spec === nothing &&
             return _json(Dict("error" => "no compute target named `$name` on this machine"))
         ReportEngine.kernel_connected(nb.kernel) ||
@@ -2290,7 +2283,7 @@ function _make_router(h::Hub)
             ReportEngine.shutdown!(k)
             true
         end
-        try; _workers_push!(nb); catch; end
+        try; facts_changed!(); catch; end
         _json(Dict("ok" => ok, "did" => "shut down"))
     end))
     # A release this notebook has not been shown yet. Asked on load, because the release happened
@@ -2833,6 +2826,46 @@ function _make_router(h::Hub)
         q = get(HTTP.queryparams(HTTP.URI(req.target)), "q", "")
         _json(Dict("names" => _pkg_complete(String(q))))
     end))
+    # ── A region's sysimage, as a notebook's Prepare chooses it ─────────────────────────────────────
+    # What the region lists, what this notebook could add (its registered packages and its project's,
+    # each at the version it resolves), Slate's packages every image holds, and what the image built
+    # now holds. Query {region}.
+    HTTP.register!(router, "GET", "/api/{id}/sysimage-packages", req -> _withnb(h, req, nb -> begin
+        name = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")))
+        r = ReportEngine.region_get(name)
+        r === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
+        _json(Dict("ok" => true, "region" => r.name, "on" => r.sysimage, "listed" => r.sysimage_pkgs,
+                   "candidates" => ReportEngine.sysimage_candidates(_nb_origin_env(nb); project = _nb_project(nb)),
+                   "always" => collect(ReportEngine._SYSIMAGE_INFRA),
+                   "image" => ReportEngine.sysimage_status(r, let k = get(_REGION_KERNELS, (nb.id, r.name), nothing)
+                       (k isa GateKernel && k.target isa ReportEngine.RemoteTarget) ? k.target.project : ""
+                   end)))
+    end))
+    # Keep a region's sysimage list. Body {region, packages: [{name, uuid, version, path}]}.
+    HTTP.register!(router, "POST", "/api/{id}/sysimage-packages", req -> _withnb(h, req, _ -> begin
+        b = _body(req)
+        name = strip(String(get(b, "region", "")))
+        ReportEngine.region_get(name) === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
+        pk = get(b, "packages", Any[])
+        pk isa AbstractVector || return _json(Dict("ok" => false, "error" => "packages must be a list"))
+        r = ReportEngine.region_set!(name; sysimage_pkgs = ReportEngine._sysimage_pkgs_of(pk))
+        _json(Dict("ok" => true, "listed" => r.sysimage_pkgs))
+    end))
+    # A package at a path on a region's machine, read from its Project.toml there: its name, uuid and
+    # version, or why it is not one. Query {region, path}.
+    HTTP.register!(router, "GET", "/api/{id}/sysimage-path", req -> _withnb(h, req, _ -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        r = ReportEngine.region_get(strip(String(get(q, "region", ""))))
+        r === nothing && return _json(Dict("ok" => false, "error" => "no such region"))
+        path = strip(String(get(q, "path", "")))
+        isempty(path) && return _json(Dict("ok" => false, "error" => "no path"))
+        _json(ReportEngine.sysimage_path_package(r, path))
+    end))
+    # The releases of a registered package, newest first, for choosing one. Query {name}.
+    HTTP.register!(router, "GET", "/api/{id}/pkg-versions", req -> _withnb(h, req, _ -> begin
+        name = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")))
+        _json(_pkg_versions(String(name)))
+    end))
     # What version of a package the user's GLOBAL default env has — the version a notebook that resolves
     # the package from the global env is actually using. Lets the missing-package prompt SHOW it and
     # install THAT version (not blindly latest, which could break the notebook).
@@ -2846,7 +2879,8 @@ function _make_router(h::Hub)
                    "parent" => e.parent,
                    "parentPath" => e.parentpath,
                    "detached" => e.detached,
-                   "manageable" => _pkg_manageable(nb.kernel)))
+                   "manageable" => _pkg_manageable(nb.kernel),
+                   "sysimages" => _nb_sysimages(nb)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
         b = _body(req)
@@ -3564,22 +3598,117 @@ function _worker_conn_owner(h, conn_name::AbstractString)
     return nothing
 end
 
-# Telemetry sample → `{t:"telemetry",side,stats}`. `stats` is the SAME JSON STRING the roster pill parses
-# (`_worker_entry` sets `d["stats"] = JSON.json(sample)`), so the browser reuses its `_wpStats`/`_wpPillStat`
-# verbatim — hence the double-encode (JSON string embedded as a JSON string value).
+# A sample's host / proc / job figures; empty for a sample recorded before they were.
+_sample_part(s, k::Symbol) = hasproperty(s, k) ? getproperty(s, k) : Dict{String,Any}()
+
+# Every field of a sample, for the telemetry view (the history endpoint keeps to what its charts plot).
+_sample_full(s) = Dict{String,Any}(
+    "t" => round(s.rcv; digits = 1), "cpu" => s.cpu, "rss" => s.rss, "gc_ms" => s.gc_ms, "evals" => s.evals,
+    "running" => s.running, "memo" => s.memo, "sys_cpu" => s.sys_cpu, "load1" => s.load1,
+    "sys_mem_total" => s.sys_mem_total, "sys_mem_free" => s.sys_mem_free,
+    "gpus" => [Dict(pairs(g)) for g in _sample_gpus(s)],
+    "host" => _sample_part(s, :host), "proc" => _sample_part(s, :proc), "job" => _sample_part(s, :job))
+
+# A sample's GPU readings; none for a sample recorded before they were.
+_sample_gpus(s) = hasproperty(s, :gpus) ? s.gpus : NamedTuple[]
+# For the history charts: mean utilization over the GPUs, and memory used across them (-1 without GPUs).
+_gpu_util(s) = (g = filter(x -> x.util >= 0, _sample_gpus(s)); isempty(g) ? -1 : round(sum(x.util for x in g) / length(g); digits = 1))
+_gpu_mem(s) = (g = filter(x -> x.mem_used >= 0, _sample_gpus(s)); isempty(g) ? -1 : sum(x.mem_used for x in g))
+
+# ── Telemetry log ──────────────────────────────────────────────────────────────────────────────
+# Every sample a worker sends, kept per notebook and per day as JSON lines under
+# `<cache>/telemetry/<notebook>/<yyyy-mm-dd>.jsonl`. Each sample names the cells running when it was
+# taken, so what ran when, and what it used, can be read back (DuckDB reads these files as they are).
+# A finished day is compressed with zstd; days older than `TELEMETRY_KEEP_DAYS` are removed. The cores
+# are summarized (mean, max, how many are busy): every core of a large node is several hundred figures a
+# sample, which the live view keeps and the log does not need.
+const TELEMETRY_LOG = Ref(true)
+const TELEMETRY_KEEP_DAYS = Ref(14)
+const _TEL_LOG_LOCK = ReentrantLock()
+const _TEL_LOG_DAY = Dict{String,String}()          # notebook's log dir → the day it last wrote
+
+telemetry_dir(nb::LiveNotebook) = joinpath(SlateHome.cache_home(), "telemetry",
+    replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_-]" => "_") * "-" *
+    string(hash(abspath(nb.path)) % 0xffffffff; base = 16, pad = 8))
+
+function _telemetry_line(side::AbstractString, sample)
+    d = _sample_full(sample)
+    host = Dict{String,Any}(d["host"])
+    cores = pop!(host, "cores", nothing)
+    if cores isa AbstractVector && !isempty(cores)
+        host["cores_n"] = length(cores)
+        host["cores_mean"] = round(sum(cores) / length(cores); digits = 1)
+        host["cores_max"] = maximum(cores)
+        host["cores_busy"] = count(>=(50), cores)
+    end
+    d["host"] = host; d["side"] = String(side)
+    return JSON.json(_json_finite(d))
+end
+
+function _telemetry_log!(nb::LiveNotebook, side::AbstractString, sample)
+    TELEMETRY_LOG[] || return nothing
+    dir = telemetry_dir(nb)
+    day = Dates.format(Dates.now(), "yyyy-mm-dd")
+    line = _telemetry_line(side, sample)
+    newday = lock(_TEL_LOG_LOCK) do
+        mkpath(dir)
+        open(io -> println(io, line), joinpath(dir, day * ".jsonl"), "a")
+        prev = get(_TEL_LOG_DAY, dir, "")
+        _TEL_LOG_DAY[dir] = day
+        prev != day
+    end
+    newday && Threads.@spawn _telemetry_tidy!(dir, day)
+    return nothing
+end
+
+# Compress the days before `today` and remove those past the retention.
+function _telemetry_tidy!(dir::AbstractString, today::AbstractString)
+    cutoff = Dates.Date(today) - Dates.Day(TELEMETRY_KEEP_DAYS[])
+    for f in readdir(dir; join = true)
+        m = match(r"^(\d{4}-\d{2}-\d{2})\.jsonl(\.zst)?$", basename(f))
+        m === nothing && continue
+        d = Dates.Date(m.captures[1])
+        if d < cutoff
+            rm(f; force = true)
+        elseif m.captures[2] === nothing && m.captures[1] != today
+            try
+                open(f) do src
+                    open(f * ".zst", "w") do dst
+                        z = ZstdCompressorStream(dst); write(z, src); close(z)
+                    end
+                end
+                rm(f)
+            catch e
+                @warn "slate: could not compress a telemetry log" file = f exception = e
+            end
+        end
+    end
+    return nothing
+end
+
 function _telemetry_push!(h, conn_name::AbstractString, sample)
-    owner = _worker_conn_owner(h, conn_name); owner === nothing && return nothing
+    owner = _worker_conn_owner(h, conn_name)
+    if owner === nothing
+        # A worker no notebook holds (watched, or parked): relayed under the host and port the
+        # host rosters list it by, for the rows and views that show it.
+        m = match(r"^slate-(.+)-(\d+)$", String(conn_name))
+        m === nothing && return nothing
+        frame = try
+            string("{\"t\":\"sample\",\"key\":", JSON.json("roster/" * m.captures[1] * ":" * m.captures[2]),
+                   ",\"at\":", time(), ",\"stats\":", JSON.json(JSON.json(sample)), "}")
+        catch; return nothing; end
+        _facts_send(frame)
+        return nothing
+    end
     nb, side = owner
-    # The sample says what the WORKER knows. What ends a worker on a scheduler — the allocation's
-    # lease and the region's idle policy — is the hub's to know, so it rides along here rather than
-    # waiting on a separate push that some mutation site has to remember to make.
-    alloc = _region_alloc_facts(String(side))
+    try; _telemetry_log!(nb, side, sample); catch e; @debug "slate: telemetry log write failed" exception = e; end
+    # A measurement, not a fact: relayed on the facts stream to every page (a notebook's and the home
+    # page's alike) under its worker's key, and never kept as part of the facts.
     frame = try
-        string("{\"t\":\"telemetry\",\"side\":", JSON.json(String(side)),
-               ",\"alloc\":", JSON.json(alloc),
-               ",\"stats\":", JSON.json(JSON.json(sample)), "}")
+        string("{\"t\":\"sample\",\"key\":", JSON.json("worker/" * nb.id * "/" * String(side)),
+               ",\"at\":", time(), ",\"stats\":", JSON.json(JSON.json(sample)), "}")
     catch; return nothing; end
-    _ws_broadcast!(nb, frame)
+    _facts_send(frame)
     return nothing
 end
 
@@ -3625,18 +3754,6 @@ function _log_push!(h, conn_name::AbstractString, line::AbstractString)
     nb, side = owner
     frame = try
         string("{\"t\":\"log\",\"side\":", JSON.json(String(side)), ",\"line\":", JSON.json(String(line)), "}")
-    catch; return nothing; end
-    _ws_broadcast!(nb, frame)
-    return nothing
-end
-
-# Current worker/pill list → `{t:"workers",data:[...]}`. Pushed at a region spawn-START (so the pill
-# appears immediately in a "starting" state, before the worker's gate is even up and any telemetry flows)
-# and again on connect — the browser's renderWorkers() then draws/updates the pills without waiting for
-# the next notebook state version-bump (which is why they used to pop in only after the first run).
-function _workers_push!(nb::LiveNotebook)
-    frame = try
-        string("{\"t\":\"workers\",\"data\":", JSON.json(_workers_json(nb)), "}")
     catch; return nothing; end
     _ws_broadcast!(nb, frame)
     return nothing
@@ -3711,7 +3828,7 @@ function _install_sshauth_watch!(h)
             String(r.host) == String(host) || continue
             try; _restale_region_cells!(nb, r.name) > 0 && _ensure_runner!(nb); catch; end
         end
-        for nb in nbs; try; _workers_push!(nb); catch; end; end   # pills leave "disconnected" at once
+        for nb in nbs; try; facts_changed!(); catch; end; end   # pills leave "disconnected" at once
         return nothing
     end
     errormonitor(@async while true
@@ -3928,11 +4045,20 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     end
     _install_sshauth_watch!(h) # a cluster asking for a password / second factor → a dialog in the notebook
     _install_session_drop!(h)  # a session going away drops the worker wires it was carrying, at once
+    _install_facts!(h)         # the one description of the hub's state every page renders from
+    # A forked env behind its project is re-resolved before a worker starts in it (see `_refresh_fork_env!`).
+    ReportEngine.FORK_REFRESH[] = (k, report) ->
+        _refresh_fork_env!(k.envdir, k.parent, get(report.meta, "env", Dict{String,Any}[]))
     routed = _make_router(h)
     # Instrumentation sits on the request path permanently and costs a `Ref` read when off. Wrapping
     # the ROUTER rather than the dispatcher below on purpose: the raw-stream handlers (SSE, the
     # WebSocket) are long-lived, and timing a connection that stays open for an hour would say
     # nothing useful about a route.
+    # Anything that changes the hub is a request that is not a GET, so after each one the facts are
+    # refreshed: whatever it changed reaches every page, without each route having to say what that
+    # was. A refresh that finds nothing changed sends nothing.
+    routed_ = routed
+    routed = req -> (r = routed_(req); req.method == "GET" || facts_changed!(); r)
     handle = HTTP.streamhandler(function (req)
         SlateDiag.diag_enabled() || return routed(req)
         t0 = time_ns(); b0 = Base.gc_bytes(); ok = true
@@ -3966,6 +4092,7 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
             for (k, v) in r.headers; HTTP.setheader(stream, k => v); end
             HTTP.startwrite(stream); write(stream, r.body); return
         end
+        target == "/api/facts/events" && return _sse_facts(stream)
         m = match(_EVENTS_RE, target)
         if m !== nothing
             nb = lock(h.lock) do; get(h.notebooks, m.captures[1], nothing); end
@@ -4024,14 +4151,14 @@ Load the notebook at `path` into the hub (reusing the existing entry if already
 open) and start its file watcher. Returns the hub id (its `/n/<id>` route).
 """
 function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = "", runon::AbstractString = "",
-                        autorun::Bool = true, inactive::Bool = false)
+                        autorun::Bool = true, inactive::Bool = false, update::Bool = false)
     file = abspath(path)
     id = lock(h.lock) do
         for nb in values(h.notebooks)
             abspath(nb.path) == file && return nb.id
         end
         id = _unique_id(h, file)
-        nb = load_notebook(file; id = id, threads = threads, runon = runon, autorun = autorun, inactive = inactive)
+        nb = load_notebook(file; id = id, threads = threads, runon = runon, autorun = autorun, inactive = inactive, update = update)
         h.notebooks[id] = nb
         _start_watcher!(nb)
         return id
@@ -4057,6 +4184,7 @@ function close_notebook!(h::Hub, id::AbstractString)
         return n
     end
     nb === nothing && return false
+    nb.closed = true                       # background work for it stops creating things from here on
     # Tell open tabs the close is DELIBERATE before draining their SSE. Without this the client's
     # disconnect recovery reads the ensuing 404 as a crashed server and re-opens the notebook by path —
     # respawning it seconds after every close. The queued message still reaches each tab: a closed
@@ -4089,8 +4217,9 @@ function close_notebook!(h::Hub, id::AbstractString)
     # session leaves its interpreter scoped to our modules for whoever adopts it next.
     try; stop_debug!(nb; serialize = false, force = true); catch; end
     forget_debug!(id); forget_specialists!(id); forget_findings!(id)   # ids are reused when the file reopens
-    try; shutdown!(nb.kernel); catch; end
-    _teardown_region!(nb)                  # detach — a remote region idles warm like the main kernel
+    # Not waiting on a worker still starting: it is ended when it is up (`shutdown!`).
+    try; shutdown!(nb.kernel; wait = false); catch; end
+    _teardown_region!(nb; wait = false)    # detach — a remote region idles warm like the main kernel
     lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end
     _persist_registry!(h)                  # forget an explicitly-closed nb so a restart won't re-open it
     return true
@@ -4098,6 +4227,7 @@ end
 
 "Stop the hub: drain every notebook's SSE connections, then close the server."
 function stop_hub(h::Hub)
+    _FACTS_HUB[] === h && (_FACTS_HUB[] = nothing)   # its facts tick ends with it
     # Snapshot + clear the notebooks under `h.lock`, then tear each down OFF the lock (blocking worker
     # round-trips must not run while `h.lock` is held — this is the outer half of the teardown deadlock).
     nbs = lock(h.lock) do
@@ -4106,11 +4236,12 @@ function stop_hub(h::Hub)
         v
     end
     for nb in nbs
+        nb.closed = true
         _close_listeners(nb); _stop_live_rerender!(nb); _stop_watchers!(nb); _unwire_callbacks!(nb)
         _interrupt_inflight!(nb)
         try; stop_debug!(nb; serialize = false, force = true); catch; end
-        try; shutdown!(nb.kernel); catch; end
-        _teardown_region!(nb)
+        try; shutdown!(nb.kernel; wait = false); catch; end
+        _teardown_region!(nb; wait = false)
     end
     _stop_run_supervisor!()          # its closure holds THIS hub — see `_ensure_run_supervisor!`
     h.server === nothing || close(h.server)

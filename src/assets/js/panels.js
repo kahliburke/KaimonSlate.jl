@@ -97,6 +97,18 @@ async function loadPackages() {
     html += `<div class="pkggrouphdr">Parent project <span class="pkgpath">${_esc(window.PLATFORM.baseOf(r.parentPath || ''))}</span></div>`;
     html += parent.map(p => row(p, false)).join('');
   }
+  // What each region's sysimage holds: those packages are loaded before any cell there runs.
+  for (const si of (r.sysimages || [])) {
+    html += `<div class="pkggrouphdr">Sysimage · ${_esc(si.region)}${si.built ? ` <span class="pkgpath">${si.total} packages with dependencies</span>` : ''}</div>`;
+    if (!si.built) { html += '<div class="phint">Not built yet: it is built when the region is prepared.</div>'; continue; }
+    html += si.packages.map(p => {
+      const tag = p.clash ? `<span class="pkgsrc clash" title="this notebook resolves ${_esc(p.notebook)}, so its workers on ${_esc(si.region)} start without the image">notebook has ${_esc(p.notebook)}</span>`
+        : !p.notebook && !p.slate ? `<span class="pkgsrc only" title="not in this notebook's environment: it loads only in cells on ${_esc(si.region)}">image only</span>`
+        : p.slate ? `<span class="pkgsrc slate" title="Slate's own worker packages, in every image">slate</span>` : '';
+      const ver = p.path ? 'path' : (p.version || '');
+      return `<div class="pkgrow"><span class="pkgname">${_esc(p.name)}</span>${tag}<span class="pkgver">${_esc(ver)}</span></div>`;
+    }).join('');
+  }
   document.getElementById('pkglist').innerHTML = html;
 }
 async function pkgAdd() {
@@ -333,9 +345,9 @@ async function reopenClosed() {
   let path = null;
   try { path = localStorage.getItem('slate:path:' + NB_ID); } catch (_) {}
   if (path) {
-    try {
-      await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
-    } catch (_) {}
+    let d = null;
+    try { d = await slateOpenPath(path); } catch (_) {}
+    if (!d) { location.href = '/'; return; }     // not opened (an update declined): back to the front page
   }
   location.reload();
 }
@@ -399,8 +411,8 @@ async function _reopenByPath() {
   try { path = localStorage.getItem('slate:path:' + NB_ID); } catch (_) {}
   if (!path) return null;                          // never saw a good state — can't know the path
   try {
-    const r = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
-    if (!r.ok) return null;
+    const d = await slateOpenPath(path);
+    if (!d) return null;
     const st = await fetch(_apipath('/api/state'));
     return st.ok ? st.json() : null;
   } catch (_) { return null; }

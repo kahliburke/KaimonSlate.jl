@@ -21,6 +21,44 @@ const RE = ReportEngine
         @test all(p -> p.args[3] isa Expr && p.args[3].head === :escape, v.args)
     end
 
+    @testset "an extension's tool is named by its namespace" begin
+        # `fusionkb.search` parses as field access; it has to come out as the server's registry name.
+        ex = RE._tool_expand(:(fusionkb.search(query = "bootstrap current", limit = 3)))
+        @test ex.args[2] == "fusionkb.search"
+        @test Set(p.args[2] for p in ex.args[3].args) == Set(["query", "limit"])
+        @test RE._tool_expand(:(ping())).args[2] == "ping"
+        @test_throws ErrorException RE._tool_expand(:(f(x)(y = 1)))
+        # A recorded call on an extension tool round-trips through its own source.
+        s = RE.toolcall_source("fusionkb.search", Pair{String,Any}["query" => "q"])
+        @test RE._tool_expand(Meta.parse(s).args[3]).args[2] == "fusionkb.search"
+    end
+
+    @testset "a server tool's JSON schema becomes the panel's parameter rows" begin
+        st = RE.ServerTool("fusionkb.search", "Search the knowledge base.",
+            Dict{String,Any}("type" => "object", "required" => ["query"],
+                "properties" => Dict{String,Any}("limit" => Dict{String,Any}("type" => "integer"),
+                                                 "query" => Dict{String,Any}("type" => "string"))))
+        meta = RE._server_tool_meta(st)
+        @test meta["description"] == "Search the knowledge base."
+        # Required first, so the panel leads with what a call cannot omit.
+        @test [a["name"] for a in meta["arguments"]] == ["query", "limit"]
+        @test meta["arguments"][1]["required"] && !meta["arguments"][2]["required"]
+        @test meta["arguments"][2]["type_meta"]["kind"] == "integer"
+        @test occursin("type=\"number\"", RE._arg_control("limit", meta["arguments"][2], nothing))
+        # A tool without parameters has an empty schema, not a missing one.
+        @test RE._server_tool_meta(RE.ServerTool("ping", "", Dict{String,Any}("type" => "object")))["arguments"] == []
+    end
+
+    @testset "a bare follow-up resolves to the replying extension's namespace" begin
+        # An extension's reply says `job_status(...)`; it cannot know it is served as `fusionkb.`.
+        tools = [RE.ServerTool(n, "", Dict{String,Any}()) for n in ("fusionkb.ingest", "fusionkb.job_status", "ping")]
+        @test RE._qualify_followup("job_status", "fusionkb.ingest", tools) == "fusionkb.job_status"
+        @test RE._qualify_followup("ping", "fusionkb.ingest", tools) == "ping"          # the server has it bare
+        @test RE._qualify_followup("fusionkb.job_status", "x.y", tools) == "fusionkb.job_status"
+        @test RE._qualify_followup("job_status", "start_job", tools) == "job_status"   # a session tool's own
+        @test RE._qualify_followup("nope", "fusionkb.ingest", tools) == "nope"
+    end
+
     @testset "the vector form is the same call as the keyword form" begin
         a = RE.slate_tool("no_such_tool_xyz"; alpha = 1, beta = "two")
         b = RE.slate_tool("no_such_tool_xyz", ["alpha" => 1, "beta" => "two"])

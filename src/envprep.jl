@@ -206,6 +206,29 @@ function _inherit_workspace!(seed::AbstractDict, projectfile::AbstractString)
 end
 
 """
+    add_installed_first!(specs)
+
+`Pkg.add(specs)` into the active project, choosing among the versions this depot already holds when
+those satisfy it. They are, as a rule, already compiled, so a notebook that adds a package goes on
+sharing compiled code with the notebooks beside it instead of pulling in the newest release of every
+dependency it touches. A normal resolve follows when nothing installed will do.
+"""
+function add_installed_first!(specs)
+    isempty(specs) && return nothing
+    was = Pkg.OFFLINE_MODE[]
+    try
+        Pkg.offline(true)
+        Pkg.add(deepcopy(specs))
+        return nothing
+    catch
+    finally
+        Pkg.offline(was)
+    end
+    Pkg.add(specs)
+    return nothing
+end
+
+"""
     seed_env_project!(envdir, parent) -> parent_pkg_name
 
 Write a forked env's `Project.toml` (the parent's `[deps]`+`[compat]`+`[sources]`, with dev paths
@@ -318,13 +341,23 @@ Every source tree whose contents decide what a task computes: `parent/src`, then
 package `[sources]` devs in, transitively.
 """
 function env_source_dirs(parent::AbstractString)
-    dirs = String[]
+    isempty(parent) && return String[]
+    dirs = [joinpath(d, "src") for d in [String(parent); last.(env_path_deps(parent))]]
+    return filter!(isdir, dirs)
+end
+
+"""
+    env_path_deps(parent) -> Vector{Pair{String,String}}
+
+Every package `[sources]` develops into `parent` by path, transitively, as `name => directory`. What
+an environment built from `parent` somewhere else needs sent along, since no registry can supply it.
+"""
+function env_path_deps(parent::AbstractString)
+    out = Pair{String,String}[]
     seen = Set{String}()
     function visit(dir)
         dir in seen && return
         push!(seen, dir)
-        s = joinpath(dir, "src")
-        isdir(s) && push!(dirs, s)
         pf = project_file_in(dir)
         isempty(pf) && return
         # A workspace member inherits its roots' `[sources]`, so the chain is walked too.
@@ -332,15 +365,18 @@ function env_source_dirs(parent::AbstractString)
             isfile(f) || continue
             src = get(_toml(f), "sources", nothing)
             src isa AbstractDict || continue
-            for (_, e) in _abs_sources(src, dirname(f))
+            for (name, e) in _abs_sources(src, dirname(f))
                 e isa AbstractDict && haskey(e, "path") || continue
-                visit(String(e["path"]))
+                d = _strip_sep(String(e["path"]))
+                d in seen || push!(out, String(name) => d)
+                visit(d)
             end
         end
     end
-    isempty(parent) || visit(parent)
-    return dirs
+    isempty(parent) || visit(_strip_sep(String(parent)))
+    return out
 end
+_strip_sep(p) = (q = rstrip(normpath(p), ('/', '\\')); isempty(q) ? p : q)
 
 env_source_fingerprint(parent::AbstractString) =
     isempty(parent) ? "" :

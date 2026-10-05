@@ -2,7 +2,7 @@
 
 ## Cell types
 
-There are four kinds:
+There are five kinds:
 
 - **Code cells** evaluate Julia. The last expression's value renders below, along with
   stdout and any rich display (images, ECharts, tables, LaTeX).
@@ -11,8 +11,12 @@ There are four kinds:
   is free-form, so a notebook can coin its own.
 - **Web cells** hold HTML, CSS and JS in their own panes, for building an interface that talks to
   Julia. See [Front-end Extensions](frontend-extensions.md).
-- **Tool cells** hold an `@tool name(...)` call, defining a tool the [agent](agent.md) can call. They
+- **Tool cells** hold an `@tool name(...)` call to one of the tools an [agent](agent.md) can call. They
   are never swept up by an automatic run, so reopening a notebook does not re-fire one.
+- **Job cells** hold work whose result lands over time: a parameter sweep (`@sweep`) on a compute
+  target, or a design campaign (`@campaign`) running in the background. Running the cell picks up
+  the job where it is rather than starting it again, so reopening a notebook resumes watching work
+  already in flight. See [Compute Targets](clusters.md).
 
 The cell header shows a button for each kind the cell is *not* (`{·}` code, `</>` web, `⌁` tool,
 `M↓` markdown). In command mode, `y` / `m` / `w` convert to code, markdown and web.
@@ -199,6 +203,20 @@ paused while its environment resolves and precompiles.
 
 A notebook can also open **inactive**, showing its stored results with no worker behind it. See
 [the front page](getting-started.md#The-front-page).
+
+## Notebook file format
+
+A notebook file records the format it is written in, as `format = 2` in its `Slate.config` footer; a
+file with no format line is format 1. Opening a notebook written in an older format whose update
+changes something asks first, and says what changes. Agreeing keeps a copy of the original beside it
+(`name.format1.<time>.jl`) and writes the notebook in the current format; declining leaves the file
+alone and does not open it. An older notebook the update would not change is simply stamped with the
+current format the next time it is saved.
+
+| Format | What changed |
+|---|---|
+| 1 | The original format. |
+| 2 | Sweep cells (`#%% sweep`) and cells running a campaign become job cells (`#%% job`); the `Slate.sweep` scheduler options become `Slate.job`. |
 
 ## Quiet cells
 

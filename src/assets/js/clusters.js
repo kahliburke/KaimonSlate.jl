@@ -1,16 +1,18 @@
-// Compute targets — the "Compute targets" section of the Remotes modal, under the known-remotes list.
+// Machines — the "Machines" section of the Remotes modal, under the known-remotes list.
 //
-// A target is what a `#%% sweep cluster=<name>` cell submits to. Its fields describe a MACHINE (login
-// host, scheduler, partition, where the scratch store is), which is the same thing a region on that
-// machine needs, so it belongs here beside the hosts rather than inside each notebook that uses it.
+// A machine is what a `#%% job cluster=<name>` cell submits to and what a region runs its workers on.
+// Its fields describe the machine (login host, scheduler, the Julia and depot to use, where the
+// scratch store is), so it belongs here beside the hosts rather than inside each notebook that uses it.
 //
 // The NAME is the contract, not the address: a notebook says `cluster=hpc`, and each machine that
 // opens it resolves that against its own registry — which is what lets one notebook run against a
 // laptop's toy cluster and a site's real one with nothing edited in a cell.
 import { html } from 'htm/preact';
-import { signal } from '@preact/signals';
+import { signal, effect } from '@preact/signals';
 import { schedInfo, loadScheduler } from './stores.js';
-import { sessions, loadSessions, openSessions } from './sessions.js';
+import { sessions, openSessions } from './sessions.js';
+import { StepList, Activity, History } from './prepsteps.js';
+import { OptionsTable, optionsMap, optionRows } from './optstable.js';
 
 export const clusters = signal([]);
 const procsDefault = signal(0);      // what a local target that names no `procs` gets on this machine
@@ -19,13 +21,18 @@ const editing = signal(null);        // the target being edited (null = the "new
 // list whose own "New target" row already offers it, and pushed the list's purpose out of view.
 const formOpen = signal(false);
 export function closeClusterForm() { formOpen.value = false; cmsg.value = null; }
-// Clicking the row already open closes it, the way a disclosure does.
+// The list selects; the selected machine is always shown beside it.
 function toggleForm(c) {
   const same = formOpen.value && ((c === null && editing.value === null) || (c && editing.value && editing.value.name === c.name));
-  if (same) { closeClusterForm(); return; }
+  if (same) return;
   seed(c);
   formOpen.value = true;
 }
+// Something is always selected once there is anything to select.
+effect(() => {
+  const cs = clusters.value;
+  if (!formOpen.peek() && cs.length) { seed(cs[0]); formOpen.value = true; }
+});
 const cmsg = signal(null);           // {text, err}
 const more = signal(false);          // show the set-once fields (chunk, account, prologue, …)
 
@@ -36,12 +43,15 @@ const confirmP = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg,
 const kName = signal(''), kKind = signal('slurm'), kHost = signal(''), kRootRemote = signal(''),
       kProject = signal(''), kPayload = signal(''), kPartition = signal(''), kWalltime = signal(''),
       kCpus = signal(''), kMem = signal(''), kChunk = signal(''), kAccount = signal(''),
-      kRoot = signal(''), kPrologue = signal(''), kNote = signal(''), kProcs = signal('');
+      kRoot = signal(''), kPrologue = signal(''), kNote = signal(''), kProcs = signal(''),
+      kDepot = signal(''), kJulia = signal(''), kTestQos = signal('');
+const kOpts = signal([]), kOptMenu = signal(-1);   // scheduler options, as the region form edits them
 // Every key the form above collects. The registry is deliberately schema-light — the fields a
 // scheduler wants are the scheduler's business — so anything NOT in here is carried through a save
 // untouched rather than dropped by an editor that has not heard of it.
 const FORM_KEYS = ['name', 'kind', 'host', 'root', 'root_remote', 'project', 'payload', 'partition',
-                   'walltime', 'cpus', 'mem', 'chunk', 'account', 'prologue', 'note', 'procs'];
+                   'walltime', 'cpus', 'mem', 'chunk', 'account', 'prologue', 'note', 'procs',
+                   'depot', 'julia', 'test_qos', 'options', 'directives', 'qos'];
 
 export function loadClusters() {
   return fetch('/api/clusters').then(r => r.json())
@@ -65,16 +75,18 @@ function seed(c) {
   kPartition.value = g('partition'); kWalltime.value = g('walltime'); kCpus.value = g('cpus');
   kMem.value = g('mem'); kChunk.value = g('chunk'); kAccount.value = g('account');
   kPrologue.value = g('prologue'); kNote.value = g('note'); kProcs.value = g('procs');
-  if (kHost.value && !isExecKind(kKind.value)) { loadScheduler(kHost.value); loadSessions(); }
-  if (kHost.value && isExecKind(kKind.value)) loadSessions();
+  kDepot.value = g('depot'); kJulia.value = g('julia'); kTestQos.value = g('test_qos');
+  kOpts.value = optionRows(c && c.options); kOptMenu.value = -1;
+  if (c && c.host) loadMachine(c.name);
+  if (kHost.value && !isExecKind(kKind.value)) loadScheduler(kHost.value);
 }
 
 // How many of the folded-away fields this target actually uses. Shown on the disclosure so a
 // collapsed section never hides a setting you would not have guessed was there.
 const filledExtras = () =>
-  [kChunk, kAccount, kPrologue, kPayload, kNote].filter(s => (s.value || '').trim()).length;
+  [kChunk, kAccount, kPrologue, kPayload, kNote, kJulia, kTestQos].filter(s => (s.value || '').trim()).length;
 
-// One line saying where the work goes, for the list and for the sweep cell's summary.
+// One line saying where the work goes, for the list and for the job cell's summary.
 export function clusterSummary(c) {
   if (!c) return '';
   const k = c.kind || 'slurm';
@@ -102,6 +114,9 @@ function save() {
   put('partition', kPartition.value); put('walltime', kWalltime.value); put('cpus', kCpus.value);
   put('mem', kMem.value); put('chunk', kChunk.value); put('account', kAccount.value);
   put('prologue', kPrologue.value); put('note', kNote.value);
+  put('depot', kDepot.value); put('julia', kJulia.value); put('test_qos', kTestQos.value);
+  const om = optionsMap(kOpts.value);
+  if (Object.keys(om).length) body.options = om;
   if (isExecKind(kKind.value)) put('procs', kProcs.value);
   cmsg.value = { text: 'Saving…' };
   fetch('/api/clusters', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -115,10 +130,10 @@ function save() {
 }
 
 async function del(name) {
-  if (!await confirmP('Delete compute target “' + name + '”?\nSweep cells using it will stop resolving. Work already in its store is untouched.', 'Delete', 'danger')) return;
+  if (!await confirmP('Delete machine “' + name + '”?\nJob cells and regions using it will stop resolving. Work already in its store is untouched.', 'Delete', 'danger')) return;
   await fetch('/api/clusters/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).catch(() => {});
   if (editing.value && editing.value.name === name) { seed(null); closeClusterForm(); }
-  loadClusters();
+  loadClusters().then(() => { const cs = clusters.value; if (cs.length) toggleForm(cs[0]); });
 }
 
 // ── Is this host signed in? ─────────────────────────────────────────────────────────────────
@@ -165,25 +180,74 @@ function Partitions() {
   </select>`;
 }
 
+// ── What preparing a machine found ───────────────────────────────────────────────────────────
+// Read from /api/machines/view: the host's facts, the depot in use, the environments that passed a
+// test task, and a prepare of the machine running now. Polled while one runs.
+const mview = signal({});           // name → view
+function loadMachine(name) {
+  return fetch('/api/machines/view?name=' + encodeURIComponent(name)).then(r => r.json()).then(d => {
+    mview.value = { ...mview.value, [name]: d };
+    if (d && d.preparing && d.preparing.running) setTimeout(() => loadMachine(name), 1500);
+  }).catch(() => {});
+}
+function prepareMachine(name) {
+  fetch('/api/machines/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                   body: JSON.stringify({ name }) })
+    .then(() => setTimeout(() => loadMachine(name), 500)).catch(() => {});
+}
+const ago = t => { const s = Math.max(0, Date.now() / 1000 - t);
+  return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + 'm ago' : s < 129600 ? Math.round(s / 3600) + 'h ago' : Math.round(s / 86400) + 'd ago'; };
+
+function MachineReadiness(name) {
+  const d = mview.value[name];
+  if (!d || !d.ok) return null;
+  const site = d.site || {}, p = d.preparing, running = !!(p && p.running);
+  const head = running ? html`<span class="pddim"><span class="hydspin"></span> preparing</span>`
+    : !site.prepared_at ? html`<span class="pddim">not prepared</span>`
+    : site.stale ? html`<span class="rppsyswarn">⚠ ${site.stale}</span>`
+    : html`<span class="rppsysok">✓ prepared · ${ago(site.prepared_at)}</span>`;
+  const julia = (site.facts && site.facts.julia) || '';
+  return html`<div class="rpprow"><label>Readiness</label><div class="rppsysbox rppprep">
+      <div class="rppprephead">${head}
+        ${running ? null : html`<button class="rppsysbtn" onClick=${() => prepareMachine(name)}>${site.prepared_at ? 'Prepare again' : 'Prepare'}</button>`}</div>
+      ${running ? StepList(p.steps, p.now, p.last_output) : null}
+      ${running ? Activity(p.log, 'm:' + name) : null}
+      ${History(d.key, 'm:' + name)}
+      ${site.prepared_at ? html`<div class="pddim">${[julia, 'depot ' + (d.depot || '~/.julia')].filter(Boolean).join(' · ')}</div>` : null}
+      ${site.site_prologue ? html`<div class="pddim">site prologue <code>${site.site_prologue}</code></div>` : null}
+      ${(d.tests || []).map(t => html`<div class="pddim">${[
+          'tested ' + String(t.project || '').split('/').slice(-2).join('/'),
+          t.node_type && t.node_type !== '/' ? 'on ' + t.node_type.replace(/\/$/, '').replace(/^\//, '') : '',
+          t.by ? 'by ' + t.by : '',
+          t.status === 'fail' ? 'failed' : '',
+          t.load_s ? 'loads in ' + t.load_s + 's' : '',
+          t.cuda ? 'CUDA ' + (String(t.cuda.functional).startsWith('true') ? 'ok' : 'not functional') : '',
+          t.tested_at ? ago(t.tested_at) : ''].filter(Boolean).join(' · ')}${t.changed ? html` · <span class="rppsyswarn">packages changed since</span>` : null}</div>`)}
+    </div></div>`;
+}
+
 export function Clusters() {
   const cs = clusters.value, e = editing.value, open = formOpen.value;
   // `local` is the older spelling of `exec` with no host; a definition on disk still uses it.
   const isExec = kKind.value === 'exec' || kKind.value === 'local';
   return html`<div>
-    <div class="msg"><strong>Compute targets</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Where sweep cells send their jobs.</span></div>
-    <div class="rppreglist">
-      ${cs.map(c => html`<div class=${'rppregrow' + (open && e && e.name === c.name ? ' sel' : '')} onClick=${() => toggleForm(c)}>
-        <span class="rppregname">⎈ ${c.name}</span>
-        <span class="rppregmeta" title=${c.note || ''}>${clusterSummary(c)}${c.note ? ' · ' + c.note : ''}</span>
-        <button class="rppregdel" title="forget this compute target" onClick=${ev => { ev.stopPropagation(); del(c.name); }}>✕</button></div>`)}
-      <div class=${'rppregrow rppregnew' + (open && !e ? ' sel' : '')} onClick=${() => toggleForm(null)}>
-        <span class="rppregname">＋ New target</span><span class="rppregmeta">cluster or local</span></div>
+    <div class="mchsplit">
+    <div class="mchlist">
+      ${cs.map(c => html`<div class=${'mchrow' + (open && e && e.name === c.name ? ' sel' : '')} title=${c.note || ''} onClick=${() => toggleForm(c)}>
+        <span class="mchname">⎈ ${c.name}</span>
+        <span class="mchmeta">${(isExecKind(c.kind) ? 'no scheduler' : (c.kind || 'slurm')) + ' · ' + (c.host || 'here')}</span></div>`)}
+      <div class=${'mchrow new' + (open && !e ? ' sel' : '')} onClick=${() => toggleForm(null)}>
+        <span class="mchname">＋ New machine</span></div>
     </div>
-    ${!open ? null : html`<div class="rppcfg">
-      <div class="rppformhead">${e ? ('Edit target “' + e.name + '”') : 'New compute target'}</div>
+    <div class="mchdetail">
+    ${!open ? html`<div class="pddim mchempty">No machines yet</div>` : html`<div class="rppcfg">
+      <div class="mchhead"><div class="rppformhead">${e ? e.name : 'New machine'}</div>
+        ${e ? html`<span class="pddim">${clusterSummary(e)}</span>
+          <button class="rppregdel" title="forget this machine" onClick=${() => del(e.name)}>Delete</button>` : null}</div>
+      ${e && e.host ? MachineReadiness(e.name) : null}
       <div class="rpprow"><label>Name</label>
         <input class="rppname" autocomplete="off" spellcheck="false" placeholder="e.g. hpc, gpu, here" value=${kName.value} onInput=${ev => kName.value = ev.target.value}/>
-        <span class="pddim" style="flex:0 0 auto">how sweep cells refer to it</span></div>
+        <span class="pddim">${'cluster=<name> in a job cell'}</span></div>
       <div class="rpprow"><label>Kind</label>
         <select class="rpptr" value=${kKind.value} onChange=${ev => kKind.value = ev.target.value}>
           <option value="slurm">slurm</option>
@@ -195,8 +259,7 @@ export function Clusters() {
         <div class="rpprow"><label>Host</label>
           <input class="rpppre" autocomplete="off" spellcheck="false"
             placeholder="ssh host to run on — blank runs on this machine"
-            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value}
-            onBlur=${() => loadSessions()}/></div>
+            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value}/></div>
         ${kHost.value.trim() ? Session() : null}
         <div class="rpprow"><label>Store</label>
           ${kHost.value.trim()
@@ -213,7 +276,7 @@ export function Clusters() {
       : html`
         <div class="rpprow"><label>Login host</label>
           <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="ssh host you submit from"
-            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value} onBlur=${ev => { loadScheduler(ev.target.value.trim()); loadSessions(); }}/></div>
+            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value} onBlur=${ev => loadScheduler(ev.target.value.trim())}/></div>
         ${HostSays()}
         ${Session()}
         <div class="rpprow"><label>Store</label>
@@ -231,11 +294,15 @@ export function Clusters() {
             <span class="rppfieldhint">${hint}</span></label>`)}
       </div>
       <span class="pddim">a cell can override these</span></div>
+        <div class="rpprow"><label>Options</label>${OptionsTable(kOpts, kOptMenu, kKind.value)}</div>
     <div class="rpprow"><label>Project</label>
-          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="/path/to/project  (folder with Project.toml, on the cluster)" value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>`}
+          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="blank = the notebook's own project" value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>`}
       ${isExec ? html`
         <div class="rpprow"><label>Project</label>
-          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="/path/to/project  (folder with Project.toml)" value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>` : null}
+          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="blank = the notebook's own project" value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>` : null}
+      ${kHost.value.trim() ? html`
+        <div class="rpprow"><label>Depot</label>
+          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="blank = automatic (scratch when the site has it)" value=${kDepot.value} onInput=${ev => kDepot.value = ev.target.value}/></div>` : null}
       ${/* Everything a site sets once and then forgets. Folded away because a form you scroll is a
             form where the field that matters — the walltime — stops being the one you look at. */ null}
       <div class="rpprow rppmorerow"><label></label>
@@ -249,14 +316,19 @@ export function Clusters() {
             <input class="rppport" autocomplete="off" spellcheck="false" placeholder="charge code" value=${kAccount.value} onInput=${ev => kAccount.value = ev.target.value}/>
             <span class="pddim">if the site bills one</span></div>
           <div class="rpprow"><label>Prologue</label>
-            <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="module load julia   (runs before each job)" value=${kPrologue.value} onInput=${ev => kPrologue.value = ev.target.value}/></div>
+            <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="module load …   (runs before every Julia here)" value=${kPrologue.value} onInput=${ev => kPrologue.value = ev.target.value}/></div>
+          <div class="rpprow"><label>Test QoS</label>
+            <input class="rppport" autocomplete="off" spellcheck="false" placeholder="e.g. debug" value=${kTestQos.value} onInput=${ev => kTestQos.value = ev.target.value}/>
+            <span class="pddim">for the test task before a sweep</span></div>
           <div class="rpprow"><label>Task script</label>
             <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="task runner path on the cluster; blank = shipped" value=${kPayload.value} onInput=${ev => kPayload.value = ev.target.value}/></div>`}
+        ${kHost.value.trim() ? html`<div class="rpprow"><label>Julia</label>
+          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="blank = juliaup at this hub's version" value=${kJulia.value} onInput=${ev => kJulia.value = ev.target.value}/></div>` : null}
         <div class="rpprow"><label>Note</label>
           <input class="rppname" autocomplete="off" placeholder="note" value=${kNote.value} onInput=${ev => kNote.value = ev.target.value}/></div>`}
-      <div class="rppact"><button class="rppsavereg" onClick=${save}>${e ? 'Save' : 'Create'}</button>
-        <button class="rppmore" onClick=${closeClusterForm}>Close</button></div>
+      <div class="rppact"><button class="rppsavereg" onClick=${save}>${e ? 'Save' : 'Create'}</button></div>
     </div>`}
     <div class=${'rppmsg' + (cmsg.value && cmsg.value.err ? ' err' : '')}>${cmsg.value ? cmsg.value.text : ''}</div>
+    </div></div>
   </div>`;
 }

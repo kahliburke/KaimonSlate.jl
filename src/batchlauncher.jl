@@ -44,15 +44,19 @@ struct JobSpec
     # knowing when the hub goes away. Empty = nothing to wait for.
     after::String
     after_n::Int
+    # What the job runs instead of the task runner, after the prologue. A one-element job that loads
+    # an environment and reports on it, submitted exactly as a sweep's tasks would be, is how an
+    # environment is tested on the nodes before an array is sent to them. Empty = the task runner.
+    command::String
 end
 
 JobSpec(name, chunks; root, project, payload, julia = "julia",
         resources = (; cpus = 1, mem = "1G", walltime = "00:30:00", partition = ""),
         logdir = joinpath(root, "logs"), prologue = "", directives = "", umask = "",
-        after = "", after_n = 0) =
+        after = "", after_n = 0, command = "") =
     JobSpec(String(name), String.(collect(chunks)), String(root), String(project),
             String(payload), String(julia), resources, String(logdir), String(prologue),
-            String(directives), String(umask), String(after), Int(after_n))
+            String(directives), String(umask), String(after), Int(after_n), String(command))
 
 """
     directive_lines(text; prefix = "#SBATCH", example = "--constraint=avx512") -> Vector{String}
@@ -290,6 +294,7 @@ function task_command(spec::JobSpec, chunks; heap::AbstractString = "")
     # means it may grow for a long time before collecting — and a few hundred units that each churn
     # a gigabyte then measure in tens of them. The hint makes it collect instead of grow.
     hh = isempty(heap) ? "" : "--heap-size-hint=" * String(heap) * " "
+    isempty(spec.command) || return string(pre, spec.command)
     return string(pre,
         "export JULIA_PKG_PRECOMPILE_AUTO=0\n",
         spec.julia, " --project=", spec.project, " --startup-file=no ", hh,
@@ -826,6 +831,10 @@ end
 # whatever the site's defaults happen to be — and those are the numbers a sweep most needs to state.
 const _SBATCH_ALWAYS = (cpus = 1, mem = "1G", walltime = "00:30:00")
 
+# `mem = "default"` asks for no memory at all, so the queue's own default applies. An empty `mem` is
+# not that: a region on a machine inherits the machine's, and a sweep gets `_SBATCH_ALWAYS.mem`.
+queue_default(v) = lowercase(strip(string(v))) == "default"
+
 function _sbatch_script(l::SlurmLauncher, spec::JobSpec, indexfile::AbstractString)
     r = spec.resources
     for k in sort!(collect(keys(r)))
@@ -847,6 +856,7 @@ function _sbatch_script(l::SlurmLauncher, spec::JobSpec, indexfile::AbstractStri
              # waits for every element, so the probe's own size changes nothing. Comma is AND.
              "#SBATCH --dependency=" *
                  (isempty(spec.after) ? "singleton" : "afterok:$(spec.after),singleton")]
+    queue_default(get(r, :mem, "")) && filter!(l -> !startswith(l, "#SBATCH --mem="), lines)
     # Everything else the spec carries, sorted so two identical sweeps produce identical scripts.
     # A key absent from the spec emits no line at all: writing `--nodes=1` where the author asked
     # for nothing would override the partition's own configuration with a guess.
@@ -916,10 +926,35 @@ end
 # short enough that a failure loses a slice of the answer rather than all of it.
 const _POLL_NAMES = 50
 
+# What the scheduler said about each job name at its last poll, beyond its state: the job id, why its
+# waiting elements wait, when it expects them to start, and where and for how long they run. Kept as
+# the poll reads it, since the card asks once per refresh and the scheduler is asked once for both.
+const _JOB_DETAILS = Dict{String,Dict{String,Any}}()
+const _JOB_DETAILS_LOCK = ReentrantLock()
+
+"What the last poll said about each of `names` (absent when it said nothing)."
+job_details(names) = lock(_JOB_DETAILS_LOCK) do
+    Dict{String,Dict{String,Any}}(n => copy(_JOB_DETAILS[n]) for n in names if haskey(_JOB_DETAILS, n))
+end
+
+# Elements a squeue line stands for: one, or a pending array's `123_[1-8,10]` range.
+function _array_count(id::AbstractString)
+    m = match(r"_\[([^\]]*)\]", id)
+    m === nothing && return 1
+    n = 0
+    for part in split(m.captures[1], ','; keepempty = false)
+        r = split(first(split(part, '%')), '-')
+        a = tryparse(Int, r[1]); b = length(r) > 1 ? tryparse(Int, r[2]) : a
+        (a === nothing || b === nothing) || (n += b - a + 1)
+    end
+    return max(n, 1)
+end
+
 function poll(l::SlurmLauncher, root::AbstractString, names)
     ns = String.(collect(names))
     isempty(ns) && return Dict{String,Symbol}()
     out = Dict{String,Symbol}(n => :unknown for n in ns)
+    seen = Dict{String,Dict{String,Any}}()
     # squeue lists only live jobs, so anything absent stays :unknown and the store decides whether
     # that means finished or lost.
     #
@@ -927,13 +962,31 @@ function poll(l::SlurmLauncher, root::AbstractString, names)
     # sweep's liveness on a single command: a slow or refused `squeue` dropped every chunk to
     # :unknown at once, and the next poll brought them all back, so the grid flashed in blocks.
     for part in Iterators.partition(ns, _POLL_NAMES)
-        ok, txt = (_ssh(l, "squeue -h -o '%j %T' --name=$(join(part, ','))"))
+        ok, txt = (_ssh(l, "squeue -h -o '%j|%T|%i|%r|%S|%N|%M|%L' --name=$(join(part, ','))"))
         ok || continue
         for line in split(txt, '\n'; keepempty = false)
-            parts = split(strip(line))
+            # `|`-separated as asked for; a bare `name STATE` from an older or stand-in squeue still reads.
+            parts = occursin('|', line) ? split(strip(line), '|') : split(strip(line))
             length(parts) >= 2 || continue
-            name, state = String(parts[1]), uppercase(String(parts[2]))
+            name, state = String(strip(parts[1])), uppercase(String(strip(parts[2])))
             haskey(out, name) || continue
+            if length(parts) >= 8
+                d = get!(() -> Dict{String,Any}("pending" => 0, "running" => 0), seen, name)
+                id = String(strip(parts[3]))
+                d["id"] = first(split(id, '_'))
+                n = _array_count(id)
+                if state == "RUNNING"
+                    d["running"] += n
+                    nodes = String(strip(parts[6]))
+                    isempty(nodes) || (d["nodes"] = haskey(d, "nodes") && d["nodes"] != nodes ? d["nodes"] * "," * nodes : nodes)
+                    d["elapsed"] = String(strip(parts[7])); d["left"] = String(strip(parts[8]))
+                else
+                    d["pending"] += n
+                    d["reason"] = String(strip(parts[4]))
+                    st = String(strip(parts[5]))
+                    (st in ("N/A", "") || haskey(d, "start")) || (d["start"] = replace(st, "T" => " "))
+                end
+            end
             # A name with several elements in flight reports RUNNING as soon as any element runs.
             if state == "RUNNING" || out[name] === :running
                 out[name] = :running
@@ -942,6 +995,11 @@ function poll(l::SlurmLauncher, root::AbstractString, names)
             else
                 out[name] === :running || (out[name] = :pending)
             end
+        end
+    end
+    lock(_JOB_DETAILS_LOCK) do
+        for n in ns
+            haskey(seen, n) ? (_JOB_DETAILS[n] = seen[n]) : delete!(_JOB_DETAILS, n)
         end
     end
     return out
@@ -1226,6 +1284,7 @@ end
 function _pbs_chunk_mem(r, ncpus, defaults::Bool)
     per = strip(string(get(r, :mem_per_cpu, "")))
     flat = strip(string(get(r, :mem, "")))
+    queue_default(flat) && (flat = ""; defaults = false)
     isempty(per) && return isempty(flat) ? (defaults ? _PBS_ALWAYS.mem : nothing) : pbs_size(flat)
     isempty(flat) ||
         error("`mem` and `mem_per_cpu` are both set; PBS asks for memory per chunk, so it can " *

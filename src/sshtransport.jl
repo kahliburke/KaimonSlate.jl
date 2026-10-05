@@ -142,6 +142,7 @@ mutable struct Conn
     closed::Bool
     outbox::Vector{UInt8}   # read from the local socket, not yet accepted by the far side
     stalled::Float64        # when the far side stopped accepting bytes; 0 while it keeps up
+    tosock::Channel{Vector{UInt8}}   # from the far side, for this connection's writer task
 end
 
 # A local port carried to `host:port` as seen from the far side. `host` is resolved THERE, which is
@@ -164,30 +165,54 @@ mutable struct Session
     alive::Bool
     err::String
     fwds::Vector{Fwd}
+    # libssh2 is not thread-safe, so every call on the session holds `lk`, and only for that call:
+    # a command waiting for output holds nothing, so commands run side by side and one that never
+    # ends delays only its caller.
+    lk::ReentrantLock
+    # libssh2 keeps a half-opened channel's state on the SESSION, so one channel open is in flight at
+    # a time: `openlk` is held across an open's whole retry loop, and `openerr` is why the last failed.
+    openlk::ReentrantLock
+    openerr::Cint
+    openmsg::String
+    # A server allows a few session channels per connection (OpenSSH's MaxSessions, 10 by default) and
+    # refuses the rest, so commands past this many wait for one to finish. Forwards are not counted.
+    slots::Base.Semaphore
+    busy::Threads.Atomic{Int}       # commands running now
+    pending::Channel{Any}           # sockets accepted by a forward's listener, waiting for a channel
 end
+Session(ep, fd, ptr, req, owner, prompter, alive, err, fwds) =
+    Session(ep, fd, ptr, req, owner, prompter, alive, err, fwds, ReentrantLock(), ReentrantLock(), Cint(0), "",
+            Base.Semaphore(_MAX_CHANNELS), Threads.Atomic{Int}(0), Channel{Any}(32))
+
+const _MAX_CHANNELS = something(tryparse(Int, get(ENV, "KAIMONSLATE_SSH_MAX_CHANNELS", "")), 8)
 
 const _SESSIONS = Dict{String,Session}()
 const _REG_LOCK = ReentrantLock()
 
 function _lasterr(s::Session)
+    lock(s.lk) do
     msg = Ref{Ptr{UInt8}}(C_NULL); len = Ref{Cint}(0)
     rc = ccall((:libssh2_session_last_error, LIB), Cint,
                (Ptr{Cvoid}, Ptr{Ptr{UInt8}}, Ptr{Cint}, Cint), s.ptr, msg, len, 0)
     msg[] == C_NULL ? "libssh2 error $rc" : unsafe_string(msg[], len[])
+    end
 end
 _errno(s::Session) = ccall((:libssh2_session_last_errno, LIB), Cint, (Ptr{Cvoid},), s.ptr)
 
 # Wait for the socket in the direction libssh2 says it needs, yielding the task. This is the whole
-# point of non-blocking mode: the thread goes back to the pool while we wait.
+# point of non-blocking mode: the thread goes back to the pool while we wait. Several commands wait
+# on one socket, and a read for one channel can take in what another was waiting for, so no wait is
+# longer than a moment: the call is simply tried again.
+const _WAIT_S = 0.02
 function _ready(s::Session, timeout::Real)
-    _pump_forwards!(s)      # every wait is a chance to move tunnel bytes; nothing else gets a turn
-    dir = ccall((:libssh2_session_block_directions, LIB), Cint, (Ptr{Cvoid},), s.ptr)
+    dir = lock(() -> ccall((:libssh2_session_block_directions, LIB), Cint, (Ptr{Cvoid},), s.ptr), s.lk)
     r = (dir & DIR_INBOUND) != 0
     w = (dir & DIR_OUTBOUND) != 0
     (r || w) || (r = true)                 # nothing stated: wait for something to read
     try
-        FileWatching.poll_fd(RawFD(s.fd), timeout; readable = r, writable = w)
+        FileWatching.poll_fd(RawFD(s.fd), min(timeout, _WAIT_S); readable = r, writable = w)
     catch
+        sleep(0.002)
     end
     return nothing
 end
@@ -196,7 +221,7 @@ end
 function _again(s::Session, f; timeout::Real = 60.0)
     deadline = time() + timeout
     while true
-        rc = f()
+        rc = lock(f, s.lk)
         rc != EAGAIN && return rc
         time() > deadline && return rc
         _ready(s, 5.0)
@@ -207,9 +232,13 @@ end
 function _again_ptr(s::Session, f; timeout::Real = 60.0)
     deadline = time() + timeout
     while true
-        p = f()
+        p, e, m = lock(s.lk) do
+            p = f()
+            p != C_NULL ? (p, Cint(0), "") : (e = _errno(s); (p, e, e == EAGAIN ? "" : _lasterr(s)))
+        end
         p == C_NULL || return p
-        _errno(s) != EAGAIN && return C_NULL
+        s.openerr = e; isempty(m) || (s.openmsg = m)
+        e != EAGAIN && return C_NULL
         time() > deadline && return C_NULL
         _ready(s, 5.0)
     end
@@ -397,18 +426,29 @@ function _try_kbdint(s::Session, ask)::Symbol
 end
 
 # ── running things ───────────────────────────────────────────────────────────────────────────
-_open_channel(s::Session) =
-    _again_ptr(s, () -> ccall((:libssh2_channel_open_ex, LIB), Ptr{Cvoid},
-                              (Ptr{Cvoid}, Cstring, Cuint, Cuint, Cuint, Cstring, Cuint),
-                              s.ptr, "session", 7, 2 * 1024 * 1024, 32768, C_NULL, 0))
+# A channel, or NULL with why: `(ch, err, msg)`, all read under the open lock.
+_open_channel(s::Session) = lock(s.openlk) do
+    ch = _again_ptr(s, () -> ccall((:libssh2_channel_open_ex, LIB), Ptr{Cvoid},
+                                   (Ptr{Cvoid}, Cstring, Cuint, Cuint, Cuint, Cstring, Cuint),
+                                   s.ptr, "session", 7, 2 * 1024 * 1024, 32768, C_NULL, 0))
+    ch == C_NULL ? (ch, s.openerr, "channel_open: " * (s.openerr == EAGAIN ? "no answer from the server" : s.openmsg)) :
+                   (ch, Cint(0), "")
+end
+
+# libssh2 errors that mean the connection itself is gone: a socket that failed or closed, or a server
+# that stopped answering (still EAGAIN at the open's deadline). A refused channel is not one of them:
+# that fails the command and leaves the session, and every tunnel on it, as it is. Nor is -1: libssh2
+# returns it while waiting for a reply that has not arrived yet, which happens when another channel's
+# read took the socket's data first.
+const _TRANSPORT_ERRS = (Cint(-7), Cint(-13), Cint(-30), Cint(-43), EAGAIN)
 
 function _drain(s::Session, ch, stream::Cint, sink::IO, deadline::Float64)
     buf = Vector{UInt8}(undef, 65536)
     while true
-        n = ccall((:libssh2_channel_read_ex, LIB), Cssize_t,
-                  (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t), ch, stream, buf, length(buf))
+        n = lock(() -> ccall((:libssh2_channel_read_ex, LIB), Cssize_t,
+                             (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t), ch, stream, buf, length(buf)), s.lk)
         if n == Cssize_t(EAGAIN)
-            time() > deadline && return false
+            (time() > deadline || !s.alive) && return false     # past its time, or the session is closing
             _ready(s, 5.0); continue
         end
         n <= 0 && return true                  # 0 = EOF, negative = a real error
@@ -426,8 +466,11 @@ function _finish(s::Session, ch, out::IO, err::IO, timeout::Real)
     done = _drain(s, ch, Cint(0), out, deadline)
     done = _drain(s, ch, Cint(1), err, deadline) && done
     _again(s, () -> ccall((:libssh2_channel_close, LIB), Cint, (Ptr{Cvoid},), ch); timeout = 10.0)
-    status = ccall((:libssh2_channel_get_exit_status, LIB), Cint, (Ptr{Cvoid},), ch)
-    ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch)
+    status = lock(s.lk) do
+        st = ccall((:libssh2_channel_get_exit_status, LIB), Cint, (Ptr{Cvoid},), ch)
+        ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch)
+        st
+    end
     return done ? status : TIMED_OUT
 end
 
@@ -460,10 +503,47 @@ end
 Base.write(t::LineTap, b::UInt8) = (unsafe_write(t, Ref(b), UInt(1)); 1)
 Base.take!(t::LineTap) = (_tap_line!(t); take!(t.buf))
 
-function _start(s::Session, ch, cmd::AbstractString)
-    _again(s, () -> ccall((:libssh2_channel_process_startup, LIB), Cint,
-                          (Ptr{Cvoid}, Cstring, Cuint, Cstring, Cuint),
-                          ch, "exec", 4, cmd, length(cmd)))
+# Start `cmd` on `ch`: `(rc, why)`, with why read under the lock, beside the call that failed.
+function _start(s::Session, ch, cmd::AbstractString; timeout::Real = 60.0)
+    deadline = time() + timeout
+    while true
+        rc, why = lock(s.lk) do
+            rc = ccall((:libssh2_channel_process_startup, LIB), Cint,
+                       (Ptr{Cvoid}, Cstring, Cuint, Cstring, Cuint), ch, "exec", 4, cmd, length(cmd))
+            (rc, (rc < 0 && rc != EAGAIN) ? _lasterr(s) : "")
+        end
+        rc != EAGAIN && return (rc, why)
+        time() > deadline && return (rc, "no answer from the server")
+        _ready(s, 5.0)
+    end
+end
+
+# A channel with `cmd` started on it: `(ch, "")`, or `(C_NULL, why)`. A server at its limit of open
+# sessions can refuse a channel or the command for a moment while others close, and libssh2 gives up
+# on a reply that has not arrived yet (-1) when other channels are reading, so those are tried again
+# on a fresh channel; a dead transport ends the session.
+const _CHANNEL_REFUSED = (Cint(-1), Cint(-21), Cint(-22))   # not yet, LIBSSH2_ERROR_CHANNEL_FAILURE, _REQUEST_DENIED
+function _open_started(s::Session, cmd::AbstractString; merge::Bool)
+    why = ""
+    for attempt in 1:3
+        ch, err, why = _open_channel(s)
+        if ch == C_NULL
+            err in _TRANSPORT_ERRS && (_channel_dead!(s, why); return (C_NULL, why))
+            attempt < 3 && (sleep(0.3 * attempt); continue)
+            return (C_NULL, why)
+        end
+        # stderr arrives on the same stream as stdout, in the order it was written. Read separately,
+        # it waits until stdout ends, which holds back a command's progress (Pkg reports on stderr).
+        merge && _again(s, () -> ccall((:libssh2_channel_handle_extended_data2, LIB), Cint, (Ptr{Cvoid}, Cint),
+                                       ch, EXTENDED_DATA_MERGE))
+        rc, m = _start(s, ch, cmd)
+        rc == 0 && return (ch, "")
+        lock(() -> ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch), s.lk)
+        why = "exec: " * m * " (libssh2 $rc)"
+        (attempt < 3 && rc in _CHANNEL_REFUSED) || return (C_NULL, why)
+        sleep(0.3 * attempt)
+    end
+    return (C_NULL, why)
 end
 
 # A session that cannot open a CHANNEL is finished, whatever its `alive` flag still says. The
@@ -485,27 +565,14 @@ function _channel_dead!(s::Session, why::AbstractString)
     # Off this task: `_channel_dead!` runs ON the session's owner, and the drop listener reaches
     # back into the transport to discard what was riding the session. Announcing inline would have
     # the owner waiting on work only the owner can do.
-    dropped && @async _announce_drop(key)
+    dropped && @async _announce_drop(key, true)
     return nothing
 end
 
 "Run `cmd` on the session's host. `(ok, output)` with stdout and stderr interleaved; `online` gets each line as it arrives."
 function _exec(s::Session, cmd::AbstractString; timeout::Real = 120.0, online = nothing)
-    ch = _open_channel(s)
-    if ch == C_NULL
-        why = "channel_open: " * _lasterr(s)
-        _channel_dead!(s, why)
-        return (false, why)
-    end
-    # stderr arrives on the same stream as stdout, in the order it was written. Read separately, it
-    # waits until stdout ends, which holds back a command's progress (Pkg reports on stderr) until
-    # the command is over.
-    _again(s, () -> ccall((:libssh2_channel_handle_extended_data2, LIB), Cint, (Ptr{Cvoid}, Cint),
-                          ch, EXTENDED_DATA_MERGE))
-    if _start(s, ch, cmd) != 0
-        ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch)
-        return (false, "exec: " * _lasterr(s))
-    end
+    ch, why = _open_started(s, cmd; merge = true)
+    ch == C_NULL && return (false, why)
     out = online === nothing ? IOBuffer() : LineTap(online)
     status = _finish(s, ch, out, out, timeout)
     text = String(take!(out))
@@ -518,16 +585,8 @@ end
 # metadata directories are small text files, so `tar` over the channel moves them in one round trip.
 function _exec_io(s::Session, cmd::AbstractString, input::Union{Vector{UInt8},IO,Nothing};
                   timeout::Real = 300.0)
-    ch = _open_channel(s)
-    if ch == C_NULL
-        why = "channel_open: " * _lasterr(s)
-        _channel_dead!(s, why)
-        return (false, UInt8[], why)
-    end
-    if _start(s, ch, cmd) != 0
-        ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch)
-        return (false, UInt8[], "exec: " * _lasterr(s))
-    end
+    ch, why = _open_started(s, cmd; merge = false)
+    ch == C_NULL && return (false, UInt8[], why)
     if input !== nothing
         # An `IO` is read a chunk at a time, so what is SENT never has to fit in memory. A project
         # directory is tarred to a temp file and handed over as a stream: the archive is already as
@@ -544,11 +603,11 @@ function _exec_io(s::Session, cmd::AbstractString, input::Union{Vector{UInt8},IO
             n == 0 && break
             off = 0
             while off < n
-                w = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
-                          (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
-                          ch, 0, pointer(buf, off + 1), n - off)
+                w = lock(() -> ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
+                                     (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
+                                     ch, 0, pointer(buf, off + 1), n - off), s.lk)
                 if w == Cssize_t(EAGAIN)
-                    time() > deadline && @goto sent
+                    (time() > deadline || !s.alive) && @goto sent
                     _ready(s, 5.0); continue
                 end
                 w < 0 && @goto sent
@@ -569,13 +628,15 @@ end
 # so it costs no second prompt — and because the far side resolves the target host, a login node
 # can carry a connection to a compute node without one either.
 
-_open_tcpip(s::Session, host::AbstractString, port::Integer) =
+_open_tcpip(s::Session, host::AbstractString, port::Integer) = lock(s.openlk) do
     _again_ptr(s, () -> ccall((:libssh2_channel_direct_tcpip_ex, LIB), Ptr{Cvoid},
                               (Ptr{Cvoid}, Cstring, Cint, Cstring, Cint),
                               s.ptr, host, Cint(port), "127.0.0.1", Cint(22)); timeout = 15.0)
+end
 
 function _close_conn!(c::Conn)
     c.closed = true
+    try; close(c.tosock); catch; end
     try; close(c.sock); catch; end
     c.ch == C_NULL || ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), c.ch)
     c.ch = C_NULL
@@ -587,64 +648,100 @@ end
 # window never reopens; without a bound the pump waits on it for as long as the hub runs.
 const FWD_STALL_S = 20.0
 
-# Move whatever is ready, in both directions, without blocking on either. Called from every point
-# where the session would otherwise sit waiting, so tunnel traffic keeps flowing during a command —
-# which also means anything that blocks in here blocks every command to the host, including the
-# read-only ones the UI polls with. Nothing below may wait.
+# Move whatever is ready, in both directions. Runs on the session's pump task (`_pump_loop`), never
+# under a command. libssh2 is called under the session lock; bytes for a local socket are written
+# after it is released, so a local reader that falls behind slows only its own connection's turn.
+# Returns whether anything moved.
 function _pump_forwards!(s::Session)
-    isempty(s.fwds) && return nothing
     buf = Vector{UInt8}(undef, 32768)
-    for f in s.fwds, c in f.conns
-        c.closed && continue
-        # local → remote. Never waits: whatever the far side will not take now stays in `outbox`
-        # for the next sweep, and a window shut for longer than `FWD_STALL_S` ends the connection.
-        while !c.closed && (!isempty(c.outbox) || isready(c.inbox))
-            if isempty(c.outbox)
-                data = take!(c.inbox)
-                if isempty(data); _close_conn!(c); break; end
-                append!(c.outbox, data)
+    deliver = Tuple{Conn,Vector{UInt8}}[]
+    moved = false
+    lock(s.lk) do
+        isempty(s.fwds) && return
+        for f in s.fwds, c in f.conns
+            c.closed && continue
+            # local → remote. Whatever the far side will not take now stays in `outbox` for the next
+            # sweep, and a window shut for longer than `FWD_STALL_S` ends the connection.
+            while !c.closed && (!isempty(c.outbox) || isready(c.inbox))
+                if isempty(c.outbox)
+                    data = take!(c.inbox)
+                    if isempty(data); _close_conn!(c); break; end
+                    append!(c.outbox, data)
+                end
+                n = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
+                          (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
+                          c.ch, 0, pointer(c.outbox), length(c.outbox))
+                n < 0 && n != Cssize_t(EAGAIN) && (_close_conn!(c); break)
+                if n <= 0                                    # EAGAIN, or accepted nothing
+                    c.stalled == 0.0 && (c.stalled = time())
+                    time() - c.stalled > FWD_STALL_S && _close_conn!(c)
+                    break
+                end
+                deleteat!(c.outbox, 1:Int(n)); c.stalled = 0.0; moved = true
             end
-            n = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
-                      (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
-                      c.ch, 0, pointer(c.outbox), length(c.outbox))
-            n < 0 && n != Cssize_t(EAGAIN) && (_close_conn!(c); break)
-            if n <= 0                                    # EAGAIN, or accepted nothing
-                c.stalled == 0.0 && (c.stalled = time())
-                time() - c.stalled > FWD_STALL_S && _close_conn!(c)
-                break
+            c.closed && continue
+            # remote → local, collected here and written below
+            while true
+                n = ccall((:libssh2_channel_read_ex, LIB), Cssize_t,
+                          (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t), c.ch, 0, buf, length(buf))
+                n == Cssize_t(EAGAIN) && break
+                if n <= 0; _close_conn!(c); break; end
+                push!(deliver, (c, buf[1:Int(n)])); moved = true
             end
-            deleteat!(c.outbox, 1:Int(n)); c.stalled = 0.0
         end
-        c.closed && continue
-        # remote → local
-        while true
-            n = ccall((:libssh2_channel_read_ex, LIB), Cssize_t,
-                      (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t), c.ch, 0, buf, length(buf))
-            n == Cssize_t(EAGAIN) && break
-            if n <= 0; _close_conn!(c); break; end
-            try; write(c.sock, view(buf, 1:Int(n))); catch; _close_conn!(c); break; end
+        for f in s.fwds
+            filter!(c -> !c.closed, f.conns)
         end
     end
-    for f in s.fwds
-        filter!(c -> !c.closed, f.conns)
+    for (c, bytes) in deliver
+        c.closed && continue
+        # Handed to the connection's writer: a local reader that falls behind holds up only its own
+        # connection. One that stops altogether fills its queue, and the connection is closed.
+        if Base.n_avail(c.tosock) < 256
+            try; put!(c.tosock, bytes); catch; end      # closed meanwhile
+        else
+            lock(() -> _close_conn!(c), s.lk)
+        end
+    end
+    return moved
+end
+
+# The session's pump: gives accepted sockets their channels and moves tunnel bytes, for as long as
+# the session is open. Quick turns while bytes are moving, slower ones while nothing is.
+function _pump_loop(s::Session)
+    idle = 0
+    while s.ptr != C_NULL && s.alive
+        try
+            while isready(s.pending)
+                f, sock = take!(s.pending)
+                # Its own task: opening the channel can take up to its 15 s timeout when the target is
+                # gone, and the pump keeps moving every other connection meanwhile.
+                s.alive ? Threads.@spawn(_attach_conn!(s, f, sock)) : (try; close(sock); catch; end)
+            end
+            moved = _pump_forwards!(s)
+            idle = moved ? 0 : idle + 1
+        catch
+            idle += 1
+        end
+        sleep(idle == 0 ? 0.0005 : isempty(s.fwds) ? 0.05 : 0.002)
     end
     return nothing
 end
 
-# Accept on the local port. The channel is opened by the OWNER (libssh2 is not thread-safe), so the
-# listener only hands over the socket.
-function _add_forward!(s::Session, localport::Integer, host::AbstractString, port::Integer, pending)
+# Accept on the local port. The channel is opened by the pump (`_pump_loop`), so the listener only
+# hands over the socket.
+function _add_forward!(s::Session, localport::Integer, host::AbstractString, port::Integer)
     l = try
         Sockets.listen(Sockets.localhost, Int(localport))
     catch e
         return (false, "cannot listen on $localport: $(sprint(showerror, e))")
     end
     f = Fwd(Int(localport), String(host), Int(port), l, Conn[])
-    push!(s.fwds, f)
+    lock(() -> push!(s.fwds, f), s.lk)
     Threads.@spawn begin
         while isopen(l)
             sock = try; Sockets.accept(l); catch; break; end
-            put!(pending, (f, sock))
+            put!(s.pending, (f, sock))
         end
     end
     return (true, "")
@@ -657,8 +754,14 @@ function _attach_conn!(s::Session, f::Fwd, sock)
         try; close(sock); catch; end
         return nothing
     end
-    c = Conn(sock, ch, Channel{Vector{UInt8}}(64), false, UInt8[], 0.0)
-    push!(f.conns, c)
+    c = Conn(sock, ch, Channel{Vector{UInt8}}(64), false, UInt8[], 0.0, Channel{Vector{UInt8}}(Inf))
+    lock(() -> push!(f.conns, c), s.lk)
+    Threads.@spawn begin
+        for bytes in c.tosock
+            c.closed && break
+            try; write(c.sock, bytes); catch; lock(() -> _close_conn!(c), s.lk); break; end
+        end
+    end
     Threads.@spawn begin
         try
             while !eof(sock) && !c.closed
@@ -672,21 +775,25 @@ function _attach_conn!(s::Session, f::Fwd, sock)
 end
 
 function _drop_forward!(s::Session, localport::Integer)
+    lock(s.lk) do
     for f in s.fwds
         f.localport == Int(localport) || continue
         try; close(f.listener); catch; end
         for c in f.conns; _close_conn!(c); end
     end
     filter!(f -> f.localport != Int(localport), s.fwds)
+    end
     return nothing
 end
 
 function _close_forwards!(s::Session)
-    for f in s.fwds
-        try; close(f.listener); catch; end
-        for c in f.conns; _close_conn!(c); end
+    lock(s.lk) do
+        for f in s.fwds
+            try; close(f.listener); catch; end
+            for c in f.conns; _close_conn!(c); end
+        end
+        empty!(s.fwds)
     end
-    empty!(s.fwds)
     return nothing
 end
 
@@ -757,6 +864,7 @@ function _open!(s::Session, ask)
     end
     _authed(s) || error("$(s.ep.alias): authentication did not complete")
     s.alive = true
+    errormonitor(Threads.@spawn _announce_connect(s.ep.alias))
     # Keep the session warm. Between runs a region holds nothing but an idle control session, and an
     # idle session dies to the server's own timeout or a NAT dropping the flow - after which the only
     # way back is an interactive second factor. Configuring an interval here and sending on a timer
@@ -798,8 +906,9 @@ function _close!(s::Session)
     return nothing
 end
 
-# One owner task per session: libssh2 sessions are not thread-safe, so every call on a session is
-# serialized here. It yields at each network wait, so it holds no thread while waiting.
+# One owner task per session. It opens the session, starts its pump, and takes the requests in turn:
+# a forward, an unforward or a keepalive it answers itself, a command it hands to a task of its own.
+# libssh2 is not thread-safe, so every call on the session holds `s.lk`, for that call only.
 function _serve(s::Session, ask)
     try
         _open!(s, ask)
@@ -810,52 +919,72 @@ function _serve(s::Session, ask)
         # connections before they can ask for a password at all.
         try; _close!(s); catch; end
     end
-    pending = Channel{Any}(32)          # sockets accepted by a listener, waiting for a channel
+    pump = s.alive ? errormonitor(Threads.@spawn _pump_loop(s)) : nothing
     while true
-        # A forward is a live stream, so the loop cannot simply block on the next request. Take one
-        # if there is one, otherwise move tunnel bytes and come back.
-        item = nothing
-        if isready(s.req) || isempty(s.fwds)
-            item = try; take!(s.req); catch; break; end
-        else
-            while isready(pending)
-                f, sock = take!(pending)
-                s.alive ? _attach_conn!(s, f, sock) : (try; close(sock); catch; end)
-            end
-            _pump_forwards!(s)
-            sleep(0.002)
-            continue
-        end
-        while isready(pending)
-            f, sock = take!(pending)
-            s.alive ? _attach_conn!(s, f, sock) : (try; close(sock); catch; end)
-        end
+        item = try; take!(s.req); catch; break; end
         kind, arg, reply = item
         # A keepalive is fire-and-forget: no reply is expected, and a failed send is not fatal (the
-        # next sweep tries again, and a truly dead peer surfaces at the next channel open). Handled
-        # here, on the owner, because libssh2 is not thread-safe and every call on a session is
-        # serialized through this loop.
+        # next sweep tries again, and a truly dead peer surfaces at the next channel open).
         if kind === :keepalive
             s.alive && (try; _keepalive_send(s); catch; end)
             continue
         end
+        if !s.alive
+            put!(reply, kind === :io ? (false, UInt8[], s.err) : (false, s.err))
+            kind === :close && break
+            continue
+        end
+        if kind === :exec || kind === :io
+            # Each command on a task of its own: it holds the session only for each libssh2 call, so a
+            # command that runs long, or never ends, keeps the others waiting only for a free slot.
+            Threads.atomic_add!(s.busy, 1)
+            Threads.@spawn try
+                put!(reply, try
+                    Base.acquire(s.slots) do
+                        kind === :io ? _exec_io(s, arg[1], arg[2]) :
+                        arg isa AbstractString ? _exec(s, arg) : _exec(s, arg.cmd; timeout = arg.timeout, online = arg.online)
+                    end
+                catch e
+                    kind === :io ? (false, UInt8[], sprint(showerror, e)) : (false, sprint(showerror, e))
+                end)
+            finally
+                Threads.atomic_sub!(s.busy, 1)
+            end
+            continue
+        end
         result = try
-            !s.alive ? (kind === :io ? (false, UInt8[], s.err) : (false, s.err)) :
-            kind === :exec ? (arg isa AbstractString ? _exec(s, arg) :
-                              _exec(s, arg.cmd; timeout = arg.timeout, online = arg.online)) :
-            kind === :io ? _exec_io(s, arg[1], arg[2]) :
-            kind === :forward ? _add_forward!(s, arg[1], arg[2], arg[3], pending) :
+            kind === :forward ? _add_forward!(s, arg[1], arg[2], arg[3]) :
             kind === :unforward ? (_drop_forward!(s, arg); (true, "")) :
-            kind === :close ? (_close_forwards!(s); _close!(s); (true, "")) :
+            kind === :close ? (_close_session!(s); (true, "")) :
             (false, "unknown request $kind")
         catch e
-            kind === :io ? (false, UInt8[], sprint(showerror, e)) : (false, sprint(showerror, e))
+            (false, sprint(showerror, e))
         end
         put!(reply, result)
         kind === :close && break
     end
+    # Whatever is still queued is answered, so no caller waits on a session that has gone; a request
+    # sent after this fails at once (`_request` catches the closed queue).
+    try; close(s.req); catch; end
+    for (kind, _, reply) in s.req
+        reply === nothing && continue
+        try; put!(reply, kind === :io ? (false, UInt8[], "the session closed") : (false, "the session closed")); catch; end
+    end
+    _close_session!(s)
+    pump === nothing || (try; wait(pump); catch; end)
+    return nothing
+end
+
+# Close the session once the commands still running have finished or reached their own deadlines.
+# Unconditional on the way out: a session that never came up still holds a socket.
+function _close_session!(s::Session)
+    s.alive = false                 # running commands stop at their next wait
+    t0 = time()
+    while s.busy[] > 0 && time() - t0 < 15.0
+        sleep(0.05)
+    end
     _close_forwards!(s)
-    _close!(s)          # unconditional: a session that never came up still holds a socket
+    lock(() -> _close!(s), s.lk)
     return nothing
 end
 
@@ -871,7 +1000,7 @@ const _KEEPALIVE_S = Cuint(something(tryparse(Int, get(ENV, "KAIMONSLATE_SSH_KEE
 # the owner task. Runs ONLY on the session's owner - the caller guarantees that.
 function _keepalive_send(s::Session)
     secs = Ref{Cint}(0)
-    ccall((:libssh2_keepalive_send, LIB), Cint, (Ptr{Cvoid}, Ptr{Cint}), s.ptr, secs)
+    lock(() -> ccall((:libssh2_keepalive_send, LIB), Cint, (Ptr{Cvoid}, Ptr{Cint}), s.ptr, secs), s.lk)
     return nothing
 end
 
@@ -949,7 +1078,8 @@ function session(host::AbstractString; ask)
         try; put!(o.req, (:close, "", Channel{Any}(1))); catch; end
         try; close(o.req); catch; end
     end
-    replaced[] && _announce_drop(key)   # outside the lock: the listener reaches back into transport
+    # On a task of its own: the listener takes the hub's locks, and a caller may hold one of them.
+    replaced[] && errormonitor(Threads.@spawn _announce_drop(key, true))
     return s
 end
 
@@ -1010,7 +1140,12 @@ function disconnect!(host::AbstractString)
     reply = Channel{Any}(1)
     try; put!(s.req, (:close, "", reply)); take!(reply); catch; end
     close(s.req)
-    _announce_drop(String(host))
+    # Returns once the session's tasks have finished: a caller that exits next must not leave them
+    # running into the process's teardown. Each wait is bounded, the announcement's included: it runs
+    # on a task of its own because the listener takes the hub's locks, as in `session`.
+    s.owner === nothing || timedwait(() -> istaskdone(s.owner), 10.0)
+    t = errormonitor(Threads.@spawn _announce_drop(String(host)))
+    timedwait(() -> istaskdone(t), 10.0)
     return true
 end
 
@@ -1023,13 +1158,34 @@ end
 # half-open session first.
 const _ON_DROP = Ref{Any}(nothing)
 
-"Call `f(host)` whenever a session for `host` is dropped or replaced, so callers can discard what rode it."
+"""
+    on_drop!(f)
+
+Call `f(host, died)` whenever a session for `host` is dropped or replaced, so callers can discard what
+rode it. `died` is true when the transport failed under it, false when it was closed on purpose (a
+sign-out, or an interactive sign-in clearing the old session first).
+"""
 on_drop!(f) = (_ON_DROP[] = f; nothing)
 
-function _announce_drop(host::AbstractString)
+function _announce_drop(host::AbstractString, died::Bool = false)
     f = _ON_DROP[]
     f === nothing && return nothing
-    try; f(String(host)); catch; end     # a listener's failure must never break disconnecting
+    try; f(String(host), died); catch; end     # a listener's failure must never break disconnecting
+    return nothing
+end
+
+# Told whenever a session for a host is signed in, by whatever signed it in: a person at the padlock,
+# a key sign-in in the background, or a command that reconnected on its own. What shows a host's
+# sign-in state updates from it instead of waiting for something else to.
+const _ON_CONNECT = Ref{Any}(nothing)
+
+"Call `f(host)` whenever a session for `host` has signed in."
+on_connect!(f) = (_ON_CONNECT[] = f; nothing)
+
+function _announce_connect(host::AbstractString)
+    f = _ON_CONNECT[]
+    f === nothing && return nothing
+    try; f(String(host)); catch; end
     return nothing
 end
 

@@ -115,6 +115,11 @@
 .rpplog{margin-top:4px;}
 .rpplog>.rpplogbtn{background:none;border:none;padding:0;color:inherit;opacity:.8;cursor:pointer;font-size:.74rem;}
 .rpplogtext{margin:4px 0 0;max-height:240px;overflow:auto;font-family:Menlo,monospace;font-size:.68rem;line-height:1.35;white-space:pre-wrap;overflow-wrap:anywhere;padding:6px 8px;border-radius:6px;background:rgba(0,0,0,.25);}
+/* The log and the history as panes of their own (prepsteps.js ActivityPane, HistoryPane). */
+.rppanelog{margin:0;max-height:none;height:100%;box-sizing:border-box;background:transparent;}
+.rppanempty{font-size:.78rem;padding:6px 2px;display:block;}
+.rppanelog .rppantag{display:block;color:var(--dim);font-weight:600;margin-top:6px;}
+.rppanelog .rppantag:first-child{margin-top:0;}
 .rpphist{margin-top:4px;display:flex;flex-direction:column;gap:1px;}
 .rpphistrow{font-size:.75rem;cursor:pointer;padding:1px 4px;border-radius:4px;}
 .rpphistrow:hover,.rpphistrow.sel{background:rgba(127,127,127,.15);}
@@ -122,3 +127,71 @@
 .rpphistrow.warnings .rpphistout,.rpphistrow.interrupted .rpphistout{color:#e0c070;}
 .rpphistrow.failed .rpphistout{color:#e07a7a;}
 .rpphistrep{margin:4px 0 0 8px;padding-left:8px;border-left:2px solid rgba(127,127,127,.3);}
+
+/* Telemetry view (telemetry.js): one worker's resource use over time. Opened from a notebook's worker
+   popup and from the home page's worker detail. */
+.tm-bg { position:fixed; inset:0; z-index:96; background:rgba(4,6,14,.55); display:flex; align-items:center; justify-content:center; }
+.tm-card { width:min(1240px, 96vw); height:min(92vh, 1100px); display:flex; flex-direction:column; background:var(--bg, #0d1120);
+           border:1px solid var(--border, #2a2e40); border-radius:12px; box-shadow:0 18px 60px rgba(0,0,0,.45); overflow:hidden; }
+.tm-head { display:flex; align-items:center; gap:16px; padding:10px 16px 9px; border-bottom:1px solid var(--border, #2a2e40); background:var(--bg2, #141828); }
+.tm-head > div:first-child { flex:1 1 auto; min-width:0; }
+.tm-title { font-weight:600; font-size:1.02rem; color:var(--text, #d4d8e8); }
+.tm-sub { font-size:.78rem; color:var(--dim, #6a7090); margin-top:2px; }
+.tm-ranges { display:flex; gap:2px; background:var(--bg3, #1a1e2e); border:1px solid var(--border, #2a2e40); border-radius:8px; padding:2px; }
+.tm-ranges button { background:none; border:none; color:var(--dim, #6a7090); font-size:.78rem; padding:4px 11px; border-radius:6px; cursor:pointer; }
+.tm-ranges button.on { background:var(--bg, #0d1120); color:var(--text, #d4d8e8); box-shadow:0 0 0 1px var(--border, #2a2e40); }
+.tm-x { background:none; border:none; color:var(--dim, #6a7090); font-size:1rem; cursor:pointer; padding:4px 6px; }
+.tm-x:hover { color:var(--text, #d4d8e8); }
+.tm-acts { padding:7px 16px; border-bottom:1px solid var(--border, #2a2e40); background:var(--bg2, #141828); }
+.tm-body { flex:1 1 auto; overflow:auto; padding:10px 16px 14px; overscroll-behavior:contain; }
+.tm-empty { padding:40px; text-align:center; color:var(--dim, #6a7090); }
+.tm-tiles { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:8px; margin-bottom:8px; }
+.tm-tile { background:var(--bg2, #141828); border:1px solid var(--border, #2a2e40); border-radius:10px; padding:7px 11px; }
+.tm-tile.warn { border-color:color-mix(in srgb, var(--gold, #ffd700) 55%, var(--border, #2a2e40)); }
+.tm-tlabel { font-size:.72rem; color:var(--dim, #6a7090); text-transform:uppercase; letter-spacing:.04em; }
+.tm-tval { font-size:1.15rem; font-weight:600; color:var(--text, #d4d8e8); margin-top:2px; font-variant-numeric:tabular-nums; }
+.tm-tsub { font-size:.72rem; color:var(--dim, #6a7090); margin-top:2px; }
+.tm-bar { height:4px; border-radius:3px; background:var(--bg3, #1a1e2e); margin-top:5px; overflow:hidden; }
+.tm-bar > span { display:block; height:100%; border-radius:3px; background:var(--accent, #569cd6); }
+.tm-tile.warn .tm-bar > span { background:var(--gold, #ffd700); }
+.tm-sec { margin-top:8px; }
+.tm-sechead { display:flex; align-items:baseline; gap:10px; margin-bottom:4px; }
+.tm-sechead h3 { margin:0; font-size:.82rem; font-weight:600; color:var(--text, #d4d8e8); }
+.tm-key { display:flex; gap:12px; font-size:.72rem; color:var(--dim, #6a7090); }
+.tm-key i { display:inline-block; width:10px; height:6px; border-radius:2px; margin-right:5px; vertical-align:1px; }
+.tm-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(420px, 1fr)); gap:8px; }
+.tm-chart { width:100%; background:var(--bg2, #141828); border:1px solid var(--border, #2a2e40); border-radius:10px; }
+.tm-none { font-size:.78rem; color:var(--dim, #6a7090); padding:8px 2px; }
+.tm-gpus { display:grid; gap:6px; margin-bottom:8px; }
+.tm-gpu { background:var(--bg2, #141828); border:1px solid var(--border, #2a2e40); border-radius:10px; padding:8px 12px; }
+.tm-gname { font-size:.78rem; color:var(--text, #d4d8e8); font-weight:600; }
+.tm-gstats { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:.76rem; color:var(--dim, #6a7090); margin-top:3px; font-variant-numeric:tabular-nums; }
+.tm-throttle { color:var(--gold, #ffd700); }
+
+
+/* A modal holding the page still (scrolllock.js); the scrollbar's room is kept so nothing shifts. */
+html.scroll-locked { overflow:hidden; scrollbar-gutter:stable; }
+
+/* A worker's facts and actions (workerbar.js), in the bar under the telemetry view's title. */
+.wdbar { display:flex; align-items:flex-start; gap:16px; }
+.wdfacts { flex:1 1 auto; min-width:0; display:flex; flex-wrap:wrap; gap:3px 16px; font-size:.76rem; }
+.wdfact { display:inline-flex; gap:6px; min-width:0; }
+.wdfact .k { color:var(--dim, #6a7090); }
+.wdfact .v { color:var(--text, #d4d8e8); font-family:Menlo, monospace; overflow-wrap:anywhere; }
+.wdfact .v.link { color:var(--accent, #569cd6); cursor:pointer; }
+.wdfact .v.link:hover { text-decoration:underline; }
+.wdacts { flex:0 0 auto; display:flex; align-items:center; gap:8px; }
+.wdactnote { color:var(--dim, #6a7090); font-size:.73rem; }
+.wdacterr { color:#e57575; font-size:.73rem; }
+.wdnodata { color:var(--dim, #6a7090); font-size:.75rem; padding:6px 0; }
+/* What a detached-but-warm worker is still good for — answers "why is this thing still running?". */
+.wdhint { color:var(--dim, #6a7090); font-size:.74rem; line-height:1.45; background:var(--bg, #0d1120);
+          border:1px solid var(--border, #2a2e40); border-radius:7px; padding:7px 10px; margin:8px 0 0; }
+.tm-acts button { background:var(--bg3, #1a1e2e); color:var(--text, #d4d8e8); border:1px solid var(--border, #2a2e40);
+                  border-radius:6px; padding:4px 12px; font-size:.78rem; cursor:pointer; }
+.tm-acts button[disabled] { opacity:.55; cursor:default; }
+.tm-acts .rppsysbtn { color:var(--accent, #569cd6); border-color:color-mix(in srgb, var(--accent, #569cd6) 45%, transparent);
+                      background:color-mix(in srgb, var(--accent, #569cd6) 10%, transparent); }
+.tm-acts .rppsysbtn:hover { border-color:var(--accent, #569cd6); }
+.tm-acts .rppsysbtn.danger, .tm-acts .rppreap { color:#e57575; border-color:#5a2a35; background:rgba(229,117,117,.08); }
+.tm-acts .rppsysbtn.danger:hover, .tm-acts .rppreap:hover { border-color:#e57575; background:rgba(229,117,117,.16); }

@@ -581,11 +581,11 @@ x = 1
         @test nums == Dict("b" => 1, "a" => 2)     # `b` is cited first → [1]
         # live HTML-link emit tracks the bibstyle: numeric → [3, p. 7], author-date → (Knuth, 1984)
         numctx = (anchor = "refs", tips = Dict("k" => "Knuth · TeX"), labels = Dict("k" => "3"),
-                  numeric = true, numbers = Dict("k" => 3))
+                  numeric = true, numbers = Dict("k" => 3), open = "[", close = "]")
         num = NS._rewrite_citations("[@k, p. 7]", Set(["k"]); emit = NS._cite_link_emit(numctx))
         @test occursin("<a class=\"cite\" href=\"#cell-refs\"", num) && occursin(">[3, p. 7]</a>", num)
         adctx = (anchor = "refs", tips = Dict("k" => "x"), labels = Dict("k" => "Knuth, 1984"),
-                 numeric = false, numbers = Dict{String,Int}())
+                 numeric = false, numbers = Dict{String,Int}(), open = "(", close = ")")
         ad = NS._rewrite_citations("[@k]", Set(["k"]); emit = NS._cite_link_emit(adctx))
         @test occursin(">(Knuth, 1984)</a>", ad)
         @test NS._is_numeric_style("ieee") && !NS._is_numeric_style("apa")
@@ -597,6 +597,56 @@ x = 1
         nb = _mknb("#%% md id=b\nCite [@knuth1984, p. 7].\n\n#%% md id=refs bibliography\n@book{knuth1984, title={TeX}}\n")
         pdf = try; NS.export_pdf(nb; theme = "light"); catch; nothing; end
         @test pdf === nothing || length(pdf) > 1000
+    end
+
+    @testset "author-year-brackets citation style" begin
+        bib = "@article{sunA, author={Sun, Wei and Elder, Tom}, title={A divertor study}, year={2026}}\n" *
+              "@article{sunB, author={Wei Sun}, title={Second paper}, year={2026}}\n" *
+              "@article{w7x, author={{W7-X Team}}, title={Campaign}, year={2024}}\n"
+        src = "#%% md id=body\nSee [@sunB] then [@sunA; @w7x].\n\n#%% md id=refs bibliography\n" * bib
+        nb = _mknb(src)
+        nb.report.meta["bibstyle"] = "author-year-brackets"
+        bi = NS.bibliography_index(nb.report, "/tmp")
+        nums = NS.citation_numbers(nb.report, Set(e.key for e in bi))
+        cl = NS._cite_labels("author-year-brackets", bi, nums)
+        # Year suffixes follow first citation, as Typst assigns them; a braced name stays whole.
+        @test cl.labels == Dict("sunB" => "Sun 2026a", "sunA" => "Sun 2026b", "w7x" => "W7-X Team 2024")
+        @test (cl.open, cl.close) == ("[", "]")
+        @test NS._cite_labels("ieee", bi, nums).labels["sunA"] == "2"
+        @test NS._cite_labels("apa", bi, nums).open == "("
+        # The live view groups them the same way.
+        ctx = NS._bib_link_ctx(nb)
+        live = NS._rewrite_citations("[@sunA; @w7x]", Set(e.key for e in bi); emit = NS._cite_link_emit(ctx))
+        @test occursin(">[Sun 2026b]</a>", live) && occursin(">[W7-X Team 2024]</a>", live)
+        card = first(c for c in NS.state_json(nb)["cells"] if get(c, "roleBib", false))["output"]
+        @test occursin("<span class=\"bibcard-num\">[Sun 2026a]</span>", card)   # the card shows the in-text label
+        refs = NS._html_references(NS._md_cite_ctx(nb))
+        @test occursin("[Sun 2026a] Wei Sun. Second paper. 2026.", refs) && occursin("[W7-X Team 2024]", refs)
+        # The PDF project carries Slate's CSL file and names it in the bibliography call.
+        dir = NS._build_typst_project(nb)
+        try
+            @test isfile(joinpath(dir, "author-year-brackets.csl"))
+            @test occursin("style: \"author-year-brackets.csl\"", read(joinpath(dir, "doc.typ"), String))
+        finally
+            rm(dir; recursive = true, force = true)
+        end
+        # Every style the setting offers is one Typst accepts or one Slate ships.
+        @test all(s -> haskey(NS._SLATE_CSL, s) || s in ("ieee", "apa", "chicago-author-date", "mla", "nature",
+                  "vancouver", "american-physics-society", "american-institute-of-physics",
+                  "harvard-cite-them-right"), NS._CITATION_STYLES)
+        opt = only(o for o in NS._CONFIG_UI if o.key == "bibstyle")
+        @test opt.type == :enum && opt.group == "Export" && "author-year-brackets" in opt.choices
+        pdf = try; NS.export_pdf(nb; theme = "light"); catch; nothing; end
+        @test pdf === nothing || length(pdf) > 1000
+    end
+
+    @testset "citations inside spliced markdown are numbered" begin
+        r = RE.parse_report("#%% md id=a\nFirst {{ x }} then [@a].\n\n#%% md id=refs bibliography\n@book{a,title={A}}\n@book{b,title={B}}\n")
+        md = RE.CellOutput("", [RE.MimeChunk("text/markdown", Vector{UInt8}("see [@b]"))], Any[], Any[],
+                           RE.BindSpec[], "see [@b]", nothing, nothing, 1.0)
+        push!(r.cells[1].interp, md)
+        @test NS.citation_numbers(r, Set(["a", "b"])) == Dict("b" => 1, "a" => 2)
+        @test "b" in NS.cited_citation_keys(r)          # the references card counts it as cited
     end
 
     @testset "adaptive references card + mixed inline/external bib" begin

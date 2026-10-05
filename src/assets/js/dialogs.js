@@ -82,6 +82,26 @@ const alertDark = msg => dlg(msg, [{ label: 'OK', value: true, cls: 'primary' }]
 // else rather than growing their own.
 window.confirmDark = confirmDark;
 window.alertDark = alertDark;
+
+// Open a notebook by path from this page (`/api/open` is a hub route, not this notebook's). A notebook
+// written in an older file format is refused with what updating it changes, and opens only once the
+// update is agreed to (a copy of the original is kept beside it). Resolves to `{id, url, path}`, or
+// null when it was not opened: declined, or failed.
+async function slateOpenPath(path, update = false) {
+  const post = u => fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({ path, update: u }) });
+  const r = await post(update);
+  if (r.status === 409) {
+    const u = await r.json();
+    const yes = await dlg(`Update \`${u.name}\` to the current notebook format?\n` +
+      `It is written in format ${u.format}. Opening it updates it to format ${u.current}: ${(u.changes || []).join('; ')}.\n` +
+      `A copy of the original is saved beside it as \`${u.backup}\`.`,
+      [{ label: 'Don\u2019t open', value: false }, { label: 'Update and open', value: true, cls: 'primary' }]);
+    return yes ? slateOpenPath(path, true) : null;
+  }
+  return r.ok ? r.json() : null;
+}
+window.slateOpenPath = slateOpenPath;
 // Text entry in the same dark shell (the app's replacement for `window.prompt`, which is unstyled
 // and blocks the event loop). Resolves to the trimmed string, or null on cancel/empty. Enter
 // accepts, Escape cancels; a filename's extension is left out of the initial selection so typing

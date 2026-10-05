@@ -125,3 +125,13 @@ end
     @test all(f -> occursin(r"^#[0-9a-f]{6}$", f), fills)
     @test last(fills) == "#ffd700"
 end
+
+@testset "a vector field shows its items, not its summary line" begin
+    h = RE.record_html((; modules = ["gcc-native/14", "cray-mpich/9.1.0"], tags = [:a, :b]))
+    @test occursin("<span class=\"srec-item\">gcc-native/14</span>", h) && occursin(">:a<", h)
+    @test !occursin("2-element", h)
+    @test occursin(">[1, 2, 3]<", RE.record_html((; v = [1, 2, 3])))
+    long = RE.record_html((; v = string.(1:100)))
+    @test occursin("… 60 more", long) && count("srec-item", long) == 40
+    @test occursin(">empty<", RE.record_html((; v = String[])))
+end

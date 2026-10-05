@@ -286,6 +286,8 @@ end
         @test joinpath(par, "src") in dirs
         @test joinpath(foo, "src") in dirs          # dev'd in by the parent
         @test joinpath(bar, "src") in dirs          # …and by Foo, so transitively
+        # The same walk names what an environment built elsewhere has to be sent.
+        @test ReportEngine.env_path_deps(par) == ["Foo" => foo, "Bar" => bar]
 
         a = ReportEngine.env_source_fingerprint(par)
         write(joinpath(foo, "src", "Foo.jl"), "module Foo\ncrisscross(x) = x * 999\nend
@@ -306,6 +308,38 @@ end
         write(joinpath(foo, "src", "Foo.jl"), "module Foo\ncrisscross(x) = x * 7\nend
 ")
         @test ReportEngine.env_parent_fingerprint(par) == d
+    end
+
+
+    # A fork is behind its parent once the parent's project changes, as when a dependency is added to
+    # the package under development; that is what re-resolves it before a worker starts in it.
+    @testset "a fork falls behind when its parent project changes" begin
+        par = mktempdir(); env = mktempdir()
+        pf = joinpath(par, "Project.toml")
+        write(pf, "name = \"Parent\"\nuuid = \"11111111-1111-1111-1111-111111111111\"\n\n[deps]\n")
+        unstamped = ReportEngine.env_stale(env, par)
+        ReportEngine.stamp_env!(env, par)
+        fresh = ReportEngine.env_stale(env, par)
+        write(pf, read(pf, String) * "Preferences = \"21216c6a-2e73-6563-6e65-726566657250\"\n")
+        @test (unstamped, fresh, ReportEngine.env_stale(env, par)) == (true, false, true)
+        @test ReportEngine.env_stale(env, "") == false     # a detached notebook has nothing to follow
+    end
+
+    @testset "a package add chooses among the versions already installed" begin
+        installed = Set{VersionNumber}()
+        for root in DEPOT_PATH, d in (isdir(joinpath(root, "packages", "JSON")) ? readdir(joinpath(root, "packages", "JSON"); join = true) : String[])
+            f = joinpath(d, "Project.toml")
+            isfile(f) && push!(installed, VersionNumber(Pkg.TOML.parsefile(f)["version"]))
+        end
+        old = Base.active_project()
+        try
+            Pkg.activate(mktempdir(); io = devnull)
+            ReportEngine.add_installed_first!([Pkg.PackageSpec(name = "JSON")])
+            got = only(p.version for p in values(Pkg.dependencies()) if p.name == "JSON")
+            @test got in installed && !Pkg.OFFLINE_MODE[]
+        finally
+            Pkg.activate(old; io = devnull)
+        end
     end
 
 end

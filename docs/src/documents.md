@@ -75,17 +75,16 @@ references card.
 
 ## Citation style
 
-Set the citation style per notebook in **Settings → Citation style** (persisted as `bibstyle` in
-[Settings, under This notebook](settings.md#This-notebook)):
+Pick the citation style per notebook in **Settings → Export → Citation style** (persisted as
+`bibstyle` in [Settings, under This notebook](settings.md#This-notebook)):
 
-`ieee` · `apa` · `chicago-author-date` · `chicago-notes` · `mla` · `nature` · `vancouver` ·
-`harvard-cite-them-right`
+`ieee` · `american-physics-society` · `american-institute-of-physics` · `nature` · `vancouver` ·
+`apa` · `chicago-author-date` · `harvard-cite-them-right` · `mla` · `author-year-brackets`
 
-The value is passed straight to Typst, so it has to be a name Typst knows. Harvard is
-`harvard-cite-them-right`; a bare `harvard` fails the export.
-
-Numeric styles (IEEE, Nature, Vancouver) render `[1]` and order the References by first citation;
-author–date styles (APA, Chicago, MLA, Harvard) render `(Knuth, 1984)` and order alphabetically.
+Numeric styles (IEEE, APS, AIP, Nature, Vancouver) render `[1]` and order the References by first
+citation. Author–date styles (APA, Chicago, Harvard, MLA) render `(Knuth, 1984)` and order
+alphabetically. `author-year-brackets` is Slate's own: it cites as `[Knuth 1984]`, adds `a`, `b`, …
+when two works share an author and year, and keys each References entry by the same label.
 
 ## Figures
 

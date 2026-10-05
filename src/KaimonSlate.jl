@@ -733,6 +733,11 @@ function _load_slate_config!()
         return nothing
     end
     NotebookServer.CHECKER_ON[] = get(_slate_config(), "checker_on", false) === true
+    # Workers' telemetry kept on disk per notebook (slate.json "telemetry_log", "telemetry_keep_days").
+    NotebookServer.TELEMETRY_LOG[] = get(_slate_config(), "telemetry_log", true) !== false
+    let k = get(_slate_config(), "telemetry_keep_days", 14)
+        k isa Integer && k > 0 && (NotebookServer.TELEMETRY_KEEP_DAYS[] = k)
+    end
     NotebookServer._CHECKER_PERSIST[] = function (on)
         cfg = _slate_config(); cfg["checker_on"] = on
         _persist_slate_config!(cfg)
@@ -924,12 +929,21 @@ function create_tools(GateTool::Type)
     `autorun=false` opens WITHOUT the initial run — cells land STALE, untouched —
     so you (or the user) can inspect/edit first (e.g. tag a cell `locked`) before
     anything, possibly expensive, runs. Only applies on a fresh open.
+
+    A notebook written in an older file format whose update changes something is not
+    opened: the reply says what the update changes. Ask the user, and open it again
+    with `update=true` to update it (a copy of the original is kept beside it).
     """
-    function nb_open(path::String; threads::String = "", autorun::Bool = true)::String
+    function nb_open(path::String; threads::String = "", autorun::Bool = true, update::Bool = false)::String
         path = expanduser(path)
         ReportEngine.ensure_notebook_file!(path)   # creates the file AND the dirs leading to it
         h = _hub()
-        id = open_notebook!(h, path; threads = threads, autorun = autorun)
+        id = try
+            open_notebook!(h, path; threads = threads, autorun = autorun, update = update)
+        catch e
+            e isa NotebookServer.NotebookNeedsUpdate || rethrow()
+            return "Not opened: " * sprint(showerror, e) * " (open(path; update=true) once the user agrees)"
+        end
         return "Serving $(abspath(path)) at $(_base())/n/$id"
     end
 
@@ -1126,6 +1140,18 @@ function create_tools(GateTool::Type)
                 (smt !== nothing && smf !== nothing && smt != "0") &&
                     push!(parts, "host-mem $(hb(string(parse(Float64, smt) - parse(Float64, smf))))/$(hb(smt))")
                 isempty(parts) || println(io, "      stats: ", join(parts, " · "))
+                # The GPUs the worker's job can use (an array, so read as JSON rather than by pattern).
+                gpus = try; get(JSON.parse(stj), "gpus", Any[]); catch; Any[]; end
+                for gp in gpus
+                    gp isa AbstractDict || continue
+                    gb(x) = string(round(Float64(x) / 2^30; digits = 1))
+                    line = "gpu$(get(gp, "i", 0)) $(get(gp, "name", ""))  $(get(gp, "util", -1))%"
+                    get(gp, "mem_used", -1) >= 0 && (line *= " · $(gb(gp["mem_used"]))/$(gb(gp["mem_total"]))GB")
+                    get(gp, "temp", -1) >= 0 && (line *= " · $(gp["temp"])°C")
+                    get(gp, "power_w", -1) >= 0 && (line *= " · $(round(Int, gp["power_w"]))W")
+                    get(gp, "proc_mem", -1) > 0 && (line *= " · this worker $(gb(gp["proc_mem"]))GB")
+                    println(io, "      ", line)
+                end
             end
         end
         println(io, "\nReap one with worker(action=\"reap\", host=…, port=…); restart a notebook's own worker with worker(action=\"restart\", notebook=…).")
@@ -1215,7 +1241,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", options="", prologue="", idle_release="", idle_warn="", liveness_grace="", clear="") -> String
+        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", submit="", options="", prologue="", idle_release="", idle_warn="", liveness_grace="", clear="") -> String
 
     Define (or update) a named region — a global compute target: a `host` reached over `transport`
     (`tunnel`|`direct`), an optional `preload` (a LOCAL project dir replicated on the host so its
@@ -1237,7 +1263,9 @@ function create_tools(GateTool::Type)
 
     A region whose host fronts a cluster asks its `scheduler` (`slurm`, `pbs`, `auto`, or `none` to
     run on the host itself) for a node: `partition`, `walltime` (`HH:MM:SS`), `cpus`, `mem` (`16G`),
-    `gpus` (`1`, `a100:2`) and `account` say what to ask for. Any other scheduler setting goes in
+    `gpus` (`1`, `a100:2`) and `account` say what to ask for; `mem="default"` sends no memory request,
+    so the queue's own default applies. On SLURM, `submit` is how the node is asked for: `sbatch`
+    (the default) or `salloc`, which an interactive QOS requires. Any other scheduler setting goes in
     `options`, as `key=value` entries separated by `;` (`options="constraint=gpu; qos=debug"`); a
     bare key is a switch (`exclusive`), and each is spelled for the region's scheduler when the node
     is requested. Passing `options` replaces the region's whole set. `prologue` is shell run on the
@@ -1258,10 +1286,14 @@ function create_tools(GateTool::Type)
                     threads::String = "", sysimage::String = "", curve::String = "", peer::String = "",
                     scheduler::String = "", partition::String = "", walltime::String = "",
                     cpus::String = "", mem::String = "", gpus::String = "", account::String = "",
-                    options::String = "", prologue::String = "",
+                    submit::String = "", options::String = "", prologue::String = "",
                     idle_release::String = "", idle_warn::String = "", liveness_grace::String = "",
-                    clear::String = "", delete::Bool = false)::String
+                    machine::String = "", clear::String = "", delete::String = "")::String
         nm = strip(name); isempty(nm) && return "Give a region name."
+        # A string like every other argument here: the gate pairs keyword types by position.
+        delete = lowercase(strip(delete)) in ("true", "1", "yes")
+        (isempty(strip(machine)) || ReportEngine.cluster_get(strip(machine)) !== nothing) ||
+            return "⛔ no machine '$(strip(machine))' — `machine(action=\"list\")` shows them"
         if delete
             ReportEngine.region_get(nm) === nothing && return "No region '$nm' to delete."
             ReportEngine.region_remove!(nm)   # reaps this region's workers, then drops the record
@@ -1278,7 +1310,7 @@ function create_tools(GateTool::Type)
         for (k, v) in ((:host, host), (:data_root, data_root), (:cache_root, cache_root),
                        (:threads, threads), (:peer, peer), (:partition, partition),
                        (:walltime, walltime), (:mem, mem), (:gpus, gpus), (:account, account),
-                       (:prologue, prologue))
+                       (:prologue, prologue), (:machine, machine))
             given(v) && (kw[k] = String(strip(v)))
         end
         SW = ReportEngine.Sweep
@@ -1324,6 +1356,11 @@ function create_tools(GateTool::Type)
             sc in (:none, :auto, :slurm, :pbs) || return "⛔ scheduler must be none, auto, slurm or pbs, not '$scheduler'"
             kw[:scheduler] = sc
         end
+        if given(submit)
+            sb = lowercase(strip(submit))
+            sb in ("sbatch", "salloc") || return "⛔ submit must be sbatch or salloc, not '$submit'"
+            kw[:submit] = sb
+        end
         if given(preload)
             pl = strip(preload)
             isdir(expanduser(pl)) || return "preload project dir not found: $pl"
@@ -1337,6 +1374,7 @@ function create_tools(GateTool::Type)
                        isempty(r.walltime) ? "" : " walltime=$(r.walltime)",
                        isempty(r.gpus) ? "" : " gpus=$(r.gpus)",
                        isempty(r.account) ? "" : " account=$(r.account)",
+                       isempty(r.submit) ? "" : " submit=$(r.submit)",
                        isempty(r.options) ? "" :
                            " options=" * join((isempty(v) ? k : "$k=$v" for (k, v) in sort!(collect(r.options))), "; "))) *
                (isempty(r.prologue) ? "" : ", prologue set") *
@@ -1402,6 +1440,42 @@ function create_tools(GateTool::Type)
         ref = lowercase(strip(refresh)) in ("1", "true", "yes", "on")
         try; return ReportEngine.peer_plan(names; refresh = ref)
         catch e; return "❌ peer_plan failed: " * first(sprint(showerror, e), 200); end
+    end
+
+    """
+        prune_envs(; apply = "0", unmatched = "0", roots = "") -> String
+
+    Notebooks' own package environments (under ~/.julia/environments/kaimonslate) that no notebook
+    needs any more: those whose notebook is gone, and those holding only an empty Project.toml, which
+    opening the notebook recreates. An environment with no record of its notebook is matched against
+    the notebooks under `roots` (comma-separated directories, default your home) and kept when found;
+    one that matches none is reported, and removed only with `unmatched="1"`. An environment holding
+    anything besides environment files (a project-less notebook's assets) is always kept. Reports what
+    it would do; `apply="1"` removes. Run `Pkg.gc()` afterwards to free the package versions only
+    those environments used.
+    """
+    function prune_envs(; apply::String = "0", unmatched::String = "0", roots::String = "")::String
+        yes(x) = lowercase(strip(x)) in ("1", "true", "yes", "on")
+        rs = String[expanduser(strip(r)) for r in split(roots, ',') if !isempty(strip(r))]
+        rows = ReportEngine.prune_notebook_envs(; apply = yes(apply), unmatched = yes(unmatched),
+                                                  roots = isempty(rs) ? [homedir()] : rs)
+        isempty(rows) && return "No notebook environments under $(ReportEngine.notebook_envs_root())."
+        hum(b) = b < 2^20 ? "$(round(b / 1024; digits = 1)) KB" : "$(round(b / 2^20; digits = 1)) MB"
+        io = IOBuffer()
+        println(io, (yes(apply) ? "Pruned " : "Would prune ") * ReportEngine.notebook_envs_root())
+        for v in (:remove, :unmatched, :keep)
+            g = [r for r in rows if r.verdict === v]
+            isempty(g) && continue
+            println(io, "  ", v === :remove ? (yes(apply) ? "removed" : "remove") : String(v), ": ",
+                    length(g), " (", hum(sum(r.bytes for r in g)), ")")
+            v === :keep && continue
+            reasons = Dict{String,Int}()
+            for r in g; k = String(first(split(r.why, ':'))); reasons[k] = get(reasons, k, 0) + 1; end
+            for (k, n) in sort!(collect(reasons); by = last, rev = true); println(io, "    $n × $k"); end
+            v === :unmatched && println(io, "    ", join(first(basename.(getfield.(g, :dir)), 12), ", "),
+                                        length(g) > 12 ? ", …" : "")
+        end
+        return String(take!(io))
     end
 
     """
@@ -2184,7 +2258,119 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region_prepare(name; action="start", node="", project="", id="") -> String
+        machine(; name="", action="list", project="") -> String
+
+    Machines: where regions run their workers and job cells send their sweeps. A machine is an
+    entry in the compute registry (the Remotes → Machines form; `cluster=<name>` in a job cell),
+    holding its login host, scheduler, account, the Julia to use (blank = juliaup at the hub's
+    version), the depot (blank = automatic: the site's scratch when preparing finds one) and a
+    prologue. A region names one with `region(…; machine=…)`.
+
+    `action="set"` creates or updates one from the arguments given (`host`, `kind` = slurm | pbs |
+    exec, `account`, `root_remote` (its batch store, on scratch), `depot`, `julia`, `prologue`, the
+    batch defaults `partition`, `walltime`, `cpus`, `mem`, `gpus`, `qos`, `directives` (scheduler
+    flags, one per line or `;`-separated), and `test_qos`); an empty argument leaves that field as it
+    is. `action="delete"` removes it.
+
+    `action="list"` lists them; `"show"` gives one with what preparing found on its host (Julia,
+    depot, the site's module fix, staleness) and the project environments that passed a test task
+    there. `"prepare"` runs the machine's own steps (sign in, Julia, read the site, settle the depot)
+    in the background. `"prepare_batch"` does that, then builds `project`'s task environment on the
+    machine and runs ONE test task through the scheduler (precompile, load, CUDA check) — a sweep
+    whose environment has not passed this does not submit. `"status"` reports a running prepare, or
+    the last one. Progress for either is kept like a region's: `region_prepare(name="machine_<m>"
+    or "batch_<m>", action="history")`.
+    """
+    function machine(; name::String = "", action::String = "list", project::String = "",
+                     host::String = "", kind::String = "", account::String = "", root_remote::String = "",
+                     depot::String = "", julia::String = "", prologue::String = "", partition::String = "",
+                     walltime::String = "", cpus::String = "", mem::String = "", gpus::String = "",
+                     qos::String = "", directives::String = "", test_qos::String = "")::String
+        a = strip(action); n = strip(name)
+        if a == "set"
+            isempty(n) && return "Give the machine's name."
+            cur = something(ReportEngine.cluster_get(n), Dict{String,Any}())
+            d = Dict{String,Any}(String(k) => v for (k, v) in cur)
+            d["name"] = n
+            for (k, v) in ("host" => host, "kind" => kind, "account" => account, "root_remote" => root_remote,
+                           "depot" => depot, "julia" => julia, "prologue" => prologue, "partition" => partition,
+                           "walltime" => walltime, "cpus" => cpus, "mem" => mem, "gpus" => gpus, "qos" => qos,
+                           "directives" => replace(directives, r"\s*;\s*" => "\n"), "test_qos" => test_qos)
+                isempty(strip(v)) || (d[k] = String(strip(v)))
+            end
+            haskey(d, "kind") || (d["kind"] = "slurm")
+            try
+                ReportEngine.cluster_set!(d)
+            catch e
+                return "⛔ " * sprint(showerror, e)
+            end
+            return "✓ machine '$n' saved.\n" * machine(; name = String(n), action = "show")
+        elseif a == "delete"
+            ReportEngine.cluster_get(n) === nothing && return "No machine '$n'."
+            ReportEngine.cluster_delete!(n)
+            return "🗑️ machine '$n' deleted (its store and environments on the host are untouched)."
+        end
+        if a == "list"
+            ms = ReportEngine.clusters_all()
+            isempty(ms) && return "No machines defined."
+            io = IOBuffer()
+            for d in ms
+                m = ReportEngine.machine_from(d)
+                println(io, "• $(m.name) → $(isempty(m.host) ? "this machine" : m.host) ($(m.kind))",
+                        isempty(m.host) ? "" : " · depot $(let x = ReportEngine.machine_depot(m); isempty(x) ? "~/.julia" : x end)")
+            end
+            return String(take!(io))
+        end
+        isempty(n) && return "Give the machine's name."
+        ReportEngine.cluster_get(n) === nothing && return "No machine '$n'. `machine(action=\"list\")` shows them."
+        if a == "show"
+            v = ReportEngine.machine_view(n)
+            site = v["site"]
+            io = IOBuffer()
+            println(io, "Machine '$n' on $(v["host"]) · depot $(isempty(v["depot"]) ? "~/.julia" : v["depot"])")
+            if isempty(site)
+                println(io, "  not prepared")
+            else
+                f = get(site, "facts", Dict())
+                println(io, "  prepared ", ReportEngine.Dates.format(ReportEngine.Dates.unix2datetime(Float64(get(site, "prepared_at", 0))), "yyyy-mm-dd HH:MM"), " UTC",
+                        isempty(get(site, "stale", "")) ? "" : " — STALE ($(site["stale"]))")
+                isempty(get(f, "julia", "")) || println(io, "  ", f["julia"])
+                isempty(get(site, "site_prologue", "")) || println(io, "  site prologue: ", site["site_prologue"])
+            end
+            for t in v["tests"]
+                println(io, "  tested $(get(t, "project", "")) on $(get(t, "node_type", "")) by $(get(t, "by", "")): ",
+                        "$(get(t, "status", "")), loads in $(get(t, "load_s", 0))s",
+                        get(t, "cuda", nothing) isa AbstractDict ? ", CUDA functional=$(t["cuda"]["functional"])" : "",
+                        get(t, "changed", false) === true ? " (packages changed since)" : "")
+            end
+            return String(take!(io))
+        elseif a == "prepare" || a == "prepare_batch"
+            batch = a == "prepare_batch"
+            batch && isempty(strip(project)) && return "prepare_batch needs `project` (a notebook or project folder)."
+            key = batch ? ReportEngine._batch_key(n) : ReportEngine._machine_key(n)
+            st = ReportEngine.preparing(key)
+            (st !== nothing && st["running"] === true) && return "Already preparing — `machine(name=\"$n\", action=\"status\"$(batch ? ", project=…" : ""))`."
+            Threads.@spawn try
+                batch ? ReportEngine.prepare_batch!(n; project = strip(project)) : ReportEngine.prepare_machine!(n)
+            catch e
+                ReportEngine.prepare_failed_to_start!(key, e)
+            end
+            return "Preparing '$n'$(batch ? " for $(strip(project))'s sweeps (one test task through the scheduler)" : "") in the background. " *
+                   "Follow it with machine(name=\"$n\", action=\"status\"$(batch ? ", project=\"…\"" : "")) or region_prepare(name=\"$key\", action=\"history\")."
+        elseif a == "status"
+            key = isempty(strip(project)) ? ReportEngine._machine_key(n) : ReportEngine._batch_key(n)
+            st = ReportEngine.preparing(key)
+            st === nothing && return "No prepare of '$n' has run on this hub since it started. History: region_prepare(name=\"$key\", action=\"history\")."
+            io = IOBuffer()
+            println(io, st["running"] === true ? "Preparing '$n':" : "Last prepare of '$n':")
+            ReportEngine._steps_text(io, st["steps"])
+            return String(take!(io))
+        end
+        return "Unknown action '$a': list, show, set, delete, prepare, prepare_batch or status."
+    end
+
+    """
+        region_prepare(name; action="start", node="", project="", id="", sysimage="") -> String
 
     Prepare region `name` for workers, outside any notebook: sign in, put Julia and the worker runtime
     in place, read the site (default modules, CUDA libraries on the path, CPU), create the data root,
@@ -2204,9 +2390,14 @@ function create_tools(GateTool::Type)
     empty). The node stage installs its environment there, loads every package with timing and checks
     CUDA, and the report is kept per project: a start for that project uses its load time for the
     liveness grace, and finds its environment already installed.
+
+    A region with `sysimage` on builds its workers' sysimage as a step of the prepare, after the
+    precompile and before the worker starts, on the node and in the machine's shell; it is skipped
+    when the image is current. `sysimage="rebuild"` builds it even then. The report gives the outcome
+    (built, current, deferred and why, failed), the image's size, and whether the worker booted from it.
     """
     function region_prepare(name::String; action::String = "start", node::String = "", project::String = "",
-                            id::String = "")::String
+                            id::String = "", sysimage::String = "")::String
         r = ReportEngine.region_get(strip(name))
         r === nothing && return "No region '$name'. `regions()` lists them."
         st = ReportEngine.preparing(r.name)
@@ -2252,8 +2443,18 @@ function create_tools(GateTool::Type)
         n === missing && return "⛔ node must be true or false, not '$node'"
         try; ReportEngine._reference_env(isempty(strip(project)) ? r.preload : project)
         catch e; return "⛔ project: " * sprint(showerror, e); end
+        si = lowercase(strip(sysimage))
+        si in ("", "rebuild") || return "⛔ sysimage must be \"rebuild\" or empty, not '$sysimage'"
+        # A project that is an open notebook gets the notebook's own prepare: the node is kept for its
+        # worker, which starts on it, and its waiting cells run.
+        nb = n === false ? nothing : NotebookServer._open_notebook_at(_HUB[], project)
+        if nb !== nothing
+            NotebookServer._prepare_for_notebook!(nb, r.name; rebuild_sysimage = si == "rebuild")
+            return "Preparing '$(r.name)' for the open notebook $(basename(nb.path)): its node is kept for " *
+                   "the notebook's worker. region_prepare(\"$(r.name)\", action=\"status\") to follow it."
+        end
         Threads.@spawn try
-            ReportEngine.prepare_region!(r.name; node = n, project = project)
+            ReportEngine.prepare_region!(r.name; node = n, project = project, rebuild_sysimage = si == "rebuild")
         catch e
             ReportEngine.prepare_failed_to_start!(r.name, e)
         end
@@ -2295,7 +2496,7 @@ function create_tools(GateTool::Type)
         if !isempty(parked)
             println(io, "Parked wires (live conns kept across close — reattach is ~0 network):")
             for p in parked
-                println(io, "  • $(p.label) → $(p.host):$(p.port)  (idle $(p.idle_s)s)")
+                println(io, "  • $(p.label) → $(p.host):$(p.port)  (idle $(round(Int, time() - p.since))s)")
             end
         end
         return String(take!(io))
@@ -2401,7 +2602,7 @@ function create_tools(GateTool::Type)
     api(; topic::String = "")::String = NotebookServer.slate_api_reference(topic)   # SSOT (also feeds the prompt)
 
     """
-        add_cell(notebook, source; after="", kind="code", id="", tags="", run=true, background=false) -> String
+        add_cell(notebook, source; after="", kind="code", id="", tags="", run=true, background=false, run_locked=false) -> String
 
     Append a cell containing `source`, RUN it, and return its result (value/output,
     or the error to fix). A cell that outruns a ~30s grace window is PROMOTED to a background job
@@ -2414,12 +2615,16 @@ function create_tools(GateTool::Type)
     setting for a cell that might be slow (auto-promotion covers that), and pairing it with a sleep
     defeats its whole purpose: if you have nothing to do during the run, you wanted the default. See
     `run` for the full rule. `after` = the id to insert after ("" = end of notebook).
-    `kind` = "code" or "md". `id` = an optional explicit cell id (a meaningful label like
+    `kind` = "code", "md", "web", or "job" (work that runs as a background job: a `@sweep` or a
+    campaign; a new job cell starts from a `@sweep` skeleton, and `tags="cluster=<name>"` names its
+    compute target, see `api("job cell")`). `id` = an optional explicit cell id (a meaningful label like
     "ground_state"); must be UNIQUE — errors if already in use — and is folded to header-safe
     characters (letters/digits/underscore). Omit it to auto-generate. `tags` = optional cell tags
     (comma/space-separated), both behaviour tags (`hidecode`, `collapsed`, `trace`, `nocache`, …)
     and free-form metadata. Add ONE cell at a time and read its result before the next — do not
     compose the whole notebook up front.
+
+    `run_locked=true` computes held locked cells upstream of the new cell, as for `run`.
 
     `run=false` lands the cell STALE without evaluating it. Default to leaving it alone: an added
     cell you haven't run is a cell you don't know works, and it returns no result to check. Reach
@@ -2431,10 +2636,10 @@ function create_tools(GateTool::Type)
     `slate.api` for the reference before plotting or adding interactivity; their names are not in
     package docs.
     """
-    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "", run::Bool = true, background::Bool = false)::String
+    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "", run::Bool = true, background::Bool = false, run_locked::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
         res = agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, run = run,
-                              background = background, caller = _caller())
+                              background = background, run_locked = run_locked, caller = _caller())
         return _surfaced(nb, "add_cell",
             Dict{String,Any}("source" => source, "after" => after, "kind" => kind, "id" => id, "tags" => tags, "run" => run), res)
     end
@@ -2453,7 +2658,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        edit_cell(notebook, cell, source; tags=nothing, run=true, background=false) -> String
+        edit_cell(notebook, cell, source; tags=nothing, run=true, background=false, run_locked=false) -> String
 
     Replace cell `cell`'s source, run it, and return its result. Use to fix a cell
     that errored, or to revise one in place. `tags` (optional, comma/space-separated) REPLACES the
@@ -2469,6 +2674,9 @@ function create_tools(GateTool::Type)
     that might be slow (auto-promotion covers that), and following it with a sleep defeats its purpose:
     if you have nothing to do meanwhile, you wanted the default. See `run` for the full rule.
 
+    `run_locked=true` computes the cell even if it is locked and unchanged, and the held locked cells
+    upstream of it, as for `run`.
+
     `run=false` writes the source and leaves the cell (and its dependents) STALE without running it.
     It is not a faster edit — it is an UNVERIFIED one: you get no result back, so you don't know the
     new source works, and the stale cells are yours to clear. Two cases want it: a BULK refactor
@@ -2483,20 +2691,26 @@ function create_tools(GateTool::Type)
                        # and the gate's arg coercion would have to turn an incoming "" into a
                        # `Union{Nothing,String}`. Taking it as Any and normalizing in the body keeps
                        # that off the dispatch boundary.
-                       tags = nothing, run::Bool = true, background::Bool = false)::String
+                       tags = nothing, run::Bool = true, background::Bool = false, run_locked::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
         t = tags === nothing ? nothing : String(tags)
         res = agent_edit_cell!(nb, cell, source; tags = t, run = run,
-                               background = background, caller = _caller())
+                               background = background, run_locked = run_locked, caller = _caller())
         return _surfaced(nb, "edit_cell",
             Dict{String,Any}("cell" => cell, "source" => source,
                              "tags" => something(t, ""), "run" => run), res)
     end
 
     """
-        run(notebook, cell; background=false) -> String
+        run(notebook, cell; background=false, run_locked=false) -> String
 
     Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
+
+    LOCKED CELLS compute only when run deliberately. `run` on a locked cell computes it, but a locked
+    cell UPSTREAM of it that has no stored result is held ("🔒 · ▶ to compute") and the cell waits on
+    it, as does a run of the whole notebook. `run_locked=true` says the run is deliberate: the held
+    locked cells it reaches (upstream of `cell`, or all of them for `cell=""`) compute too. Use it for
+    a planned sequence of expensive runs, not to clear a wait you did not expect.
 
     SLOW RUNS HANDLE THEMSELVES. A run that outruns a ~30s grace window is promoted to a background
     job automatically: you get a job id, collect the result with `check_eval(notebook, job)`, and it
@@ -2522,9 +2736,9 @@ function create_tools(GateTool::Type)
     `run=false` edits go through immediately. Collect with `check_eval` once you've genuinely run out
     of other work.
     """
-    function run_cell(notebook::String, cell::String; background::Bool = false)::String
+    function run_cell(notebook::String, cell::String; background::Bool = false, run_locked::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_run!(nb, cell; background = background, caller = _caller())
+        res = agent_run!(nb, cell; background = background, run_locked = run_locked, caller = _caller())
         return _surfaced(nb, "run", Dict{String,Any}("cell" => cell), res)
     end
 
@@ -3459,10 +3673,12 @@ function create_tools(GateTool::Type)
         GateTool("region", region),
         GateTool("regions", regions),
         GateTool("region_prepare", region_prepare),
+        GateTool("machine", machine),
         GateTool("peer_introduce", peer_introduce),
         GateTool("peer_teardown", peer_teardown),
         GateTool("peer_plan", peer_plan_tool),
         GateTool("transfers", transfers),
+        GateTool("prune_envs", prune_envs),
         GateTool("memo_trace", memo_trace),
         # Cell debugger. `dbg_start` and `spec_ask` can both block on a PERSON — one asking to take
         # a session, the other asking a question — so they get a person's budget, not a machine's.

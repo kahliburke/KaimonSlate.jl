@@ -48,6 +48,9 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "remotestore.jl"))
 # batch is the third, after the local filesystem fork and a remote store over ssh.
 Base.include(@__MODULE__, joinpath(@__DIR__, "envprep.jl"))
 
+# Putting a local project's environment on another machine: shared by a region's worker and by batch.
+Base.include(@__MODULE__, joinpath(@__DIR__, "envbuild.jl"))
+
 const P = parentmodule(@__MODULE__)
 const MemoStore = P.MemoStore
 const SlateTask = P.SlateTask
@@ -177,73 +180,71 @@ function provision_payload!(host::AbstractString, root_remote::AbstractString)
 end
 
 """
-    provision_remote_env!(host, root_remote, parent; julia = "julia", prologue = "") -> envdir
+    provision_remote_env!(host, root_remote, parent; setup = "", depot = "", online = nothing) -> envdir
 
-Ship `parent` to the cluster and instantiate a task environment from it. Idempotent: keyed by the
-parent's fingerprint, so an unchanged parent costs one `test -f` over ssh.
+Put `parent`'s environment on the cluster for its tasks and return where it is, as a compute node
+sees it. The local Manifest is reproduced exactly (`envbuild.jl`), so the tasks run the versions the
+notebook ran, and every package developed from a local checkout is shipped beside it. The build runs
+in the machine's shell `setup` (its julia, depot, module fix and prologue), with hours to finish.
 
-Returns the environment path as a COMPUTE NODE sees it.
+Idempotent: keyed by the parent's fingerprint and the depot, and stamped in the depot when there is
+one, so an unchanged parent costs one read and a cleared depot is rebuilt.
 """
 function provision_remote_env!(host::AbstractString, root_remote::AbstractString,
-                               parent::AbstractString; julia::AbstractString = "julia",
-                               prologue::AbstractString = "")
+                               parent::AbstractString; setup::AbstractString = "",
+                               depot::AbstractString = "", online = nothing, precompile::Bool = true)
     connected(host) || error(_offline(host))
     isempty(parent) && return joinpath(root_remote, "env")
     # Source-inclusive, for the same reason as `task_env!`: the cluster's copy is made once, so an
     # edit the fingerprint cannot see is an edit the compute nodes never get.
     fp = env_source_fingerprint(parent)
-    key = first(fp, 12)
+    key = first(fp, 12)                              # `env_key` names it the same way, for the sweep key
     envdir = "$(root_remote)/env/$(key)"
-    stamp = "$(envdir)/.slate-parent"
+    want = isempty(depot) ? fp : fp * " " * depot
+    stamp = isempty(depot) ? "$(envdir)/.slate-parent" : "$(rstrip(depot, '/'))/slate/envs/batch-$(key)"
+    ok, had = _ssh_run(host, "cat " * shq_path(stamp) * " 2>/dev/null; true")
+    (ok && strip(had) == want) && return envdir      # already built, in this depot
 
-    ok, _ = _ssh_run(host, "test -f $(stamp) && grep -qx '$(fp)' $(stamp)")
-    ok && return envdir                              # already provisioned for this parent
+    # The project itself, Manifest included: its exact versions are what the notebook ran. Replaced
+    # rather than merged, so a source file deleted here does not linger over there and get loaded.
+    put_dir(host, rstrip(parent, '/'), envdir; delete = true, filter = true,
+            excludes = [".git", "*.cov"]) ||
+        error("could not copy $(parent) to $(host):$(envdir)")
 
-    pname = try
-        pt = Pkg.TOML.parsefile(joinpath(parent, "Project.toml"))
-        (haskey(pt, "name") && haskey(pt, "uuid")) ? String(pt["name"]) : ""
-    catch
-        ""
+    # Packages developed from a local checkout, which no registry on the cluster can supply: each is
+    # sent to `devsrc/<name>` and the environment's paths are pointed at the copy. Their sources are in
+    # the fingerprint, so an edit to one builds again.
+    devs = Dict{String,String}(env_path_deps(parent))
+    mf = parent_manifest(parent)
+    for (name, dir) in dev_deps(mf, isempty(mf) ? parent : dirname(abspath(mf)))
+        rstrip(normpath(abspath(dir)), '/') == rstrip(normpath(abspath(parent)), '/') && continue
+        haskey(devs, name) || (devs[name] = dir)
     end
-    remote_pkg = "$(root_remote)/pkg/$(basename(rstrip(parent, '/')))"
-
-    ok, out = _ssh_run(host, "mkdir -p $(remote_pkg) $(envdir)")
-    ok || error("could not create $(remote_pkg) on $(host): $(strip(out))")
-
-    # The project itself. Replaced rather than merged, so a source file deleted here does not linger
-    # over there and get loaded. Manifest.toml is excluded: the cluster resolves its own.
-    put_dir(host, rstrip(parent, '/'), remote_pkg;
-            delete = true, excludes = [".git", "Manifest.toml"]) ||
-        error("could not copy $(parent) to $(host):$(remote_pkg)")
-
-    pre = isempty(prologue) ? "" : prologue * "\n"
-    dev = isempty(pname) ? "" : "Pkg.develop(Pkg.PackageSpec(path=raw\"$(remote_pkg)\"));"
-    # The parent's deps become DIRECT deps of the task environment, not merely transitive ones.
-    #
-    # `develop` alone makes them reachable from the parent package's own code and nowhere else: a
-    # sweep body runs at top level IN this environment, and Julia resolves `using Foo` against the
-    # active project's direct deps. So a parent that lists a package precisely so the compute nodes
-    # have it — which is the whole reason a task-env package carries deps it never imports — got an
-    # environment where `using` it still failed. Loading by UUID happened to work, which is why the
-    # one package Slate loads that way (Arrow) masked this for as long as it did.
-    depnames = try
-        pt = Pkg.TOML.parsefile(joinpath(parent, "Project.toml"))
-        sort!(String[k for k in keys(get(pt, "deps", Dict{String,Any}()))])
-    catch
-        String[]
+    rewrites = Tuple{String,String}[]
+    for (name, dir) in sort!(collect(devs); by = first)
+        isdir(dir) || continue
+        rp = "$(root_remote)/devsrc/$(name)"
+        put_dir(host, dir, rp; delete = true, filter = true,
+                excludes = [".git", "test", "docs", "Manifest.toml", "*.cov"]) ||
+            error("could not copy $(dir) to $(host):$(rp)")
+        push!(rewrites, (name, rp))
     end
-    addl = isempty(depnames) ? "" :
-        "Pkg.add([" * join(("Pkg.PackageSpec(name=raw\"$(d)\")" for d in depnames), ", ") * "]);"
-    code = "using Pkg; Pkg.activate(raw\"$(envdir)\"); $dev $addl Pkg.instantiate(); Pkg.precompile()"
-    ok, out = _ssh_run(host, "$(pre)$(julia) --startup-file=no -e '$(code)' && " *
-                             "printf '%s' '$(fp)' > $(stamp)")
-    ok || error("could not instantiate the task environment on $(host):\n$(strip(out))")
+    rel(p) = startswith(p, "~/") ? p[3:end] : p      # `devpaths_script` resolves against the home dir
+    rw = [(n, rel(r)) for (n, r) in rewrites]
+    code = devpaths_script(rel(envdir), rw) * devsources_script(String[r for (_, r) in rw], rw) *
+           "\nimport Pkg\n" * (precompile ? "" : "ENV[\"JULIA_PKG_PRECOMPILE_AUTO\"] = \"0\"\n") *
+           "Pkg.activate(joinpath(homedir(), raw\"$(rel(envdir))\"))\nPkg.instantiate()\n" *
+           (precompile ? "Pkg.precompile()\n" : "")
+    ok, out = run_julia_there(host, code; setup, what = "the task environment", online)
+    ok || error("could not instantiate the task environment on $(host):\n$(first(strip(out), 2000))")
+    put_file(String(host), Vector{UInt8}(codeunits(want)), stamp) ||
+        error("could not record the task environment on $(host)")
     return envdir
 end
 
 # ── Targets ──────────────────────────────────────────────────────────────────────────────────
 # A target says WHERE shards run and HOW the two sides see the store. Everything a notebook needs
-# to switch between a laptop and a cluster lives here, so the sweep cell itself never changes.
+# to switch between a laptop and a cluster lives here, so the job cell itself never changes.
 
 abstract type SweepTarget end
 
@@ -338,6 +339,15 @@ struct ClusterTarget <: SweepTarget
     # that produced them. Empty follows the site's own umask, which is routinely world-readable.
     mode::String
     probe::Int          # chunks released before any unit has finished (`@sweep(probe=)`)
+    # The machine's shell (the hub's `machine_setup`): julia on PATH, the depot, the site's module fix,
+    # the machine's prologue. Every Julia started for this target, building or running, starts in it.
+    setup::String
+    depot::String       # the machine's depot ("" = the host's default); the env stamp lives in it
+    # The environments ready on this machine's nodes (`env_key`), comma separated: the ones the hub's
+    # `env_readiness` clears, whether a region's prepare or a test task loaded them. A sweep whose
+    # environment is not among them does not submit.
+    tested::String
+    machine::String     # the machine's name, for the card's Prepare button
 end
 #
 # A target DESCRIBES a cluster; it does not reach one. `parent` and an empty `project`/`payload` mean
@@ -351,13 +361,18 @@ function ClusterTarget(host = ""; kind = :slurm, root = "", root_remote = root, 
                        parent = "", project = nothing,
                        resources = (; cpus = 1, mem = "2G", walltime = "01:00:00", partition = ""),
                        chunk = 16, account = "", qos = "", prologue = "", directives = "",
-                       julia = "julia", procs = 0, mode = "0700", probe = 1)
+                       julia = "julia", procs = 0, mode = "0700", probe = 1, setup = "", depot = "",
+                       tested = "", machine = "")
     ClusterTarget(Symbol(kind), String(host), String(root), String(root_remote),
                   project === nothing ? "" : String(project), String(payload),
                   resources, Int(chunk), String(account), String(qos), String(prologue),
                   String(directives), String(parent), String(julia), Int(procs), String(mode),
-                  Int(probe))
+                  Int(probe), String(setup), String(depot), String(tested), String(machine))
 end
+
+# `t` with the named fields replaced.
+_with(t::ClusterTarget; kw...) =
+    ClusterTarget((haskey(kw, f) ? kw[f] : getfield(t, f) for f in fieldnames(ClusterTarget))...)
 
 "A `ClusterTarget` on SLURM. The spelling notebooks and the docs use."
 SlurmTarget(host = ""; kw...) = ClusterTarget(host; kind = :slurm, kw...)
@@ -375,16 +390,25 @@ minutes on a cold cluster, and an authenticated connection either way. Reconcili
 its card and opening the notebook it lives in all have to work without any of that.
 """
 provision!(t::LocalTarget) = t
+
+# The shell a target's Julia starts in, as a prefix for one command: the machine's setup when the hub
+# resolved one, else the target's own prologue (a target built outside the hub, or by hand).
+_prefix(t::ClusterTarget) = !isempty(t.setup) ? t.setup :
+                            isempty(strip(t.prologue)) ? "" : "{ " * strip(t.prologue) * " ; } && "
+# …and as a line of its own, for a script that runs it before its commands.
+_as_line(prefix::AbstractString) = endswith(prefix, "&& ") ? prefix * "true" : rstrip(prefix, [' ', ';'])
+
 function provision!(t::ClusterTarget)
-    proj = isempty(t.project) ?
-        provision_remote_env!(t.host, t.root_remote, t.parent;
-                              julia = t.julia, prologue = t.prologue) : t.project
+    # A target the hub resolved runs in the environment a region's worker uses for the same project
+    # (`shared_env`): built and tested by whatever prepared it, never a second copy. A sweep goes
+    # out only once that has happened (`_untested`), so there is nothing to build here.
+    proj = !isempty(t.project) ? t.project :
+           !isempty(t.setup) ? "\$HOME/" * shared_env(t.parent) :
+           provision_remote_env!(t.host, t.root_remote, t.parent; setup = _prefix(t), depot = t.depot)
     # The runner is Slate's own code and its location on the cluster is Slate's business, so it is
     # shipped rather than configured. Naming one is still allowed, for a site that stages it itself.
     pay = isempty(t.payload) ? provision_payload!(t.host, t.root_remote) : t.payload
-    return ClusterTarget(t.kind, t.host, t.root, t.root_remote, proj, pay, t.resources, t.chunk,
-                         t.account, t.qos, t.prologue, t.directives, t.parent, t.julia, t.procs,
-                         t.mode, t.probe)
+    return _with(t; project = proj, payload = pay)
 end
 
 # Resources belong to the TARGET (a site's account, its partitions) but walltime, memory and cores
@@ -393,13 +417,11 @@ end
 with_resources(t::LocalTarget, res) = t          # nothing to schedule locally
 with_resources(t::ClusterTarget, res) =
     res === nothing ? t :
-    ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload,
-                  merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue, t.directives,
-                  t.parent, t.julia, t.procs, t.mode, t.probe)
+    _with(t; resources = merge(t.resources, res))
 
-# The scheduler settings a `#%% sweep` cell may carry on its header (engine.jl `cell_attrs`), e.g.
+# The scheduler settings a `#%% job` cell may carry on its header (engine.jl `cell_attrs`), e.g.
 #
-#     #%% sweep id=scan walltime=02:00:00 partition=gpu mem=16G
+#     #%% job id=scan walltime=02:00:00 partition=gpu mem=16G
 #
 # These are the numbers you change WHILE a job is queued or after it was killed. Keeping them off
 # the Julia source means adjusting one does not edit code — and because resources are deliberately
@@ -485,7 +507,7 @@ sched_options() = [(; key = String(k), flag = BatchLauncher.sbatch_flag(k),
 
 # ── Named compute targets ────────────────────────────────────────────────────────────────────
 # A cluster is defined ONCE for the notebook (engine.jl's `Slate.clusters` footer, edited from the
-# ⎈ on a sweep cell) and referenced by name: `#%% sweep cluster=hpc`. Three cells that run on the
+# ⎈ on a job cell) and referenced by name: `#%% job cluster=hpc`. Three cells that run on the
 # same partition then say so once, and changing where the work goes is one edit rather than three.
 #
 # `kind` selects the backend. SLURM is the one that is real today; `local` runs the same cells with
@@ -496,7 +518,7 @@ sched_options() = [(; key = String(k), flag = BatchLauncher.sbatch_flag(k),
     cluster(spec) -> SweepTarget
 
 Build a target from a notebook cluster definition (a flat `Dict` of strings). Called for you when a
-sweep cell names one with `cluster=`; call it directly only to inspect what a definition resolves to.
+job cell names one with `cluster=`; call it directly only to inspect what a definition resolves to.
 """
 function cluster(spec::AbstractDict)
     a = cluster_args(spec)
@@ -506,7 +528,7 @@ function cluster(spec::AbstractDict)
         return LocalTarget(; a.root, a.parent, a.chunk, a.procs)
     return ClusterTarget(a.host; kind = Symbol(a.kind), a.root, a.root_remote, a.parent, a.payload,
                          a.chunk, a.account, a.qos, a.prologue, a.directives, a.resources, a.procs,
-                         a.mode)
+                         a.mode, a.setup, a.depot, a.tested, machine = a.name)
 end
 
 """
@@ -564,10 +586,13 @@ function cluster_args(spec::AbstractDict)
               root_remote = isempty(root_remote) ? root : root_remote,
               host, account = get_("account"), qos = get_("qos"),
               prologue = get_("prologue"), directives = get_("directives"),
+              # Resolved by the hub from the machine and what preparing it found (`machine_setup`),
+              # and added to the entry it hands a cell, since a worker has no registry of its own.
+              setup = get_("_setup"), depot = get_("_depot"), tested = get_("_tested"),
               resources = res === nothing ? NamedTuple() : res)
 end
 
-# Resolve the target a sweep cell asked for: an explicit one written in the cell wins, else the
+# Resolve the target a job cell asked for: an explicit one written in the cell wins, else the
 # `cluster=` named on its header, else nothing to run on — which is worth an error naming the
 # targets that ARE defined, because the usual cause is a typo, a rename, or opening a notebook on a
 # machine that has never been told what `hpc` means. The name is the notebook's; what it resolves to
@@ -688,15 +713,12 @@ sweep_policy(t::SweepTarget) = BatchSweep.FailurePolicy(; probe_chunks = t.probe
 with_probe(t::LocalTarget, n) = n === nothing ? t :
     LocalTarget(t.root, t.project, t.payload, t.chunk, t.procs, n)
 with_probe(t::ClusterTarget, n) = n === nothing ? t :
-    ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload, t.resources, t.chunk,
-                  t.account, t.qos, t.prologue, t.directives, t.parent, t.julia, t.procs, t.mode, n)
+    _with(t; probe = n)
 
 with_chunk(t::LocalTarget, n) = n === nothing ? t :
     LocalTarget(t.root, t.project, t.payload, n, t.procs, t.probe)
 with_chunk(t::ClusterTarget, n) = n === nothing ? t :
-    ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload,
-                  t.resources, n, t.account, t.qos, t.prologue, t.directives, t.parent, t.julia,
-                  t.procs, t.mode, t.probe)
+    _with(t; chunk = n)
 
 "The host a target authenticates to; empty for one that runs here."
 target_host(::LocalTarget) = ""
@@ -750,7 +772,7 @@ function specfn_for(t::ClusterTarget)
         p = ready[] === nothing ? (ready[] = provision!(t)) : ready[]
         BatchLauncher.JobSpec(name, cs; root = p.root_remote, project = p.project,
                               payload = p.payload, resources = p.resources,
-                              prologue = p.prologue, directives = p.directives,
+                              prologue = _as_line(_prefix(p)), directives = p.directives,
                               umask = store_umask(p))
     end
 end
@@ -1206,7 +1228,7 @@ function cluster_status(name::AbstractString = "";
     nm = String(name)
     if isempty(nm)
         length(clusters) == 1 || error("name a cluster: " *
-            (isempty(clusters) ? "this notebook defines none (⎈ on a sweep cell)" :
+            (isempty(clusters) ? "this notebook defines none (⎈ on a job cell)" :
              join(sort(collect(keys(clusters))), ", ")))
         nm = first(keys(clusters))
     end
@@ -1431,7 +1453,8 @@ one `readdir` per cluster per tick and never touches the network.
 """
 # The cluster registry and the remote log live in the hub's module. Looked up at call time because
 # this file also loads on a worker, which has neither.
-_hub_clusters() = isdefined(P, :clusters_all) ? P.clusters_all() : Dict{String,Any}[]
+_hub_clusters() = isdefined(P, :clusters_resolved) ? P.clusters_resolved() :
+                  isdefined(P, :clusters_all) ? P.clusters_all() : Dict{String,Any}[]
 _hub_log(msg::AbstractString) = (isdefined(P, :_rlog) && P._rlog(msg); nothing)
 
 function advance_started!(; every::Real = 30.0)
@@ -1462,6 +1485,13 @@ function advance_started!(; every::Real = 30.0)
                 _hub_log("supervisor: $(name)/$(run) has no descriptor — dropped its started marker")
                 continue
             end
+            # Submitted, but its environment has never run on these nodes: testing it is part of
+            # running it, so the hub starts the test, and the next pass submits once it has passed.
+            tr = _as_run(t, run)
+            if _untested(tr)
+                isdefined(P, :auto_prepare_batch!) && P.auto_prepare_batch!(name, tr.parent, tr.resources)
+                continue
+            end
             try
                 p = reconcile_and_sync!(t, run, l; submit = true, failure_policy = sweep_policy(t))
                 BatchSweep.is_settled(p) || (n += 1)
@@ -1472,6 +1502,36 @@ function advance_started!(; every::Real = 30.0)
     end
     return n
 end
+
+# A run as its cell wrote it, whichever process is submitting (the notebook's worker for the first
+# wave, the hub's supervisor for the rest): the project its task environment is built from, and the
+# resources the cell asked for. The registry knows neither.
+function _as_run(t::ClusterTarget, run::AbstractString)
+    m = try; MemoStore.read_manifest(store_root(t), run); catch; nothing; end
+    m === nothing && return t
+    p = String(get(m, "parent", ""))
+    (isempty(p) || p == t.parent || !isdir(p)) || (t = _with(t; parent = p))
+    r = get(m, "resources", nothing)
+    if r isa AbstractDict && !isempty(r)
+        t = _with(t; resources = merge(t.resources, NamedTuple(Symbol(k) => String(v) for (k, v) in r)))
+    end
+    return t
+end
+_as_run(t::SweepTarget, ::AbstractString) = t
+
+# The name a tested environment is recorded under: the project (the same key a region's prepare uses)
+# and the kind of node it ran on. A run on another partition or constraint lands on other nodes, which
+# is the difference that calls for testing again; a different count or walltime is not.
+env_key(project, nodetype) = proj_key(project) * "|" * nodetype
+env_test_key(t::ClusterTarget) = env_key(t.parent,
+    node_type(string(get(t.resources, :partition, "")), string(get(t.resources, :constraint, ""))))
+node_type(partition::AbstractString, constraint::AbstractString) =
+    lowercase(strip(partition)) * "/" * lowercase(strip(constraint))
+
+# Whether `t`'s environment still has to pass a test task before an array goes out. Only a target the
+# hub resolved knows what has been tested (`setup` is set by it); one built by hand runs as it is.
+_untested(t::ClusterTarget) = !isempty(t.setup) && !(env_test_key(t) in split(t.tested, ','; keepempty = false))
+_untested(::SweepTarget) = false
 
 # Runs whose descriptors this process has sent. The cell pushes them, but a cluster that wants a
 # sign-in is unreachable until someone signs in, and that is usually AFTER the cell has run: the
@@ -1499,6 +1559,10 @@ function reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher;
     # taken on a reader's behalf a moment ago could miss a chunk that has since landed, and the
     # decision this makes is the one that must not be taken twice.
     submit && sync_in!(target; force = true)
+    target = _as_run(target, run)
+    # An environment never tested on this machine's nodes is not sent to them as an array: the card
+    # offers Prepare, which runs one task first (`_untested`).
+    submit && _untested(target) && (submit = false)
     if submit && !_ensure_descriptors!(target, run)
         error("could not send sweep $(run)'s descriptors to " *
               "$(target_host(target)):$(job_root(target)) — nothing was submitted")
@@ -2694,9 +2758,16 @@ end
 # A row that FAILED carries its message and traceback in `value` — the same slot, because a unit
 # produced one thing or the other and `status` already says which. There is deliberately no second
 # `error` field to check: a reader that forgot it would silently treat a failure as an empty result.
+#
+# Only the chunks holding these keys are parsed (the fold knows which), so reading a round costs its
+# own units wherever they landed, however large the rest of the store has grown.
 function _rows(root, params, keys, run, src = LocalSource(root))
     rows = NamedTuple[]
-    have = store_rows(root)
+    have = Dict{String,Any}()
+    evs = SlateTask.events_by_chunk(root)
+    for c in BatchSweep.chunks_holding(root, keys)
+        merge!(have, SlateTask.rows_of(root, get(evs, c, String[])))
+    end
     for (prm, k) in zip(params, keys)
         m = get(have, k, nothing)
         if m === nothing
@@ -2790,7 +2861,7 @@ a handle on the results themselves before it can decide whether a cached answer 
 
 Built from ROWS the caller already has, never by re-reading the store. A sweep of a few thousand
 units is a few thousand manifests, and every caller here has just parsed them for its own purposes;
-parsing them again to compute this would double what running a sweep cell costs.
+parsing them again to compute this would double what running a job cell costs.
 
 Content, not counts. A retry that turns one failure into a success moves it, and so does one that
 replaces a result with different bytes at the same tally — which counting could not see.
@@ -2839,7 +2910,7 @@ function load(r::ShardedResult; max_bytes::Integer = 512 * 1024^2, limit::Intege
     return [row.value isa ShardRef ? row.value[] : row.value for row in ok]
 end
 
-"Clear the failed shards so the next run of the sweep cell retries exactly those."
+"Clear the failed shards so the next run of the job cell retries exactly those."
 function retry_failed!(r::ShardedResult)
     root = store_root(r.target)
     st = BatchSweep.fold(root).status          # status alone: no record is read to find a failure
@@ -2996,7 +3067,7 @@ function _forget_stale_runs(root::AbstractString, keep::AbstractString, cell::Ab
     isempty(cell) && return 0          # a run with no cell behind it is nobody's to collect
     n = 0
     # From the cell's own index, not a scan of the store: a store holds one manifest per UNIT, and
-    # this runs on every execution of a sweep cell.
+    # this runs on every execution of a job cell.
     for sw in BatchSweep.cell_runs(root, cell)
         sw == keep && continue
         try
@@ -3240,6 +3311,63 @@ const LOG_SLICE_MAX = 1 << 22        # 4 MB per window
 const LOG_HITS_MAX = 5000
 _opt_span(opts, key::Symbol, default::Int, cap::Int) =
     clamp(_opt_int(opts, key, default), -cap, cap)
+"""
+    log_reads(launcher, path, action, opts) -> Dict or nothing
+
+The log viewer's reads of one file through `launcher`, each as the viewer takes it: `log_stat`
+(size and mtime, what a live view polls), `log_slice` (a byte window of whole lines) and
+`log_search` (every matching line of the whole file). `nothing` for any other action. Shared by a
+sweep's job output and a worker's log, so the viewer reads both the same way.
+"""
+function log_reads(l, path::AbstractString, action::AbstractString, opts)
+    if action == "log_stat"
+        st = BatchLauncher.log_stat(l, path)
+        return Dict{String,Any}("bytes" => st.bytes, "modified" => st.modified)
+    elseif action == "log_slice"
+        s = BatchLauncher.log_slice(l, path; offset = _opt_span(opts, :offset, -(1 << 16), typemax(Int) >> 1),
+                                             nbytes = _opt_span(opts, :nbytes, 1 << 16, LOG_SLICE_MAX))
+        return Dict{String,Any}("text" => s.text, "from" => s.from, "to" => s.to, "size" => s.size)
+    elseif action == "log_search"
+        r = BatchLauncher.log_search(l, path, String(get(opts, :pattern, ""));
+                                     ignorecase = get(opts, :ignorecase, false) == true,
+                                     regex = get(opts, :regex, false) == true,
+                                     limit = clamp(_opt_int(opts, :limit, 1000), 0, LOG_HITS_MAX))
+        return Dict{String,Any}("total" => r.total, "capped" => r.capped,
+                                "hits" => [Dict{String,Any}("offset" => h.offset, "line" => h.line,
+                                                            "text" => h.text) for h in r.hits])
+    end
+    return nothing
+end
+
+"""
+    log_vocabulary() -> Dict
+
+What counts as an error or a warning in a log, and the shape of a log record, as the patterns the
+viewer applies. Sent rather than restated in JS, so the viewer and a sweep card colouring the same
+line cannot disagree about it.
+"""
+log_vocabulary() = Dict{String,Any}("declared" => _LOG_LEVEL_SRC,
+                                    "error" => [_LOG_BAD_SRC, _LOG_BAD_COUNT_SRC],
+                                    "warn" => [_LOG_WARN_SRC],
+                                    # Counting a whole file goes by DECLARED level when the file
+                                    # has any; the word lists are for output that has none.
+                                    "dwarn" => _LOG_DECL_WARN_SRC,
+                                    "derror" => _LOG_DECL_BAD_SRC,
+                                    # …and the shape of a record, so it can be shown as one.
+                                    "head" => _LOG_HEAD_SRC, "field" => _LOG_FIELD_SRC,
+                                    "fcont" => _LOG_FCONT_SRC, "mcont" => _LOG_MCONT_SRC,
+                                    "tail" => _LOG_TAIL_SRC)
+
+"""
+    file_launcher(host) -> launcher
+
+A launcher that only reads files on `host` ("" for this machine) over its signed-in session, for
+`log_reads` on a file no sweep owns.
+"""
+file_launcher(host::AbstractString) =
+    isempty(host) ? BatchLauncher.ExecLauncher() :
+                    BatchLauncher.ExecLauncher(String(host); runner = (h, sc) -> run_there(h, sc))
+
 function handle_action(target::SweepTarget, run::AbstractString, params, keys,
                        action::AbstractString; plot = nothing, notify = nothing,
                        landed = nothing, arg::AbstractString = "", opts = (;))
@@ -3255,7 +3383,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     # is exactly the manual bookkeeping this fabric exists to remove.
     if action == "settled"
         # The result object is a SNAPSHOT: its counters come from the plan stored on it, and only a
-        # re-run of the sweep cell rebuilds that — which must not happen, or the sweep resubmits. So
+        # re-run of the job cell rebuilds that — which must not happen, or the sweep resubmits. So
         # a settle left `r.settled` reading false beside a card that said "finished, with failures",
         # and every counter with it. Re-read here, where the card has just established that they
         # changed, rather than on property access, where it would cost a manifest per shard.
@@ -3294,17 +3422,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
         # What counts as an error or a warning, sent rather than restated in JS — the viewer marks
         # the lines it is showing and the card colours the ones it renders, and the two disagreeing
         # about the same line is the bug this prevents.
-        out["logsev"] = Dict{String,Any}("declared" => _LOG_LEVEL_SRC,
-                                         "error" => [_LOG_BAD_SRC, _LOG_BAD_COUNT_SRC],
-                                         "warn" => [_LOG_WARN_SRC],
-                                         # Counting a whole file goes by DECLARED level when the
-                                         # file has any; the word lists are for output that has none.
-                                         "dwarn" => _LOG_DECL_WARN_SRC,
-                                         "derror" => _LOG_DECL_BAD_SRC,
-                                         # …and the shape of a record, so it can be shown as one.
-                                         "head" => _LOG_HEAD_SRC, "field" => _LOG_FIELD_SRC,
-                                         "fcont" => _LOG_FCONT_SRC, "mcont" => _LOG_MCONT_SRC,
-                                         "tail" => _LOG_TAIL_SRC)
+        out["logsev"] = log_vocabulary()
         return out
     end
     # What is behind one tile of the grid, asked for when a reader points at it. Per-unit detail is
@@ -3334,24 +3452,8 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     end
     # The three reads, each a bare reply rather than a status payload: a viewer polling a growing
     # file must not drag a manifest scan along behind every tick.
-    if action == "log_stat"
-        st = log_stat(target, run, arg)
-        return Dict{String,Any}("bytes" => st.bytes, "modified" => st.modified)
-    end
-    if action == "log_slice"
-        s = log_slice(target, run, arg; offset = _opt_span(opts, :offset, -(1 << 16), typemax(Int) >> 1),
-                                        nbytes = _opt_span(opts, :nbytes, 1 << 16, LOG_SLICE_MAX))
-        return Dict{String,Any}("text" => s.text, "from" => s.from, "to" => s.to, "size" => s.size)
-    end
-    if action == "log_search"
-        r = log_search(target, run, arg, String(get(opts, :pattern, ""));
-                       ignorecase = get(opts, :ignorecase, false) == true,
-                       regex = get(opts, :regex, false) == true,
-                       limit = clamp(_opt_int(opts, :limit, 1000), 0, LOG_HITS_MAX))
-        return Dict{String,Any}("total" => r.total, "capped" => r.capped,
-                                "hits" => [Dict{String,Any}("offset" => h.offset, "line" => h.line,
-                                                            "text" => h.text) for h in r.hits])
-    end
+    action in ("log_stat", "log_slice", "log_search") &&
+        return log_reads(launcher_for(target), _known_log(target, run, arg), action, opts)
     _with_store_lock(target) do
     if action == "submit"
         BatchSweep.start!(root, run)
@@ -3405,7 +3507,7 @@ end
 # character each. At a few thousand units that string is a few KB, which is cheap next to sending
 # structured rows for every unit.
 function status_payload(target::SweepTarget, run::AbstractString, params, keys;
-                        plot = nothing, advance::Bool = true)
+                        plot = nothing, advance::Bool = true, field::AbstractString = "")
     sync_in!(target)
     root = store_root(target)
     l = launcher_for(target)
@@ -3425,8 +3527,12 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
                                       failure_policy = sweep_policy(target)) :
                   BatchSweep.plan(root, run; launcher = l, job_state = js)
     t = BatchSweep.telemetry(root, run; launcher = l, plan = p)
-    _ds = display_state(p, started)
-    _w = _when_stamp(root, run, started)
+    jobs = run_jobs(target, run)
+    # Started, nothing with the scheduler, and an environment that has not passed its test: held
+    # while the hub tests it (`advance_started!`), which is not the same as queued.
+    held = started && isempty(jobs) && _untested(_as_run(target, run))
+    _ds = held ? :held : display_state(p, started)
+    _w = _when_stamp(root, run, started; submitted = !isempty(jobs))
     # Tile COLOURS, not per-unit statuses: the browser patches tiles by index, and computing the
     # colour here is what keeps the live grid identical to the one the cell rendered. It also keeps
     # the payload flat — a few hundred short strings whatever the sweep's size.
@@ -3473,6 +3579,11 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         # it to be discovered as a provisioning failure on the next Submit.
         "host" => target_host(target),
         "when" => _w.at, "when_kind" => _w.kind,
+        # Where each of its jobs stands with the scheduler, and the prepare a held run waits on.
+        "queue" => _queue_html(BatchLauncher.job_details(jobs)),
+        # Only while held: once a job is out, testing is over and the card says nothing about it.
+        "prepare" => held ? _prepare_key(target) : "",
+        "prepare_machine" => (held && target isa ClusterTarget) ? (isempty(target.machine) ? target.host : target.machine) : "",
         "signed_in" => connected(target_host(target)))
     # The data line grows as units land, so it rides the poll too. Off the indices, so a sweep
     # writing terabytes still costs manifest reads to watch.
@@ -3505,13 +3616,17 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # `nothing` here is an explicit null on the wire, which the card reads as "clear it".
     if plot !== false || p.shards_failed > 0
         rows = _rows(root, params, keys, run, source_of(target))
-        opt, err = plot === false ? (nothing, "") : _plot_option(plot, rows)
+        opt, err, fields, f = plot === false ? (nothing, "", String[], "") : _plot_option(plot, rows; field)
         out["chart"] = opt
         out["charterr"] = err
+        out["chartfields"] = fields
+        out["chartfield"] = f
         out["fails"] = _fails_html(rows)
     else
         out["chart"] = nothing
         out["charterr"] = ""
+        out["chartfields"] = String[]
+        out["chartfield"] = ""
         out["fails"] = ""
     end
     return out
@@ -3543,88 +3658,181 @@ const _AUTO_PLOT_MAX = 2000
 # single hue, low end 2.66:1.)
 const _AUTO_HEAT_COLORS = ["#1c5cab", "#2a78d6", "#5598e7", "#86b6ef", "#b7d3f6"]
 
-# The grid axes that are numeric AND actually vary, in grid order.
+# A grid axis that repeats the same experiment (a seed) is averaged over rather than drawn: the picture
+# is of the other axes, and the spread across seeds is noise to it. Recognised by name.
+const _REPLICATION_AXES = Set([:seed, :seeds, :rep, :reps, :replicate, :replication, :repeat,
+                               :trial, :trials, :run, :runs, :sample, :draw])
+# A text axis becomes a category axis up to this many distinct values; past it no chart is drawn.
+const _AUTO_CATEGORIES_MAX = 24
+
+# The grid axes that actually vary, in grid order: each drawn as `:numeric` or `:category`, or among
+# the replication axes averaged over. `nothing` when the grid has no common named shape.
 function _auto_axes(rows)
-    isempty(rows) && return Symbol[]
+    isempty(rows) && return nothing
     p1 = rows[1].params
-    p1 isa NamedTuple || return Symbol[]
-    found = Symbol[]
+    p1 isa NamedTuple || return nothing
+    drawn = Tuple{Symbol,Symbol}[]
+    reps = Symbol[]
     for k in keys(p1)
         vals = Any[]
         for r in rows
-            hasproperty(r.params, k) || return Symbol[]
+            hasproperty(r.params, k) || return nothing
             push!(vals, getproperty(r.params, k))
         end
-        all(v -> v isa Real, vals) || continue
-        length(unique(vals)) > 1 && push!(found, k)
+        n = length(unique(vals))
+        n > 1 || continue
+        if all(v -> v isa Real && !(v isa Bool), vals)
+            k in _REPLICATION_AXES ? push!(reps, k) : push!(drawn, (k, :numeric))
+        elseif all(v -> v isa Union{AbstractString,Symbol,Bool}, vals) && n <= _AUTO_CATEGORIES_MAX
+            push!(drawn, (k, :category))
+        else
+            return nothing
+        end
     end
-    return found
+    return (drawn, reps)
 end
 
-# The one numeric field to plot: a bare number is itself; a grouped record plots only when exactly
-# ONE of its fields is numeric, because with several, which one is the author's business.
-function _auto_field(landed)
-    all(r -> r.summary isa Real, landed) && return (true, nothing)
+# The numeric fields a unit's record offers, in its own order; `[nothing]` for a bare number.
+function _auto_fields(landed)
+    all(r -> r.summary isa Real && !(r.summary isa Bool), landed) && return Any[nothing]
     s1 = landed[1].summary
-    s1 isa NamedTuple || return (false, nothing)
-    nums = [k for k in keys(s1) if getproperty(s1, k) isa Real]
-    length(nums) == 1 || return (false, nothing)
-    f = nums[1]
-    all(r -> r.summary isa NamedTuple && hasproperty(r.summary, f) &&
-             getproperty(r.summary, f) isa Real, landed) || return (false, nothing)
-    return (true, f)
+    s1 isa NamedTuple || return Any[]
+    num(v) = v isa Real && !(v isa Bool)
+    return Any[k for k in keys(s1) if num(getproperty(s1, k)) &&
+               all(r -> r.summary isa NamedTuple && hasproperty(r.summary, k) && num(getproperty(r.summary, k)), landed)]
 end
 
-function _auto_plot(rows)
-    (isempty(rows) || length(rows) > _AUTO_PLOT_MAX) && return nothing
-    axes = _auto_axes(rows)
-    length(axes) in (1, 2) || return nothing
+"""
+    _auto_plot(rows; field = "") -> (option | nothing, fields, field)
+
+The chart a sweep's card draws without being asked. The grid's varying axes decide its shape: one
+numeric axis is a line, one text axis bars, a numeric and a text axis a line per category, two text
+axes grouped bars, two numeric axes a heatmap. An axis repeating the experiment (`seed`, `rep`, …) is
+averaged over, and the value axis says so. A unit returning a number plots it; one returning a named
+tuple plots one of its numeric fields, `field` or else the first whose values vary, and `fields` lists them all
+so the card can offer the choice. More than two axes left to draw, or a grid of no named shape, draws nothing.
+"""
+function _auto_plot(rows; field::AbstractString = "")
+    none = (nothing, String[], "")
+    (isempty(rows) || length(rows) > _AUTO_PLOT_MAX) && return none
+    ax = _auto_axes(rows)
+    ax === nothing && return none
+    drawn, reps = ax
+    length(drawn) in (1, 2) || return none
     landed = [r for r in rows if r.status == "ok"]
-    isempty(landed) && return nothing
-    okf, field = _auto_field(landed)
-    okf || return nothing
-    zof(r) = r.status != "ok" ? nothing :
-             field === nothing ? r.summary : getproperty(r.summary, field)
-    length(axes) == 2 && return _auto_heatmap(rows, axes, field, zof)
-    ax = axes[1]
-    yof = zof
-    # `nothing` for a unit that has not reported: the axis is then fixed from the first frame and the
-    # line breaks at the real gaps, so the picture only gains detail instead of changing shape.
-    return Dict{String,Any}(
-        "backgroundColor" => "transparent", "animation" => false,
-        # `containLabel` rather than fixed margins: this chart is drawn for values nobody has seen
-        # yet, so no hardcoded left inset can be right for both `0.5` and `200,000` — the wide one
-        # gets its first digit clipped. Axis NAMES sit in the middle of their axis for the same
-        # reason: at the end, a name runs off the edge of the plot area it labels.
-        # Same reason as the heatmap below: `containLabel` covers labels, not the axis name.
-        "grid"    => Dict("left" => 10, "right" => 18, "top" => 24, "bottom" => 26,
-                          "containLabel" => true),
-        "tooltip" => Dict("trigger" => "axis"),
-        "xAxis"   => Dict("type" => "value", "name" => String(ax),
-                          "nameLocation" => "middle", "nameGap" => 26),
-        "yAxis"   => Dict("type" => "value", "name" => field === nothing ? "" : String(field),
-                          "nameLocation" => "middle", "nameGap" => 52),
-        "series"  => [Dict("type" => "line", "showSymbol" => true, "symbolSize" => 4,
-                           "connectNulls" => false,
-                           "data" => [[getproperty(r.params, ax), yof(r)] for r in rows])])
+    isempty(landed) && return none
+    fields = _auto_fields(landed)
+    isempty(fields) && return none
+    names = String[f === nothing ? "" : String(f) for f in fields]
+    # The field asked for, or the first that varies across what has landed: a record's fields come
+    # back from the store in no particular order, and a constant field (a budget) makes a flat chart.
+    fval(x, r) = x === nothing ? r.summary : getproperty(r.summary, x)
+    varies(x) = length(unique(fval(x, r) for r in landed)) > 1
+    f = something(findfirst(==(field), names), findfirst(varies, fields), 1)
+    fsym = fields[f]
+    zof(r) = r.status != "ok" ? nothing : fsym === nothing ? r.summary : getproperty(r.summary, fsym)
+    label = (fsym === nothing ? "" : String(fsym)) *
+            (isempty(reps) ? "" : string(isempty(names[f]) ? "" : " ", "(mean over ", join(String.(reps), ", "), ")"))
+    fieldnames = fsym === nothing ? String[] : names
+    # One kind of chart for the grid as it is, unaveraged and with its holes, when a single numeric
+    # axis is all there is: the line keeps its full axis from the first frame and breaks at the gaps.
+    if length(drawn) == 1 && drawn[1][2] === :numeric && isempty(reps)
+        k = drawn[1][1]
+        return (_auto_line(Dict(k => [[getproperty(r.params, k), zof(r)] for r in rows]), String(k), label, false),
+                fieldnames, names[f])
+    end
+    # Otherwise the drawn axes' values, each with the mean of what has landed there.
+    groups = Dict{Tuple,Vector{Float64}}()
+    order = Tuple[]
+    for r in rows
+        key = Tuple(getproperty(r.params, a) for (a, _) in drawn)
+        haskey(groups, key) || (groups[key] = Float64[]; push!(order, key))
+        z = zof(r)
+        z === nothing || push!(groups[key], Float64(z))
+    end
+    mean_(v) = isempty(v) ? nothing : sum(v) / length(v)
+    vals(i) = unique([k[i] for k in order])
+    opt = if length(drawn) == 1
+        # One text axis: a bar a category.
+        a = drawn[1][1]
+        cats = vals(1)
+        _auto_bars(cats, [("", [mean_(groups[(c,)]) for c in cats])], String(a), label)
+    elseif drawn[1][2] === :numeric && drawn[2][2] === :numeric
+        _auto_heatmap([(k[1], k[2], mean_(groups[k])) for k in order], String(drawn[1][1]), String(drawn[2][1]), label)
+    elseif any(d -> d[2] === :numeric, drawn)
+        # A numeric and a text axis: a line a category, over the numeric one.
+        ni = drawn[1][2] === :numeric ? 1 : 2; ci = 3 - ni
+        xs = sort!(vals(ni))
+        series = Dict{Any,Any}()
+        for c in vals(ci)
+            series[string(c)] = [[x, mean_(get(groups, ni == 1 ? (x, c) : (c, x), Float64[]))] for x in xs]
+        end
+        _auto_line(series, String(drawn[ni][1]), label, true)
+    else
+        # Two text axes: grouped bars, the axis with more values along the bottom.
+        xi = length(vals(1)) >= length(vals(2)) ? 1 : 2; si = 3 - xi
+        xs = vals(xi)
+        _auto_bars(xs, [(string(g), [mean_(get(groups, xi == 1 ? (x, g) : (g, x), Float64[])) for x in xs]) for g in vals(si)],
+                   String(drawn[xi][1]), label)
+    end
+    return (opt, fieldnames, names[f])
 end
 
-# Two varying axes: the grid itself, coloured by the reported figure. Categorical axes over the
-# SORTED DISTINCT values of each, so the cells are evenly spaced however the axis is distributed —
-# a log-spaced sweep is the normal case and a value axis would crowd every point but the last into
-# one corner. A unit that has not reported contributes no cell, so the picture fills in rather than
-# changing shape, and the empty squares are where the work still is.
-function _auto_heatmap(rows, axes, field, zof)
-    xs = sort!(unique(Real[getproperty(r.params, axes[1]) for r in rows]))
-    ys = sort!(unique(Real[getproperty(r.params, axes[2]) for r in rows]))
+# `containLabel` rather than fixed margins: this chart is drawn for values nobody has seen yet, so no
+# hardcoded left inset can be right for both `0.5` and `200,000`. Axis names sit in the middle of their
+# axis for the same reason: at the end, a name runs off the edge of the plot area it labels.
+_auto_grid(legend::Bool) = Dict("left" => 10, "right" => 18, "top" => legend ? 52 : 34, "bottom" => 26, "containLabel" => true)
+# The value axis's name sits above the axis, left-aligned: beside it, it would need room past tick
+# labels whose width nobody knows before the values arrive, and `containLabel` does not reserve it.
+_auto_value_axis(name) = Dict("type" => "value", "name" => name, "nameLocation" => "end", "nameGap" => 12,
+                              "nameTextStyle" => Dict("align" => "left"))
+_auto_legend() = Dict("top" => 0, "type" => "scroll", "textStyle" => Dict("color" => "#9aa0b8"))
+
+# Lines over a numeric axis, one a key of `series` (a single unnamed one draws no legend). `nothing` for
+# a point that has not reported, so the axis is fixed from the first frame and the line breaks at gaps.
+function _auto_line(series::AbstractDict, xname, yname, legend::Bool)
+    names = sort!(collect(keys(series)); by = string)
+    out = Dict{String,Any}(
+        "backgroundColor" => "transparent", "animation" => false,
+        "grid"    => _auto_grid(legend),
+        "tooltip" => Dict("trigger" => "axis"),
+        "xAxis"   => Dict("type" => "value", "name" => xname, "nameLocation" => "middle", "nameGap" => 26, "scale" => true),
+        "yAxis"   => _auto_value_axis(yname),
+        "series"  => [Dict{String,Any}("type" => "line", "name" => string(n), "showSymbol" => true, "symbolSize" => 4,
+                                       "connectNulls" => false, "data" => series[n]) for n in names])
+    legend && (out["legend"] = _auto_legend())
+    return out
+end
+
+# Bars over categories: `series` is `[(name, values)]`, several of them grouped side by side.
+function _auto_bars(cats, series, xname, yname)
+    legend = length(series) > 1
+    out = Dict{String,Any}(
+        "backgroundColor" => "transparent", "animation" => false,
+        "grid"    => _auto_grid(legend),
+        "tooltip" => Dict("trigger" => "axis", "axisPointer" => Dict("type" => "shadow")),
+        "xAxis"   => Dict("type" => "category", "data" => [string(c) for c in cats], "name" => xname,
+                          "nameLocation" => "middle", "nameGap" => 26),
+        "yAxis"   => _auto_value_axis(yname),
+        "series"  => [Dict{String,Any}("type" => "bar", "name" => n, "data" => v) for (n, v) in series])
+    legend && (out["legend"] = _auto_legend())
+    return out
+end
+
+# Two numeric axes: the grid itself, coloured by the reported figure. Category axes over the SORTED
+# DISTINCT values of each, so the cells are evenly spaced however the axis is distributed: a log-spaced
+# sweep is the normal case, and a value axis would crowd every point but the last into one corner. A
+# point that has not reported contributes no cell, so the picture fills in rather than changing shape.
+function _auto_heatmap(cells, xname, yname, zname)
+    xs = sort!(unique(Real[c[1] for c in cells]))
+    ys = sort!(unique(Real[c[2] for c in cells]))
     xi = Dict(v => i - 1 for (i, v) in enumerate(xs))
     yi = Dict(v => i - 1 for (i, v) in enumerate(ys))
     data = Any[]
     lo = Inf; hi = -Inf
-    for r in rows
-        z = zof(r)
+    for (x, y, z) in cells
         z === nothing && continue
-        push!(data, Any[xi[getproperty(r.params, axes[1])], yi[getproperty(r.params, axes[2])], z])
+        push!(data, Any[xi[x], yi[y], z])
         lo = min(lo, z); hi = max(hi, z)
     end
     isempty(data) && return nothing
@@ -3636,18 +3844,19 @@ function _auto_heatmap(rows, axes, field, zof)
         # `containLabel` reserves room for axis LABELS and not for axis NAMES, so a `nameGap` that
         # clears the labels then runs off the bottom of the container. The gap below is what the
         # name itself needs, measured from the outside of the labels.
-        "grid"    => Dict("left" => 10, "right" => 64, "top" => 24, "bottom" => 26,
+        "grid"    => Dict("left" => 10, "right" => 64, "top" => 34, "bottom" => 26,
                           "containLabel" => true),
         "tooltip" => Dict("position" => "top"),
-        "xAxis"   => Dict("type" => "category", "data" => xs, "name" => String(axes[1]),
+        "xAxis"   => Dict("type" => "category", "data" => xs, "name" => xname,
                           "nameLocation" => "middle", "nameGap" => 26,
                           "splitArea" => Dict("show" => false)),
-        "yAxis"   => Dict("type" => "category", "data" => ys, "name" => String(axes[2]),
-                          "nameLocation" => "middle", "nameGap" => 52,
+        "yAxis"   => Dict("type" => "category", "data" => ys, "name" => yname,
+                          "nameLocation" => "end", "nameGap" => 12,
+                          "nameTextStyle" => Dict("align" => "left"),
                           "splitArea" => Dict("show" => false)),
         "visualMap" => Dict("min" => lo, "max" => hi, "calculable" => true,
                             "orient" => "vertical", "right" => 4, "top" => "middle",
-                            "text" => field === nothing ? nothing : [String(field), ""],
+                            "text" => isempty(zname) ? nothing : [zname, ""],
                             "textStyle" => Dict("color" => "#6a7090"),
                             "inRange" => Dict("color" => _AUTO_HEAT_COLORS)),
         "series"  => [Dict("type" => "heatmap", "progressive" => 0,
@@ -3664,20 +3873,25 @@ end
 #
 # A plot that throws must say so on the card: a silently blank chart during a long run is exactly
 # the "is it working?" ambiguity the fabric exists to remove, and it would be blamed on the sweep.
-function _plot_option(plot, rows)
-    plot === false && return nothing, ""       # explicitly no chart
-    plot === nothing && return _auto_plot(rows), ""
+# Returns `(option, error, fields, field)`: the numeric fields the automatic chart can show and the one
+# it shows, which the card offers as a choice (`field` asks for one).
+function _plot_option(plot, rows; field::AbstractString = "")
+    plot === false && return nothing, "", String[], ""       # explicitly no chart
+    if plot === nothing
+        opt, fields, f = _auto_plot(rows; field)
+        return opt, "", fields, f
+    end
     try
         v = Base.invokelatest(plot, rows)
-        v === nothing && return nothing, ""
+        v === nothing && return nothing, "", String[], ""
         # Duck-typed rather than depending on the host's `EChart`: this module is loaded into the
         # worker AND the engine, and it should not care which one owns that struct.
         opt = hasproperty(v, :option) ? getproperty(v, :option) : v
         opt isa AbstractDict || return nothing,
-            "plot returned a $(typeof(v)); it must return an echart(…) or an option Dict"
-        return opt, ""
+            "plot returned a $(typeof(v)); it must return an echart(…) or an option Dict", String[], ""
+        return opt, "", String[], ""
     catch e
-        return nothing, sprint(showerror, e)
+        return nothing, sprint(showerror, e), String[], ""
     end
 end
 
@@ -3734,7 +3948,7 @@ _json(x) = sprint(_json, x)
 const _STATE_COLOR = Dict(
     :succeeded => "#56d364", :partial   => "#ffd700", :blocked => "#e57575",
     :exhausted => "#e57575", :cancelled => "#6a7090", :running => "#569cd6",
-    :pending   => "#6a7090", :ready     => "#4ec9b0")
+    :pending   => "#6a7090", :ready     => "#4ec9b0", :held => "#d9a441")
 
 # The three ways of stopping short read differently on purpose: one is the work's fault, one is
 # yours, and one is the resources'.
@@ -3746,9 +3960,11 @@ const _STATE_COLOR = Dict(
 # approved spending on it. Both read as past participles so the chip is a sentence about the run
 # rather than a label with a number after it. The hub renders a fallback and the browser restates it
 # in the reader's own timezone, the way the ETA clock already does.
-function _when_stamp(root::AbstractString, run::AbstractString, started::Bool)
+# "Submitted" only once a job is with the scheduler: Submit asks for the work, which a held run has
+# not yet been sent.
+function _when_stamp(root::AbstractString, run::AbstractString, started::Bool; submitted::Bool = true)
     t = started ? BatchSweep.started_at(root, run) : BatchSweep.created_at(root, run)
-    return (kind = started ? "submitted" : "written", at = t)
+    return (kind = started ? (submitted ? "submitted" : "requested") : "written", at = t)
 end
 
 # A bare "15:51" is only unambiguous on the day it happened, and a sweep card outlives the day. So
@@ -3770,7 +3986,8 @@ _state_label(s) = s === :succeeded ? "complete" :
                   s === :cancelled ? "stopped at your request" :
                   s === :exhausted ? "gave up — units never landed" :
                   s === :running   ? "running" :
-                  s === :ready     ? "ready — nothing submitted" : "not started"
+                  s === :ready     ? "ready — nothing submitted" :
+                  s === :held      ? "held — testing its environment on the nodes first" : "not started"
 
 # The unit grid, BINNED to a fixed tile budget. One tile per unit does not survive contact with a
 # real sweep: a hundred thousand units would be a hundred thousand DOM nodes, rebuilt on every
@@ -3968,6 +4185,43 @@ function _signin_html(target::SweepTarget)
                   "font-size:12px;color:var(--amber,#d9a441)'>🔒 ", _esc(h),
                   ": not signed in — use the padlock at the top of the page</div>")
 end
+
+# Where the hub keeps a machine's batch prepare (`batch_prepare.jl` `_batch_key`).
+_prepare_key(t::ClusterTarget) =
+    "batch_" * replace(strip(isempty(t.machine) ? t.host : t.machine), r"[^A-Za-z0-9_]+" => "_")
+
+# Each of a run's jobs as the scheduler sees it: how many elements wait or run, why the waiting ones
+# wait and when the scheduler expects them to start, and where the running ones are.
+function _queue_html(details::AbstractDict)
+    isempty(details) && return ""
+    io = IOBuffer()
+    print(io, "<div style='margin-top:8px;font-size:12px;display:flex;flex-direction:column;gap:3px'>")
+    for (name, d) in sort!(collect(details); by = first)
+        bits = String[]
+        np, nr = get(d, "pending", 0), get(d, "running", 0)
+        nr > 0 && push!(bits, string(nr, " running", isempty(get(d, "nodes", "")) ? "" : " on " * d["nodes"],
+                                     isempty(get(d, "elapsed", "")) ? "" : " · " * d["elapsed"] * " in",
+                                     isempty(get(d, "left", "")) ? "" : ", " * d["left"] * " left"))
+        np > 0 && push!(bits, string(np, " queued",
+                                     isempty(get(d, "reason", "")) ? "" : " — " * _queue_reason(d["reason"]),
+                                     isempty(get(d, "start", "")) ? "" : " · est. start " * d["start"]))
+        isempty(bits) && continue
+        print(io, "<div><span style='opacity:.6;font-family:monospace'>job ", _esc(get(d, "id", name)),
+                  "</span> ", _esc(join(bits, " · ")), "</div>")
+    end
+    print(io, "</div>")
+    return String(take!(io))
+end
+
+# Slurm's reason codes, as a person would say them. Anything not listed is shown as Slurm says it.
+const _QUEUE_REASONS = Dict(
+    "Priority" => "behind higher-priority jobs", "Resources" => "waiting for nodes to free up",
+    "QOSMaxJobsPerUserLimit" => "at your limit of running jobs on this QOS",
+    "QOSMaxSubmitJobPerUserLimit" => "at your limit of queued jobs on this QOS",
+    "AssocMaxJobsLimit" => "at the account's running-job limit", "Dependency" => "waiting for an earlier wave",
+    "BeginTime" => "not before its start time", "ReqNodeNotAvail" => "the nodes it asks for are unavailable",
+    "JobHeldUser" => "held", "JobHeldAdmin" => "held by an administrator", "None" => "")
+_queue_reason(r::AbstractString) = (s = get(_QUEUE_REASONS, String(r), String(r)); isempty(s) ? "" : s)
 
 function _why_html(p::BatchSweep.Plan)
     box(color, body) = string(
@@ -4176,7 +4430,16 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     # keeps filling after it. The host is emitted only when there is something to draw, so a sweep
     # with no plottable shape does not leave a hole in the card.
     if r.plot !== false
-        opt, perr = _plot_option(r.plot, getfield(r, :rows))
+        opt, perr, fields, f = _plot_option(r.plot, getfield(r, :rows))
+        # Which of the record's numeric fields the automatic chart shows, when it has several.
+        print(io, "<select data-sw='chartfield' title='the field the chart shows' style='",
+                  length(fields) > 1 ? "" : "display:none;",
+                  "margin-top:10px;font:inherit;font-size:11px;padding:2px 6px;border-radius:5px;",
+                  "border:1px solid var(--border,#2a2e40);background:transparent;color:var(--text,#d4d8e8)'>")
+        for x in fields
+            print(io, "<option value='", _esc(x), "'", x == f ? " selected" : "", ">", _esc(x), "</option>")
+        end
+        print(io, "</select>")
         # The host is always emitted but starts HIDDEN, because the automatic plot cannot know its
         # own shape until a unit has landed — and a poll that finally has something to draw needs
         # somewhere to draw it. `drawChart` reveals it on the first option; until then the card
@@ -4208,6 +4471,10 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     # falls back to the next MIME and the card silently becomes a line of text — so a dataset the
     # store cannot answer for would take the whole card down and give no clue why.
     print(io, "<div data-sw='data'>", _safe_data_html(r), "</div>")
+    println(io, "<div data-sw='queue'></div>")
+    # While a submitted run waits for its environment's test: the step the test is on. Filled by the
+    # script from the hub, which runs it; a click opens the prepare's own view.
+    println(io, "<div data-sw='testing' style='margin-top:8px;font-size:12px;opacity:.85;cursor:pointer'></div>")
     println(io, "<div data-sw='why'>", _why_html(p), "</div>")
     println(io, "<div data-sw='fails'>", _fails_html(getfield(r, :rows)), "</div>")
 
@@ -4392,6 +4659,7 @@ function _live_script(io, r::ShardedResult)
           // only the card it was opened from.
           window.slateSweeps.report("$(id)", cell ? cell.dataset.cid : "", s, "$(doch)");
         }
+        syncFields(s);
         if (s.chart) drawChart(s.chart);
         else if (s.chart === null) clearChart();
         var ce = root.querySelector('[data-sw="charterr"]');
@@ -4400,11 +4668,32 @@ function _live_script(io, r::ShardedResult)
         // Why it stopped, and which units failed. Rendered by Julia and swapped in whole, so the
         // browser holds no second copy of this markup to drift from the cell's own render. Only on
         // CHANGE, so an open <details> is not collapsed underneath the reader on every poll.
-      ["why", "fails", "data"].forEach(function(k){
+      ["queue", "why", "fails", "data"].forEach(function(k){
           var el = root.querySelector('[data-sw="' + k + '"]');
           if (!el || s[k] === undefined) return;
           if (el.dataset.h !== s[k]) { el.dataset.h = s[k]; el.innerHTML = s[k]; }
         });
+        // The test of a held run's environment runs in the hub, which is asked directly: the step it
+        // is on, or where it failed. Nothing once the run is out.
+        var tslot = root.querySelector('[data-sw="testing"]');
+        if (tslot) {
+          if (!s.prepare) { tslot.textContent = ''; tslot.onclick = null; }
+          else {
+            tslot.onclick = function(){ window.slatePrepareBatch && window.slatePrepareBatch(s.prepare_machine, tslot); };
+            fetch('/api/regions/prepare?name=' + encodeURIComponent(s.prepare)).then(function(r){ return r.json(); }).then(function(d){
+              var p = d && d.preparing, rec = d && d.readiness, txt = 'testing its environment — starting';
+              if (p && p.running) {
+                var cur = p.steps && p.steps.length ? p.steps[p.steps.length - 1] : null;
+                if (cur) txt = 'testing — ' + cur.step + (cur.detail ? ': ' + cur.detail : '');
+              } else if (rec && rec.prepared_at) {
+                var bad = (rec.steps || []).filter(function(x){ return x.status === 'fail'; })[0];
+                if (bad) txt = 'the environment test failed at ' + bad.step + (bad.detail ? ': ' + bad.detail : '') + ' — click for the report';
+                else if (rec.tested) txt = 'tested — submitting';
+              }
+              tslot.textContent = txt;
+            }).catch(function(){});
+          }
+        }
         var bar = root.querySelector('[data-sw="bar"]');
         if (bar) bar.style.width = (100 * s.frac).toFixed(2) + "%";
         if (bar) bar.style.background = s.color;
@@ -4476,10 +4765,28 @@ function _live_script(io, r::ShardedResult)
           if (n) n.textContent = s.blocked ? s.blocked : "finished";
         }
       }
+      // The field the automatic chart shows, chosen on the card; asked for on every poll.
+      var field = "";
+      var fsel = root.querySelector('[data-sw="chartfield"]');
+      if (fsel) {
+        field = fsel.value || "";
+        fsel.addEventListener('change', function(){ field = fsel.value; chartSig = ""; tick(); });
+      }
+      function syncFields(s){
+        if (!fsel || !s.chartfields) return;
+        var sig = s.chartfields.join(",");
+        if (fsel.dataset.sig !== sig) {
+          fsel.dataset.sig = sig;
+          fsel.innerHTML = "";
+          s.chartfields.forEach(function(f){ var o = document.createElement("option"); o.value = f; o.textContent = f; fsel.appendChild(o); });
+        }
+        fsel.value = s.chartfield || "";
+        fsel.style.display = s.chartfields.length > 1 ? "" : "none";
+      }
       function tick(){
         if (!document.body.contains(root)) { clearInterval(timer); return; }
         if (!window.slateCall) return;
-        window.slateCall("$(ch)", {}).then(paint).catch(function(){ clearInterval(timer); });
+        window.slateCall("$(ch)", { field: field }).then(paint).catch(function(){ clearInterval(timer); });
       }
 
       // Buttons. Disabled while the call is in flight so an impatient second click cannot cancel
@@ -4656,7 +4963,7 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
 end
 
 # ── The sweep in words ───────────────────────────────────────────────────────────────────────
-# A sweep cell renders as an HTML card, and in a notebook the richer MIME always wins — so the
+# A job cell renders as an HTML card, and in a notebook the richer MIME always wins — so the
 # `text/plain` form, which is what a terminal, a log, a standalone `julia notebook.jl` run and a
 # copy-paste into a message all need, was written and then unreachable.
 #
@@ -4833,7 +5140,11 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                                summary_src = summary_src, lazy = lazy, landed = landed)
         push!(chunks, ck)
     end
-    BatchSweep.write_sweep!(root, run, chunks; cell = String(cell), notebook = _ctx_docid())
+    BatchSweep.write_sweep!(root, run, chunks; cell = String(cell), notebook = _ctx_docid(),
+                            parent = target isa ClusterTarget ? target.parent : "",
+                            resources = target isa ClusterTarget ?
+                                Dict{String,String}(String(k) => string(v) for (k, v) in pairs(target.resources)) :
+                                Dict{String,String}())
     # At most ONE unstarted run per cell. A run is keyed by body + setup + captures + grid, so every
     # edit to any of them mints a new one — and the old one, which nobody ever asked to run, is left
     # behind holding a blob per parameter point. An afternoon of adjusting a constant leaves a store
@@ -4847,11 +5158,18 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # Unchecked, a failed push submits work the far side cannot run: the chunk starts, finds no
     # descriptor for its key and dies there. An unreachable target pushes nothing and submits
     # nothing, which is how authoring against a cluster you are not signed in to keeps working.
-    if sync_out!(target)
-        _descriptors_sent!(target, run)
-    elseif _reachable(target)
-        error("could not send the sweep's descriptors to " *
-              "$(target_host(target)):$(job_root(target)) — nothing was submitted")
+    #
+    # A run whose every unit has landed will submit nothing, and one this process has already sent
+    # has nothing new to send (its descriptors are named by their content), so neither pays the
+    # round trip. Replaying a campaign's finished rounds is then a matter of local reads. A landed
+    # run is not marked sent: a unit retried later has its descriptors sent before it is submitted.
+    if !all(in(landed), keys) && !lock(() -> (String(root), run) in _DESC_SENT, _DESC_LOCK)
+        if sync_out!(target)
+            _descriptors_sent!(target, run)
+        elseif _reachable(target)
+            error("could not send the sweep's descriptors to " *
+                  "$(target_host(target)):$(job_root(target)) — nothing was submitted")
+        end
     end
 
     launcher = launcher_for(target)
@@ -4870,7 +5188,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # Filled with the result below, so the card's settle report can bring the OBJECT level with what
     # the card already knows. A Ref because the channel is registered before the result exists.
     rref = Ref{Any}(nothing)
-    # The card's live channel. Registered here rather than by the author, so a sweep cell needs no
+    # The card's live channel. Registered here rather than by the author, so a job cell needs no
     # wiring to be watchable. `register` is the notebook's `slate_on`; outside a notebook (a
     # standalone run, a test) it is simply absent and the card renders static.
     if register !== nothing
@@ -4898,7 +5216,8 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         # be submitting this sweep's outstanding chunks by polling it.
         register(status_channel(run),
                  a -> status_payload(target, run, ps, ks; plot,
-                                     advance = get(a, :advance, true) !== false))
+                                     advance = get(a, :advance, true) !== false,
+                                     field = String(something(get(a, :field, ""), ""))))
         register(action_channel(run),
                  a -> handle_action(target, run, ps, ks, String(get(a, :action, ""));
                                     plot, notify = note,
@@ -5208,9 +5527,9 @@ end
 
 Run the body once per row of `grid`, as batch work, and return a [`ShardedResult`].
 
-Belongs in a `#%% sweep` cell, and takes NO target there:
+Belongs in a `#%% job` cell, and takes NO target there:
 
-    #%% sweep id=scan cluster=hpc walltime=04:00:00
+    #%% job id=scan cluster=hpc walltime=04:00:00
     scan = @sweep(paramgrid(n = 1:64)) do p
         simulate(p.n)
     end
@@ -5219,7 +5538,7 @@ The header is where the target and the resources live. `cluster=hpc` is a NAME, 
 machine against its own registry — which is what lets one notebook run against a laptop's test
 cluster and a site's real one with nothing edited in a cell. `walltime=`, `chunk=` and `data=` sit
 beside it, and the ⚙ on the cell edits all of them without touching Julia source. That ⚙ is offered
-on a sweep cell and nowhere else.
+on a job cell and nowhere else.
 
 In an ordinary code cell this still runs, and is a worse version of the same thing: the target must
 be written into the body, the header settings have nowhere to live, and nothing can be changed
@@ -5251,6 +5570,11 @@ Re-running the cell is a reconcile: whatever has landed is kept, only what is mi
 Editing the body makes it a different sweep.
 """
 macro sweep(args...)
+    # Without parentheses, `@sweep grid do p … end` reaches the macro as ONE `do` expression around
+    # the grid's call. Taken apart, it is the same as the parenthesised form.
+    if length(args) == 1 && args[1] isa Expr && args[1].head === :do
+        args = (args[1].args[2], args[1].args[1])
+    end
     # A do-block is passed as the FIRST argument, so find the lambda rather than assuming where it
     # sits; that also keeps `@sweep(grid, target, setup = s) do p … end` working.
     bi = findfirst(a -> a isa Expr && a.head === :(->), args)
@@ -5276,7 +5600,7 @@ macro sweep(args...)
             push!(positional, a)
         end
     end
-    # The target is OPTIONAL. `@sweep(grid) do … end` in a `#%% sweep cluster=hpc` cell takes its
+    # The target is OPTIONAL. `@sweep(grid) do … end` in a `#%% job cluster=hpc` cell takes its
     # target from the notebook's cluster definitions, so where the work runs is configuration rather
     # than something each cell restates.
     isempty(positional) &&
@@ -5350,7 +5674,7 @@ macro sweep(args...)
         local _caps = $(Sweep)._collect_captures(@__MODULE__, vcat(_names, _helpers[2]),
                                                  $(QuoteNode(param)))
         # `slate_on` is injected into a notebook's namespace, so it is reachable from here and
-        # nowhere else. Picking it up automatically is what lets a sweep cell be live without the
+        # nowhere else. Picking it up automatically is what lets a job cell be live without the
         # author registering anything.
         local _reg = isdefined(@__MODULE__, :slate_on) ?
                      getfield(@__MODULE__, :slate_on) : nothing
@@ -5359,7 +5683,7 @@ macro sweep(args...)
         local _refresh = isdefined(@__MODULE__, :slate_refresh) ?
                          getfield(@__MODULE__, :slate_refresh) : nothing
         local _cell = get(task_local_storage(), :slate_cell, "")
-        # The cell's own `key=value` header attributes — where a `#%% sweep` cell keeps its
+        # The cell's own `key=value` header attributes — where a `#%% job` cell keeps its
         # walltime, partition and memory, so they can be changed from the UI without editing code.
         local _sctx = get(task_local_storage(), :slate_ctx, nothing)
         local _attrs = (_sctx !== nothing && hasproperty(_sctx, :attrs)) ?

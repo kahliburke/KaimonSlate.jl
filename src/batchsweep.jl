@@ -48,7 +48,8 @@ Record which chunks make up a sweep. The chunk descriptors themselves already li
 this is the only extra bookkeeping a sweep needs.
 """
 function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
-                      cell::AbstractString = "", notebook::AbstractString = "")
+                      cell::AbstractString = "", notebook::AbstractString = "", parent::AbstractString = "",
+                      resources::AbstractDict = Dict{String,String}())
     d = Dict{String,Any}(
         "kind" => KIND_SWEEP,
         "created" => round(Int, time()),
@@ -63,6 +64,11 @@ function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
     # a cell called `fit` are indistinguishable without this — which matters most beside a button
     # that releases a run.
     isempty(notebook) || (d["notebook"] = String(notebook))
+    # …and which PROJECT its task environment is built from. Whoever submits a later wave rebuilds
+    # the target from the registry, and the registry's default project is that process's own.
+    isempty(parent) || (d["parent"] = String(parent))
+    # …and the resources the cell asked for, so a test of its environment asks for the same nodes.
+    isempty(resources) || (d["resources"] = Dict{String,Any}(String(k) => string(v) for (k, v) in resources))
     MemoStore.write_manifest(root, sweep, d)
     isempty(cell) || _index_cell_run!(root, String(cell), String(sweep))
     return sweep
@@ -71,7 +77,7 @@ end
 # ── Which runs a cell has minted ─────────────────────────────────────────────────────────────
 # A tiny index per cell, so "this cell's other runs" is one small file read. The alternative —
 # scanning the store for sweep descriptors — means parsing every manifest in it, and a store holds
-# one per UNIT: fine for a panel somebody opened, ruinous on every run of a sweep cell.
+# one per UNIT: fine for a panel somebody opened, ruinous on every run of a job cell.
 
 cells_dir(root) = joinpath(String(root), "cells")
 # A cell id comes from a notebook and is not promised to be a filename. Keep it recognisable where
@@ -404,12 +410,16 @@ end
 # re-read of the whole log. Events for a chunk are applied in name order; if an event turns up that
 # sorts BEFORE one already folded for that chunk (a node whose clock lags), that chunk is folded
 # again from scratch, since applying it late would resurrect what a later event had dropped.
+#
+# It also keeps the chunk each unit landed through, so a reader after a few units' records parses
+# those chunks' events rather than the whole log.
 mutable struct Fold
     status::Dict{String,String}          # shard key → "ok" | "error"
+    where::Dict{String,String}           # shard key → chunk whose events hold its record
     seen::Set{String}                    # event file names already applied
     high::Dict{String,String}            # chunk → highest event name applied
 end
-Fold() = Fold(Dict{String,String}(), Set{String}(), Dict{String,String}())
+Fold() = Fold(Dict{String,String}(), Dict{String,String}(), Set{String}(), Dict{String,String}())
 
 const _FOLDS = Dict{String,Fold}()
 const _FOLD_LOCK = ReentrantLock()
@@ -417,15 +427,18 @@ const _FOLD_LOCK = ReentrantLock()
 "Drop a store's cached fold. For a caller that has changed the log behind it."
 forget_fold!(root::AbstractString) = lock(_FOLD_LOCK) do; delete!(_FOLDS, String(root)); end
 
-function _apply_event!(f::Fold, root::AbstractString, path::AbstractString)
+function _apply_event!(f::Fold, root::AbstractString, chunk::AbstractString, path::AbstractString)
     d = try; TOML.parsefile(path); catch; return; end
     for u in get(d, "units", Any[])
         u isa AbstractDict || continue
         k = String(get(u, "key", ""))
-        isempty(k) || (f.status[k] = String(get(u, "status", "")))
+        isempty(k) && continue
+        f.status[k] = String(get(u, "status", ""))
+        f.where[k] = String(chunk)
     end
     for k in get(d, "dropped", Any[])
         delete!(f.status, String(k))
+        delete!(f.where, String(k))
     end
 end
 
@@ -445,16 +458,24 @@ function fold(root::AbstractString)
         late = any(any(p -> !(basename(p) in f.seen) && basename(p) < get(f.high, c, ""), paths)
                    for (c, paths) in evs)
         if vanished || late
-            empty!(f.status); empty!(f.seen); empty!(f.high)
+            empty!(f.status); empty!(f.where); empty!(f.seen); empty!(f.high)
         end
         for (c, paths) in evs, p in paths
             n = basename(p)
             n in f.seen && continue
-            _apply_event!(f, root, p)
+            _apply_event!(f, root, c, p)
             push!(f.seen, n)
             f.high[c] = max(get(f.high, c, ""), n)
         end
         return f
+    end
+end
+
+"The chunks whose events hold the records of `keys`: what a reader of those units has to parse."
+function chunks_holding(root::AbstractString, keys)
+    f = fold(root)
+    return lock(_FOLD_LOCK) do
+        Set{String}(c for c in (get(f.where, String(k), nothing) for k in keys) if c !== nothing)
     end
 end
 
@@ -559,10 +580,13 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
         chunk_done[c] = !isempty(shards) && ndone == length(shards)
     end
 
-    # Which chunks are covered by something the scheduler still has. One poll for the whole sweep.
+    # Which chunks are covered by something the scheduler still has. One poll for the whole sweep,
+    # naming only the submissions that cover a chunk of it still unfinished: a finished chunk's
+    # state does not depend on the scheduler, so a settled sweep asks nothing.
     live = Dict{String,Symbol}()
     if launcher !== nothing || job_state !== nothing
-        names = collect(keys(subs))
+        open_ = Set(c for c in chunks if !get(chunk_done, c, false))
+        names = String[n for (n, cs) in subs if any(in(open_), cs)]
         if !isempty(names)
             states = job_state !== nothing ? job_state :
                      BatchLauncher.poll(launcher, root, names)
@@ -583,11 +607,15 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
 
     cstate = Dict{String,Symbol}()
     to_submit = String[]
+    # A chunk reports as it starts (its first event), so one covered by a submission the scheduler
+    # has running, but not yet started, is waiting its turn: one of the few processes a local run
+    # keeps going, or an array element still queued behind the ones that are running.
+    begun = keys(fold(root).high)
     for c in chunks
         if get(chunk_done, c, false)
             cstate[c] = :done
         elseif haskey(live, c)
-            cstate[c] = live[c]
+            cstate[c] = live[c] === :running && !(c in begun) ? :pending : live[c]
         elseif cancelled
             cstate[c] = :cancelled
         elseif !isempty(blocked)

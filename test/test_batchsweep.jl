@@ -47,6 +47,14 @@ struct NoPollLauncher <: BL.Launcher end
 BL.poll(::NoPollLauncher, root::AbstractString, names) =
     error("the scheduler was asked, and the caller already had the answer")
 
+# Answers every name as pending and remembers what it was asked.
+struct AskLauncher <: BL.Launcher
+    asked::Vector{Vector{String}}
+end
+AskLauncher() = AskLauncher(Vector{String}[])
+BL.poll(l::AskLauncher, root::AbstractString, names) =
+    (push!(l.asked, sort!(String.(collect(names)))); Dict{String,Symbol}(String(n) => :pending for n in names))
+
 specfn(root, project = tempdir()) =
     (name, chunks) -> BL.JobSpec(name, chunks; root,
                                  project, payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
@@ -73,6 +81,13 @@ function mksweep(root; nchunk = 2, per = 3, fn_src = "p -> p * 2", sweep = "swee
 end
 
 @testset "batchsweep" begin
+    @testset "@sweep takes its grid with or without parentheses" begin
+        # Unparenthesised, the macro receives one `do` expression around the grid's call.
+        bare = :(Sweep.@sweep Sweep.paramgrid(n = 1:3) do p; p.n; end)
+        paren = :(Sweep.@sweep(Sweep.paramgrid(n = 1:3)) do p; p.n; end)
+        @test macroexpand(@__MODULE__, bare) isa Expr
+        @test macroexpand(@__MODULE__, paren) isa Expr
+    end
     @testset "submission names are content-derived and order-independent" begin
         @test BS.submission_name(["a", "b"]) == BS.submission_name(["b", "a"])
         @test BS.submission_name(["a", "b"]) != BS.submission_name(["a", "c"])
@@ -166,6 +181,41 @@ end
             p = BS.reconcile!(root, sweep, l, specfn(root))
             @test isempty(l.submitted)
             @test BS.is_complete(p) && BS.fraction(p) == 1.0
+        end
+    end
+
+    @testset "the scheduler is asked only about a sweep's unfinished chunks" begin
+        # A store keeps every submission it made, and a campaign adds a sweep a round, so asking
+        # about all of them grows with the store. A finished chunk's state does not depend on the
+        # scheduler: a settled sweep asks nothing, and one in flight asks about its own work.
+        mktempdir() do root
+            a, ca = mksweep(root; sweep = "swa")
+            b, cb = mksweep(root; sweep = "swb")
+            for s in (a, b); BS.reconcile!(root, s, FakeLauncher(), specfn(root); failure_policy = NOPROBE); end
+            for c in ca; SlateTask.run_chunk(root, c); end
+            l = AskLauncher()
+            @test BS.is_complete(BS.plan(root, a; launcher = l))
+            @test isempty(l.asked)
+            p = BS.plan(root, b; launcher = l)
+            want = sort!([n for (n, cs) in BS.known_submissions(root) if any(in(cb), cs)])
+            @test only(l.asked) == want && length(BS.known_submissions(root)) > length(want)
+            @test all(==(:pending), values(p.chunk_state))
+        end
+    end
+
+    @testset "a sweep's rows are read from the chunks holding its units" begin
+        mktempdir() do root
+            a, ca = mksweep(root; sweep = "swa")
+            b, cb = mksweep(root; sweep = "swb")
+            for c in [ca; cb]; SlateTask.run_chunk(root, c); end
+            ka = ["swa_s$i" for i in 1:6]
+            @test BS.chunks_holding(root, ka) == Set(ca)
+            @test BS.chunks_holding(root, ["swa_s1", "not a key"]) == Set([ca[1]])
+            SlateTask.write_event!(root, ca[1], Dict{String,Any}[]; dropped = ["swa_s2"])
+            @test isempty(BS.chunks_holding(root, ["swa_s2"]))
+            rows = Sweep._rows(root, collect(1:6), ka, a)
+            @test [r.status for r in rows] == ["ok", "", "ok", "ok", "ok", "ok"]
+            @test [r.record for r in rows if r.status == "ok"] == [2, 6, 8, 10, 12]
         end
     end
 
@@ -577,6 +627,67 @@ end
                        try; Sweep._unsupported_scheduler(:k8s); catch e; e.msg; end)
     end
 
+    @testset "a queued request says when it expects to start, and a refused one why" begin
+        mktempdir() do bin
+            tool(nm, body) = (p = joinpath(bin, nm); write(p, "#!/bin/sh\n" * body * "\n"); chmod(p, 0o755))
+            tool("sbatch", "cat >/dev/null\necho 'sbatch: error: the queue requires 32 cores per GPU'\n" *
+                           "echo 'allocation failure: Unspecified error'\nexit 1")
+            today = Libc.strftime("%Y-%m-%d", time())
+            withenv("PATH" => bin * ":" * ENV["PATH"]) do
+                tool("squeue", "echo '41|PENDING||4:00:00|$(today)T07:40:00|Priority|128'")
+                a = Sweep.find_allocation(:slurm, "", "hold")
+                @test a.state === :pending && a.id == "41" && a.start == "07:40" && a.reason == "Priority" && a.cpus == 128
+                tool("squeue", "echo '41|PENDING||4:00:00|N/A|None'")      # not planned yet
+                a = Sweep.find_allocation(:slurm, "", "hold")
+                @test a.start == "" && a.reason == ""
+                # Nothing held and the submission refused: the scheduler's reason comes back.
+                tool("squeue", "exit 0")
+                a = Sweep.request_allocation!(:slurm, "", "hold"; cpus = 8, gpus = "1")
+                @test a.state === :none && a.said == "the queue requires 32 cores per GPU"
+            end
+        end
+        @test Sweep._start_time("2020-01-02T03:04:05") == "2020-01-02 03:04"
+    end
+
+    @testset "an interactive allocation is asked for with salloc, detached" begin
+        kw = (; walltime = "01:00:00", partition = "", cpus = 32, mem = "56G", gpus = "1", account = "m1",
+              extra = "", options = Dict("qos" => "shared_interactive"))
+        s = Sweep._slurm_salloc_script("slate-g"; kw...)
+        @test occursin("nohup salloc --no-shell -J 'slate-g'", s) && occursin("--qos='shared_interactive'", s)
+        @test !occursin("-o /dev/null", s) && !occursin("sbatch", s)
+        @test occursin("sbatch -o /dev/null -J 'slate-g'", Sweep._slurm_request_script("slate-g"; kw...))
+        mktempdir() do home
+            bin = mkpath(joinpath(home, "bin"))
+            tool(nm, body) = (p = joinpath(bin, nm); write(p, "#!/bin/sh\n" * body * "\n"); chmod(p, 0o755))
+            withenv("PATH" => bin * ":" * ENV["PATH"], "HOME" => home) do
+                # Refused: its words come back, the way a refused sbatch's do.
+                tool("squeue", "exit 0")
+                tool("salloc", "echo 'salloc: error: the queue requires 32 cores per GPU'\nexit 1")
+                a = Sweep.request_allocation!(:slurm, "", "slate-g"; submit = "salloc", kw...)
+                @test a.state === :none && a.said == "the queue requires 32 cores per GPU"
+                # Queued: the request is left running and found by name, like a submitted job.
+                tool("salloc", "echo 'salloc: Pending job allocation 77'\nsleep 3")
+                tool("squeue", "[ -f \"\$HOME/asked\" ] && echo '77|PENDING||1:00:00|N/A|Priority|32'; touch \"\$HOME/asked\"")
+                a = Sweep.request_allocation!(:slurm, "", "slate-g"; submit = "salloc", kw...)
+                @test a.state === :pending && a.id == "77"
+                @test occursin("Pending job allocation 77", read(joinpath(home, ".cache", "kaimonslate", "salloc-slate-g.log"), String))
+            end
+        end
+    end
+
+    @testset "mem = default asks the scheduler for no memory" begin
+        # Not the same as an empty mem, which a region on a machine fills from the machine's.
+        ask(mem) = Sweep._slurm_request_script("hold"; walltime = "01:00:00", partition = "", cpus = 32,
+                                               mem, gpus = "1", account = "", extra = "")
+        @test occursin("--mem '0'", ask("0")) && !occursin("--mem", ask("default")) && !occursin("--mem", ask("DEFAULT"))
+        pbs = Sweep._pbs_request_script("hold"; walltime = "01:00:00", partition = "", cpus = 4, mem = "default",
+                                        gpus = "", account = "", extra = "")
+        @test !occursin("mem=", pbs)
+        BL = Sweep.BatchLauncher
+        @test BL._pbs_chunk_mem(Dict(:mem => "default"), 4, true) === nothing
+        @test BL._pbs_chunk_mem(Dict{Symbol,Any}(), 4, true) == BL._PBS_ALWAYS.mem
+    end
+
     @testset "a remote exec launcher looks for its processes where it started them" begin
         # `reconcile!` hands every launcher `store_root`, which for a cluster is the hub's local
         # MIRROR. `submit!` writes its pid file under the cluster's own path, so asking the far side
@@ -730,9 +841,10 @@ end
         # A caller holding the answer hands it over, and the plan must then not ask at all — which
         # is what this launcher checks, by refusing.
         mktempdir() do root
-            sweep, _ = mksweep(root)
+            sweep, chunks = mksweep(root)
             BS.reconcile!(root, sweep, FakeLauncher(), specfn(root); failure_policy = NOPROBE)
             @test !isempty(BS.known_submissions(root))       # there IS something to ask about
+            for c in chunks; SlateTask.write_event!(root, c, Dict{String,Any}[]; total = 3, done = 0); end   # started
 
             name = first(keys(BS.known_submissions(root)))
             p = BS.plan(root, sweep; launcher = NoPollLauncher(),
@@ -746,6 +858,23 @@ end
             p2 = BS.reconcile!(root, sweep, NoPollLauncher(), specfn(root);
                                submit = false, job_state = Dict(name => :pending))
             @test all(==(:pending), values(p2.chunk_state))
+        end
+    end
+
+    @testset "a chunk runs once it has started; until then it waits its turn" begin
+        # One submission covers several chunks, and the scheduler reports it running as soon as any
+        # of them is: a local run keeps a few processes going, an array job runs some elements while
+        # the rest queue. A chunk reports as it starts, so the ones that have not are queued.
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 3)
+            l = FakeLauncher()
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = NOPROBE)
+            for n in keys(l.live); l.live[n] = :running; end
+            SlateTask.write_event!(root, chunks[1], Dict{String,Any}[]; total = 3, done = 0)
+            p = BS.plan(root, sweep; launcher = l)
+            @test p.chunk_state[chunks[1]] === :running
+            @test p.chunk_state[chunks[2]] === :pending && p.chunk_state[chunks[3]] === :pending
+            @test Sweep._sched_counts(p) == (queued = 2, running = 1)
         end
     end
 
@@ -792,6 +921,7 @@ end
             full = Sweep.@sweep(Sweep.paramgrid(x = 1:6), t; submit = false) do p; p.x * 10; end
             @test full.run != pilot.run                       # a different request…
             @test BS.plan(root, full.run).shards_done == 2    # …over results it already shares
+            @test count(row -> row.status == "ok", getfield(full, :rows)) == 2   # records and all
 
             ran = skipped = 0
             for c in BS.sweep_chunks(root, full.run)
@@ -2312,12 +2442,12 @@ end
             @test Sweep.fetch(a, dest) == dest && filesize(dest) == 4096   # deliberately, one file
             @test length(Sweep.bytes(a)) == 4096
 
-            # A grouped summary auto-plots only when ONE field is numeric; `loss` and `steps` both
-            # are, so it declines rather than choosing for the author.
-            # …and it says so with a null rather than an absent key, so the card can tell "no
-            # chart" from "no news" and clear one it had already drawn.
-            @test Sweep.status_payload(t, r.run, r.params, r.keys;
-                                       advance = false)["chart"] === nothing
+            # A grouped summary with several numeric fields draws the first, and names them all so
+            # the card can offer the others; a Bool (`converged`) is not one of them.
+            s1 = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)
+            @test sort(s1["chartfields"]) == ["loss", "steps"] && s1["chartfield"] == "loss"   # `steps` is constant
+            s2 = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false, field = "steps")
+            @test s2["chartfield"] == "steps" && s2["chart"]["yAxis"]["name"] == "steps"
         end
     end
 
@@ -2369,7 +2499,7 @@ end
             a = mk(1)
             @test BS.sweep_cell(root, a.run) == "sweepcell"
             # Found through the cell's own index, not by parsing every manifest in a store that
-            # holds one per unit — this runs on every execution of a sweep cell.
+            # holds one per unit — this runs on every execution of a job cell.
             @test BS.cell_runs(root, "sweepcell") == [a.run]
             b = mk(2)                                  # an edited body ⇒ a different run
             @test b.run != a.run
@@ -2530,7 +2660,7 @@ end
     end
 
     @testset "the sweep in words, not markup" begin
-        # A sweep cell renders as an HTML card and the richer MIME always wins in a notebook, so the
+        # A job cell renders as an HTML card and the richer MIME always wins in a notebook, so the
         # text/plain form existed and had no way to reach the screen. One renderer, two surfaces.
         mktempdir() do root
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
@@ -2579,6 +2709,44 @@ end
             # `plot = false` says the same thing, rather than omitting the key.
             s3 = Sweep.status_payload(t, r.run, r.params, r.keys; plot = false, advance = false)
             @test haskey(s3, "chart") && s3["chart"] === nothing
+        end
+    end
+
+    @testset "the chart you get without asking averages seeds and draws text axes as categories" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 40,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            chart(r; kw...) = (for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end;
+                               Sweep.status_payload(t, r.run, r.params, r.keys; advance = false, kw...))
+            # Two text axes and a seed: grouped bars of the mean over seeds, the axis with more
+            # values along the bottom, the other as the series.
+            grid = [(; problem, method, seed) for problem in ["a", "b"] for method in ["x", "y", "z"] for seed in 1:2]
+            r = Sweep.@sweep(grid, t; submit = false) do p
+                (; score = (p.method == "x" ? 1.0 : 2.0) + (p.problem == "b" ? 10.0 : 0.0) + p.seed / 10, n = 3)
+            end
+            s = chart(r)
+            o = s["chart"]
+            @test all(x -> x["type"] == "bar", o["series"]) && o["xAxis"]["data"] == ["x", "y", "z"]
+            @test sort([x["name"] for x in o["series"]]) == ["a", "b"]
+            bars = Dict(x["name"] => x["data"] for x in o["series"])
+            @test bars["a"] ≈ [1.15, 2.15, 2.15] && bars["b"] ≈ [11.15, 12.15, 12.15]   # the mean over both seeds
+            # The field it shows is the first that varies (`n` is the same everywhere); both are offered.
+            @test o["yAxis"]["name"] == "score (mean over seed)" && sort(s["chartfields"]) == ["n", "score"]
+
+            # A numeric and a text axis: a line a category, over the numeric one.
+            r2 = Sweep.@sweep([(; lr, method) for lr in [0.1, 0.2] for method in ["x", "y"]], t; submit = false) do p
+                p.lr * (p.method == "x" ? 1 : 2)
+            end
+            o2 = chart(r2)["chart"]
+            @test all(x -> x["type"] == "line", o2["series"]) && o2["xAxis"]["name"] == "lr"
+            @test Dict(x["name"] => x["data"] for x in o2["series"])["y"] ≈ [[0.1, 0.2], [0.2, 0.4]]
+
+            # One text axis: a bar a category.
+            r3 = Sweep.@sweep([(; method) for method in ["x", "y"]], t; submit = false) do p
+                length(p.method) * 1.0
+            end
+            o3 = chart(r3)["chart"]
+            @test only(o3["series"])["type"] == "bar" && o3["xAxis"]["data"] == ["x", "y"]
         end
     end
 
@@ -2729,6 +2897,8 @@ end
                      "--gres=gpu:v100:2", "--nodelist=c[1-4]", "--exclude=c7", "--tmp=100G"]
             @test occursin("#SBATCH " * want * "\n", s)
         end
+        # `mem = "default"` leaves memory to the queue; with no mem at all the script still states one.
+        @test !occursin("--mem", script((; cpus = 8, mem = "default"))) && occursin("--mem=1G", script((; cpus = 8)))
         # `_` → `-`, so an option Slate has never heard of works the day the site invents it.
         @test occursin("#SBATCH --switches=1@00:30:00\n",
                        script((; switches = "1@00:30:00")))
@@ -3021,7 +3191,7 @@ end
         end
     end
 
-    @testset "a sweep cell resolves its cluster by name" begin
+    @testset "a job cell resolves its cluster by name" begin
         # Clusters are defined ONCE for the notebook and referenced by name, so several cells share
         # one definition and moving the work is a single edit.
         mktempdir() do root
@@ -3073,7 +3243,7 @@ end
 
             # A typo is the usual cause, so the error names what this machine DOES have. It points at
             # the UI rather than at header syntax: the cluster is picked from the cell's ⚙, and
-            # telling someone to type `#%% sweep cluster=…` describes a path nobody takes.
+            # telling someone to type `#%% job cluster=…` describes a path nobody takes.
             e = try; Sweep.resolve_target(nothing, Dict("cluster" => "hcp"), defs); catch x; x; end
             @test occursin("no cluster named `hcp`", sprint(showerror, e))
             @test occursin("box, hpc", sprint(showerror, e))
@@ -3153,7 +3323,7 @@ end
 
                 # A cell header's `chunk=` rebuilds the target POSITIONALLY, so every field has to
                 # be carried across by hand — which is the one place a new field is silently
-                # dropped, and it is on the path every sweep cell with a `chunk=` takes.
+                # dropped, and it is on the path every job cell with a `chunk=` takes.
                 t3 = Sweep.with_chunk(mk(procs = 3), 5)
                 @test t3.chunk == 5 && t3.procs == 3 && maxproc(t3) == 3
                 @test Sweep.with_chunk(mk(), 5).procs == 0        # unset stays unset, not defaulted

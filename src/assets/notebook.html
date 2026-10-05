@@ -84,7 +84,7 @@
     <div id="topmenu" class="topmenu">
       <button onclick="togglePackages();closeTopMenu()">📦 Packages</button>
       <button onclick="openExtensions();closeTopMenu()">🧩 Extensions</button>
-      <button onclick="window.open('/#clusters','_blank');closeTopMenu()" title="clusters that sweep cells submit to, set up on the front page">🏭 Compute targets ↗</button>
+      <button onclick="window.open('/#clusters','_blank');closeTopMenu()" title="clusters that job cells submit to, set up on the front page">🏭 Compute targets ↗</button>
       <button onclick="toggleAct();closeTopMenu()">📋 Activity log</button>
       <button data-panel="logpanel" onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
       <button data-panel="histpanel" onclick="toggleHistory();closeTopMenu()">🕘 History</button>
@@ -122,6 +122,7 @@
     <div id="workerpop-ident" class="workerpop-ident"></div>
     <div id="workerpop-stats" class="workerpop-stats"></div>
   </div>
+  <div class="workerpop-logbar"><span>Log</span><button class="wrl-change" onclick="wpOpenLog()" title="the whole log, searchable">Open full log ›</button></div>
   <div id="workerpop-log" class="workerpop-log">loading…</div>
 </div>
 <!-- Launch confirmation popover: anchored under the "Inactive — click to launch" pill. First click on

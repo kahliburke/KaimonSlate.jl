@@ -1,4 +1,5 @@
-// "Preparing environment" banner — the structured counterpart to the raw `bringup:` line stream.
+// Bring-up narration — the structured counterpart to the raw `bringup:` line stream. Rendered in the
+// starting worker's panel (workers.js) for a notebook, and in the top banner for an app or a bundle.
 //
 // A cold notebook open (deps not precompiled — Makie is the canonical case) used to read as a frozen
 // "Running 0/N": the precompile happened invisibly under the first cell's output capture. The worker
@@ -21,6 +22,16 @@
   window.onPrepare = function (json) {
     try { prep = JSON.parse(json); } catch (_) { return; }
     renderPrepare();
+    window.wpPrepTick && window.wpPrepTick();   // the starting worker's pill shows the step it is on
+  };
+
+  // The current step in a few words, for a pill: "precompiling 12/80", the stage, or "" when there is none.
+  window.slatePrepShort = function () {
+    if (!prep) return '';
+    if (prep.phase === 'precompile') return 'precompiling ' + (prep.n > 0 ? (prep.k | 0) + '/' + prep.n : (prep.k | 0));
+    if (prep.phase === 'resolve' || prep.phase === 'install') return 'installing packages';
+    if (prep.stage) return String(prep.stage).replace(/\s+—.*$/, '').replace(/…$/, '').toLowerCase();
+    return '';
   };
 
   // A raw bring-up line arrived (worker boot output / remote provision stream) → the build log.
@@ -48,7 +59,11 @@
     const last = document.getElementById('hydrawlast');
     // The summary line is plain text (it sits inside a <summary>, where markup would fight the
     // chrome) — so strip the styling rather than render it.
-    if (last) last.textContent = det.open ? '' : window.slateAnsiText(raw[raw.length - 1]);
+    // A multi-line log record arrives as several lines (┌ head, │ middle, └ last); a continuation
+    // alone reads as noise ("└ ms = 610.3"), so the summary shows the newest line that starts one.
+    let li = raw.length - 1;
+    while (li > 0 && /^[│└]/.test(window.slateAnsiText(raw[li]).trimStart())) li--;
+    if (last) last.textContent = det.open ? '' : window.slateAnsiText(raw[li]).replace(/^┌\s*/, '');
     // Keep the last ~120 lines in view — the build log is a debugging aid, not the headline.
     // Rendered as HTML so Pkg's colour survives: its ✓/✗ marks and package names are much easier to
     // scan in colour, which is most of the point of this panel.

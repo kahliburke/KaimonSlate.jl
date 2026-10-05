@@ -112,12 +112,16 @@ message, so a reload replays them.
 
 ## Tool cells
 
-A `#%% tool` cell holds an `@tool name(arg = value)` call, invoking one of the session's gate tools
-in this process and rendering the tool's full declared parameter list beside the result. That turns
-an agent's action into a durable, re-runnable part of the document rather than a line in a
-transcript.
+A `#%% tool` cell holds an `@tool name(arg = value)` call to a Kaimon tool, the same tools an agent
+calls over MCP, and renders the tool's full declared parameter list beside the result. That turns an
+agent's action into a durable, re-runnable part of the document rather than a line in a transcript.
 
-`slate_tools()` lists what this session exposes. `tool_handle(tc)` threads a background call's run id
+A Kaimon tool is called by its name (`@tool ping()`), an extension's by its namespace and name
+(`@tool fusionkb.search(query = "bootstrap current", limit = 5)`). The call goes to the Kaimon
+server on this machine, so a notebook whose worker runs elsewhere (a cluster node) reaches only the
+tools registered in its own worker.
+
+`slate_tools()` lists what a tool cell can call, and where each comes from. `tool_handle(tc)` threads a background call's run id
 into the next call. A tool cell is never swept up by an automatic run, so reopening a notebook or a
 reactive update does not re-fire it.
 

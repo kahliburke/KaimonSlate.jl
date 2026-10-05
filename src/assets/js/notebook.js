@@ -559,7 +559,8 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // as a distinct object, so the reference compares below can't tell it's the same result — which
     // is what made one run draw a chart twice. `slateAcceptRev` is the single arbiter of recency;
     // see its definition in view.js.
-    const _stale = window.slateRevIsNew ? !window.slateRevIsNew(c) : false;
+    const out = el.querySelector('.output');
+    const _stale = window.slateRevIsNew ? !window.slateRevIsNew(c, out) : false;
     // A cell's payload has FOUR consumers — output, charts, tables, animations — and `rev` is one
     // stamp covering all of them. `revMark`'s contract (view.js) is that the stamp is spent only
     // where the payload actually reaches the DOM; spending it in the output branch broke that for
@@ -567,8 +568,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // was spent on a no-op swap and every later pass skipped the player as stale — it appeared only
     // after a full page reload. `_landed` tracks whether everything that had work to do did it.
     let _landed = true;
-    const out = el.querySelector('.output');
-    if (!_conflicted && !_stale && c.output !== last.current.out) {
+    // …and against the element, not only this component's memo: an element built again after the
+    // payload landed holds nothing, while the memo still says the output was applied.
+    if (!_conflicted && !_stale && (c.output !== last.current.out || (out && out.__slateOut !== c.output))) {
       if (out) {
         // Typeset and clamp AFTER the swap has decoded, not beside it (main): doing them inline ran
         // them against the outgoing content.
@@ -644,10 +646,10 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     + (c.roleBib ? ' role-bib' : '') + (c.roleCaption ? ' role-caption' : '');
   // A tool cell keeps the `code` class (its body IS a code editor) and adds `tool`, so the chrome
   // can mark it without re-implementing the editor mounting.
-  // A sweep cell keeps the `code` class for the same reason a tool cell does — its body IS a code
+  // A job cell keeps the `code` class for the same reason a tool cell does — its body IS a code
   // editor — and adds `sweep`, which the chrome uses to mark it as work that runs off this machine.
   const cls = 'cell ' + (c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web'
-                        : c.kind === 'tool' ? 'code tool' : c.kind === 'sweep' ? 'code sweep'
+                        : c.kind === 'tool' ? 'code tool' : c.kind === 'job' ? 'code job'
                         : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
     // A workbook cell is the reader's to write. The class is emitted in every posture so the author

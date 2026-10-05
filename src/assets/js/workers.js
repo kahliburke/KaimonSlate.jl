@@ -4,46 +4,85 @@
 // live while open) plus its diagnostics (process + host cpu/mem, from the 2s telemetry). The #runloc
 // pill's ▾ caret still opens the run-location picker (change WHERE it runs); the body opens this popup.
 
+// Everything shown about a worker (its identity, health, allocation and latest sample) is read from
+// the page's model (model.js), which holds the hub's facts. The panel fetches only what the facts do
+// not carry: the worker's log and where it came from (`_wpProv`).
 let _wpSide = null;
-let _wpShown = null;   // the row the open popup is drawn from, for the clock tick below
-// side → freshest telemetry JSON string, PUSHED over the page WebSocket (window.onWorkerTelemetry). Fresher
-// than state.workers[].stats (which only refreshes on a notebook version-bump), so the pills read it first.
-const _wpLive = {};
-// side → the freshest status NOTE ("why this worker is unwell"). Kept separately from the telemetry
-// because the two arrive on different pushes: a stats sample says nothing about health, so the note
-// has to survive one rather than be re-derived from it.
-const _wpNote = {};
+const _wpProv = {};               // side → {origin, spawned} from the log route, for the open panel
 let _wpRaw = [];                  // chronological raw log lines for the OPEN popup (snapshot + streamed), re-parsed on each change
-let _wpWorkers = [];              // latest worker list — the popup's tab strip, kept in step with the pills
+let _wpWorkers = [];              // the model's workers for this notebook, as last painted
+// The record the open panel draws: the worker's facts, and what the log route added about it.
+const _wpCurrent = () => _wpSide === null ? null
+  : Object.assign({ side: _wpSide }, _wpProv[_wpSide] || {}, window.slateModel.getWorker(_wpSide) || {});
 const _WP_LOG_MAX = 2000;        // cap the client-side buffer so a chatty worker can't grow it unbounded
 const _wpEsc = s => window.slateEscHtml(s);
 // '' for absent/negative, so a chip is omitted rather than showing a meaningless zero.
 const _wpBytes = v => (v == null || v < 0) ? '' : window.slateBytes(v, { compact: true });
 
-// A telemetry sample (JSON string) → the full breakdown as wrapping labelled chips (HTML). No truncation:
-// every metric stays visible on its own chip, wrapping to a new row as needed. `note` shows when there's no
-// sample yet (e.g. an in-process kernel or a just-spawned worker).
+// A telemetry sample (JSON string) → a few meter rows (HTML): CPU, memory and each GPU, each against
+// what the worker can actually use (the job's limits where it has them, else the host's), then a line
+// of the rest. Clicking it opens the telemetry view (telemetry.js) for the full picture over time.
+// `note` (why the worker is unwell) leads, and shows even when there is no sample yet.
+// `peak`, when given, is the busiest moment in the sample's interval: a translucent band behind the bar.
+const _wpPct = f => Math.round(Math.min(1, Math.max(0, f)) * 100);
+const _wpMeter = (label, frac, text, warn, peak) => '<div class="wm-row"><span class="wm-k">' + label + '</span>' +
+  '<span class="wm-bar' + (warn ? ' warn' : '') + '">' +
+  (peak != null && frac != null && peak > frac ? '<span class="wm-peak" style="width:' + _wpPct(peak) + '%"></span>' : '') +
+  '<span class="wm-fill" style="width:' + (frac == null ? 0 : _wpPct(frac)) + '%"></span></span>' +
+  '<span class="wm-v" title="' + text + '">' + text + '</span></div>';
 function _wpStatsChips(statsJson, note) {
-  // A degraded/disconnected/starting worker carries a `note` explaining WHY — show it as a leading warning
-  // chip so the popup says what's wrong even when telemetry is stale or absent (was a bare "(no log yet)").
   const warn = note ? '<span class="wchip wchip-warn">⚠ ' + _wpEsc(note) + '</span>' : '';
   let s; if (statsJson) { try { s = JSON.parse(statsJson); } catch (_) { s = null; } }
   if (!s) return warn;
-  // `w` = reserved value width (ch) sized to the metric's max, so a chip's width stays fixed as the number
-  // changes each tick (paired with tabular-nums in CSS) — the row no longer jitters on every update.
-  const chip = (k, v, w) => '<span class="wchip"><span class="wchip-k">' + k + '</span>' +
-    '<span class="wchip-v" style="min-width:' + w + 'ch">' + _wpEsc(v) + '</span></span>';
-  const p = [];
-  if (s.cpu >= 0) p.push(chip('cpu', s.cpu + '%', 5));
-  if (s.rss > 0) p.push(chip('rss', _wpBytes(s.rss), 5));
-  if (s.evals > 0) p.push(chip('running', s.evals, 2));
-  if (s.gc_ms > 0) p.push(chip('gc', s.gc_ms + 'ms', 6));
-  if (s.memo >= 0) p.push(chip('memo', _wpBytes(s.memo), 5));
-  if (s.sys_cpu >= 0) p.push(chip('host cpu', s.sys_cpu + '%', 5));
-  if (s.load1 >= 0) p.push(chip('load', s.load1, 5));
-  if (s.sys_mem_total > 0) p.push(chip('host mem', _wpBytes(s.sys_mem_total - s.sys_mem_free) + ' / ' + _wpBytes(s.sys_mem_total), 13));
-  return warn + p.join('');
+  const r = window.slateModel.reading(s), proc = s.proc || {}, B = _wpBytes;
+  const rows = [];
+  // CPU: this worker, against what it may use (the job's allowance, else the host's cores).
+  if (r.cpu != null) rows.push(_wpMeter('CPU', r.cpuFrac,
+    _wpEsc(r.cpuText + (r.hostCpu != null ? ' · host ' + Math.round(r.hostCpu) + '%' + (r.hostCores ? ' of ' + r.hostCores : '') : ''))));
+  // Memory: against the limit that would stop it.
+  if (r.mem) rows.push(_wpMeter('Memory', r.memFrac,
+    _wpEsc(B(r.mem.used) + ' / ' + B(r.mem.limit) + (r.mem.of === 'job' ? ' job limit' : ' host') + (r.rss ? ' · this worker ' + B(r.rss) : '')),
+    r.memFrac > 0.85));
+  else if (r.rss) rows.push(_wpMeter('Memory', null, _wpEsc('this worker ' + B(r.rss))));
+  for (const g of r.gpus) rows.push(_wpMeter('GPU ' + g.i, g.util == null ? null : g.util / 100,
+    _wpEsc([g.util != null ? g.util + '%' + (g.peak != null ? ' · peak ' + g.peak + '%' : '') : null,
+            g.memUsed != null && g.memTotal ? B(g.memUsed) + ' / ' + B(g.memTotal) : null,
+            g.temp != null ? g.temp + '°C' : null,
+            g.power != null ? Math.round(g.power) + (g.powerLimit ? ' / ' + Math.round(g.powerLimit) : '') + ' W' : null]
+      .filter(Boolean).join(' · ')), g.memTotal && g.memUsed / g.memTotal > 0.9,
+    g.peak == null ? null : g.peak / 100));
+  const memo = s.memo_bytes ?? s.memo;
+  const rest = [proc.alloc_rate >= 0 ? 'allocating ' + _wpBytes(proc.alloc_rate) + '/s' : null,
+                memo >= 0 ? 'memo ' + _wpBytes(memo) : null, s.evals > 0 ? s.evals + ' running' : null,
+                s.load1 >= 0 ? 'load ' + s.load1 : null].filter(Boolean);
+  return warn + '<div class="wm" title="Open telemetry" onclick="wpOpenTelemetry()">' + rows.join('') +
+    (rest.length ? '<div class="wm-rest">' + _wpEsc(rest.join(' · ')) + '</div>' : '') +
+    '<div class="wm-open">Open telemetry ›</div></div>';
 }
+// The whole log of the worker the panel is showing, in the log viewer (logview.js): paged by byte
+// range and searchable however large it is, with its colour kept.
+window.wpOpenLog = function () {
+  const side = _wpSide || '', nbid = (window.__slateState || {}).id;
+  if (!nbid || !window.slateLogs) return;
+  const w = (_wpWorkers || []).find(x => (x.side || '') === side) || {};
+  window.slateLogs.openSource({
+    key: 'worker:' + side, title: 'Worker log · ' + _wpLabel(side, w.host),
+    call: (action, arg, opts) => fetch('/api/' + encodeURIComponent(nbid) + '/worker-log-io', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({}, opts, { side, action, arg })) }).then(r => r.json()) });
+};
+
+// The telemetry view for the worker the popup is showing.
+// Host and port come from the live worker list: the popup's snapshot is the log route's answer, which
+// for a region worker names neither.
+window.wpOpenTelemetry = function () {
+  const shown = _wpCurrent(); if (!shown || !(window.openWorkerTelemetry || window.openTelemetry)) return;
+  const side = _wpSide;
+  const r = Object.assign({}, shown, (_wpWorkers || []).find(w => (w.side || '') === side) || {});
+  // The worker's bar (facts, restart, reap) rides along, as it does from the home page.
+  (window.openWorkerTelemetry || window.openTelemetry)({ nb: (window.__slateState || {}).id, side,
+    host: r.host && r.host !== 'local' ? r.host : '', port: r.port, label: _wpLabel(side, r.host) });
+};
 
 // ── Worker-log prettifier ─────────────────────────────────────────────────────────────────────────────
 // The worker's timestamp ConsoleLogger renders each record across MULTIPLE physical lines with box-drawing
@@ -139,6 +178,9 @@ function _wpPillStat(statsJson) {
   const p = [];
   if (s.cpu >= 1) p.push(Math.round(s.cpu) + '%');   // hide 0% on a resting worker — it's just noise (popup still shows it)
   if (s.rss > 0) p.push(_wpBytes(s.rss));
+  // On a GPU job the GPUs' load is usually the number that matters: their mean, when busy.
+  const r = window.slateModel.reading(s);
+  if (r.gpus.some(g => g.util >= 1)) p.push('gpu ' + Math.round(r.gpuAvg) + '%');
   return p.join(' · ');
 }
 
@@ -148,31 +190,65 @@ function _wpLabel(side, host) {
   return side + (host ? ' · ' + host : '');
 }
 
-// Region pills + the main worker's compact stat on the #runloc pill. Called from updateChrome on every state
-// AND from the WS worker-list push. Two things keep the strip calm and scalable:
-//  • DEBOUNCE — the push races the full-state render (each may carry a slightly different list); coalescing
-//    to one paint per burst kills the flicker/pop the two used to cause.
-//  • SALIENT + overflow — only workers that need attention (running / starting / degraded / disconnected)
-//    stay inline; idle-healthy ones fold into a "+N ▾" menu, so the bar stays bounded for any number of regions.
+// The pill, the panel and its tabs, repainted whenever the model changes. Debounced, so a burst of
+// changes paints once. Only workers that need attention (running / starting / degraded / disconnected)
+// stay inline; idle-healthy ones fold into a "+N ▾" menu, so the bar stays bounded for any number of
+// regions.
 let _wpPendingWs = [], _wpPaintTimer = null;
-function renderWorkers(state) {
-  const ws = (state && state.workers) || [];
-  // Both paths into the pills come through here — the full notebook state and the pushed list — so
-  // this is where the model is fed. Everything downstream reads it rather than this array.
-  window.slateModel.applyWorkers(ws);
-  // Cheap, non-jarring bits run NOW (never debounced): drop live samples for vanished workers, and the main
-  // worker's compact stat on the #runloc pill.
-  const keep = new Set(['', ...ws.map(w => w.side || '')]);
-  for (const k of Object.keys(_wpLive)) if (!keep.has(k)) delete _wpLive[k];
-  // The strip (main worker + regions) is debounced — one paint per burst, from the LATEST list.
-  _wpPendingWs = ws;
-  _wpWorkers = ws;                 // the popup's tab strip reads the same list
+function _wpOnModel() {
+  _wpWorkers = window.slateModel.workerList();
+  _wpPendingWs = _wpWorkers;
   if (_wpPaintTimer) return;
   _wpPaintTimer = setTimeout(() => {
     _wpPaintTimer = null; _wpPaintStrip(_wpPendingWs);
-    _wpSide === null || _wpPaintTabs();   // a worker appearing/leaving changes the open popup's tabs
+    if (_wpSide !== null) { _wpPaintTabs(); _wpPaintBringup(); _wpFollowRestart(); _wpDrawFacts(); }
+    if (window._dagOnWorkers) window._dagOnWorkers(_wpWorkers);   // the DAG's region status dots
   }, 160);
 }
+window.slateModel.subscribe(_wpOnModel);
+_wpOnModel();   // the facts may have landed before this script subscribed
+
+// The open panel's worker was replaced (a restart puts the new one on another port): its log and
+// where it came from are the new process's, so they are fetched again.
+let _wpOpenPort = null;
+const _wpPortOf = (side) => { const w = (_wpWorkers || []).find(x => (x.side || '') === side); return w ? w.port : null; };
+function _wpFollowRestart() {
+  if (_wpSide === null) return;
+  const p = _wpPortOf(_wpSide);
+  if (p == null) return;
+  if (_wpOpenPort == null) { _wpOpenPort = p; return; }    // opened before the list named a port
+  if (+p !== +_wpOpenPort) { _wpOpenPort = p; _wpRefresh(); }
+}
+
+// ── Bring-up ─────────────────────────────────────────────────────────────────────
+// A worker being started (a cold local spawn, a remote provision, a region coming up) is narrated in
+// ITS panel: the step it is on, precompile progress, and the build log, the elements prepare.js fills.
+// The pill says which step it is on. `window.__slateBringup` (view.js) names the side being started.
+const _wpBringingUp = (side) => { const b = window.__slateBringup; return !!b && (b.side || '') === side; };
+function _wpBringupShort(side) { return _wpBringingUp(side) && window.slatePrepShort ? window.slatePrepShort() : ''; }
+function _wpPaintBringup() {
+  const old = document.getElementById('workerpop-bringup');
+  const want = _wpSide !== null && _wpBringingUp(_wpSide);
+  if (!want) { old && old.remove(); return; }
+  if (!old) {
+    const b = window.__slateBringup, el = document.createElement('div');
+    el.id = 'workerpop-bringup'; el.className = 'workerpop-bringup';
+    el.innerHTML = '<span class="hydspin"></span><div class="wpbody">' +
+      '<div id="hydmsg" class="hydmsg">' + (b.kind === 'remote' ? 'Starting the worker on <b>' + _wpEsc(b.host || 'the remote host') + '</b>…' : 'Starting the worker…') + '</div>' +
+      '<div id="hydprep" class="hydprep"></div>' +
+      '<details id="hydraw" class="hydraw" style="display:none" ontoggle="window._prepRawToggle&&window._prepRawToggle()"><summary>build log <span id="hydrawlast" class="hydrawlast"></span></summary><pre id="hydrawpre"></pre></details></div>';
+    const head = document.querySelector('#workerpopbg .workerpop-head');
+    head && head.appendChild(el);
+  }
+  window.renderPrepare && window.renderPrepare();
+}
+window.wpBringupChanged = function () { _wpPaintBringup(); _wpPaintStrip(_wpPendingWs.length ? _wpPendingWs : _wpWorkers); };
+window.wpPrepTick = function () {
+  const b = window.__slateBringup; if (!b) return;
+  const pill = document.querySelector('#workerpills .wpill-top[data-side="' + (window.CSS && CSS.escape ? CSS.escape(b.side || '') : (b.side || '')) + '"] .wstat');
+  const t = window.slatePrepShort ? window.slatePrepShort() : '';
+  if (pill && t && pill.textContent !== t) pill.textContent = t;
+};
 
 // Severity rank — the most attention-worthy worker surfaces first; everything calmer folds away. The main is
 // ranked like any other (no special-casing): 4 disconnected · 3 degraded · 2 starting · 1 running · 0 idle-ok.
@@ -181,26 +257,14 @@ function _wpSeverity(w) {
   if (st === 'disconnected') return 4;
   if (st === 'degraded') return 3;
   if (st === 'connecting') return 2;
-  let s = null; try { s = JSON.parse(_wpLive[w.side || ''] || w.stats || 'null'); } catch (_) {}
+  let s = null; try { s = JSON.parse(w.stats || 'null'); } catch (_) {}
   return (s && s.evals > 0) ? 1 : 0;
 }
 
 // The pill/row FACE — the compact status or stat, shared by the top pill and the dropdown rows.
 // The server sends a code for WHY a worker is not connected; the words are here. `note` is still a
 // free-text line for the one case that is commentary rather than state — a bring-up in progress.
-function _wpNoteText(w) {
-  if (!w) return '';
-  switch (w.noteCode) {
-    case 'allocation_ended':
-      return 'the allocation on ' + (w.noteHost || 'the compute node') + ' ended — the next run requests a new node';
-    case 'not_signed_in':
-      return 'not signed in to ' + (w.noteHost || 'the host') + ' — use the padlock at the top of the page';
-    case 'unresponsive':
-      return 'worker stopped responding — press ▶ or re-run to reconnect';
-    default:
-      return w.note || '';
-  }
-}
+const _wpNoteText = (w) => window.slateModel.workerNote(w);
 
 function _wpFace(w) {
   const st = window.slateModel.workerStatus(w);
@@ -209,8 +273,8 @@ function _wpFace(w) {
   if (w.face && st !== 'ok') return w.face;
   if (st === 'degraded') return '⚠ ' + _wpUnwellShort(_wpNoteText(w));
   if (st === 'disconnected') return 'disconnected';
-  const stat = _wpPillStat(_wpLive[w.side || ''] || w.stats);
-  if (st === 'connecting') return stat || 'starting…';
+  const stat = _wpPillStat(w.stats);
+  if (st === 'connecting') return stat || _wpBringupShort(w.side || '') || 'starting…';
   return stat;
 }
 
@@ -235,11 +299,17 @@ function _wpPaintStrip(ws) {
   const caret = ranked.length > 1 ? '<span class="wpill-caret">▾</span>' : '';
   // Fixed single slot: the pill reserves a min-width so it doesn't jump as the top worker changes, and the
   // LABEL elides (CSS ellipsis) if a region name is long — icon/stat/caret stay put.
-  box.innerHTML = '<span class="wpill wpill-top' + cls + '" data-toplist data-side="' + _wpEsc(side) +
-    '" title="' + _wpEsc(_wpLabel(side, top.host) + (ranked.length > 1 ? ' — click for all ' + ranked.length + ' workers' : ' — click for details')) +
+  // No `title`: hovering opens the list of workers, which would sit under the tooltip.
+  const html = '<span class="wpill wpill-top' + cls + '" data-toplist data-side="' + _wpEsc(side) +
     '"><span class="wtopicon">' + icon + '</span><span class="wtoplabel">' + _wpEsc(_wpLabel(side, top.host)) + '</span>' +
     (face ? '<span class="wstat">' + _wpEsc(face) + '</span>' : '') + caret +
     '<div class="wpill-menu" hidden>' + rows + '</div></span>';
+  // Repainted on every change, so the list of workers is kept open across a repaint while it is
+  // showing, and a repaint that would draw the same thing touches nothing.
+  if (box._wpHtml === html) return;
+  const wasOpen = _wpMenuOpen();
+  box.innerHTML = html; box._wpHtml = html;
+  if (wasOpen) { const m = box.querySelector('.wpill-menu'); if (m) m.hidden = false; }
 }
 
 // Health dot for a dropdown row: 🟢 ok · 🟡 degraded · 🟠 connecting/disconnected.
@@ -248,63 +318,6 @@ function _wpOverflowDot(w) { const st = window.slateModel.workerStatus(w);
 
 // Short reason for a degraded pill face — pull the "Ns" out of the note ("no liveness reply for 18s …").
 function _wpUnwellShort(note) { const m = note && /(\d+)s/.exec(note); return m ? m[1] + 's no reply' : 'unresponsive'; }
-
-// The worker/pill list pushed over the WS (region spawn-start/connect, and every liveness miss/recovery)
-// → redraw the pills immediately, without waiting for the next full notebook state. If a popup is open for
-// one of these workers, refresh its status/note chips too so the degraded countdown ticks live in the popup.
-function onWorkersUpdate(ws) {
-  try {
-    ws = ws || [];
-    renderWorkers({ workers: ws });       // feeds the model on the way through
-    // The cell chips carry the same worker fact as the pills, so they follow the same push rather
-    // than waiting for the next full state render.
-    window.refreshRegionChips && window.refreshRegionChips();
-    if (_wpSide !== null) {
-      const w = ws.find(x => (x.side || '') === _wpSide);
-      if (w) {
-        _wpNote[_wpSide] = _wpNoteText(w);
-        const el = document.getElementById('workerpop-stats'); if (el) el.innerHTML = _wpStatsChips(_wpLive[_wpSide] || w.stats, _wpNoteText(w));
-      }
-    }
-    // Live aliveness for the DAG region containers: hand the freshest list to the pane so its
-    // header status dots (and any open region card) track liveness drops/recoveries at once.
-    if (window._dagOnWorkers) window._dagOnWorkers(ws);
-  } catch (_) {}
-}
-
-// A worker telemetry sample pushed over the WS → update its pill face live (and the popup breakdown if
-// that side's popup is open), WITHOUT waiting for the next notebook state. `side===""` is the main worker.
-function onWorkerTelemetry(side, statsJson, alloc) {
-  side = side || '';
-  _wpLive[side] = statsJson;
-  // The allocation clocks ride this frame. They used to be dropped in wscall.js, so the popup's
-  // walltime and idle rows came from the one-shot fetch that opened it and then stood still.
-  window.slateModel.applyTelemetry(side, statsJson, alloc);
-  if (_wpSide === side && _wpShown && alloc) {
-    for (const k of ['scheduler', 'held', 'allocState', 'walltimeLeft',
-                     'idleRelease', 'idleWarn', 'idleFor']) delete _wpShown[k];
-    Object.assign(_wpShown, alloc);
-    _wpShown._at = Date.now();          // these ages are as of NOW, so the tick counts from here
-    const ib = document.getElementById('workerpop-ident'); if (ib) ib.innerHTML = _wpIdentChips(_wpShown);
-    const ab = document.getElementById('workerpop-acts');  if (ab) ab.innerHTML = _wpActions(_wpShown);
-  }
-  const box = document.getElementById('workerpills');
-  const pill = box && box.querySelector('.wpill[data-side="' + (window.CSS && CSS.escape ? CSS.escape(side) : side) + '"]');
-  // Only patch the face when the pill is showing its normal stat — leave a degraded/reconnecting pill's status
-  // text alone (the debounced re-render owns that; a stray stale sample shouldn't overwrite "⚠ Ns no reply").
-  if (pill && !pill.classList.contains('degraded') && !pill.classList.contains('reconnecting')) {
-    const txt = _wpPillStat(statsJson);
-    let el = pill.querySelector('.wstat');
-    if (txt && !el) { el = document.createElement('span'); el.className = 'wstat'; pill.appendChild(document.createTextNode(' ')); pill.appendChild(el); }
-    if (el) el.textContent = txt;
-  }
-  if (_wpSide === side) {                                        // popup for this side is open — refresh its stat chips
-    // Carry the note through: a telemetry tick is not news about the worker's HEALTH, and rendering
-    // the chips without it made the reason the popup was opened for vanish on the next sample.
-    const el = document.getElementById('workerpop-stats');
-    if (el) el.innerHTML = _wpStatsChips(statsJson, _wpNote[side] || '');
-  }
-}
 
 // A worker log line pushed over the WS → prepend it to the open popup for that side (newest-first, matching
 // the snapshot render). Ignored unless that side's popup is showing; the log file keeps the full history.
@@ -322,8 +335,8 @@ function onWorkerLog(side, line) {
 // dropdown can't: a red dot on a tab you are NOT reading.
 //
 // Ranked by severity and bounded the same way the topbar pill is: unwell workers always hold a
-// visible tab, calm ones fold into `+N ▾`. Live dots come from `_wpLive`, which already streams for
-// every worker, so only the LOG is per-tab work — fetched on switch, one buffer, so the line cap
+// visible tab, calm ones fold into `+N ▾`. Live dots come from the model, which already holds every
+// worker, so only the LOG is per-tab work — fetched on switch, one buffer, so the line cap
 // stays meaningful however many workers there are.
 const _WP_TABS_MAX = 4;
 function _wpPaintTabs() {
@@ -383,16 +396,16 @@ function _wpIdentChips(r) {
   // pushed instants at DRAW time, so the ticker below keeps them honest between pushes.
   // The server sends AGES, measured in its own clock; `_wpAt` is when they landed in ours. Every
   // instant here is therefore local, and a skewed hub or compute node cannot bend the display.
-  const since = (Date.now() - (+r._at || Date.now())) / 1000;
-  if (+r.walltimeLeft >= 0) row('walltime', _wpDur(+r.walltimeLeft - since) + ' left');
+  const M = window.slateModel, left = M.walltimeLeft(r);
+  if (left >= 0) row('walltime', _wpDur(left) + ' left');
   // A rate that has not been fitted yet is shown as unknown, not as zero: "0ppm" would claim these
   // clocks were measured and found not to drift.
-  if (r.clockSamples) {
+  if (r.clockRttMs !== undefined) {
     const ppm = (r.clockDriftPpm === undefined || r.clockDriftPpm === null) ? '--' : r.clockDriftPpm + 'ppm';
     row('clock', '±' + r.clockRttMs + 'ms · ' + ppm);
   }
   if (+r.idleRelease > 0) {
-    const idle = (+r.idleFor || 0) + since;
+    const idle = Math.max(0, M.idleFor(r));
     const left = +r.idleRelease - idle;
     row('idle', _wpDur(idle) + ' / ' + _wpDur(+r.idleRelease) +
                 (left > 0 ? ' — releases in ' + _wpDur(left) : ' — releasing'));
@@ -446,9 +459,10 @@ window.wpRelease = async function (side) {
 function _wpSwitchTab(side) {
   if (side === _wpSide) return;
   _wpSide = side; _wpRaw = [];
+  _wpOpenPort = _wpPortOf(side);
+  _wpPaintBringup();
   const log = document.getElementById('workerpop-log'); if (log) log.textContent = 'loading…';
-  const st = document.getElementById('workerpop-stats'); if (st) st.textContent = '';
-  const id = document.getElementById('workerpop-ident'); if (id) id.innerHTML = '';
+  _wpDrawFacts();   // what the facts say is there at once; the log follows
   _wpPaintTabs();
   _wpRefresh();
 }
@@ -456,19 +470,21 @@ function _wpSwitchTab(side) {
 function openWorkerPop(side, ev, pin) {
   ev && ev.stopPropagation();   // opened from a click → don't let it bubble to the document close-on-outside-click handler
   _wpSide = side;
+  _wpOpenPort = _wpPortOf(side);
   if (pin) _wpPinned = true;    // a deliberate click (e.g. a region card's Log) opens PINNED so it stays put
   const bg = document.getElementById('workerpopbg'); if (!bg) return;
   _wpRaw = [];
   document.getElementById('workerpop-log').textContent = 'loading…';
-  document.getElementById('workerpop-stats').textContent = '';
-  const idb = document.getElementById('workerpop-ident'); if (idb) idb.innerHTML = '';
+  _wpDrawFacts();   // what the facts say is there at once; the log follows
   bg.classList.add('show');
   _wpUpdatePin();
   _wpPaintTabs();   // opens on the worker you clicked, with its siblings alongside
-  _wpRefresh();   // ONE snapshot for history + title/status; live stats & new log lines then arrive via the WS push
+  _wpPaintBringup();
+  _wpRefresh();   // the log; new lines then arrive over the page's WebSocket, everything else through the model
 }
 function closeWorkerPop() {
   _wpSide = null; _wpPinned = false;
+  _wpPaintBringup();
   const bg = document.getElementById('workerpopbg'); if (bg) bg.classList.remove('show');
   _wpUpdatePin();
 }
@@ -479,35 +495,16 @@ async function _wpRefresh() {
   catch (_) { r = null; }
   if (_wpSide !== side) return;                                  // switched to another region (or closed) mid-fetch → stale response, drop it
   // An app REFUSES the worker-log route (a log can carry notebook data, and an app's visitor is not
-  // its operator), so the panel has to stand on what /state already gave us: identity and telemetry
-  // are there, and only the log is missing. Saying where it lives beats a pane stuck on "loading…".
-  if (!r || typeof r !== 'object' || r.log === undefined) {
-    const w = (_wpWorkers || []).find(x => (x.side || '') === side);
-    r = Object.assign({ side: side }, w || {}, { log: "" , _noLog: true });
-  }
-  const dot = _wpOverflowDot(r);   // same rank as every other dot: degraded outranks a live wire
-  document.getElementById('workerpop-title').innerHTML = dot + ' ' + (r.side ? 'region' : 'main worker') +
-    ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : '');
-  // The run-location picker (formerly the #runloc caret) lives here now — only for the MAIN worker, since a
-  // region's host is fixed by its registry def. "change ▾" opens the existing picker modal.
-  const rl = document.getElementById('workerpop-runloc');
-  if (rl) {
-    if (!r.side) { rl.style.display = ''; rl.innerHTML = 'run location: <b>' + _wpEsc(r.host || 'local') +
-      '</b> <button class="wrl-change" onclick="closeWorkerPop(); toggleRunLoc(event)">change ▾</button>'; }
-    else { rl.style.display = 'none'; rl.innerHTML = ''; }
-  }
-  _wpNote[side] = _wpNoteText(r);
-  r._at = Date.now();          // anchor the server's ages in this machine's clock
-  _wpShown = r;
-  const idb = document.getElementById('workerpop-ident');
-  if (idb) idb.innerHTML = _wpIdentChips(r);
-  const ab = document.getElementById('workerpop-acts');
-  if (ab) ab.innerHTML = _wpActions(r);
-  document.getElementById('workerpop-stats').innerHTML = _wpStatsChips(r.stats, _wpNoteText(r));
+  // its operator), so only the log is missing; everything else comes from the facts.
+  const noLog = !r || typeof r !== 'object' || r.log === undefined;
+  // What the route adds to the facts: where the process came from. The rest of its answer is the
+  // same worker entry the facts carry, and is not used: the facts are the one copy.
+  _wpProv[side] = noLog ? {} : { origin: r.origin, spawned: r.spawned };
+  _wpDrawFacts();
   // Seed the chronological buffer from the snapshot; live lines then append via onWorkerLog. Parsed + rendered
   // newest-record-first so multi-line records stay right-way-up. Trailing blank line from the file is dropped.
-  _wpRaw = r.log ? r.log.split('\n').filter((l, i, a) => l.length || i < a.length - 1) : [];
-  if (r._noLog) {
+  _wpRaw = (!noLog && r.log) ? r.log.split('\n').filter((l, i, a) => l.length || i < a.length - 1) : [];
+  if (noLog) {
     const box = document.getElementById('workerpop-log');
     if (box) box.innerHTML = '<div class="wplog-none">Worker logs are an operator view, not a reader ' +
       'one — a log can carry the notebook\'s own data, so an app does not serve them here.<br>' +
@@ -518,19 +515,54 @@ async function _wpRefresh() {
   }
 }
 
-window.renderWorkers = renderWorkers;
+// The open panel's title, picker, identity, actions and figures, from the model. Called when the panel
+// opens, whenever the model changes, and every second while an allocation clock is showing.
+// Only touches what changed: this runs on every change to the model (each telemetry sample among
+// them), and replacing a button under the pointer would swallow a click on it.
+function _wpSetHtml(el, html) { if (el && el._wpHtml !== html) { el.innerHTML = html; el._wpHtml = html; } }
+function _wpDrawFacts() {
+  const r = _wpCurrent(); if (!r) return;
+  const dot = _wpOverflowDot(r);   // same rank as every other dot
+  _wpSetHtml(document.getElementById('workerpop-title'), dot + ' ' + (r.side ? 'region' : 'main worker') +
+    ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : ''));
+  // The run-location picker (formerly the #runloc caret) lives here now — only for the MAIN worker, since a
+  // region's host is fixed by its registry def. "change ▾" opens the existing picker modal.
+  const rl = document.getElementById('workerpop-runloc');
+  if (rl) {
+    rl.style.display = r.side ? 'none' : '';
+    _wpSetHtml(rl, r.side ? '' : 'run location: <b>' + _wpEsc(r.host || 'local') +
+      '</b> <button class="wrl-change" onclick="closeWorkerPop(); toggleRunLoc(event)">change ▾</button>');
+  }
+  _wpSetHtml(document.getElementById('workerpop-ident'), _wpIdentChips(r));
+  _wpSetHtml(document.getElementById('workerpop-acts'), _wpActions(r));
+  _wpSetHtml(document.getElementById('workerpop-stats'), _wpStatsChips(r.stats, _wpNoteText(r)));
+}
+
 window.openWorkerPop = openWorkerPop;
 window.closeWorkerPop = closeWorkerPop;
-window.onWorkerTelemetry = onWorkerTelemetry;
 window.onWorkerLog = onWorkerLog;
-window.onWorkersUpdate = onWorkersUpdate;
 
-// The bar's single pill IS the dropdown trigger. Click → toggle the ranked list of ALL workers. HOVERING a
-// row PREVIEWS that worker in the side panel — transient: it follows the mouse and hides when you leave.
-// CLICKING a row (or the panel's 📌) PINS the panel so it stays up while you work elsewhere; 📌/× to unpin.
-let _wpPinned = false, _wpShowT = null, _wpHideT = null;
+// The bar's single pill. HOVERING it (after the tooltip delay from Settings) opens the ranked list of ALL
+// workers; leaving the pill, the list and the panel closes it. CLICKING the pill opens its worker's panel
+// PINNED. Hovering a row PREVIEWS that worker in the side panel, which follows the mouse and hides when you
+// leave; clicking a row (or the panel's 📌) PINS it so it stays up while you work elsewhere; 📌/× to unpin.
+let _wpPinned = false, _wpShowT = null, _wpHideT = null, _wpMenuT = null;
+let _wpMenuHeld = false;   // the pill was just clicked: no list until the pointer leaves it
+function _wpHoverDelay() {
+  const n = parseInt(localStorage.getItem('slateTipDelay'), 10);
+  return Number.isFinite(n) && n >= 0 ? n : (window.slateTipDefaultDelay ? window.slateTipDefaultDelay() : 400);
+}
+function _wpScheduleMenu(top) {
+  if (_wpMenuOpen() || _wpMenuT || _wpMenuHeld) return;
+  _wpMenuT = setTimeout(() => { _wpMenuT = null; const m = top.querySelector('.wpill-menu'); if (m && top.isConnected) m.hidden = false; },
+                        _wpHoverDelay());
+}
 function _wpMenuOpen() { return !!document.querySelector('#workerpills .wpill-menu:not([hidden])'); }
-function _wpCloseMenu() { const m = document.querySelector('#workerpills .wpill-menu:not([hidden])'); if (m) m.hidden = true; if (_wpShowT) { clearTimeout(_wpShowT); _wpShowT = null; } }
+function _wpCloseMenu() {
+  const m = document.querySelector('#workerpills .wpill-menu:not([hidden])'); if (m) m.hidden = true;
+  if (_wpShowT) { clearTimeout(_wpShowT); _wpShowT = null; }
+  if (_wpMenuT) { clearTimeout(_wpMenuT); _wpMenuT = null; }
+}
 function _wpKeepPanel() { if (_wpHideT) { clearTimeout(_wpHideT); _wpHideT = null; } }   // over a row/panel → don't hide
 function _wpUpdatePin() { const p = document.getElementById('workerpop-pin'); if (p) { p.classList.toggle('pinned', _wpPinned); p.title = _wpPinned ? 'pinned — click to unpin' : 'click to pin this panel'; } }
 function _wpShowPanel(side, pin) {
@@ -546,7 +578,13 @@ function _wpScheduleShow(side) {                 // hover → transient preview 
   if (_wpShowT) clearTimeout(_wpShowT);
   _wpShowT = setTimeout(() => { _wpShowT = null; if (_wpMenuOpen()) _wpShowPanel(side, false); }, 320);
 }
-function _wpScheduleHide() {                      // left the whole area → hide an UNPINNED preview
+function _wpScheduleHide() {                      // left the whole area → close the list, hide an UNPINNED preview
+  if (_wpMenuT) { clearTimeout(_wpMenuT); _wpMenuT = null; }
+  if (_wpMenuOpen()) {
+    if (_wpHideT) clearTimeout(_wpHideT);
+    _wpHideT = setTimeout(() => { _wpHideT = null; _wpCloseMenu(); if (!_wpPinned && _wpSide !== null) closeWorkerPop(); }, 260);
+    return;
+  }
   if (_wpPinned || _wpSide === null) return;
   if (_wpShowT) { clearTimeout(_wpShowT); _wpShowT = null; }
   if (_wpHideT) clearTimeout(_wpHideT);
@@ -575,7 +613,12 @@ document.addEventListener('click', e => {
   const row = e.target.closest('#workerpills .wpill-menuitem[data-side]');
   if (row) { _wpCloseMenu(); _wpShowPanel(row.getAttribute('data-side'), true); return; }   // click a row → PIN it
   const top = e.target.closest('#workerpills .wpill-top');
-  if (top) { const menu = top.querySelector('.wpill-menu'); if (menu) menu.hidden ? (menu.hidden = false) : _wpCloseMenu(); e.stopPropagation(); return; }
+  if (top) {                                                    // the pill → its worker's panel, pinned; again closes it
+    const side = top.getAttribute('data-side') || '';
+    _wpCloseMenu(); _wpMenuHeld = true;
+    (_wpPinned && _wpSide === side) ? closeWorkerPop() : _wpShowPanel(side, true);
+    e.stopPropagation(); return;
+  }
   if (e.target.closest('#workerpopbg')) return;                 // clicks inside the panel don't dismiss it
   if (_wpMenuOpen()) _wpCloseMenu();                            // click-away closes the dropdown…
   if (!_wpPinned && _wpSide !== null) closeWorkerPop();         // …and an UNPINNED preview; a pinned panel stays
@@ -584,11 +627,14 @@ document.addEventListener('click', e => {
 document.addEventListener('mouseover', e => {
   if (!e.target || !e.target.closest) return;
   const row = e.target.closest('#workerpills .wpill-menuitem[data-side]');
-  if (row || e.target.closest('#workerpopbg') || e.target.closest('#workerpills .wpill-top')) _wpKeepPanel();
+  const top = e.target.closest('#workerpills .wpill-top');
+  if (row || top || e.target.closest('#workerpopbg')) _wpKeepPanel();
+  if (top && !row) _wpScheduleMenu(top);
   if (row && _wpMenuOpen()) _wpScheduleShow(row.getAttribute('data-side'));
 });
 document.addEventListener('mouseout', e => {
   const to = e.relatedTarget;
+  if (!(to && to.closest && to.closest('#workerpills .wpill-top'))) _wpMenuHeld = false;
   const stillIn = to && to.closest && (to.closest('#workerpills') || to.closest('#workerpopbg'));
   if (!stillIn) _wpScheduleHide();
 });
@@ -600,11 +646,16 @@ document.addEventListener('keydown', e => {
   }
 }, true);
 
-// The allocation clocks tick between pushes: redraw them every second while a popup is open so a
-// walltime does not sit still until the next sample arrives.
+// What counts from an instant (an allocation's walltime, its idle stretch, how long a worker has not
+// answered) is redrawn every second: the facts change only when the system does, so nothing else
+// would move these.
 setInterval(() => {
-  if (_wpSide === null || !_wpShown) return;
-  if (!window.slateModel.isHeld(_wpShown)) return;   // nothing held, nothing counting down
+  if (_wpWorkers.some(w => w.noteCode === 'no_reply')) _wpPaintStrip(_wpWorkers);
+  const r = _wpCurrent();
+  if (!r) return;
+  if (!window.slateModel.isHeld(r) && r.noteCode !== 'no_reply') return;   // nothing counting
+  const st = document.getElementById('workerpop-stats');
+  if (r.noteCode === 'no_reply') _wpSetHtml(st, _wpStatsChips(r.stats, _wpNoteText(r)));
   const idb = document.getElementById('workerpop-ident');
-  if (idb) idb.innerHTML = _wpIdentChips(_wpShown);
+  _wpSetHtml(idb, _wpIdentChips(r));
 }, 1000);

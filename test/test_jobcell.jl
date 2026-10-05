@@ -1,4 +1,4 @@
-# The `#%% sweep` cell kind: parse/serialize round-trip and the kind predicates that decide how the
+# The `#%% job` cell kind: parse/serialize round-trip and the kind predicates that decide how the
 # engine treats it. The lifecycle and the renderer are separate; this is the plumbing that has to be
 # right before either can be built, because it is what every notebook file on disk depends on.
 using ReTest
@@ -7,16 +7,16 @@ const RE = KaimonSlate.ReportEngine
 
 findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 
-@testset "sweep cell kind" begin
+@testset "job cell kind" begin
     @testset "parses from the header token" begin
         r = RE.parse_report("""
-        #%% sweep id=scan
+        #%% job id=scan
         @sweep(grid, target) do p
             work(p)
         end
         """)
         c = findcell(r, "scan")
-        @test c.kind === RE.SWEEP
+        @test c.kind === RE.JOB
         @test occursin("@sweep", c.source)
     end
 
@@ -25,7 +25,7 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         #%% md id=intro
         # A sweep
 
-        #%% sweep id=scan
+        #%% job id=scan
         @sweep(grid, target) do p
             work(p)
         end
@@ -35,10 +35,10 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         """
         r = RE.parse_report(src)
         out = RE.serialize_report(r)
-        @test occursin("#%% sweep id=scan", out)
+        @test occursin("#%% job id=scan", out)
         r2 = RE.parse_report(out)
         @test [c.kind for c in r2.cells] == [c.kind for c in r.cells]
-        @test findcell(r2, "scan").kind === RE.SWEEP
+        @test findcell(r2, "scan").kind === RE.JOB
         @test findcell(r2, "after").kind === RE.CODE
     end
 
@@ -46,28 +46,28 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         # Target and resources ride in the header so the tag editor can drive them without the
         # author editing Julia.
         r = RE.parse_report("""
-        #%% sweep id=scan collapsed
+        #%% job id=scan collapsed
         @sweep(grid, target) do p; work(p); end
         """)
         c = findcell(r, "scan")
-        @test c.kind === RE.SWEEP
+        @test c.kind === RE.JOB
         @test :collapsed in c.flags
-        @test occursin("#%% sweep id=scan", RE.serialize_report(r))
+        @test occursin("#%% job id=scan", RE.serialize_report(r))
         @test occursin("collapsed", RE.serialize_report(r))
     end
 
     @testset "is evaluated, and participates in the graph, exactly like code" begin
         # This is what buys full DAG integration for free: deps, capture, staleness, memoization.
-        @test RE.is_code_kind(RE.SWEEP)
+        @test RE.is_code_kind(RE.JOB)
         @test RE.is_code_kind(RE.CODE)
         @test !RE.is_code_kind(RE.MARKDOWN)
     end
 
     @testset "runs automatically, unlike a tool call" begin
-        # Evaluating a sweep cell RECONCILES (reads the store and the scheduler); it does not submit.
+        # Evaluating a job cell RECONCILES (reads the store and the scheduler); it does not submit.
         # That is what makes reopening a notebook safe, so unlike TOOL it is not excluded from
         # automatic runs — otherwise a reopened notebook could never show progress on its own.
-        @test RE.runs_automatically(RE.SWEEP)
+        @test RE.runs_automatically(RE.JOB)
         @test !RE.runs_automatically(RE.TOOL)
     end
 
@@ -79,7 +79,7 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         #%% code id=g
         grid = [1, 2, 3]
 
-        #%% sweep id=scan
+        #%% job id=scan
         results = run_sweep(grid, tgt)
 
         #%% code id=plot
@@ -138,43 +138,43 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
     # the move in the first place.
     @testset "per-cell scheduler options round-trip through the footer" begin
         src = """
-        #%% sweep id=scan cluster=hpc
+        #%% job id=scan cluster=hpc
         @sweep(grid) do p
             p.x
         end
         """
         r = RE.parse_report(src)
-        r.meta["sweepopts"] = Dict("scan" => Dict(
+        r.meta["jobopts"] = Dict("scan" => Dict(
             "licenses"   => "ansys@srv:2",        # `@` and `:`
             "constraint" => "(avx512|avx2)&!gpu", # parentheses, pipe, ampersand, bang
             "comment"    => "run for the paper",  # spaces
             "walltime"   => "04:00:00"))
         out = RE.serialize_report(r)
-        @test occursin("# ╔═╡ Slate.sweep", out)
+        @test occursin("# ╔═╡ Slate.job", out)
         back = RE.parse_report(out)
-        @test back.meta["sweepopts"]["scan"] == r.meta["sweepopts"]["scan"]
+        @test back.meta["jobopts"]["scan"] == r.meta["jobopts"]["scan"]
         # …and the cells are untouched by a footer that now sits below them.
         @test [c.id for c in back.cells] == [c.id for c in r.cells]
-        @test findcell(back, "scan").kind === RE.SWEEP
+        @test findcell(back, "scan").kind === RE.JOB
 
         # Stable across a re-serialise, or every save churns the file.
         @test RE.serialize_report(back) == out
 
         # Nothing to say ⇒ no block at all, rather than an empty one accreting in every notebook.
         r2 = RE.parse_report(src)
-        @test !occursin("Slate.sweep", RE.serialize_report(r2))
-        r2.meta["sweepopts"] = Dict("scan" => Dict{String,String}())
-        @test !occursin("Slate.sweep", RE.serialize_report(r2))
+        @test !occursin("Slate.job", RE.serialize_report(r2))
+        r2.meta["jobopts"] = Dict("scan" => Dict{String,String}())
+        @test !occursin("Slate.job", RE.serialize_report(r2))
 
         # JSON escapes, so even a newline survives — the format's problem, not ours. This is the
         # whole reason for moving off header tags, so it is worth asserting rather than assuming.
         r3 = RE.parse_report(src)
-        r3.meta["sweepopts"] = Dict("scan" => Dict("script" => "one\ntwo", "ok" => "1"))
+        r3.meta["jobopts"] = Dict("scan" => Dict("script" => "one\ntwo", "ok" => "1"))
         b3 = RE.parse_report(RE.serialize_report(r3))
-        @test b3.meta["sweepopts"]["scan"]["script"] == "one\ntwo"
+        @test b3.meta["jobopts"]["scan"]["script"] == "one\ntwo"
         # …and the block stays ONE line per cell: the newline is escaped, not emitted, so it cannot
         # split the record across lines and orphan the rest of the footer.
-        blk = split(RE.serialize_report(r3), "Slate.sweep")[2]
+        blk = split(RE.serialize_report(r3), "Slate.job")[2]
         @test count(l -> startswith(l, "#   {"), split(blk, '\n')) == 1
         # …and a hand-edited line that is not valid JSON is skipped, not thrown: a malformed option
         # must never stop a notebook opening.
@@ -185,10 +185,10 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         # each stops at its own close, so neither eats the other.
         r4 = RE.parse_report(src)
         r4.meta["threads"] = "4"
-        r4.meta["sweepopts"] = Dict("scan" => Dict("licenses" => "x@y"))
+        r4.meta["jobopts"] = Dict("scan" => Dict("licenses" => "x@y"))
         b4 = RE.parse_report(RE.serialize_report(r4))
         @test b4.meta["threads"] == "4"
-        @test b4.meta["sweepopts"]["scan"]["licenses"] == "x@y"
+        @test b4.meta["jobopts"]["scan"]["licenses"] == "x@y"
     end
 
     # `script = "model.jl"` — the definitions the body calls, kept in a file rather than pasted into

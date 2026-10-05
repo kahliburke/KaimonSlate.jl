@@ -21,13 +21,14 @@
 # notebook's parent project (Project.toml + /src), all copied over and kept in sync so the remote
 # worker's Revise hot-reloads exactly like local. Package *adds* execute on the remote worker.
 #
-# `import Sockets`, `FileWatching` — stdlib. SSH rides the session in `SshTransport` (no subprocess,
+# `import Sockets` — stdlib; `BetterFileWatching` wakes the source sync on a save. SSH rides the session in `SshTransport` (no subprocess,
 # so hostnames/paths can't inject). KaimonGate CURVE bits are reached through the client the
 # hub already uses (`connect_tcp!(…; server_key=…)` does the client-side CURVE itself).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 import Sockets
-import FileWatching
+import BetterFileWatching
+import CancellationTokens
 import Dates
 import Mmap
 import SHA as _SHA
@@ -176,15 +177,18 @@ struct RemoteTarget <: RunTarget
     sysimage::Bool               # opt-in: bake + boot a PackageCompiler worker sysimage for this env (default false)
     curve::Bool                  # CURVE-encrypt this region's data channel (default true; false = plaintext, for the §7 bench)
     job::String                  # scheduler job whose node `ssh_host` is ("" ⇒ not inside an allocation)
+    depot::String                # Julia depot on the host for this target's Julia ("" ⇒ the host's default)
+    setup::String                # shell run before every Julia for this target (`machine_setup`)
 end
 RemoteTarget(ssh_host::AbstractString; transport::Symbol = :tunnel,
              project::AbstractString = "~/.cache/kaimonslate/remote",
              port::Int = 0, stream_port::Int = 0, origin_env::AbstractString = "",
              datadir::AbstractString = "", cache_root::AbstractString = "", region::AbstractString = "",
-             sysimage::Bool = false, curve::Bool = true, job::AbstractString = "") =
+             sysimage::Bool = false, curve::Bool = true, job::AbstractString = "",
+             depot::AbstractString = "", setup::AbstractString = "") =
     RemoteTarget(String(ssh_host), transport, String(project), port, stream_port,
                  String(origin_env), String(datadir), String(cache_root), String(region), sysimage, curve,
-                 String(job))
+                 String(job), String(depot), String(setup))
 
 is_remote(::LocalTarget) = false
 is_remote(::RemoteTarget) = true
@@ -193,8 +197,6 @@ is_remote(::RemoteTarget) = true
 const _REMOTE_ROOT      = ".cache/kaimonslate"
 const _REMOTE_WORKER    = "$_REMOTE_ROOT/worker"      # Slate's worker payload (src/*.jl)
 const _REMOTE_KGATE_ENV = "$_REMOTE_ROOT/kgate-env"   # a project with KaimonGate (+ Revise) instantiated
-const _REMOTE_SYSIMG    = "$_REMOTE_ROOT/sysimg"      # baked worker sysimages, keyed by payload+env hash
-const _REMOTE_SYSIMG_BUILDER = "$_REMOTE_ROOT/sysimg-builder"  # env holding PackageCompiler (kept OFF the worker env)
 const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
 # The extension SDK (Widget/Choice/WebPage/slate_context) is path-dev'd from the monorepo and NOT yet
 # registered, so a registry `Pkg.add` can't find it on a remote host. Ship its source and `Pkg.develop`
@@ -336,6 +338,9 @@ const _VIA_LOCK = ReentrantLock()
 function route!(node::AbstractString, login::AbstractString, job::AbstractString = "",
                 kind::Symbol = :slurm)
     lock(_VIA_LOCK) do
+        if isempty(login) || get(_VIA, String(node), (; job = "")).job != job
+            delete!(_NODE_SSH, String(node))            # a new job, or none: ask again
+        end
         if isempty(login)
             delete!(_VIA, String(node))
         else
@@ -354,6 +359,22 @@ _was_routed(node::AbstractString) = lock(_VIA_LOCK) do; String(node) in _ROUTED_
 
 "How `host` is reached, or `nothing` when it is reachable on its own."
 via(host::AbstractString) = lock(_VIA_LOCK) do; get(_VIA, String(host), nothing); end
+
+# SLURM nodes reached by ssh from their login node rather than by `srun` steps (under `_VIA_LOCK`).
+# Some partitions start one step at a time per job, so with the worker running in its step every
+# other command would wait for it to end. An ssh into a node you hold, which most sites allow, lands
+# in the job without a step.
+const _NODE_SSH = Set{String}()
+_node_by_ssh(node::AbstractString) = lock(_VIA_LOCK) do; String(node) in _NODE_SSH; end
+
+# Whether `node` takes an ssh from its login node, remembered for the job it is routed in.
+function _probe_node_ssh!(node::AbstractString)
+    v = via(node)
+    (v === nothing || v.kind !== :slurm || isempty(v.job)) && return false
+    ok, _ = Sweep.run_there(v.host, _ssh_into(node, "true"; connect_timeout = 10); timeout = 20.0)
+    lock(_VIA_LOCK) do; ok ? push!(_NODE_SSH, String(node)) : delete!(_NODE_SSH, String(node)); end
+    return ok
+end
 
 # ── Reaching a host ──────────────────────────────────────────────────────────────────────────
 # Every command goes over the shared `SshTransport` session (see remotestore.jl), so a host that
@@ -472,7 +493,9 @@ end
 # Returns ok::Bool; the remote script is removed after.
 const _JULIA_SCRIPT_TIMEOUT = 4 * 3600.0   # a Pkg resolve + precompile on a slow shared filesystem
 
-function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::Bool = false, online = nothing)
+# `setup` is the shell to start Julia in: a target's machine setup (depot, module fixes, prologue).
+function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::Bool = false, online = nothing,
+                     setup::AbstractString = "")
     _ssh_ok(host, `mkdir -p $_REMOTE_ROOT`) || return (false, "")
     tmp = tempname()
     write(tmp, code)
@@ -480,7 +503,7 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
     up_ok = _put_file(host, Vector{UInt8}(codeunits(code)), remote)
     rm(tmp; force = true)
     up_ok || (_rlog("FAILED: sending provisioning script → $host ($what)"); return (false, ""))
-    script = _cmdstr(`$(_julia_sh("julia --startup-file=no $remote"))`)
+    script = setup * _julia_sh("julia --startup-file=no $remote")
     # Pkg work runs for minutes, so it gets its own deadline rather than the default command's. With
     # `stream`, each line is logged as it arrives (tagged to the region whose bring-up asked, which the
     # session's task cannot know by itself) and handed to `online` for the banner.
@@ -507,10 +530,13 @@ _julia_sh(cmd::AbstractString) = "export PATH=\"\$HOME/.juliaup/bin:\$PATH\"; $c
 # `uname -s` fails/empties on Windows, where we skip and leave it to a manual install (per the agreed
 # scope). Idempotent: a present julia (system or juliaup) short-circuits. Returns true iff julia is
 # available afterward. Run at the top of provisioning and the preflight Julia step.
-function _ensure_julia!(host; version::AbstractString = "")
+function _ensure_julia!(host; version::AbstractString = "", setup::AbstractString = "")
     ver = "$(VERSION.major).$(VERSION.minor).$(VERSION.patch)"   # match the HUB's Julia
-    # `version` is a `julia --version` the caller already read from the host.
-    have, out = isempty(strip(version)) ? _ssh_capture(host, `$(_julia_sh("julia --version"))`) : (true, version)
+    # `version` is a `julia --version` the caller already read from the host. `setup` is the machine's
+    # shell, which puts the julia it names (a site's module, a path) on PATH ahead of juliaup's.
+    have, out = !isempty(strip(version)) ? (true, version) :
+                isempty(setup) ? _ssh_capture(host, `$(_julia_sh("julia --version"))`) :
+                                 _run_on(String(host), setup * "julia --version")
     if have
         # Present already — flag a version skew (non-fatal): Serialization (the jls codec across the
         # gate) and Manifest resolution can differ across Julia versions. `juliaup add $ver` fixes it.
@@ -600,14 +626,34 @@ end
 # The ssh lands OUTSIDE the job, so nothing there carries its id the way a `srun` step carries
 # `SLURM_JOB_ID`. It is exported for the command, since code run on a node (a worker, and the cells
 # on it) names checkpoints and scratch paths after the job it is in.
-_in_allocation(v, node, script) =
-    v.kind === :pbs ?
-        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null " *
-        Sweep.shq(node) * " " *
-        Sweep.shq((isempty(v.job) ? "" : "export PBS_JOBID=" * Sweep.shq(v.job) * "; ") * script) :
-        # A step inherits the allocation's task count, so without `--ntasks=1` a job asking for N
-        # tasks runs this command N times. Everything routed here is one command on one node.
-        "srun --jobid=" * v.job * " --overlap --ntasks=1 bash -c " * Sweep.shq(script)
+function _in_allocation(v, node, script)
+    if v.kind === :pbs || _node_by_ssh(node)
+        var = v.kind === :pbs ? "PBS_JOBID" : "SLURM_JOB_ID"
+        return _ssh_into(node, (isempty(v.job) ? "" : "export $var=" * Sweep.shq(v.job) * "; ") * script)
+    end
+    # A step inherits the allocation's task count, so without `--ntasks=1` a job asking for N tasks
+    # runs this command N times. Everything routed here is one command on one node. `--immediate`
+    # bounds the wait for the step to start: a step the job cannot take now says why within that
+    # time instead of holding the login session until it can.
+    return "srun --jobid=" * v.job * " --overlap --immediate=$(_STEP_START_S) --ntasks=1 bash -c " * Sweep.shq(script)
+end
+
+# Seconds a command routed into an allocation waits for its step to start.
+const _STEP_START_S = 30
+
+# `LogLevel=ERROR` keeps the node's login banner out of the command's output and still reports why a
+# connection failed.
+_ssh_into(node, script; connect_timeout::Integer = 20) =
+    "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR " *
+    "-o ConnectTimeout=$connect_timeout " * Sweep.shq(node) * " " * Sweep.shq(script)
+
+# `cmd` started in a session of its own with its output to `logf`, returning at once. `setsid -f` forks
+# before it detaches, so nothing of the calling shell stays behind holding the ssh channel open (a
+# backgrounded `setsid nohup … &` leaves one, and the ssh that started it never returns). An older
+# util-linux without `-f` falls back to a double fork.
+_detach_on_node(cmd::AbstractString, logf::AbstractString) =
+    "if setsid -f true 2>/dev/null; then setsid -f $cmd > $logf 2>&1 < /dev/null; " *
+    "else ( nohup $cmd > $logf 2>&1 < /dev/null & ); fi"
 
 # A worker started over ssh is outside the PBS job, so the job ending would leave it running on a node
 # that may already belong to someone else. Attaching it to the job lets the node's PBS daemon end it
@@ -811,17 +857,19 @@ end
 # Project of each dev'd dependency (a dependency it adds changes the resolve), the worker packages
 # added beside them, the extension SDK, and the Julia that resolves it all. A host that recorded
 # this after its last successful build already holds this environment.
-function _env_fingerprint(envdir::AbstractString, infra::AbstractString)
+function _env_fingerprint(envdir::AbstractString, infra::AbstractString; depot::AbstractString = "")
     ctx = _SHA.SHA1_CTX()
     add(s) = _SHA.update!(ctx, codeunits(String(s)))
     add("julia $VERSION\n"); add(infra); add(_SEB_DEVELOP)
+    # Where it is installed: a different depot holds none of it.
+    isempty(depot) || add("depot $depot\n")
     seb = joinpath(_LOCAL_SEB, "Project.toml")
     isfile(seb) && add(read(seb, String))
     if !isempty(envdir) && isdir(envdir)
         for f in sort!(filter(Sweep._is_env_file, readdir(envdir)))
             add(f); add(read(joinpath(envdir, f), String))
         end
-        for (name, lpath) in _dev_deps(joinpath(envdir, "Manifest.toml"), envdir)
+        for (name, lpath) in Sweep.dev_deps(joinpath(envdir, "Manifest.toml"), envdir)
             p = joinpath(lpath, "Project.toml")
             isfile(p) && (add(name); add(read(p, String)))
         end
@@ -829,7 +877,13 @@ function _env_fingerprint(envdir::AbstractString, infra::AbstractString)
     return bytes2hex(_SHA.digest!(ctx))
 end
 
-const _ENV_STAMP = ".slate-env"   # beside the remote env's Project.toml
+const _ENV_STAMP = ".slate-env"   # beside the remote env's Project.toml, when the depot is the default
+
+# Where the host records which environment it last built for `t`. In the depot when the target has
+# one, so a depot that was cleared, purged or swapped reads as holding nothing rather than as current.
+_env_stamp_path(t) = isempty(t.depot) ? _projrel(t.project) * "/" * _ENV_STAMP :
+                                        rstrip(t.depot, '/') * "/slate/envs/" * basename(_projrel(t.project))
+_projrel(p::AbstractString) = startswith(p, "~/") ? String(p[3:end]) : String(p)
 
 # What a host records of an environment it built: the fingerprint of its inputs, the host's own Julia
 # (`julia --version` there, which the hub's version does not determine), and whether its packages
@@ -841,6 +895,42 @@ _env_stamp(fp::AbstractString, julia::AbstractString, precompiled::Bool) =
 # serves a request that did not need one; a download-only build does not serve one that does.
 _env_stamp_serves(had::AbstractString, want::AbstractString) =
     had == want || (!endswith(want, "+pc") && had == want * "+pc")
+
+# The shell for `_adopt_twin_env!`: find another environment on the host whose stamp serves `stamp`
+# (`_env_stamp_serves`) and copy its resolved files into `t`'s. Prints `twin=<dir>` when it did.
+function _twin_env_script(t, stamp::AbstractString)
+    rel = _projrel(t.project)
+    q(p) = (startswith(p, "/") || startswith(p, "~/")) ? Sweep.shq_path(p) : "\"\$HOME/\"" * Sweep.shq(p)
+    envs = q(dirname(rel))
+    # Each stamp names the environment it belongs to: by its own directory when it sits beside it, by
+    # its file name when the depot holds it.
+    stamps, src = isempty(t.depot) ? (envs * "/*/" * _ENV_STAMP, "\$(dirname \"\$s\")") :
+                                     (q(rstrip(t.depot, '/') * "/slate/envs") * "/*", envs * "/\$(basename \"\$s\")")
+    return """
+    dst=$(q(rel)); want=$(Sweep.shq(String(stamp))); alt=$(Sweep.shq(endswith(stamp, "+pc") ? String(stamp) : stamp * "+pc"))
+    for s in $stamps; do
+      [ -f "\$s" ] || continue
+      c=\$(cat "\$s"); [ "\$c" = "\$want" ] || [ "\$c" = "\$alt" ] || continue
+      src=$src
+      [ "\$src" = "\$dst" ] && continue
+      [ -f "\$src/Project.toml" ] && [ -f "\$src/Manifest.toml" ] || continue
+      mkdir -p "\$dst" && cp "\$src/Project.toml" "\$src/Manifest.toml" "\$dst/" || continue
+      [ -f "\$src/LocalPreferences.toml" ] && cp "\$src/LocalPreferences.toml" "\$dst/"
+      echo "twin=\$src"; break
+    done; true
+    """
+end
+
+# An environment the host already built from the same contents (the stamp covers everything that
+# decides the resolve and the host's Julia, and not where it lives) is copied rather than resolved
+# again: its files were rewritten for the host's paths, and the packages it names are in the same depot.
+function _adopt_twin_env!(t, stamp::AbstractString)
+    ok, out = _run_on(t.ssh_host, _twin_env_script(t, stamp))
+    m = ok ? match(r"twin=(\S+)", out) : nothing
+    m === nothing && return false
+    _rlog("provision [3/3] same environment already built on $(t.ssh_host) in $(basename(m.captures[1])) — copied it")
+    return true
+end
 # What the host last received of the worker payload and of the extension SDK, as their content SHAs.
 # Written after a send succeeds, so a matching stamp means that exact content is already there.
 const _PAYLOAD_STAMP = "$_REMOTE_WORKER/.slate-payload"
@@ -866,23 +956,23 @@ end
 # Everything a start needs to know about the host, read in ONE command. On a scheduler node each
 # command is a job step, and a step costs seconds to create, so asking piecemeal cost more than most
 # of what it asked about. `projrel` is the worker env ($HOME-relative); "" leaves the env lines out.
-function _host_state_script(projrel::AbstractString = "")
-    q(p) = startswith(p, "/") ? Sweep.shq(p) : "\"\$HOME/\"" * Sweep.shq(p)
+function _host_state_script(projrel::AbstractString = ""; stamp::AbstractString = "$projrel/$_ENV_STAMP")
+    q(p) = (startswith(p, "/") || startswith(p, "~/")) ? Sweep.shq_path(p) : "\"\$HOME/\"" * Sweep.shq(p)
     io = IOBuffer()
     print(io, _STAMP_SCRIPT)
     println(io, "echo \"payload=\$(cat ", q(_PAYLOAD_STAMP), " 2>/dev/null)\"")
     println(io, "echo \"seb=\$(cat ", q(_SEB_STAMP), " 2>/dev/null)\"")
     println(io, "echo \"kgate=\$(test -f ", q("$_REMOTE_KGATE_ENV/.ready"), " && echo 1)\"")
     if !isempty(projrel)
-        println(io, "echo \"env=\$(test -f ", q("$projrel/Manifest.toml"), " && cat ", q("$projrel/$_ENV_STAMP"), " 2>/dev/null)\"")
+        println(io, "echo \"env=\$(test -f ", q("$projrel/Manifest.toml"), " && cat ", q(stamp), " 2>/dev/null)\"")
         println(io, "echo \"rg=\$(R=\$(cat ", q(_RG_PATH_FILE), " 2>/dev/null); test -n \"\$R\" && test -x \"\$R\" && echo 1)\"")
     end
     return String(take!(io))
 end
 
 # `nothing` when the host did not answer.
-function _host_state(host::AbstractString, projrel::AbstractString = "")
-    ok, out = _run_on(String(host), _host_state_script(projrel))
+function _host_state(host::AbstractString, projrel::AbstractString = ""; stamp::AbstractString = "$projrel/$_ENV_STAMP")
+    ok, out = _run_on(String(host), _host_state_script(projrel; stamp))
     ok || return nothing
     return _parse_probe(out)
 end
@@ -891,12 +981,12 @@ end
 # considered — Julia, the worker's own files, and the runtime env it boots from. Idempotent, and the
 # host stage of `prepare_region!` as well as the start of every provision. `seen` is the host's state
 # when the caller already read it. Returns what it did, one phrase per part.
-function _provision_runtime!(host; seen = nothing)
+function _provision_runtime!(host; seen = nothing, setup::AbstractString = "")
     st = seen === nothing ? something(_host_state(host), Dict{String,String}()) : seen
     did = String[]
     # 0. Julia — a fresh box may have none; install juliaup unattended (Linux/macOS). Everything below
     #    needs `julia`, so this gates the rest.
-    _ensure_julia!(host; version = get(st, "julia", "")) ||
+    _ensure_julia!(host; version = get(st, "julia", ""), setup) ||
         error("provision: no usable `julia` on '$host' (auto-install skipped/failed — Windows, or juliaup install error). Install Julia (juliaup) manually and retry.")
     # 1. worker payload, unless the host already holds this exact one
     sha = _payload_sha()
@@ -969,11 +1059,11 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # Reachability precheck FIRST — a clear message beats a cryptic transfer failure ten steps in when the
     # host is a typo or your ssh config/key isn't set up.
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    st = seen === nothing ? _host_state(host, rel) : seen
+    st = seen === nothing ? _host_state(host, rel; stamp = _env_stamp_path(t)) : seen
     st === nothing && error(_unreachable(host))
     # A prepared region notices here when its site has changed since (Julia, default modules).
     try; readiness_check!(t; seen = st); catch e; _rlog("readiness check on $host failed: $(sprint(showerror, e))"); end
-    _provision_runtime!(host; seen = st)
+    _provision_runtime!(host; seen = st, setup = t.setup)
     # 3. Environment — reproduce the notebook's LOCAL env on the remote so packages match EXACTLY:
     #    ship the origin project's Project.toml + Manifest.toml (the Manifest pins registry versions and
     #    records git deps by url+tree-hash → they clone), send any dev'd deps' local sources + rewrite
@@ -1002,17 +1092,17 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             # Streamed so the (fresh-resolve) instantiate narrates into the bring-up banner. No Manifest is
             # shipped here → no reliable pre-count, so the precompile bar is indeterminate ("k done"), but it
             # still shows live progress + the current package instead of going dark.
-            build = _rewrite_devpaths_script(rel, rewrites) *
+            build = Sweep.devpaths_script(rel, rewrites) *
                 "\nimport Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
                 "Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _SEB_DEVELOP * "; Pkg.instantiate()\n" *
                 _PREP_DONE_SNIPPET * "\n"
-            first(_ssh_julia!(host, build, "instantiate parent project on $host";
+            first(_ssh_julia!(host, build, "instantiate parent project on $host"; setup = t.setup,
                               stream = true, online = _bringup_note)) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
             first(_ssh_julia!(host, "import Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
                               "Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _SEB_DEVELOP * "; Pkg.instantiate()",
-                              "bare worker env on $host")) || error("provision: could not build the worker env on $host")
+                              "bare worker env on $host"; setup = t.setup)) || error("provision: could not build the worker env on $host")
         end
     end
     # Resolving and instantiating is minutes on a cluster filesystem, and it is the same work every
@@ -1022,17 +1112,20 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # not that the depot still holds it.
     envdir = !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml")) ? t.origin_env :
              (!isempty(parent_project) && isdir(parent_project) ? String(parent_project) : "")
-    stamp = _env_stamp(_env_fingerprint(envdir, infra), get(st, "julia", ""), precompile)
+    stamp = _env_stamp(_env_fingerprint(envdir, infra; depot = t.depot), get(st, "julia", ""), precompile)
     had = strip(get(st, "env", ""))
     built = rebuild || !_env_stamp_serves(had, stamp)
+    # The environment's sources without its resolved files, which hold the host's own paths.
+    send_sources! = function ()
+        isempty(envdir) && return
+        _send_dir!(host, envdir, t.project; region = t.region, filter = true,
+                   excludes = [".git", "*.cov", ".ready", "Project.toml", "Manifest.toml",
+                               "JuliaProject.toml", "JuliaManifest.toml"])
+        _send_dev_deps!(t, envdir)
+    end
     if !built
         _rlog("provision [3/3] environment unchanged on $host (skip resolve) — sending sources only")
-        if !isempty(envdir)
-            _send_dir!(host, envdir, t.project; region = t.region, filter = true,
-                       excludes = [".git", "*.cov", ".ready", "Project.toml", "Manifest.toml",
-                                   "JuliaProject.toml", "JuliaManifest.toml"])
-            _send_dev_deps!(t, envdir)
-        end
+        send_sources!()
     else
         _rlog("provision [3/3] " * (rebuild ? "rebuilding the environment on $host" :
                                     isempty(had) ? "no environment recorded on $host" :
@@ -1040,7 +1133,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
               " — building")
         _prep_stage("Building package environment on $host")
         try
-            build_env!()
+            _adopt_twin_env!(t, stamp) ? send_sources!() : build_env!()
         catch e
             # A build failure usually means the env dir carries broken resolve state — a dev-dep whose path
             # vanished, a half-written manifest, a stale entry left by an earlier provision. Reset the env's
@@ -1048,10 +1141,11 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             # self-heals instead of wedging every future spawn on this env. (The isolation keying means this
             # only ever touches THIS project's env.) A second failure is a real problem — let it surface.
             _rlog("provision [3/3] env build failed on $host — resetting env + one retry: " * first(sprint(showerror, e), 140))
-            _ssh_ok(host, `rm -f $rel/Project.toml $rel/Manifest.toml $rel/$_ENV_STAMP`)
+            _ssh_ok(host, `rm -f $rel/Project.toml $rel/Manifest.toml`)
+            _run_on(host, "rm -f " * Sweep.shq_path(_env_stamp_path(t)))
             build_env!()
         end
-        _put_file(host, Vector{UInt8}(codeunits(stamp)), "$rel/$_ENV_STAMP") ||
+        _put_file(host, Vector{UInt8}(codeunits(stamp)), _env_stamp_path(t)) ||
             _rlog("provision: could not record the environment fingerprint on $host (next start rebuilds)")
     end
     # WHERE rg is, written down once. `ripgrep_jll` is provisioned into the worker env, but a JLL
@@ -1059,47 +1153,22 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # on a host that has it, the log search falls through to `grep -E`, and POSIX ERE cannot parse
     # the patterns it is handed. That failure was silent: the counts beside a remote log all read
     # zero while the records they counted were on screen.
-    (built || get(st, "rg", "") != "1") && _record_rg_path!(host, rel)
+    (built || get(st, "rg", "") != "1") && _record_rg_path!(host, rel; setup = t.setup)
     _rlog("provision DONE host=$host")
-    _kickoff_sysimage_build!(t, rel)   # detached + idempotent — fast workers once it lands, plain boot until then
     return nothing
 end
 
-# ── worker sysimage (bake the include'd payload's JIT) ────────────────────────────────────────
-# KaimonGate's handshake path is already baked into ITS pkgimage, but worker.jl is `include`d — not a
-# package — so its payload files (capture, macroexpand, memo layer, ExpressionExplorer usage) and the
-# notebook/region deps JIT on the first cell. A PackageCompiler sysimage is the ONLY thing that bakes an
-# included payload: it trace-compiles an execution file (we drive one `__slate_eval` through the full
-# capture path — the same trivial eval the worker prewarms with) AND bakes the env's direct deps as
-# fully-loaded packages. The boot line adds `-J <sysimage>` when one is present (see `_launch_worker!`);
-# Revise still hot-reloads runtime /src edits on top of the baked image.
-#
-# The whole tree is namespaced PER ENV — `sysimg/<envkey>/…`, where envkey hashes the worker's
-# `--project` dir — so multiple regions sharing a host don't collide: two regions with different preload
-# envs get independent subtrees (own `current`, own images, own build lock), while two that share an env
-# legitimately share one image (dedup, no rebuild thrash). Within a subtree the image is keyed by
-# SHA(payload src + that env's Manifest), so a `.so` is intrinsically tied to its env: on any payload or
-# Manifest drift the key changes, the build clears the stale `current` pointer (live workers fall back to
-# a plain boot) and bakes a fresh image. The env-fingerprint half of the key is a CANONICAL projection of
-# the resolved deps (name/uuid/version/tree-hash + julia_version), NOT raw Manifest bytes — so TOML
-# re-serialization noise doesn't force needless rebuilds, while a real dep/Julia-version change still does.
-# The build runs DETACHED on the remote — the first cold worker boots the slow way; every boot after the
-# image lands (pool refills, reaps/respawns) is fast. A build defers if host free RAM is below
-# KAIMONSLATE_SYSIMAGE_MINFREE_GB (a link is memory-hungry).
-#
-# OPT-IN per region: only a region with `sysimage=true` (Region.sysimage → RemoteTarget.sysimage) builds +
-# boots one — it's off by default because a build is heavy (needs a C compiler + several GB free + minutes)
-# and pays off most for package-heavy envs. Notebooks' own remote workers and preflight never build one.
-# KAIMONSLATE_SYSIMAGE=0 is a global kill-switch that overrides even an opted-in region.
+# ── worker sysimage ───────────────────────────────────────────────────────────────────────────
+# A region that boots from a sysimage gets it built by its prepare (`build_sysimage!`, the program in
+# src/sysimage_build.jl), on the node type its workers run on. Images live in the machine's store,
+# `<depot>/slate-sysimg/<key>/`, named by the packages they hold, so regions that resolve to the same
+# packages share one. A worker boots from it through `_sysimage_jopt_sh` when its notebook resolves the
+# same versions (`sysimage_plan`). KAIMONSLATE_SYSIMAGE=0 turns every image off.
 _sysimage_enabled() = get(ENV, "KAIMONSLATE_SYSIMAGE", "1") != "0"
 # Minimum free RAM (GB) on the host before a sysimage build is allowed — a link peaks at several GB, so on a
 # small/busy box the build defers instead of OOM-thrashing. Tunable; default sized for a ~300MB image.
 _sysimage_minfree_gb() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_SYSIMAGE_MINFREE_GB", "")), 5.0)
 
-# Per-env sysimage subdir (host-$HOME-relative), keyed by a hash of the worker's `--project` dir. Computed
-# hub-side from the SAME `t.project` string at both the build and the boot site so they always agree.
-_sysimage_envkey(project::AbstractString) = bytes2hex(_SHA.sha1(codeunits(String(project))))[1:12]
-_sysimage_dir(project::AbstractString) = "$_REMOTE_SYSIMG/$(_sysimage_envkey(project))"
 
 # The precompile execution file (run with the worker env active): include the payload and drive the
 # eval/capture path so its hot specializations bake in. Best-effort throughout — a trace error just means
@@ -1115,224 +1184,265 @@ catch
 end
 """
 
-# The remote build program: recompute the key, skip if already current, else (invalidating a drifted
-# pointer first) bake `sysimg/<key>.so` via PackageCompiler from a dedicated builder env, then publish
-# `sysimg/current` atomically and prune older images. Self-guarded against concurrent builds by a lockfile.
-function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractString, minfree_gb::Real)
-    io = IOBuffer()
-    P(s) = println(io, s)
-    P("import Pkg, TOML, SHA")   # all stdlib — always available on the remote's default Julia
-    P("home = homedir()")
-    P("proj = joinpath(home, raw\"$projrel\")")
-    P("sysdir = joinpath(home, raw\"$sysreldir\"); mkpath(sysdir)")   # per-env subtree (no cross-region collision)
-    # key = SHA1 over the payload (basenames + contents) + a CANONICAL projection of the env's resolved deps
-    # (sorted name/uuid/version/tree-hash-or-path + julia_version) — NOT the raw Manifest bytes, which churn
-    # on TOML re-serialization and julia_version stamps and would force needless rebuilds. Still change-correct:
-    # a real dep bump or a Julia upgrade shifts the key (a sysimage IS Julia-version-specific and must rebuild).
-    P("payload = joinpath(home, raw\"$_REMOTE_WORKER\")")
-    # Hash the payload SOURCE only — exclude the transient per-port boot scripts (`worker-<port>.jl`) that
-    # `_launch_worker!` writes into this same dir, or the key would drift on every single spawn (new port →
-    # new boot script) and rebuild endlessly. The shipped src payload (worker.jl + its includes) is stable.
-    P("files = sort!(filter(f -> endswith(f, \".jl\") && !occursin(r\"^worker-\\d+\\.jl\$\", basename(f)), readdir(payload; join = true)))")
-    P("ctx = SHA.SHA1_CTX()")
-    P("for f in files; SHA.update!(ctx, codeunits(basename(f))); SHA.update!(ctx, read(f)); end")
-    P("mf = joinpath(proj, \"Manifest.toml\")")
-    P("if isfile(mf)")
-    P("  md = TOML.parsefile(mf)")
-    P("  SHA.update!(ctx, codeunits(string(get(md, \"julia_version\", \"\"))))")
-    P("  mdeps = get(md, \"deps\", Dict{String,Any}())")
-    P("  for name in sort!(collect(keys(mdeps)))")
-    P("    for e in mdeps[name]")
-    P("      e isa AbstractDict || continue")
-    P("      SHA.update!(ctx, codeunits(string(name, \";\", get(e, \"uuid\", \"\"), \";\", get(e, \"version\", \"\"), \";\", get(e, \"git-tree-sha1\", get(e, \"path\", \"\")), \"|\")))")
-    P("    end")
-    P("  end")
-    P("end")
-    P("key = bytes2hex(SHA.digest!(ctx))[1:16]")
-    P("target = joinpath(sysdir, key * \".so\"); curf = joinpath(sysdir, \"current\")")
-    P("println(\"[sysimg] key=\$key\"); flush(stdout)")
-    # already current → nothing to do (checked BEFORE the memory guard: skipping needs no headroom)
-    P("if isfile(curf) && strip(read(curf, String)) == key && isfile(target); println(\"[sysimg] already current — nothing to do\"); exit(0); end")
-    # Free-RAM guard: a sysimage link peaks at several GB; on a tight box DEFER rather than OOM-thrash. We keep
-    # any existing `current` bootable (a slightly-stale image still loads — Revise reloads /src on top), so
-    # deferring is safe; a later provision on a quieter box builds it. Tunable via KAIMONSLATE_SYSIMAGE_MINFREE_GB.
-    # Available RAM is read per-OS (the remote's Julia): Linux /proc/meminfo, macOS `vm_stat` (free+inactive
-    # pages), anything else unbounded (Inf ⇒ guard off) rather than assuming a Linux-only /proc.
-    P("avail = try")
-    P("  if Sys.islinux()")
-    P("    parse(Float64, match(r\"MemAvailable:\\s+(\\d+)\", read(\"/proc/meminfo\", String)).captures[1]) / 1048576")
-    P("  elseif Sys.isapple()")
-    P("    vs = read(`vm_stat`, String); pg = (m = match(r\"page size of (\\d+)\", vs)) === nothing ? 4096 : parse(Int, m.captures[1])")
-    P("    fp(re) = ((m = match(re, vs)) === nothing ? 0 : parse(Int, m.captures[1]))")
-    P("    (fp(r\"Pages free:\\s+(\\d+)\") + fp(r\"Pages inactive:\\s+(\\d+)\")) * pg / 2^30")
-    P("  else; Inf; end")
-    P("catch; Inf; end")
-    P("if avail < $minfree_gb; println(\"[sysimg] only \$(round(avail; digits = 1))GB free (< $(minfree_gb)GB) — deferring build (lower KAIMONSLATE_SYSIMAGE_MINFREE_GB to force)\"); exit(0); end")
-    # drift → clear the stale pointer so workers fall back to a plain boot while we rebuild
-    P("if isfile(curf); prev = strip(read(curf, String)); rm(curf; force = true); println(\"[sysimg] payload/env drift (\$prev → \$key) — invalidated; rebuilding\"); end")
-    # concurrent-build lock (stale after 30 min)
-    P("lk = joinpath(sysdir, \".building\")")
-    P("if isfile(lk) && (time() - mtime(lk)) < $(_sysimage_lock_stale()); println(\"[sysimg] another build in progress — skip\"); exit(0); end")
-    P("write(lk, key)")
-    P("try")
-    P("  builder = joinpath(home, raw\"$_REMOTE_SYSIMG_BUILDER\"); Pkg.activate(builder)")
-    P("  if !isfile(joinpath(builder, \"Project.toml\")) || !occursin(\"PackageCompiler\", read(joinpath(builder, \"Project.toml\"), String))")
-    P("    Pkg.add(\"PackageCompiler\")")
-    P("  end")
-    P("  Pkg.instantiate()")
-    P("  exec = joinpath(sysdir, \"precompile_exec.jl\")")
-    P("  open(exec, \"w\") do eio; write(eio, $(repr(_sysimage_exec_contents()))); end")
-    P("  pdata = TOML.parsefile(joinpath(proj, \"Project.toml\"))")
-    P("  pkgs = sort!(collect(keys(get(pdata, \"deps\", Dict{String,Any}()))))")   # env's direct deps → baked as packages
-    P("  println(\"[sysimg] baking \$(length(pkgs)) package(s) + payload trace → \$target\"); flush(stdout)")
-    P("  @eval import PackageCompiler")   # added at runtime above → @eval + invokelatest to dodge world-age
-    P("  Base.invokelatest(PackageCompiler.create_sysimage, pkgs; sysimage_path = target, project = proj, precompile_execution_file = exec)")
-    P("  tmpc = curf * \".tmp\"; write(tmpc, key); mv(tmpc, curf; force = true)")   # publish the pointer atomically
-    P("  for f in readdir(sysdir; join = true); (endswith(f, \".so\") && f != target) && rm(f; force = true); end")   # prune old images
-    # Prime the pkgimage cache against the NEW base image: the very first boot with a fresh custom sysimage
-    # otherwise recompiles the env's pkgimages (~a minute on a slow CPU), which would land under the first
-    # real worker. Pay it HERE, detached and idle, by running the exec (include worker.jl + evals = the real
-    # boot's load path) once under the new image, so every subsequent worker boot hits the warm cache.
-    P("  try; println(\"[sysimg] priming pkgimage cache against new image…\"); flush(stdout); run(pipeline(`\$(Base.julia_cmd()[1]) --sysimage=\$target --project=\$proj --startup-file=no \$exec`; stdout = devnull, stderr = devnull)); catch e; println(\"[sysimg] prime skipped (\$(first(sprint(showerror, e), 80)))\"); end")
-    P("  println(\"[sysimg] DONE — current=\$key\")")
-    P("finally")
-    P("  rm(lk; force = true)")
-    P("end")
-    return String(take!(io))
+# The machine's image store: in its depot, so on scratch where the site has one. Each image is a
+# directory in it named by its key.
+function sysimage_store(r)
+    d = region_depot(r)
+    return (isempty(d) ? "~/.julia" : d) * "/slate-sysimg"
 end
 
-# Ship the build program to the host and launch it DETACHED (survives the ssh channel closing), stdout →
-# the build log. Fire-and-forget: workers boot without the image until it lands, then pick it up via `-J`.
-function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; force::Bool = false)
-    (t.sysimage || force) || return nothing  # OPT-IN per region (Region.sysimage); `force` = an explicit UI/API build
-    _sysimage_enabled() || return nothing     # global kill-switch (KAIMONSLATE_SYSIMAGE=0) overrides even an opted-in region
-    host = t.ssh_host
-    # PackageCompiler needs a system C compiler to link the sysimage. Probe for one FIRST and skip cleanly
-    # if the host has none — the worker just keeps booting the plain way, and we avoid a scary linker-error
-    # stacktrace in the build log on a minimal box (e.g. a fresh cloud image with no build tools).
-    if !_ssh_test(host, `sh -c $("command -v cc || command -v gcc || command -v clang")`)
-        _rlog("sysimg: no C compiler (cc/gcc/clang) on $host — skipping sysimage build (install build tools, e.g. `apt install build-essential`, to enable)")
-        return nothing
+# The packages every worker image holds: Slate's own, which the worker loads before anything else.
+const _SYSIMAGE_INFRA = ("KaimonGate", "ExpressionExplorer", "Revise", "SlateExtensionsBase")
+
+# The build program for region `r`'s image (src/sysimage_build.jl), with its parameters set in front of
+# it. `proj` is the preparing notebook's environment, home-relative; `spec` is what the region lists.
+function _sysimage_build_script(r, proj::AbstractString, spec; force::Bool = false,
+                                minfree_gb::Real = _sysimage_minfree_gb(), infra = _SYSIMAGE_INFRA)
+    head = """
+    const PROJ = joinpath(homedir(), $(repr(String(proj))))
+    const STORE = expanduser($(repr(sysimage_store(r))))
+    const REGION = $(repr(String(r.name)))
+    const SPEC = $(repr([(String(e["name"]), String(get(e, "uuid", "")), String(get(e, "version", "")),
+                          String(get(e, "path", ""))) for e in spec]))
+    const INFRA = $(repr(String[x for x in infra]))
+    const EXEC = $(repr(_sysimage_exec_contents()))
+    const MINFREE = $(Float64(minfree_gb))
+    const STALE = $(_sysimage_lock_stale())
+    const FORCE = $force
+    """
+    return head * read(joinpath(@__DIR__, "sysimage_build.jl"), String)
+end
+
+# The image a worker's shell boots is `<cpu>.so`, the CPU spelled as the build script spells it.
+const _SYSIMAGE_CPU_SH = "CPU=\$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//; s/ *\$//; s/[^A-Za-z0-9._-]/_/g'); " *
+                        "[ -n \"\$CPU\" ] || CPU=\$(uname -m)"
+
+# The same path for the remote shell: a leading `~/` as `$HOME/`, which a quoted word does not expand.
+_shpath(p::AbstractString) = startswith(p, "~/") ? "\$HOME/" * p[3:end] : String(p)
+
+"""
+    sysimage_plan(t::RemoteTarget) -> (; use, key, dir, why)
+
+Whether a worker for `t` boots from its region's sysimage: the region boots from one, one has been
+built, and every package both the image and the notebook's environment hold is the same in both.
+Julia loads a package from the image whatever version the environment asks for, so a mismatch boots
+without the image rather than with versions nobody chose. `why` says what stopped it, "" when it was
+never asked for.
+"""
+function sysimage_plan(t::RemoteTarget)
+    none(why) = (; use = false, key = "", dir = "", why = String(why))
+    (t.sysimage && !isempty(t.region)) || return none("")
+    r = region_get(t.region); r === nothing && return none("")
+    img = get(r.readiness, "sysimage", nothing)
+    img isa AbstractDict || return none("no sysimage built yet")
+    deps = _worker_env_deps(r.host, t.project)
+    clash = deps === nothing ? sysimage_conflicts(img, t.origin_env) : sysimage_conflicts(img, deps)
+    isempty(clash) || return none("the sysimage holds other versions of " * join(clash, ", "))
+    return (; use = true, key = String(img["key"]), dir = String(img["dir"]), why = "")
+end
+
+"""
+    sysimage_conflicts(img, origin_env) -> Vector{String}
+
+The packages the image record `img` holds at another version than the environment at `origin_env`
+resolves, each as `"name (image V, notebook W)"`. A registered package is compared by its tree hash,
+one from a path by its version.
+"""
+function sysimage_conflicts(img::AbstractDict, origin_env::AbstractString)
+    isempty(origin_env) && return String[]
+    mf = parent_manifest(origin_env)
+    (isempty(mf) || !isfile(mf)) && return String[]
+    deps = try; get(Sweep.TOML.parsefile(mf), "deps", Dict{String,Any}()); catch; return String[]; end
+    return sysimage_conflicts(img, deps)
+end
+
+# The same, against a Manifest's `deps` table.
+function sysimage_conflicts(img::AbstractDict, deps::AbstractDict)
+    held = get(img, "packages", nothing)
+    held isa AbstractDict || return String[]
+    out = String[]
+    for (name, es) in deps, e in es
+        e isa AbstractDict || continue
+        h = get(held, String(get(e, "uuid", "")), nothing)
+        h isa AbstractDict || continue
+        same = haskey(e, "path") ? String(get(e, "version", "")) == String(get(h, "version", "")) :
+               String(get(e, "git-tree-sha1", "")) == String(get(h, "tree", ""))
+        same || push!(out, "$name (image $(get(h, "version", "?")), notebook $(get(e, "version", "?")))")
     end
-    sysreldir = _sysimage_dir(t.project)            # sysimg/<envkey> — per-env, matches the boot-line resolver
-    _ssh_ok(host, `mkdir -p $sysreldir`) || return nothing
-    remote = "$sysreldir/build.jl"
-    logf = "$sysreldir/build.log"
-    body = _sysimage_build_script(projrel, sysreldir, _sysimage_minfree_gb())
-    _put_file(host, Vector{UInt8}(codeunits(body)), remote) ||
-        (_rlog("sysimg: sending build script → $host failed (skip)"); return nothing)
-    launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && if command -v setsid >/dev/null 2>&1; then setsid nohup julia --startup-file=no $remote > $logf 2>&1 & else nohup julia --startup-file=no $remote > $logf 2>&1 & fi"
-    _rlog("sysimg: launching detached build on $host  (log: $host:$logf)")
-    _ssh_ok(host, `$launch`) || _rlog("sysimg: build launch returned nonzero on $host (it may still be starting)")
-    return nothing
+    return sort!(out)
 end
 
-# Sysimage build state for a target's env — ONE ssh that reads the per-env `sysimg/<envkey>/` dir: the
-# published `current` key, the built `.so` (size + mtime), whether a build is in progress, whether the host
-# even has a C compiler, and a short tail of the build log. Feeds the Regions UI's sysimage panel.
-function sysimage_status(t::RemoteTarget)
-    host = t.ssh_host
-    d = _sysimage_dir(t.project)
-    res = Dict{String,Any}("host" => host, "envkey" => _sysimage_envkey(t.project), "opt_in" => t.sysimage,
-                           "reachable" => false, "building" => false, "current" => "", "bytes" => 0,
-                           "built" => 0, "stale" => false, "compiler" => true, "log" => "")
-    isempty(host) && return res
-    pr = startswith(t.project, "~/") ? t.project[3:end] : t.project   # env dir → Manifest for the staleness check
-    # Pass the WHOLE script as the single remote-command arg (like `_launch_worker!`'s launch line): ssh
-    # flattens argv and the remote LOGIN shell re-parses, so `sh -c <multi-word>` would be mangled — but a
-    # lone command string is parsed intact (`$(...)`, `[ … ]`, `;`, `&&` all survive).
-    # Staleness is an mtime heuristic (cheap, no content hash): a payload `.jl` (EXCLUDING the transient
-    # per-port `worker-<port>.jl` boot scripts, which the build key also ignores) or the env Manifest newer
-    # than the `.so` ⇒ the image predates a code/dep change and should be rebuilt.
-    sh = "D=\$HOME/$d; CUR=\$(cat \$D/current 2>/dev/null); echo \"current=\$CUR\"; " *
-         "if [ -n \"\$CUR\" ] && [ -f \"\$D/\$CUR.so\" ]; then SO=\$D/\$CUR.so; echo \"bytes=\$(stat -c %s \$SO 2>/dev/null || stat -f %z \$SO 2>/dev/null)\"; echo \"built=\$(stat -c %Y \$SO 2>/dev/null || stat -f %m \$SO 2>/dev/null)\"; " *
-         "N=\$(find \$HOME/$_REMOTE_WORKER -maxdepth 1 -name '*.jl' ! -name 'worker-*.jl' -newer \$SO -print -quit 2>/dev/null); " *
-         "MF=\$HOME/$pr/Manifest.toml; if [ -z \"\$N\" ] && [ -f \"\$MF\" ] && [ \"\$MF\" -nt \"\$SO\" ]; then N=\$MF; fi; " *
-         "[ -n \"\$N\" ] && echo stale=1; fi; " *
-         "if [ -f \$D/.building ]; then echo building=1; fi; " *
-         "if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then echo nocompiler=1; fi; " *
-         # Marker must NOT start with `=` — zsh (a common login shell) would try equals-expansion on `===LOG===`
-         # (`=cmd` → path of cmd), fail with a nonzero exit, and make the whole ssh command look like it failed.
-         # `|| true` so a MISSING build.log (a host that hasn't built yet) doesn't make `tail` — the last
-         # command — exit nonzero, which _ssh_capture would read as an unreachable host (false "status
-         # unavailable"). A genuine ssh/connection failure still returns nonzero via ssh itself.
-         "echo __SLATELOG__; tail -n 14 \$D/build.log 2>/dev/null || true"
-    ok, out = try; _ssh_capture(host, `$sh`); catch; (false, ""); end
-    ok || return res
-    res["reachable"] = true
-    parts = split(out, "__SLATELOG__")
-    for line in split(strip(parts[1]), '\n')
-        kv = split(line, '='; limit = 2); length(kv) == 2 || continue
-        k, v = strip(kv[1]), strip(kv[2])
-        k == "current" && (res["current"] = String(v))
-        k == "bytes" && (res["bytes"] = something(tryparse(Int, v), 0))
-        k == "built" && (res["built"] = something(tryparse(Int, v), 0))
-        k == "building" && (res["building"] = true)
-        k == "stale" && (res["stale"] = true)
-        k == "nocompiler" && (res["compiler"] = false)
+# The `deps` of the environment a worker loads, read on `host`, or `nothing` when it cannot be read.
+# The hub's copy is not that environment: provisioning adds Slate's worker packages to it there, and
+# resolving them can move other packages to other versions.
+function _worker_env_deps(host::AbstractString, project::AbstractString)
+    (isempty(host) || isempty(project)) && return nothing
+    ok, out = _run_on(host, "cat " * Sweep.shq_path(rstrip(String(project), '/') * "/Manifest.toml") * " 2>/dev/null")
+    (ok && !isempty(strip(out))) || return nothing
+    d = try; get(Sweep.TOML.parse(out), "deps", nothing); catch; nothing; end
+    return d isa AbstractDict ? d : nothing
+end
+
+# Shell that sets `JOPT` to `--sysimage=<image>` when a worker for `t` boots from its region's image
+# (`sysimage_plan`) and this node's CPU has that image, else to nothing, for a `julia \$JOPT …` after
+# it. Booting from it also puts the image's environment on the load path, so a package only the
+# image holds loads in the region's cells. Workers boot through it, and so does a prepare's load.
+function _sysimage_jopt_sh(t::RemoteTarget)
+    plan = sysimage_plan(t)
+    isempty(plan.why) || _rlog("sysimg: $(t.region) starts without its sysimage: $(plan.why)")
+    plan.use || return "JOPT=''"
+    d = _shpath(plan.dir); so = "$d/\$CPU.so"
+    return _SYSIMAGE_CPU_SH * "; JOPT=''; if [ -f \"$so\" ]; " *
+           "then JOPT=\"--sysimage=$so\"; export JULIA_LOAD_PATH=\"@:$d/env:@stdlib\"; fi"
+end
+
+"""
+    sysimage_candidates(origin_env; project = "") -> Vector{Dict}
+
+The packages an image for this environment can hold, as a region lists them: its registered direct
+dependencies, and its project's when it is a notebook's own environment, each with the version it
+resolves and `from` (`notebook` or `project`). A package the environment has from a path (the project itself, a checkout) is left out: it
+loads normally on top of the image, so its edits are seen.
+"""
+function sysimage_candidates(origin_env::AbstractString; project::AbstractString = "")
+    out = Dict{String,Dict{String,String}}()
+    mf = isempty(origin_env) ? "" : parent_manifest(origin_env)
+    (isempty(mf) || !isfile(mf)) && return Dict{String,String}[]
+    m = try; Sweep.TOML.parsefile(mf); catch; return Dict{String,String}[]; end
+    byuuid = Dict{String,Any}()
+    for (name, es) in get(m, "deps", Dict{String,Any}()), e in es
+        e isa AbstractDict && (byuuid[String(get(e, "uuid", ""))] = (String(name), e))
     end
-    length(parts) > 1 && (res["log"] = String(strip(parts[2])))
-    return res
+    # The notebook's own environment first, then its project's (`project`, the enclosing one, whose
+    # packages a notebook's own environment reaches through the project rather than listing): a
+    # package in both is the notebook's. An environment that is the project itself is the project's.
+    own = joinpath(origin_env, "Project.toml")
+    projfile = isempty(project) ? "" : joinpath(project, "Project.toml")
+    for proj in unique(filter(isfile, [own, joinpath(dirname(mf), "Project.toml"), projfile]))
+        p = try; Sweep.TOML.parsefile(proj); catch; continue; end
+        from = (proj == own && rstrip(abspath(origin_env), '/') != rstrip(abspath(project), '/')) ? "notebook" : "project"
+        for (name, uuid) in get(p, "deps", Dict{String,Any}())
+            x = get(byuuid, String(uuid), nothing)
+            (x === nothing || haskey(x[2], "path") || haskey(out, String(uuid))) && continue
+            out[String(uuid)] = Dict("name" => String(name), "uuid" => String(uuid), "from" => from,
+                                     "version" => String(get(x[2], "version", "")), "path" => "")
+        end
+    end
+    return sort!(collect(values(out)); by = e -> lowercase(e["name"]))
 end
 
-# Region-level wrappers for the UI/API: read a region's sysimage state, or kick off an EXPLICIT build
-# (forced past the opt-in gate). The build first provisions (idempotent — ensures the env's Project/Manifest
-# exist) then launches detached; both in a background task so the request returns at once (UI polls status).
+"""
+    sysimage_path_package(r, path) -> Dict
+
+The package at `path` on region `r`'s machine, from its Project.toml there: `name`, `uuid`,
+`version`, or `ok = false` with why it is not a package.
+"""
+function sysimage_path_package(r, path::AbstractString)
+    ok, out = _run_on(r.host, "cat " * Sweep.shq_path(rstrip(String(path), '/') * "/Project.toml"))
+    ok || return Dict{String,Any}("ok" => false, "error" => "no Project.toml at $path on $(r.host)")
+    t = try; Sweep.TOML.parse(out); catch; return Dict{String,Any}("ok" => false, "error" => "its Project.toml does not parse"); end
+    name = String(get(t, "name", ""))
+    isempty(name) && return Dict{String,Any}("ok" => false, "error" => "$path is an environment, not a package (no name)")
+    return Dict{String,Any}("ok" => true, "name" => name, "uuid" => String(get(t, "uuid", "")),
+                            "version" => String(get(t, "version", "")), "path" => String(path))
+end
+
+# A package list's identity: what decides whether an image built from it is still the one asked for.
+sysimage_spec_key(spec) = isempty(spec) ? "" :
+    bytes2hex(_SHA.sha1(join(sort!([join((get(e, "name", ""), get(e, "uuid", ""), get(e, "version", ""), get(e, "path", "")), "|")
+                                    for e in spec]), "\n")))[1:12]
+
+"""
+    build_sysimage!(r, t::RemoteTarget, host; prologue = "", force = false) -> (status, detail, measured)
+
+Build region `r`'s worker sysimage on `host` (a granted node, or the host itself), in the shell its
+workers start in (the machine's setup, then `prologue`), for the notebook environment `t` names, and
+wait for it. The image holds what the region lists, or the notebook's registered packages when it
+lists nothing, with Slate's worker packages. The outcome as a prepare step: `ok` when the image is
+current or was built, `warn` when the build was put off or skipped (workers then start without one),
+`fail` when it failed; `measured` is the record a launch decides by (`sysimage_plan`).
+"""
+function build_sysimage!(r, t::RemoteTarget, host::AbstractString; prologue::AbstractString = "", force::Bool = false)
+    rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
+    spec = isempty(r.sysimage_pkgs) ? sysimage_candidates(t.origin_env) : r.sysimage_pkgs
+    body = _sysimage_build_script(r, rel, spec; force)
+    t0 = time()
+    ok, out = _ssh_julia!(host, body, "sysimage on $host"; stream = true, setup = t.setup * prologue)
+    st, detail, m = _sysimage_outcome(out, ok, round(Int, time() - t0))
+    m["dir"] = isempty(get(m, "key", "")) ? "" : sysimage_store(r) * "/" * m["key"]; m["spec"] = sysimage_spec_key(r.sysimage_pkgs)
+    m["listed"] = r.sysimage_pkgs; m["built_at"] = time()
+    return (st, detail, m)
+end
+
+# A build's output as a step outcome: the last `[sysimg] result=…` line it printed, with the key, the
+# CPU and the packages the image holds (`[sysimg] pkg uuid name version tree`).
+function _sysimage_outcome(out::AbstractString, ok::Bool, secs::Integer)
+    ms = collect(eachmatch(r"\[sysimg\] result=(\w+)(.*)", out))
+    isempty(ms) && return ("fail", "the build ended without a result" * (ok ? "" : ": " * first(strip(out), 300)), Dict{String,Any}())
+    kind, rest = ms[end].captures[1], String(strip(ms[end].captures[2]))
+    field(k) = (m = match(Regex("\\b" * k * "=(\\S+)"), rest); m === nothing ? "" : String(m.captures[1]))
+    reason = (m = match(r"reason=(.*)", rest); m === nothing ? "" : String(m.captures[1]))
+    img, bytes = field("image"), something(tryparse(Int, field("bytes")), 0)
+    km = match(r"\[sysimg\] key=(\w+) cpu=(\S*)", out)
+    pkgs = Dict{String,Any}()
+    for pm in eachmatch(r"\[sysimg\] pkg (\S+) (\S+) (\S*) (\S*)", out)
+        pkgs[pm.captures[1]] = Dict("name" => pm.captures[2], "version" => pm.captures[3], "tree" => pm.captures[4])
+    end
+    size = bytes > 0 ? " · $(round(Int, bytes / 2^20)) MB" : ""
+    measured = Dict{String,Any}("image" => img, "bytes" => bytes, "secs" => secs, "result" => String(kind),
+                                "key" => km === nothing ? "" : String(km.captures[1]),
+                                "cpu" => km === nothing ? "" : String(km.captures[2]), "packages" => pkgs)
+    kind == "current" && return ("ok", "already built for these packages$size · $(length(pkgs)) packages", measured)
+    kind == "built" && return ("ok", "built in $(secs)s$size · $(length(pkgs)) packages", measured)
+    kind == "failed" && return ("fail", reason, measured)
+    return ("warn", reason * " — workers start without one", measured)
+end
+
+"""
+    sysimage_status(r, worker_project) -> Union{Dict,Nothing}
+
+Region `r`'s built image as its package dialog shows it, or `nothing` when none is built: its size,
+when it was built, how many packages it holds, the list it was built from (`listed`, `nothing` when
+that is not known), and the packages the notebook's environment on the machine (`worker_project`,
+"" when it has none there yet) holds at other versions.
+"""
+function sysimage_status(r, worker_project::AbstractString)
+    img = get(r.readiness, "sysimage", nothing)
+    img isa AbstractDict || return nothing
+    listed = get(img, "listed", nothing)
+    if listed === nothing && get(img, "spec", nothing) == sysimage_spec_key(r.sysimage_pkgs)
+        listed = r.sysimage_pkgs           # recorded before the list was kept with the image
+    end
+    return Dict{String,Any}("key" => get(img, "key", ""), "bytes" => get(img, "bytes", 0),
+                            "built_at" => get(img, "built_at", 0), "packages" => length(get(img, "packages", Dict())),
+                            "listed" => listed,
+                            "conflicts" => (d = _worker_env_deps(r.host, worker_project); d === nothing ? String[] : sysimage_conflicts(img, d)))
+end
+
+"""
+    sysimage_view(r) -> Dict
+
+Region `r`'s sysimage as the page shows it: the image its workers boot from (size, CPU, when it was
+built, how many packages it holds), what it lists, and whether a build is running now.
+"""
+function sysimage_view(r)
+    img = get(r.readiness, "sysimage", nothing)
+    st = preparing(r.name)
+    building = st !== nothing && st["running"] === true &&
+               any(s -> get(s, "step", "") == "Build the sysimage" && get(s, "status", "") == "running", st["steps"])
+    out = Dict{String,Any}("ok" => true, "on" => r.sysimage, "building" => building, "listed" => r.sysimage_pkgs)
+    img isa AbstractDict && merge!(out, Dict{String,Any}("current" => get(img, "key", ""), "bytes" => get(img, "bytes", 0),
+        "cpu" => replace(String(get(img, "cpu", "")), '_' => ' '), "built" => round(Int, Float64(get(img, "built_at", 0))),
+        "packages" => length(get(img, "packages", Dict()))))
+    return out
+end
+
 # Telemetry history the hub recorded for the worker on (host, port) — the ring for the kernel connected to
 # it (conn.name == "slate-<host>-<port>"). Empty when the hub has no live connection (only attached workers
 # stream telemetry in; an idle / other-hub worker surfaces just its point-in-time `.stats` sidecar). Each
 # sample is the flat telemetry NamedTuple (cpu, rss, memo, sys_cpu, load1, …, rcv = hub arrival time).
 worker_stats_history(host::AbstractString, port::Integer) =
     (st = kernel_stats("slate-$host-$port"); st === nothing ? Any[] : st.history)
-
-sysimage_status_for_region(name) = (r = region_get(name); r === nothing ? nothing : sysimage_status(_region_target(r)))
-function sysimage_build_for_region!(name)
-    r = region_get(name); r === nothing && return (; ok = false, error = "no region '$name'")
-    isempty(r.host) && return (; ok = false, error = "region '$(r.name)' has no host")
-    t = _region_target(r)
-    rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    Threads.@spawn try
-        provision_remote!(t, r.preload)               # idempotent — ensures the env exists before the build reads its Manifest
-        _kickoff_sysimage_build!(t, rel; force = true)
-    catch e
-        _rlog("sysimg: manual build for region '$(r.name)' failed to start — $(sprint(showerror, e))")
-    end
-    return (; ok = true, host = t.ssh_host, envkey = _sysimage_envkey(t.project))
-end
-
-# Dev'd dependencies in a Manifest = entries carrying a `path` (a local checkout, `Pkg.develop`). Returns
-# name => absolute-local-path. Registry deps have no path; git deps have a `repo-url` (they clone on the
-# remote straight from the Manifest, so need no special handling). Paths may be relative to the env dir.
-# A line-scan of the stable `[[deps.Name]]` … `path = "…"` format — no TOML dep needed on the hub side.
-# `path = "."` resolves to the env dir itself, and on Windows `abspath` keeps the trailing
-# separator there (`C:\...\proj\`) while on unix it does not. These paths are compared against
-# env dirs to skip the project itself and handed to rsync, where a trailing separator changes
-# what gets copied, so normalise it away. A bare root (`C:\`, `/`) is left alone.
-function _strip_trailing_sep(p::AbstractString)
-    s = String(p)
-    q = rstrip(s, ('/', '\\'))
-    isempty(q) && return s                                    # "/" — a unix root
-    (Sys.iswindows() && length(q) == 2 && q[2] == ':') && return s   # "C:\" — a drive root
-    return q
-end
-
-function _dev_deps(manifest::AbstractString, envdir::AbstractString)
-    out = Pair{String,String}[]
-    isfile(manifest) || return out
-    curname = ""
-    for line in eachline(manifest)
-        m = match(r"^\[\[deps\.(.+?)\]\]\s*$", line)
-        if m !== nothing; curname = String(m.captures[1]); continue; end
-        startswith(strip(line), "[") && (curname = "")           # entered some other table → out of a deps block
-        isempty(curname) && continue
-        pm = match(r"^\s*path\s*=\s*\"(.*)\"\s*$", line)
-        pm === nothing && continue
-        p = String(pm.captures[1])
-        push!(out, curname => _strip_trailing_sep(isabspath(p) ? p : abspath(joinpath(envdir, p))))
-        curname = ""
-    end
-    return out
-end
 
 const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # shipped sources for dev'd deps (Pkg.develop targets)
 
@@ -1351,7 +1461,7 @@ function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString)
     # the shared one at the workspace root, and its relative `path=`s are anchored on ITS dir, not the
     # project's. A fork env is an ordinary env, so this is just `local_env/Manifest.toml` there.
     mf = parent_manifest(local_env)
-    for (name, lpath) in _dev_deps(mf, isempty(mf) ? local_env : dirname(abspath(mf)))
+    for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? local_env : dirname(abspath(mf)))
         # Normalize + strip the trailing slash the `path="."` form leaves (abspath("x/.") → "x/") so the
         # project-itself entry compares equal to the env dir and is left as the active project.
         if rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(local_env)), '/')
@@ -1371,50 +1481,6 @@ function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString)
     return rewrites
 end
 
-# Remote Julia code that rewrites each dev dep's path — in the Manifest (if present) AND in Project.toml's
-# `[sources]` — to its shipped `devsrc` location. Julia ≥1.11's resolver reads the `[sources]` path, so a
-# dev dep dangles unless BOTH are redirected. Returns "" when there's nothing to rewrite. Shared so the
-# origin-env replication and the parent-project provision rewrite paths identically.
-function _rewrite_devpaths_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}})
-    isempty(rewrites) && return ""
-    io = IOBuffer()
-    println(io, "import Pkg, TOML")
-    println(io, "proj = joinpath(homedir(), raw\"$projrel\")")
-    println(io, "mf = joinpath(proj, \"Manifest.toml\")")
-    println(io, "if isfile(mf)")
-    println(io, "  data = TOML.parsefile(mf)")
-    println(io, "  deps = get(data, \"deps\", Dict{String,Any}())")
-    for (name, rp) in rewrites
-        println(io, "  if haskey(deps, raw\"$name\")")
-        println(io, "    for e in deps[raw\"$name\"]; e isa AbstractDict && (e[\"path\"] = joinpath(homedir(), raw\"$rp\")); end")
-        println(io, "  end")
-    end
-    println(io, "  open(mf, \"w\") do _io; TOML.print(_io, data); end")
-    println(io, "end")
-    println(io, "pf = joinpath(proj, \"Project.toml\")")
-    println(io, "if isfile(pf)")
-    println(io, "  pdata = TOML.parsefile(pf)")
-    println(io, "  src = get!(() -> Dict{String,Any}(), pdata, \"sources\")")
-    # A workspace member declares no `[sources]` of its own — it inherits the workspace root's, and
-    # only the member dir is shipped. So ADD an entry for a dev dep that has none, not just rewrite.
-    # Guarded on the dep being declared: Pkg rejects a source naming a package the project doesn't
-    # list, which an indirect (manifest-only) path dep would be.
-    println(io, "  decl = union(keys(get(pdata, \"deps\", Dict{String,Any}())), keys(get(pdata, \"extras\", Dict{String,Any}())))")
-    for (name, rp) in rewrites
-        println(io, "  let e = get(src, raw\"$name\", nothing)")
-        println(io, "    if e isa AbstractDict && haskey(e, \"path\")")
-        println(io, "      e[\"path\"] = joinpath(homedir(), raw\"$rp\")")
-        # An existing entry without a `path` is a git source — leave it, its url/rev still resolve.
-        println(io, "    elseif e === nothing && raw\"$name\" in decl")
-        println(io, "      src[raw\"$name\"] = Dict{String,Any}(\"path\" => joinpath(homedir(), raw\"$rp\"))")
-        println(io, "    end")
-        println(io, "  end")
-    end
-    println(io, "  isempty(src) && delete!(pdata, \"sources\")")
-    println(io, "  open(pf, \"w\") do _io; TOML.print(_io, pdata); end")
-    println(io, "end")
-    return String(take!(io))
-end
 
 """
     _replicate_env!(t::RemoteTarget) -> nothing
@@ -1442,7 +1508,7 @@ function _replicate_env!(t::RemoteTarget; precompile::Bool = true)
     # STREAM the instantiate/precompile — the long, otherwise-silent step — into the remote log live, so a
     # multi-minute bring-up narrates its progress (resolve, install, Precompiling …) instead of going dark.
     ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise(); precompile),
-                          "instantiate on $host"; stream = true, online = _bringup_note)
+                          "instantiate on $host"; stream = true, online = _bringup_note, setup = t.setup)
     ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
     return nothing
 end
@@ -1486,12 +1552,12 @@ const _PREP_DONE_SNIPPET = "try; println(stderr, \"@@SLATE_PREP done\"); flush(s
 # noisier but not wrong.
 _RG_PATH_FILE = "$_REMOTE_ROOT/rg-path"
 
-function _record_rg_path!(host::AbstractString, projrel::AbstractString)
+function _record_rg_path!(host::AbstractString, projrel::AbstractString; setup::AbstractString = "")
     code = "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$projrel\")); " *
            "p = try; (@eval using ripgrep_jll); string(ripgrep_jll.rg_path); catch; \"\"; end; " *
            "isempty(p) || (mkpath(joinpath(homedir(), raw\"$_REMOTE_ROOT\")); " *
            "write(joinpath(homedir(), raw\"$_RG_PATH_FILE\"), p))"
-    try; _ssh_julia!(host, code, "record ripgrep path on $host"); catch; end
+    try; _ssh_julia!(host, code, "record ripgrep path on $host"; setup); catch; end
     return nothing
 end
 
@@ -1506,7 +1572,7 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     infra = add_revise ? "[$base, Pkg.PackageSpec(name=\"Revise\")]" : "[$base]"
     io = IOBuffer()
     # Redirect dev deps' Manifest + [sources] paths to their shipped devsrc locations (no-op when empty).
-    rw = _rewrite_devpaths_script(projrel, rewrites)
+    rw = Sweep.devpaths_script(projrel, rewrites)
     isempty(rw) || print(io, rw)
     println(io, "import Pkg")
     # Fetch only: precompiling here would build for this machine's CPU, which need not be the CPU the
@@ -1533,107 +1599,231 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
 end
 
 # ── continuous sync ────────────────────────────────────────────────────────────
-# Watch the local parent project (/src + Project.toml) and send changes to the remote on
-# change, so the remote worker's Revise hot-reloads exactly like local. One task per target;
-# coalesced (a burst of saves → one transfer). Package adds happen on the remote worker itself.
-mutable struct SyncWatcher
-    task::Task
-    running::Bool
-end
-const _SYNCERS = Dict{String,SyncWatcher}()   # keyed by "host:remote_project"
-const _SYNC_LOCK = ReentrantLock()
+# A remote worker loads the notebook's parent project and its dev'd packages from copies on the host,
+# and Revise there reloads what changes in those copies. Keeping them current is the hub's job: it
+# holds one watch per local source directory, however many notebooks and hosts use it, and sends each
+# change to every copy of it. A cell bound for a remote worker flushes first (`sync_flush!`), so it
+# never runs older code than a local worker whose Revise saw the same save.
+#
+# What decides a send is a comparison: the size and mtime of each file in the directory's `src/` and
+# `ext/` (the files directly in it when it has neither) against what each copy was last sent. A save
+# raises a filesystem event that starts the comparison at once. A check every `_SYNC_POLL_S` starts it
+# anyway, for the change no event reports: a network filesystem written from another machine, or a
+# `src/` or `ext/` made after the watch began. It is one stat per file. The flush before a remote cell
+# makes the same comparison, so a cell never waits on either.
 
-# A syncer's key: the host and project it sends to, and the scheduler job when the host is a granted
-# node, so a released allocation stops its own syncers and no one else's on a node of the same name.
+"One remote copy of a source directory: what it was last sent, and the kernels that load from it."
+mutable struct SyncDest
+    host::String
+    remotedir::String                       # $HOME-relative or absolute, as `_put_file` takes it
+    excludes::Vector{String}
+    region::String
+    sent::Dict{String,Tuple{Int,Float64}}   # rel path => (size, mtime) as last sent
+    kernels::Dict{String,Any}               # owner key ("host:project") => the kernel to tell
+    failing::Bool
+end
+
+mutable struct SyncSource
+    dir::String
+    dests::Dict{String,SyncDest}            # "host:remotedir" => copy
+    task::Union{Task,Nothing}
+    sending::ReentrantLock                  # one send at a time per source: the poll and a flush
+    wake::Base.Event                        # a save, or the next check, is due
+    cancel::CancellationTokens.CancellationTokenSource
+end
+SyncSource(dir::AbstractString) = SyncSource(String(dir), Dict{String,SyncDest}(), nothing, ReentrantLock(),
+                                             Base.Event(true), CancellationTokens.CancellationTokenSource())
+
+const _SYNC_SOURCES = Dict{String,SyncSource}()   # local dir => its watch
+const _SYNC_LOCK = ReentrantLock()
+const _SYNC_POLL_S = 10.0
+# More changed files than this go as one archive of the directory rather than file by file.
+const _SYNC_FILEWISE_MAX = 16
+
+# Who keeps a copy current: the host and project it serves, and the scheduler job when the host is a
+# granted node, so a released allocation drops its own copies and no one else's on a node of that name.
 _sync_base(t::RemoteTarget) = isempty(t.job) ? string(t.ssh_host, ":", t.project) :
                                                string(_sync_job_prefix(t.ssh_host, t.job), t.project)
 _sync_job_prefix(host, job) = string(host, "#", job, ":")
 
-function start_sync!(t::RemoteTarget, parent_project::AbstractString)
-    (isempty(parent_project) && !isdir(parent_project)) && return
-    base = _sync_base(t)
+# The files a source directory's watch covers, by '/'-separated path relative to it.
+function _sync_files(dir::AbstractString, excludes::Vector{String})
+    out = Dict{String,Tuple{Int,Float64}}()
+    scope = String[d for d in ("src", "ext") if isdir(joinpath(dir, d))]
+    paths = isempty(scope) ? (f for f in readdir(dir) if isfile(joinpath(dir, f))) :
+            (relpath(joinpath(r, f), dir) for d in scope
+                 for (r, _, fs) in walkdir(joinpath(dir, d); onerror = _ -> nothing) for f in fs)
+    for p in paths
+        rel = replace(String(p), '\\' => '/')
+        Sweep._excluded(rel, excludes) && continue
+        st = try; stat(joinpath(dir, rel)); catch; continue; end
+        out[rel] = (Int(st.size), st.mtime)
+    end
+    return out
+end
+
+"""
+    start_sync!(t, parent_project; kernel = nothing, sent = false)
+
+Keep `t`'s host copies of the notebook's parent project (its `src/`, into the worker env) and of each
+dev'd package (into `devsrc/<name>`) current, telling `kernel` which files changed. `sent` says the
+copies were just sent whole (a provision), so only later changes travel; otherwise the first check
+sends whatever differs.
+"""
+function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = nothing, sent::Bool = false)
+    (isempty(parent_project) || !isdir(parent_project)) && return
+    owner = _sync_base(t)
+    pairs = Tuple{String,String,Vector{String}}[
+        (String(parent_project), String(t.project), ["Manifest.toml", "Project.toml", ".git", "*.cov"])]
+    # Read the SAME env whose Manifest provisioning replicated (origin_env, else the parent) to find the
+    # dev'd packages; skip the project itself and any vanished source.
+    env = isempty(t.origin_env) ? parent_project : t.origin_env
+    for (name, lpath) in Sweep.dev_deps(joinpath(env, "Manifest.toml"), env)
+        rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
+        isdir(lpath) || continue
+        push!(pairs, (String(lpath), "$_REMOTE_DEVSRC/$name", [".git", "*.cov"]))
+    end
     lock(_SYNC_LOCK) do
-        # 1. the notebook's parent project /src → t.project (project code hot-reload). NEVER the env
-        #    files, or we'd clobber the replicated Project/Manifest (the exact env provisioning set up).
-        _start_syncer!(base, t.ssh_host, parent_project,
-                       isdir(joinpath(parent_project, "src")) ? joinpath(parent_project, "src") : parent_project,
-                       t.project, ["Manifest.toml", "Project.toml", ".git", "*.cov"])
-        # 2. each dev'd path dep → devsrc/<name>, so a local package the notebook develops stays fresh on
-        #    the remote and Revise hot-reloads its edits there — the "kept up to date" half of dev-dep
-        #    provisioning. Read the SAME env whose Manifest provisioning replicated (origin_env, else the
-        #    parent) to discover which deps are dev'd; skip the project itself and any vanished source.
-        env = isempty(t.origin_env) ? parent_project : t.origin_env
-        for (name, lpath) in _dev_deps(joinpath(env, "Manifest.toml"), env)
-            rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
-            isdir(lpath) || continue
-            _start_syncer!("$base:dev:$name", t.ssh_host, lpath,
-                           isdir(joinpath(lpath, "src")) ? joinpath(lpath, "src") : lpath,
-                           "$_REMOTE_DEVSRC/$name", [".git", "*.cov"])
+        for (dir, remotedir, excludes) in pairs
+            src = get!(() -> SyncSource(dir), _SYNC_SOURCES, dir)
+            d = get!(src.dests, string(t.ssh_host, ":", remotedir)) do
+                SyncDest(String(t.ssh_host), remotedir, excludes, String(t.region),
+                         sent ? _sync_files(dir, excludes) : Dict{String,Tuple{Int,Float64}}(),
+                         Dict{String,Any}(), false)
+            end
+            d.kernels[owner] = kernel
+            (src.task === nothing || istaskdone(src.task)) && (src.task = Threads.@spawn _sync_poll(src))
         end
     end
     return nothing
 end
 
-# Start one keyed filesystem→remote syncer if not already running (call with _SYNC_LOCK held).
-function _start_syncer!(key::AbstractString, host::AbstractString, localdir::AbstractString,
-                        watchdir::AbstractString, remotedir::AbstractString, excludes::Vector{String})
-    k = String(key)
-    (haskey(_SYNCERS, k) && _SYNCERS[k].running) && return
-    _SYNCERS[k] = SyncWatcher(Threads.@spawn(_sync_task(String(host), String(localdir), String(watchdir),
-                                                        String(remotedir), excludes, k)), true)
-    return nothing
+# Bring one copy up to date: the changed files, then the removals, then each kernel that loads from it
+# is told. Returns whether the copy now matches. Call with `src.sending` held.
+function _sync_dest!(src::SyncSource, d::SyncDest, now::Dict{String,Tuple{Int,Float64}})
+    changed = String[rel for (rel, v) in now if get(d.sent, rel, nothing) != v]
+    gone = String[rel for rel in keys(d.sent) if !haskey(now, rel)]
+    (isempty(changed) && isempty(gone)) && return true
+    ok = try
+        if length(changed) > _SYNC_FILEWISE_MAX
+            _send_dir!(d.host, src.dir, d.remotedir; excludes = d.excludes, region = d.region, filter = true)
+        else
+            all(rel -> _put_file(d.host, read(joinpath(src.dir, rel)), d.remotedir * "/" * rel), changed)
+        end &&
+        (isempty(gone) || first(_run_on(_host_for_files(d.host),
+            "rm -f " * join((Sweep.shq_path(d.remotedir * "/" * rel) for rel in gone), ' '))))
+    catch e
+        _rlog("sync: sending $(basename(src.dir)) → $(d.host):$(d.remotedir) failed — " * first(sprint(showerror, e), 160))
+        false
+    end
+    if !ok
+        d.failing || _rlog("sync: $(basename(src.dir)) → $(d.host):$(d.remotedir) is behind; retrying")
+        d.failing = true
+        return false
+    end
+    d.failing && _rlog("sync: $(basename(src.dir)) → $(d.host):$(d.remotedir) caught up")
+    d.failing = false
+    d.sent = now
+    _rlog("sync: $(basename(src.dir)) → $(d.host): " *
+          join(vcat(changed, ["−" * g for g in gone])[1:min(end, 6)], ", ") *
+          (length(changed) + length(gone) > 6 ? ", …" : ""))
+    paths = String[d.remotedir * "/" * rel for rel in vcat(changed, gone)]
+    for k in values(d.kernels)
+        (k isa GateKernel && k.conn !== nothing) || continue
+        try; _tool(k, "__slate_files_changed", Dict{String,Any}("paths" => paths); timeout = 60.0); catch; end
+    end
+    return true
 end
 
-# One sync task: watch `watchdir`, and on any change send `localdir` → `remotedir`,
-# coalescing bursts. Generic over what's synced so BOTH the parent project (/src hot-reload) and each
-# dev'd path dep (devsrc/<name>, so a local package's edits Revise-reload on the remote) share it.
-function _sync_task(host::AbstractString, localdir::AbstractString, watchdir::AbstractString,
-                    remotedir::AbstractString, excludes::Vector{String}, key::String)
-    while get(_SYNCERS, key, nothing) !== nothing && _SYNCERS[key].running
-        try
-            ev = FileWatching.watch_folder(watchdir, 2.0)      # block until a change, or time out
-            # A TIMEOUT is not a change. Sending on one tars the whole directory and pushes it over
-            # ssh every couple of seconds for as long as the notebook is open, whether or not anyone
-            # edited anything — and once the host is gone, logs a failure at the same rate.
-            (ev.second.timedout) && continue
-            sleep(0.15)                                        # coalesce a burst of saves
-            _send_dir!(host, localdir, remotedir; excludes = excludes)
+# The events that wake a watch: a save anywhere under the directory's `src/` and `ext/` (the directory
+# itself when it has neither), collected over a short latency so a burst of saves is one wake. Each
+# runs until the watch is cancelled.
+function _sync_events!(src::SyncSource)
+    token = CancellationTokens.get_token(src.cancel)
+    subs = String[joinpath(src.dir, d) for d in ("src", "ext") if isdir(joinpath(src.dir, d))]
+    for sub in (isempty(subs) ? [src.dir] : subs)
+        Threads.@spawn try
+            BetterFileWatching.watch_folder(_ -> notify(src.wake), sub, token; latency = 0.15)
         catch e
-            @warn "slate remote: sync loop error" host = host dir = localdir exception = (e,) maxlog = 3
-            sleep(1.0)
+            CancellationTokens.is_cancellation_requested(token) ||
+                _rlog("sync: no change events for $sub (checked every $(_SYNC_POLL_S)s instead) — " *
+                      first(sprint(showerror, e), 160))
         end
     end
-    try; FileWatching.unwatch_folder(watchdir); catch; end
+    Threads.@spawn while !CancellationTokens.is_cancellation_requested(token)
+        sleep(_SYNC_POLL_S)
+        notify(src.wake)
+    end
+    notify(src.wake)                                # one comparison now, for what changed before the watch
     return nothing
 end
 
-# Stop every syncer for this target — the parent-project watcher AND each dev-dep watcher (keyed
-# `<base>:dev:<name>`), so a teardown leaves no orphaned sync loops.
-function stop_sync!(t::RemoteTarget)
-    base = _sync_base(t)
-    lock(_SYNC_LOCK) do
-        for key in collect(keys(_SYNCERS))
-            (key == base || startswith(key, base * ":")) || continue
-            _SYNCERS[key].running = false
-            delete!(_SYNCERS, key)
+function _sync_poll(src::SyncSource)
+    _sync_events!(src)
+    while true
+        wait(src.wake)
+        dests = lock(() -> collect(values(src.dests)), _SYNC_LOCK)
+        isempty(dests) && return nothing
+        try
+            lock(src.sending) do
+                for d in dests
+                    now = _sync_files(src.dir, d.excludes)
+                    now == d.sent || _sync_dest!(src, d, now)
+                end
+            end
+        catch e
+            _rlog("sync: watching $(src.dir) failed — " * first(sprint(showerror, e), 160))
+        end
+    end
+end
+
+"""
+    sync_flush!(k)
+
+Bring every host copy `k`'s worker loads from up to date now, and have its Revise take the changes in,
+before a cell runs there. Costs one look at each source tree when nothing changed.
+"""
+function sync_flush!(k)
+    t = k.target
+    t isa RemoteTarget || return nothing
+    owner = _sync_base(t)
+    work = lock(_SYNC_LOCK) do
+        [(s, d) for s in values(_SYNC_SOURCES) for d in values(s.dests) if haskey(d.kernels, owner)]
+    end
+    for (s, d) in work
+        lock(s.sending) do
+            now = _sync_files(s.dir, d.excludes)
+            now == d.sent || _sync_dest!(s, d, now)
         end
     end
     return nothing
 end
 
-# Every syncer sending to a node within scheduler job `job`, whatever project it watches: for when
-# the allocation is what went away rather than one target on it.
-function stop_sync_job!(host::AbstractString, job::AbstractString)
-    pre = _sync_job_prefix(host, job)
+# Drop the copies `keep(d, owner)` says to, and a watch left with none ends on its next check.
+function _sync_drop!(drop)
     lock(_SYNC_LOCK) do
-        for key in collect(keys(_SYNCERS))
-            startswith(key, pre) || continue
-            _SYNCERS[key].running = false
-            delete!(_SYNCERS, key)
+        for (dir, s) in collect(_SYNC_SOURCES)
+            for (key, d) in collect(s.dests)
+                for owner in collect(keys(d.kernels)); drop(d, owner) && delete!(d.kernels, owner); end
+                isempty(d.kernels) && delete!(s.dests, key)
+            end
+            if isempty(s.dests)
+                delete!(_SYNC_SOURCES, dir)
+                CancellationTokens.cancel(s.cancel)
+                notify(s.wake)                      # its loop sees no copies left and ends
+            end
         end
     end
     return nothing
 end
+
+"Stop keeping `t`'s copies current (its kernel is going)."
+stop_sync!(t::RemoteTarget) = (o = _sync_base(t); _sync_drop!((d, owner) -> owner == o))
+
+# Every copy kept for kernels within scheduler job `job` on `host`: for when the allocation is what
+# went away rather than one target on it.
+stop_sync_job!(host::AbstractString, job::AbstractString) =
+    (pre = _sync_job_prefix(host, job); _sync_drop!((d, owner) -> startswith(owner, pre)))
 
 # ── remote worker spawn + CURVE bootstrap ────────────────────────────────────────
 # The remote worker script — run as `julia <file>` (a FILE, NOT `-e`: verified on factorio that
@@ -1718,11 +1908,10 @@ function _region_prologue(region::AbstractString)
     isempty(region) && return ""
     r = try; region_get(region); catch; nothing; end
     r === nothing && return ""
-    # What preparing the region found the site needs (unloading a module that shadows CUDA.jl's own
-    # libraries, say) runs first, so the region's own prologue can still undo or extend it.
-    parts = filter(!isempty, [strip(String(get(r.readiness, "prologue", ""))), strip(r.prologue)])
-    isempty(parts) && return ""
-    return "{ " * join(parts, " ; ") * " ; } && "
+    # The machine's setup (`machine_setup`: depot, the site's module fix, its prologue) runs before
+    # this, so the region's own prologue can still undo or extend it.
+    p = strip(r.prologue)
+    return isempty(p) ? "" : "{ " * p * " ; } && "
 end
 
 function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
@@ -1755,10 +1944,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     # zsh, which does NOT word-split an unquoted `$JOPT`, so `-J <path>` would arrive as a single glued arg
     # ("-J /path") and Julia would read the value as " /path" (leading space → treated as relative → homedir
     # prepended → load failure). The `=`-joined long form has no space to split on, so it's shell-agnostic.
-    sysreldir = _sysimage_dir(t.project)
-    siresolve = t.sysimage ?
-        "SI=\$(cat $sysreldir/current 2>/dev/null); JOPT=''; if [ -n \"\$SI\" ] && [ -f \"\$HOME/$sysreldir/\$SI.so\" ]; then JOPT=\"--sysimage=\$HOME/$sysreldir/\$SI.so\"; fi" :
-        "JOPT=''"   # region didn't opt into a sysimage → always a plain boot
+    siresolve = _sysimage_jopt_sh(t)
     xflags = effective_worker_extra_flags(extra_flags)
     jl = "julia \$JOPT --project=$proj --startup-file=no --threads=$nthreads $xflags $remote_script '$tag'"
     # A region's prologue, if it has one: `module load cuda`, a scratch dir, a venv. It runs HERE and
@@ -1768,7 +1954,10 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     pro = _region_prologue(region)
     # Everything set up before the worker boots: cwd, PATH to the remote juliaup, the self-identifying
     # tag, the region prologue, and the sysimage resolve. Shared by both launch forms below.
-    setup = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $pro$siresolve"
+    # BLAS threads as a local worker has them; before the region's own setup, which may set its own.
+    blas = worker_blas_threads()
+    setup = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && " *
+            "export OPENBLAS_NUM_THREADS=$blas OMP_NUM_THREADS=$blas && " * t.setup * "$pro$siresolve"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
     v = via(host)
     if v === nothing || isempty(v.job)
@@ -1781,27 +1970,39 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         _ssh_ok(host, `$launch`) ||
             _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
     else
-        # A routed scheduler node. A worker launched DETACHED inside the `srun --overlap` step (`… & fi`)
-        # dies the instant the step exits: the node runs `proctrack/cgroup`, so the step's cgroup is torn
-        # down with every process in it, and `setsid` escapes the process GROUP but not the cgroup. So the
-        # worker runs in the FOREGROUND of the step - the step, and its cgroup, then live exactly as long as
-        # the worker does - and the DETACH is moved one level out, to the LOGIN node, which is under no such
-        # cgroup. `setsid nohup` there reparents the step launcher (`srun`, or PBS's `ssh node`) to init, so
-        # it survives the ssh channel closing and even a full session drop; the worker is re-attached over
-        # the forward on reconnect. `_in_allocation` builds the same in-allocation launcher every poll uses.
-        worker = "$setup && " * (v.kind === :pbs ? _pbs_attached(jl) : "exec $jl")
-        inner = _in_allocation(v, host, worker)
-        launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $inner > $logf 2>&1 & else nohup $inner > $logf 2>&1 & fi"
-        # Run the detach on the RAW login session (`run_there`), NOT `_ssh_ok`/`_run_on`: on a single-node
+        # A routed scheduler node, two ways in.
+        #
+        # Reached by ssh (PBS, and a SLURM node that takes one): the command lands in the job's own
+        # cgroup, which lasts as long as the job, so the worker is detached ON THE NODE. It then depends
+        # on nothing at the login node: losing that login node, or the hub's session through it, leaves
+        # the worker running, to be re-attached over a new forward. It still ends with the job.
+        #
+        # Reached by a `srun --overlap` step: a worker detached inside the step dies the instant the step
+        # exits, since the node runs `proctrack/cgroup` and the step's cgroup is torn down with every
+        # process in it (`setsid` escapes the process GROUP, not the cgroup). So the worker runs in the
+        # FOREGROUND of the step, and the detach moves one level out, to the LOGIN node: `setsid nohup`
+        # there reparents `srun` to init, so it survives the ssh channel closing and a session drop.
+        #
+        # Both run on the RAW login session (`run_there`), NOT `_ssh_ok`/`_run_on`: on a single-node
         # cluster the login host IS the routed node (`via(v.host)` is set), so `_run_on(v.host, …)` would
-        # wrap this in ANOTHER `srun --overlap` step and the detached launcher would die with THAT step's
-        # cgroup - the very failure this fix exists to avoid. `run_there` reaches the login node directly.
-        first(Sweep.run_there(v.host, launch)) ||
+        # wrap this in ANOTHER `srun --overlap` step and the launcher would die with THAT step's cgroup.
+        worker = "$setup && " * (v.kind === :pbs ? _pbs_attached(jl) : "exec $jl")
+        launch = if v.kind === :pbs || _node_by_ssh(host)
+            _in_allocation(v, host, "cd \$HOME && " * _detach_on_node("bash -c " * Sweep.shq(worker), logf))
+        else
+            inner = _in_allocation(v, host, worker)
+            "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $inner > $logf 2>&1 & else nohup $inner > $logf 2>&1 & fi"
+        end
+        first(Sweep.run_there(v.host, launch; timeout = 60)) ||
             _rlog("spawn: worker launch returned nonzero via $(v.host) (it may still be starting)")
     end
     # Record who/what this worker serves so it's self-describing (list/reconnect/reap/adopt all read
     # this). `project` (the worker's --project env dir) is what pool adoption matches on.
     fields = ["notebook" => String(label), "parent" => String(parent), "hub" => gethostname(),
+              "owner" => worker_owner_tag(),     # which hub on that host — see `_manifest_ours`
+              # The machine it runs on: a routed node's manifest is read through the login host, so
+              # the roster's host does not say.
+              "node" => String(host),
               "transport" => string(t.transport), "project" => t.project,
               "port" => string(port), "stream_port" => string(stream_port),
               "client_pubkey" => hubkey, "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS")]
@@ -1863,9 +2064,139 @@ function _payload_current(k)::Bool
         return true
     end
     got == want && return true
+    # A worker still computing keeps its work: replacing it would kill a cell whose result nothing can
+    # recover. It is swapped on an attach after it has finished.
+    busy = try
+        r = _tool(k, "__slate_running", Dict{String,Any}(); timeout = 6.0)
+        run = _infofield(r, "running", nothing)
+        run !== nothing && !isempty(run) ? join(string.(run), ", ") : ""
+    catch
+        ""
+    end
+    if !isempty(busy)
+        _rlog("payload: worker-$(k.port) for '$(k.label)' runs older code but is still running $busy — kept until it is idle")
+        return true
+    end
     _rlog("payload: worker-$(k.port) for '$(k.label)' is stale " *
           "(sha $(isempty(got) ? "none" : first(got, 12)) ≠ current $(first(want, 12))) — reprovisioning")
     return false
+end
+
+# Resolve connect coordinates + CURVE key, open the tunnel if needed, and dial. `deadline`
+# bounds the wait: a fresh spawn legitimately needs ~90s (remote Julia boot + KaimonGate
+# load), but an ALREADY-RUNNING worker answers in about a second — so the reattach dial
+# fails fast instead of hanging on a wedged process. The retry quantum is 0.25s (was 1s —
+# it sat directly on the reattach path, where try #1 usually races the tunnel coming up).
+# On failure the just-opened tunnel is CLOSED — its supervisor would otherwise respawn the
+# forward forever (a leak the old single-path flow had on its error exit).
+function _dial_worker(t::RemoteTarget, port, stream_port; deadline::Float64, server_key::String = "",
+                      remote_ip::String = "", label::AbstractString = "", quiet::Bool = false)
+    K = _kaimon()
+    host = t.ssh_host
+    quiet || _unwatch!(host, Int(port))        # a notebook taking the worker replaces a telemetry watch
+    if t.transport === :direct
+        # CURVE key + routable IP: use the caller's cached values (the attachment record) when
+        # given — each is otherwise an ssh exec, and both were learned at the original spawn.
+        # The key is PINNED either way (pinning is a local trust-store write, not a fetch).
+        ip = isempty(remote_ip) ? _remote_ip(host) : remote_ip
+        if isempty(server_key)
+            server_key = _fetch_and_pin_curve!(t, ip, port)
+        else
+            try; getfield(_kaimon(), :KaimonGate).pin_server!(ip, port, server_key); catch; end
+        end
+        connect_host, connect_port, connect_stream = ip, port, stream_port
+        tunnel = nothing
+    else
+        ip = ""
+        lport, lstream = _free_local_port(), _free_local_port()
+        v = via(host)
+        # For a routed worker the login node reaches the compute node over the cluster's own network,
+        # so the forward targets the node BY NAME. On a SINGLE-NODE cluster the node IS the login host:
+        # the SSH server then commonly refuses `direct_tcpip` to its own external name (PermitOpen is
+        # loopback-only), while the worker - bound 0.0.0.0 - is still reachable on loopback. Target
+        # 127.0.0.1 there, which is also the address the CURVE key is then pinned against.
+        tunnel = v === nothing ? open_tunnel(host, [(lport, port), (lstream, stream_port)]) :
+                 open_tunnel(v.host, [(lport, port), (lstream, stream_port)];
+                             remote = host == v.host ? "127.0.0.1" : host)
+        connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
+        # The key is pinned against the LOCAL end of the forward, which is the address this hub
+        # actually dials. Every forward carries CURVE, routed or not — see `_remote_worker_script`.
+        if isempty(server_key)
+            for attempt in 1:12                 # the worker writes its key early in boot
+                server_key = try
+                    _fetch_and_pin_curve!(t, connect_host, connect_port)
+                catch e
+                    # A node that will not run the command will not run it on the next try either.
+                    occursin(r"Unable to create step|not held any more", sprint(showerror, e)) && rethrow()
+                    attempt == 12 && _rlog("connect: no CURVE key from $host yet — dialing without one")
+                    sleep(1.0); ""
+                end
+                isempty(server_key) || break
+            end
+        end
+    end
+    quiet || _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
+    quiet || _prep_stage("Connecting to worker on $host — remote Julia boot + handshake…")
+    # A FORWARDED transport (:tunnel) sets up its `ssh -L` ASYNC (open_tunnel spawns it), so the local
+    # port isn't listening the instant we dial — a bare connect_tcp! then burns its full ~1.5s
+    # _tcp_port_open timeout on the not-yet-ready forward before the first retry. Tight-poll the local
+    # port first (loopback "refused" is instant), so the first real connect lands the moment the forward
+    # comes up — the dominant warm-worker ADOPT latency once the ssh master is warm. Bounded; on timeout
+    # we fall through and let the connect loop's own deadline handle a genuinely-stuck forward.
+    if tunnel !== nothing
+        fw0 = time()
+        while time() - fw0 < min(deadline, _fwd_ready_wait()) &&
+              _probe_tcp(connect_host, connect_port; timeout = 0.5) !== :open
+            sleep(0.05)
+        end
+    end
+    t0 = time(); last = ""; conn = nothing; tries = 0
+    firewall_since = 0.0   # :direct — first time the port looked firewalled (SYN dropped) with no refuse/open since
+    while time() - t0 < deadline
+        tries += 1
+        # :direct dials the worker's RAW ip:port. A closed/firewalled port DROPS the SYN, so a bare
+        # connect_tcp! blocks ~75 s (the OS TCP timeout) — long enough to look like a hang and blow past
+        # `deadline`. Probe first (bounded): dial only when the port is actually open; a booting worker
+        # (refused) just retries; a port that stays unreachable is a firewall → fail fast with a clear
+        # message instead of waiting out the whole deadline.
+        if t.transport === :direct
+            _pt = time()
+            pr = _probe_tcp(connect_host, connect_port; timeout = _probe_timeout())
+            _rlog("  dial try $tries: probe=$pr in $(round(time() - _pt; digits = 2))s (elapsed $(round(time() - t0; digits = 1))s)")
+            if pr === :unreachable
+                firewall_since == 0.0 && (firewall_since = time())
+                last = "port $connect_port on $host is not reachable — open $(connect_port)-$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
+                (time() - firewall_since > _firewall_giveup()) && break   # sustained DROP ⇒ firewall, not a slow boot — stop early
+                sleep(0.5); continue
+            end
+            firewall_since = 0.0                                  # refused/open ⇒ host reachable; normal boot/ready path
+            if pr === :refused
+                last = "worker not listening on $connect_port yet (booting)"
+                sleep(0.5); continue
+            end
+        end
+        try
+            conn = K.connect_tcp!(_manager(), connect_host, connect_port;
+                                  name = "slate-$(host)-$(port)", stream_port = connect_stream,
+                                  server_key = server_key, label = label)
+            quiet || _rlog("connect: TCP+CURVE up after $tries tries, $(round(time() - t0; digits = 1))s of dialing (post-connect setup follows before 'connect OK')")
+            break
+        catch e
+            last = sprint(showerror, e)
+            # A stale live-status ConnectionManager entry for this endpoint makes connect_tcp!
+            # refuse with "Already connected" on EVERY retry (it won't replace a live corpse) —
+            # so evict it and let the next iteration build fresh, instead of burning the whole
+            # deadline re-dialing into the same corpse. Same eviction the reap path does.
+            occursin("Already connected", last) && _evict_worker_conn!(host, port)
+            sleep(0.25)
+        end
+    end
+    if conn === nothing
+        quiet || _rlog("connect FAILED: could not reach worker on $host:$port after $tries tries ($last)")
+        tunnel === nothing || (try; close_tunnel(tunnel); catch; end)
+    end
+    # resolved key/ip ride back so a successful caller can stamp them into the attachment record
+    return (conn = conn, tunnel = tunnel, err = last, server_key = server_key, remote_ip = ip)
 end
 
 """
@@ -1890,116 +2221,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     host = t.ssh_host
     _rlog("═══ REMOTE SPAWN requested: notebook worker → $host (transport=$(t.transport)) ═══")
 
-    # Resolve connect coordinates + CURVE key, open the tunnel if needed, and dial. `deadline`
-    # bounds the wait: a fresh spawn legitimately needs ~90s (remote Julia boot + KaimonGate
-    # load), but an ALREADY-RUNNING worker answers in about a second — so the reattach dial
-    # fails fast instead of hanging on a wedged process. The retry quantum is 0.25s (was 1s —
-    # it sat directly on the reattach path, where try #1 usually races the tunnel coming up).
-    # On failure the just-opened tunnel is CLOSED — its supervisor would otherwise respawn the
-    # forward forever (a leak the old single-path flow had on its error exit).
-    function dial(port, stream_port; deadline::Float64, server_key::String = "", remote_ip::String = "")
-        if t.transport === :direct
-            # CURVE key + routable IP: use the caller's cached values (the attachment record) when
-            # given — each is otherwise an ssh exec, and both were learned at the original spawn.
-            # The key is PINNED either way (pinning is a local trust-store write, not a fetch).
-            ip = isempty(remote_ip) ? _remote_ip(host) : remote_ip
-            if isempty(server_key)
-                server_key = _fetch_and_pin_curve!(t, ip, port)
-            else
-                try; getfield(_kaimon(), :KaimonGate).pin_server!(ip, port, server_key); catch; end
-            end
-            connect_host, connect_port, connect_stream = ip, port, stream_port
-            tunnel = nothing
-        else
-            ip = ""
-            lport, lstream = _free_local_port(), _free_local_port()
-            v = via(host)
-            # For a routed worker the login node reaches the compute node over the cluster's own network,
-            # so the forward targets the node BY NAME. On a SINGLE-NODE cluster the node IS the login host:
-            # the SSH server then commonly refuses `direct_tcpip` to its own external name (PermitOpen is
-            # loopback-only), while the worker - bound 0.0.0.0 - is still reachable on loopback. Target
-            # 127.0.0.1 there, which is also the address the CURVE key is then pinned against.
-            tunnel = v === nothing ? open_tunnel(host, [(lport, port), (lstream, stream_port)]) :
-                     open_tunnel(v.host, [(lport, port), (lstream, stream_port)];
-                                 remote = host == v.host ? "127.0.0.1" : host)
-            connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
-            # The key is pinned against the LOCAL end of the forward, which is the address this hub
-            # actually dials. Every forward carries CURVE, routed or not — see `_remote_worker_script`.
-            if isempty(server_key)
-                for attempt in 1:12                 # the worker writes its key early in boot
-                    server_key = try
-                        _fetch_and_pin_curve!(t, connect_host, connect_port)
-                    catch
-                        attempt == 12 && _rlog("connect: no CURVE key from $host yet — dialing without one")
-                        sleep(1.0); ""
-                    end
-                    isempty(server_key) || break
-                end
-            end
-        end
-        _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
-        _prep_stage("Connecting to worker on $host — remote Julia boot + handshake…")
-        # A FORWARDED transport (:tunnel) sets up its `ssh -L` ASYNC (open_tunnel spawns it), so the local
-        # port isn't listening the instant we dial — a bare connect_tcp! then burns its full ~1.5s
-        # _tcp_port_open timeout on the not-yet-ready forward before the first retry. Tight-poll the local
-        # port first (loopback "refused" is instant), so the first real connect lands the moment the forward
-        # comes up — the dominant warm-worker ADOPT latency once the ssh master is warm. Bounded; on timeout
-        # we fall through and let the connect loop's own deadline handle a genuinely-stuck forward.
-        if tunnel !== nothing
-            fw0 = time()
-            while time() - fw0 < min(deadline, _fwd_ready_wait()) &&
-                  _probe_tcp(connect_host, connect_port; timeout = 0.5) !== :open
-                sleep(0.05)
-            end
-        end
-        t0 = time(); last = ""; conn = nothing; tries = 0
-        firewall_since = 0.0   # :direct — first time the port looked firewalled (SYN dropped) with no refuse/open since
-        while time() - t0 < deadline
-            tries += 1
-            # :direct dials the worker's RAW ip:port. A closed/firewalled port DROPS the SYN, so a bare
-            # connect_tcp! blocks ~75 s (the OS TCP timeout) — long enough to look like a hang and blow past
-            # `deadline`. Probe first (bounded): dial only when the port is actually open; a booting worker
-            # (refused) just retries; a port that stays unreachable is a firewall → fail fast with a clear
-            # message instead of waiting out the whole deadline.
-            if t.transport === :direct
-                _pt = time()
-                pr = _probe_tcp(connect_host, connect_port; timeout = _probe_timeout())
-                _rlog("  dial try $tries: probe=$pr in $(round(time() - _pt; digits = 2))s (elapsed $(round(time() - t0; digits = 1))s)")
-                if pr === :unreachable
-                    firewall_since == 0.0 && (firewall_since = time())
-                    last = "port $connect_port on $host is not reachable — open $(connect_port)-$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
-                    (time() - firewall_since > _firewall_giveup()) && break   # sustained DROP ⇒ firewall, not a slow boot — stop early
-                    sleep(0.5); continue
-                end
-                firewall_since = 0.0                                  # refused/open ⇒ host reachable; normal boot/ready path
-                if pr === :refused
-                    last = "worker not listening on $connect_port yet (booting)"
-                    sleep(0.5); continue
-                end
-            end
-            try
-                conn = K.connect_tcp!(_manager(), connect_host, connect_port;
-                                      name = "slate-$(host)-$(port)", stream_port = connect_stream,
-                                      server_key = server_key, label = k.label)
-                _rlog("connect: TCP+CURVE up after $tries tries, $(round(time() - t0; digits = 1))s of dialing (post-connect setup follows before 'connect OK')")
-                break
-            catch e
-                last = sprint(showerror, e)
-                # A stale live-status ConnectionManager entry for this endpoint makes connect_tcp!
-                # refuse with "Already connected" on EVERY retry (it won't replace a live corpse) —
-                # so evict it and let the next iteration build fresh, instead of burning the whole
-                # deadline re-dialing into the same corpse. Same eviction the reap path does.
-                occursin("Already connected", last) && _evict_worker_conn!(host, port)
-                sleep(0.25)
-            end
-        end
-        if conn === nothing
-            _rlog("connect FAILED: could not reach worker on $host:$port after $tries tries ($last)")
-            tunnel === nothing || (try; close_tunnel(tunnel); catch; end)
-        end
-        # resolved key/ip ride back so a successful caller can stamp them into the attachment record
-        return (conn = conn, tunnel = tunnel, err = last, server_key = server_key, remote_ip = ip)
-    end
+    dial(port, stream_port; kw...) = _dial_worker(t, port, stream_port; label = k.label, kw...)
 
     t0 = time()
     # After a successful (re)attach, everything that isn't the dial moves OFF the hot path: the
@@ -2014,7 +2236,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     fresh(sv) = sv !== nothing && time() - sv.at < 60
     function fresh_spawn()
         provision_remote!(t, parent_project; seen = fresh(survey) ? survey.state : nothing)
-        start_sync!(t, parent_project)
+        start_sync!(t, parent_project; kernel = k, sent = true)
         # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them;
         # else auto from _next_ports (9100+), floored above the roster.
         # The listening ports and the roster: the start's survey when it is recent, else one command.
@@ -2055,7 +2277,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
         _attach_record!(host, k.label; port = port, stream_port = stream_port,
-                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
+                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip, job = t.job)
         _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host")
         return (r.conn, r.tunnel)
     end
@@ -2073,8 +2295,8 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
             return fresh_spawn()
         end
         _attach_record!(host, k.label; port = k.port, stream_port = k.stream_port,
-                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
-        start_sync!(t, parent_project)          # non-blocking watcher; heals /src drift from the detached period
+                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip, job = t.job)
+        start_sync!(t, parent_project; kernel = k)   # sends what changed while it was detached
         # No provisioning here. The worker is live and loads from this environment, and rebuilding it
         # underneath competes with that load; every fresh spawn provisions for itself anyway.
         Threads.@spawn try
@@ -2118,6 +2340,14 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     #    no ssh at all before the dial itself, whose success IS the validation. Short deadline:
     #    a live worker answers in well under a second; anything else is stale → demote.
     rec = _attach_lookup(host, k.label)
+    # A worker on a scheduler node ends with its job: one recorded in another job is gone, and dialling
+    # it only waits out the dial's deadline.
+    if rec !== nothing && !isempty(t.job) && rec.job != t.job
+        _attach_clear!(host, k.label)
+        _rlog("reconnect: worker-$(rec.port) was recorded in " * (isempty(rec.job) ? "an earlier allocation" : "job $(rec.job)") *
+              ", not job $(t.job); not dialling it")
+        rec = nothing
+    end
     if rec !== nothing
         k.port = rec.port; k.stream_port = rec.stream_port
         r = dial(rec.port, rec.stream_port; deadline = _dial_deadline_record(),
@@ -2134,7 +2364,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     #    dial and falls through to a fresh spawn on new ports (the stale one stays visible in
     #    the roster for manual reap).
     # From here on every path asks the host the same few things, so they are asked once.
-    survey = _start_survey(host, startswith(t.project, "~/") ? t.project[3:end] : t.project)
+    survey = _start_survey(host, _projrel(t.project); stamp = _env_stamp_path(t))
     roster = survey === nothing ? nothing : survey.roster
     reattach = nothing
     try; reattach = _find_live_worker(host, k.label, k.parent; workers = roster); catch; end
@@ -2190,6 +2420,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
                 try
                     _write_worker_manifest!(host, port, [
                         "notebook" => k.label, "parent" => k.parent, "hub" => gethostname(),
+                        "owner" => worker_owner_tag(), "node" => String(host),
                         "transport" => string(t.transport), "project" => t.project,
                         "port" => string(port), "stream_port" => string(sp),
                         "client_pubkey" => _hub_client_pubkey(), "region" => t.region,
@@ -2254,9 +2485,11 @@ function _curve_key_from(out::AbstractString)
 end
 
 function _fetch_and_pin_curve!(t::RemoteTarget, connect_host::AbstractString, port::Int)
-    ok, out = _ssh_capture(t.ssh_host, `head -n1 $_REMOTE_KEY_PATH`)
+    # Read where the files are: a routed node shares its login node's home, so no command runs on it.
+    ok, out = _ssh_capture(_host_for_files(t.ssh_host), `head -n1 $_REMOTE_KEY_PATH`)
     pub = ok ? _curve_key_from(out) : ""
-    isempty(pub) && error("slate remote: no CURVE server key on $(t.ssh_host) at $_REMOTE_KEY_PATH")
+    isempty(pub) && error("slate remote: no CURVE server key on $(t.ssh_host) at $_REMOTE_KEY_PATH" *
+                          (ok ? "" : ": " * first(strip(out), 300)))
     # Pin via KaimonGate's trust store when reachable through Kaimon; harmless if absent.
     try
         kg = getfield(_kaimon(), :KaimonGate)
@@ -3121,7 +3354,7 @@ end
 # 45s counting down to a conclusion available the instant the session went.
 const _SESSION_DROP_SINK = Ref{Any}(nothing)
 
-function _session_dropped!(host::AbstractString)
+function _session_dropped!(host::AbstractString, died::Bool = false)
     h = String(host)
     hosts = String[h]
     lock(_VIA_LOCK) do
@@ -3131,11 +3364,12 @@ function _session_dropped!(host::AbstractString)
     end
     for x in hosts
         try; _evict_data_tunnels!(x); catch; end
+        try; _unwatch_host!(x); catch; end
     end
-    _rlog("session dropped on $h — discarded the data forwards it carried" *
+    _rlog("session $(died ? "lost" : "closed") on $h — discarded the data forwards it carried" *
           (length(hosts) > 1 ? " (and those of $(join(hosts[2:end], ", ")))" : ""))
     f = _SESSION_DROP_SINK[]
-    f === nothing || (try; f(h, hosts); catch e
+    f === nothing || (try; f(h, hosts, died); catch e
         _rlog("session drop sink failed for $h: " * first(sprint(showerror, e), 160))
     end)
     return nothing
@@ -3697,12 +3931,19 @@ end
 # ReportEngine deliberately has no JSON dep), keyed by hash(host, label).
 const _ATTACH_DIR = joinpath(_slate_cache_dir(), "attach")
 
+# Keyed by the OWNING hub as well: the attach dir lives under a state home that two hubs on one
+# machine can share (an `--ai` host pins its Slate homes to the user's own), and a record is tried
+# FIRST, before any probe — so without the owner in the key, hub B dials the worker hub A recorded
+# for the same notebook and captures it. Same identity as the manifests (`_manifest_ours`).
 _attach_path(host, label) =
-    joinpath(_ATTACH_DIR, string(hash((String(host), String(label))); base = 16) * ".json")
+    joinpath(_ATTACH_DIR, string(hash((String(host), String(label), worker_owner_tag())); base = 16) * ".json")
 
 function _attach_record!(host, label; port::Int, stream_port::Int, transport::Symbol,
-                         server_key::AbstractString = "", remote_ip::AbstractString = "")
-    fields = ["host" => String(host), "label" => String(label), "port" => string(port),
+                         server_key::AbstractString = "", remote_ip::AbstractString = "",
+                         job::AbstractString = "")
+    fields = ["host" => String(host), "label" => String(label), "owner" => worker_owner_tag(),
+              "job" => String(job),
+              "port" => string(port),
               "stream_port" => string(stream_port), "transport" => string(transport),
               "server_key" => String(server_key), "remote_ip" => String(remote_ip),
               "ts" => string(round(Int, time()))]
@@ -3722,11 +3963,12 @@ function _attach_lookup(host, label)
     isfile(p) || return nothing
     s = try; read(p, String); catch; return nothing; end
     g(k) = _manifest_get(s, k)
+    g("owner") == worker_owner_tag() || return nothing   # belt and braces beside the keyed path
     port = tryparse(Int, g("port")); sp = tryparse(Int, g("stream_port"))
     (port === nothing || sp === nothing || port == 0) && return nothing
     tr = g("transport")
     return (port = port, stream_port = sp, transport = Symbol(isempty(tr) ? "tunnel" : tr),
-            server_key = g("server_key"), remote_ip = g("remote_ip"))
+            server_key = g("server_key"), remote_ip = g("remote_ip"), job = g("job"))
 end
 
 _attach_clear!(host, label) = (try; rm(_attach_path(host, label); force = true); catch; end; nothing)
@@ -3743,6 +3985,7 @@ function _attach_clear_port!(host, port::Int)
         endswith(f, ".json") || continue
         p = joinpath(_ATTACH_DIR, f)
         s = try; read(p, String); catch; continue; end
+        _manifest_get(s, "owner") == worker_owner_tag() || continue   # another hub's record is not ours to drop
         (_manifest_get(s, "host") == h && tryparse(Int, _manifest_get(s, "port")) == port) &&
             (try; rm(p; force = true); catch; end)
     end
@@ -3810,7 +4053,7 @@ struct Region
     # `idle_release`, or the question arrives too late to be answered.
     idle_warn::Int
     # ── What the fields above cannot say ─────────────────────────────────────────────────────
-    # Everything else the scheduler will take, as the sweep cell's editor stores it: KEY => VALUE
+    # Everything else the scheduler will take, as the job cell's editor stores it: KEY => VALUE
     # against `Sweep.sched_options()`, spelled per scheduler at request time by the same
     # `sbatch_flag`/`pbs_flag` the batch side uses. `qos`, `constraint`, `exclusive`, `reservation`
     # and a site's own names all live here rather than each earning a field.
@@ -3832,6 +4075,17 @@ struct Region
     # SECONDS; 0 takes the load time preparing the region measured, or the hub's default. A site
     # whose packages load slowly from a shared filesystem needs more than a workstation does.
     liveness_grace::Int
+    # The machine it runs on, by name (`machines.jl`). When set, the host, scheduler and default
+    # account are the machine's; "" keeps `host` as written, as an implicit machine on that host.
+    machine::String
+    # What its workers' sysimage holds, when `sysimage` is on: each entry a package by `name` (and
+    # `uuid`), with a `version` ("" = the version the notebook preparing it resolves) or a `path` on
+    # the machine for a package that is not registered. Slate's own worker packages are added to it.
+    sysimage_pkgs::Vector{Dict{String,String}}
+    # How the node is asked for on SLURM: "sbatch" submits a job that holds it, "salloc" asks for an
+    # interactive allocation, which a site's interactive QOS requires (`_slurm_salloc_script`). "" takes
+    # the machine's, and is "sbatch" when the machine says nothing.
+    submit::String
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -3856,7 +4110,7 @@ _region_warm_for(d, scheduler::Symbol) = _warm_for(_asint(get(d, "warm", 0)), sc
 _region_scheduler_of(d) =
     Symbol(let x = String(get(d, "scheduler", "none")); isempty(x) ? "none" : x end)
 
-# Scheduler options as the sweep cell stores them: a flat map of key => value. Values are kept as
+# Scheduler options as the job cell stores them: a flat map of key => value. Values are kept as
 # STRINGS whatever JSON made of them, so `nodes = 2` and `nodes = "2"` are one setting rather than
 # two spellings that render differently.
 function _region_options_of(d)
@@ -3895,7 +4149,27 @@ function parse_region_options(text::AbstractString)
     return out
 end
 
-_region_from_dict(d::AbstractDict) = Region(
+# A region that names a machine takes its host, scheduler and default account from it, read each time
+# so an edit to the machine reaches every region on it. One whose machine is gone keeps what it last
+# wrote.
+function _region_from_dict(d::AbstractDict)
+    n = String(get(d, "machine", ""))
+    m = isempty(n) ? nothing : (try; cluster_get(n); catch; nothing; end)
+    m === nothing && return _region_build(d)
+    d = Dict{String,Any}(String(k) => v for (k, v) in d)
+    d["host"] = String(get(m, "host", ""))
+    d["scheduler"] = String(_scheduler_of_kind(_machine_kind(get(m, "kind", "slurm"))))
+    # What the region leaves empty, it asks for as its machine does; options merge key by key.
+    for k in _SHAPE_FIELDS
+        isempty(strip(string(get(d, k, "")))) && (d[k] = String(string(get(m, k, ""))))
+    end
+    _asint(get(d, "cpus", 0)) == 0 && (d["cpus"] = _asint(get(m, "cpus", 0)))
+    isempty(_submit_of(get(d, "submit", ""))) && (d["submit"] = String(string(get(m, "submit", ""))))
+    d["options"] = merge(machine_options(m), _region_options_of(d))
+    return _region_build(d)
+end
+
+_region_build(d::AbstractDict) = Region(
     String(get(d, "name", "")), String(get(d, "host", "")),
     Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
     _asint(get(d, "base_port", 0)), String(get(d, "preload", "")), String(get(d, "data_root", "")),
@@ -3913,16 +4187,34 @@ _region_from_dict(d::AbstractDict) = Region(
     # Absent ⇒ no extra options, which is what every region written before this meant.
     _region_options_of(d), String(get(d, "prologue", "")),
     let x = get(d, "readiness", nothing); x isa AbstractDict ? Dict{String,Any}(x) : Dict{String,Any}() end,
-    max(0, _asint(get(d, "liveness_grace", 0))))
+    max(0, _asint(get(d, "liveness_grace", 0))), String(get(d, "machine", "")),
+    _sysimage_pkgs_of(get(d, "sysimage_pkgs", nothing)), _submit_of(get(d, "submit", "")))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
     "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
     "curve" => r.curve, "uuid" => r.uuid, "peer" => r.peer,
     "scheduler" => String(r.scheduler), "options" => r.options, "prologue" => r.prologue,
-    "readiness" => r.readiness, "liveness_grace" => r.liveness_grace,
+    "readiness" => r.readiness, "liveness_grace" => r.liveness_grace, "machine" => r.machine,
     "partition" => r.partition, "walltime" => r.walltime,
     "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus, "account" => r.account,
-    "alloc_name" => r.alloc_name, "idle_release" => r.idle_release, "idle_warn" => r.idle_warn)
+    "alloc_name" => r.alloc_name, "idle_release" => r.idle_release, "idle_warn" => r.idle_warn,
+    "sysimage_pkgs" => r.sysimage_pkgs, "submit" => r.submit)
+
+# How a region asks for its node: "sbatch", "salloc", or "" for its machine's way. Anything else is "".
+_submit_of(x) = (s = lowercase(strip(string(something(x, "")))); s in ("sbatch", "salloc") ? s : "")
+
+# A sysimage package list as stored: entries with string `name`, `uuid`, `version`, `path`; anything
+# without a name is dropped.
+function _sysimage_pkgs_of(x)
+    x isa AbstractVector || return Dict{String,String}[]
+    out = Dict{String,String}[]
+    for e in x
+        e isa AbstractDict || continue
+        d = Dict{String,String}(k => String(strip(string(get(e, k, "")))) for k in ("name", "uuid", "version", "path"))
+        isempty(d["name"]) || push!(out, d)
+    end
+    return out
+end
 
 # ── Per-region UUID (mesh-artifact naming; PEER_TUNNEL_PLAN §5.5) ──────────────────────────────
 # A stable 128-bit id minted once at region setup and persisted in the region record. Every
@@ -3938,31 +4230,48 @@ region_artifact_name(r::Region) = "slate-$(r.name)-$(region_uuid8(r))"
 # Parsed registry, keyed by the file's mtime+size. `regions()` sits under the worker roster, the
 # telemetry relay and the supervisor sweep, so it is called several times a second per worker; re-
 # reading and re-parsing the JSON each time cost a core. A writer swaps the file atomically, so a
-# changed stamp is the whole invalidation rule.
-const _REGIONS_CACHE = Ref{Tuple{Float64,Int,Vector{Region}}}((-1.0, -1, Region[]))
+# changed stamp is the whole invalidation rule. The machine registry is part of the stamp: a region
+# that names a machine is read through it.
+const _REGIONS_CACHE = Ref{Tuple{NTuple{4,Float64},Vector{Region}}}(((-1.0, -1.0, -1.0, -1.0), Region[]))
 const _REGIONS_CACHE_LOCK = ReentrantLock()
 
+_file_stamp(p) = (st = try; stat(p); catch; nothing; end; st === nothing ? (0.0, 0.0) : (Float64(st.mtime), Float64(st.size)))
+
 function regions()
-    p = _regions_path(); isfile(p) || return Region[]
-    st = try; stat(p); catch; nothing; end
-    st === nothing && return Region[]
-    stamp = (Float64(st.mtime), Int(st.size))
+    p = _regions_path()
+    stamp = (_file_stamp(p)..., _file_stamp(_clusters_path())...)
     hit = lock(_REGIONS_CACHE_LOCK) do
         c = _REGIONS_CACHE[]
-        (c[1] == stamp[1] && c[2] == stamp[2]) ? c[3] : nothing
+        c[1] == stamp ? c[2] : nothing
     end
     hit === nothing || return hit
+    out = isfile(p) ? _read_regions(p, _region_from_dict) : Region[]
+    # Every machine on a host is a region of its own name, unless a region already has that name.
+    names = Set(r.name for r in out)
+    for d in (try; clusters_all(); catch; Dict{String,Any}[]; end)
+        isempty(String(get(d, "host", ""))) && continue
+        _fold_region(String(d["name"])) in names && continue
+        push!(out, _region_from_dict(_machine_region_dict(d)))
+    end
+    sort!(out; by = r -> r.name)
+    lock(_REGIONS_CACHE_LOCK) do; _REGIONS_CACHE[] = (stamp, out); end
+    return out
+end
+
+# The regions as written, before a machine fills anything in: what an edit merges into and writes back,
+# so a machine's host or account is never copied into a region that only names it.
+_regions_stored() = (p = _regions_path(); isfile(p) ? _read_regions(p, _region_build) : Region[])
+
+function _read_regions(p, build)
     data = try; JSON.parse(read(p, String)); catch; return Region[]; end
     data isa AbstractVector || return Region[]
     out = Region[]
     for d in data
         d isa AbstractDict || continue
-        r = _region_from_dict(d); isempty(r.name) && continue
+        r = build(d); isempty(r.name) && continue
         push!(out, r)
     end
-    sort!(out; by = r -> r.name)
-    lock(_REGIONS_CACHE_LOCK) do; _REGIONS_CACHE[] = (stamp[1], stamp[2], out); end
-    return out
+    return sort!(out; by = r -> r.name)
 end
 region_get(name) = (n = _fold_region(name); for r in regions(); r.name == n && return r; end; nothing)
 
@@ -3989,7 +4298,8 @@ const REGION_DEFAULTS = (host = "", transport = :tunnel, base_port = 0, preload 
                          uuid = "", peer = "", scheduler = :none, partition = "", walltime = "",
                          cpus = 0, mem = "", gpus = "", account = "", alloc_name = "",
                          idle_release = 0, idle_warn = 0, options = Dict{String,String}(),
-                         prologue = "", readiness = Dict{String,Any}(), liveness_grace = 0)
+                         prologue = "", readiness = Dict{String,Any}(), liveness_grace = 0, machine = "",
+                         sysimage_pkgs = Dict{String,String}[], submit = "")
 
 # An existing region's fields, in the shape `region_set!` takes.
 _region_fields(r::Region) = NamedTuple{keys(REGION_DEFAULTS)}(Tuple(getfield(r, k) for k in keys(REGION_DEFAULTS)))
@@ -4008,8 +4318,12 @@ function region_set!(name; kw...)
     bad = setdiff(keys(kw), keys(REGION_DEFAULTS))
     isempty(bad) || throw(ArgumentError("unknown region field(s): " * join(bad, ", ")))
     return lock(_REGIONS_LOCK) do
-        list = regions()
+        list = _regions_stored()
         i = findfirst(x -> x.name == n, list)
+        # Editing a machine's own region makes a record of it that still names the machine.
+        if i === nothing && !haskey(kw, :machine) && cluster_get(String(n)) !== nothing
+            kw = merge(NamedTuple(kw), (; machine = String(n)))
+        end
         f = merge(i === nothing ? REGION_DEFAULTS : _region_fields(list[i]), NamedTuple(kw))
         # The UUID is STABLE across updates, and minted only when there is none. Editing a region must
         # never rotate it — every mesh artifact keyed on `slate-<region>-<uuid8>` would orphan
@@ -4023,17 +4337,18 @@ function region_set!(name; kw...)
                    String(f.mem), String(f.gpus), String(f.account), String(f.alloc_name),
                    max(0, Int(f.idle_release)), max(0, Int(f.idle_warn)),
           _region_options_of(Dict("options" => f.options)), String(f.prologue),
-          Dict{String,Any}(f.readiness), max(0, Int(f.liveness_grace)))
+          Dict{String,Any}(f.readiness), max(0, Int(f.liveness_grace)), String(strip(String(f.machine))),
+          _sysimage_pkgs_of(f.sysimage_pkgs), _submit_of(f.submit))
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
-        r
+        _region_from_dict(_region_to_dict(r))
     end
 end
 
 function region_delete!(name)
     n = _fold_region(name)
     lock(_REGIONS_LOCK) do
-        _write_regions!(filter(x -> x.name != n, regions()))
+        _write_regions!(filter(x -> x.name != n, _regions_stored()))
     end
     return nothing
 end
@@ -4095,8 +4410,7 @@ end
 # Snapshot of the parked wires (host, label, port, idle seconds) — for the query surface.
 function parked_wires()
     lock(_PARK_LOCK) do
-        [(host = k[1], label = k[2], port = p.port, idle_s = round(Int, time() - p.since))
-         for (k, p) in _PARKED]
+        [(host = k[1], label = k[2], port = p.port, since = p.since) for (k, p) in _PARKED]
     end
 end
 
@@ -4132,11 +4446,7 @@ end
 # notebook's parent pointing at one project still share the env (--project parity preserved); only the
 # collision/pollution goes away. Empty path ⇒ the infra-only shared "detached" — nothing is replicated
 # there, so there's nothing to pollute.
-function _proj_key(p)
-    s = String(p); isempty(s) && return "detached"
-    ap = abspath(expanduser(s))
-    replace(basename(rstrip(ap, '/')), r"[^A-Za-z0-9._-]" => "_") * "-" * bytes2hex(_SHA.sha1(codeunits(ap)))[1:8]
-end
+_proj_key(p) = Sweep.proj_key(p)
 # A notebook's remote env dir: keyed by the content it REPLICATES (origin_env) when it has one, else its
 # parent project — never the shared mutable dir when there's content to isolate.
 _remote_env_key(origin_env, parent) = _proj_key(isempty(String(origin_env)) ? parent : origin_env)
@@ -4166,7 +4476,8 @@ function _region_target(r::Region; origin_env::AbstractString = r.preload,
         project = "~/.cache/kaimonslate/remote/" * _proj_key(origin_env),
         port = r.base_port,
         origin_env = origin_env, datadir = r.data_root, cache_root = r.cache_root, region = r.name,
-        sysimage = r.sysimage, curve = r.curve, job = job)
+        sysimage = r.sysimage, curve = r.curve, job = job,
+        depot = machine_depot(region_machine(r)), setup = machine_setup(region_machine(r)))
 end
 
 # ── Where a region's workers actually go ─────────────────────────────────────────────────────
@@ -4280,6 +4591,49 @@ function _placement(r::Region)
 end
 
 """
+    placement_note(r, a; waited = nothing) -> (; state, text)
+
+What region `r`'s request for a node came to (`a`, the allocation `region_place!` returned), said
+the same way wherever it is shown. `state` is `:granted`, `:queued`, `:refused` or `:unreachable`;
+`text` is the line to show: the job and how long it has waited (`waited`, seconds), the scheduler's
+expected start and what it is waiting on, or its reason for turning the request down. `grown` is
+true when the scheduler holds more CPUs for the job than the region asked for, which the text says.
+"""
+function placement_note(r::Region, a; waited = nothing)
+    sched = uppercase(string(region_scheduler(r)))
+    a === nothing && return (; state = :refused, text = "$(r.host) granted no node", grown = false)
+    a.state === :unreachable &&
+        return (; state = :unreachable, text = "cannot reach $(r.host) to ask for a node", grown = false)
+    grew = _request_grown(r, a, sched)
+    tail = isempty(grew) ? "" : " · " * grew
+    Sweep.alive(a) && return (; state = :granted, grown = !isempty(grew),
+                               text = a.node * (isempty(a.id) ? "" : " (job $(a.id))") * tail)
+    if a.state in (:pending, :running)          # running without a node yet: still being set up
+        bits = [(a.state === :running ? "starting job " : "queued as job ") * a.id *
+                (waited === nothing ? "" : " for $(round(Int, waited / 60))m")]
+        isempty(a.start) || push!(bits, "estimated start " * a.start)
+        isempty(a.reason) || push!(bits, "waiting on " * a.reason)
+        isempty(grew) || push!(bits, grew)
+        return (; state = :queued, text = join(bits, " · "), grown = !isempty(grew))
+    end
+    # A queue that takes only interactive allocations turns a submitted job away by saying so.
+    hint = (r.submit != "salloc" && occursin(r"batch job"i, a.said)) ?
+           " · set the region to request with salloc" : ""
+    return (; state = :refused, grown = false, text = isempty(a.said) ? "$sched holds no job for the request" :
+                                                      "$sched refused the request: $(a.said)$hint")
+end
+
+# The scheduler holding more CPUs than the region asked for, and the memory request that is the usual
+# cause: SLURM adds CPUs to cover memory, and `mem = 0` is the whole node's.
+function _request_grown(r::Region, a, sched)
+    (a.cpus > 0 && r.cpus > 0 && a.cpus > r.cpus) || return ""
+    m = strip(r.mem)
+    why = m == "0" ? " for mem=0, which asks for the whole node's memory" :
+          (isempty(m) || Sweep.BatchLauncher.queue_default(m)) ? "" : " to cover mem=$m"
+    return "$sched holds $(a.cpus) CPUs, not the $(r.cpus) asked for,$why"
+end
+
+"""
     region_place!(r; wait_s = 120) -> (host, allocation)
 
 Resolve where this region's workers go, ASKING the scheduler if it must. Returns the host to use
@@ -4299,7 +4653,7 @@ function region_place!(r::Region; wait_s::Real = 120)
     end
     a = Sweep.allocation_node!(kind, r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
                                partition = r.partition, cpus = r.cpus, mem = r.mem,
-                               gpus = r.gpus, account = r.account, options = r.options)
+                               gpus = r.gpus, account = r.account, options = r.options, submit = r.submit)
     if !Sweep.alive(a)
         held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
         held === nothing || route!(held.host, "")   # nothing is holding it now; the route is a lie
@@ -4308,6 +4662,11 @@ function region_place!(r::Region; wait_s::Real = 120)
     # A compute node is normally not reachable from here at all — only through the login node. Record
     # that before anything tries to ssh to it, because a hostname alone does not say how to get there.
     route!(a.node, r.host, a.id, kind)
+    # A job reads as running while its node is still being configured, and until that is done the
+    # scheduler refuses steps in it ("Invalid job id specified"). A new grant is handed on only once
+    # the node takes one.
+    prev = lock(_REGION_PLACE_LOCK) do; get(_REGION_PLACE, r.name, nothing); end
+    (prev === nothing || prev.job != a.id) && _await_node_ready!(a.node, r.name)
     # How long this is good for comes from the SCHEDULER (`squeue %L`), not from what we asked for:
     # an allocation we adopted rather than requested is already part-spent, and trusting it for a
     # fresh full walltime is how a placement outlives its job.
@@ -4319,6 +4678,23 @@ function region_place!(r::Region; wait_s::Real = 120)
                                  checked = time(), until = time() + lease)
     end
     return (a.node, a)
+end
+
+# Until `node` runs a step, or `wait_s` passes. Returns whether it did; a node that never answers is
+# handed on anyway, and its first command reports the reason.
+function _await_node_ready!(node::AbstractString, region::AbstractString; wait_s::Real = 120)
+    # A node that takes an ssh is running the job, and is then reached that way (`_in_allocation`).
+    _probe_node_ssh!(node) && (_rlog("region[$region]: $node is reached by ssh from its login node"); return true)
+    t0 = time()
+    said = false
+    while true
+        ok, out = _run_on(String(node), "true")
+        ok && return true
+        time() - t0 > wait_s && (_rlog("region[$region]: $node still refuses steps after $(round(Int, wait_s))s: " *
+                                       first(strip(out), 200)); return false)
+        said || (_rlog("region[$region]: $node is granted but still being configured — waiting for it to take a step"); said = true)
+        sleep(3)
+    end
 end
 
 """
@@ -4363,7 +4739,7 @@ function _reap_region_workers!(r::Region)
         for w in list_remote_workers(h)
             w["alive"] === true || continue
             _manifest_get(w["manifest"], "region") == r.name || continue
-            _manifest_get(w["manifest"], "hub") == gethostname() || continue
+            _manifest_ours(w["manifest"]) || continue
             try; reap_remote_worker(h, w["port"]); n += 1; catch; end
         end
     catch e
@@ -4459,7 +4835,7 @@ _release_region_claim!(host, port::Int) =
 _region_warm_worker(w, name::AbstractString) =
     w["alive"] === true && get(w, "state", "") == "idle" &&
     _manifest_get(w["manifest"], "region") == String(name) &&
-    _manifest_get(w["manifest"], "hub") == gethostname()
+    _manifest_ours(w["manifest"])
 
 # Does warm worker `w` hold the ENV the adopting notebook needs? Adoption re-points PARENT_PROJECT but
 # does NOT re-instantiate, so its loaded packages must already be the notebook's — i.e. it was built
@@ -4527,7 +4903,7 @@ function _region_has_live_workers(r::Region)
     isempty(h) && return false
     return any(list_remote_workers(h)) do w
         w["alive"] === true && _manifest_get(w["manifest"], "region") == r.name &&
-            _manifest_get(w["manifest"], "hub") == gethostname()
+            _manifest_ours(w["manifest"])
     end
 end
 
@@ -4550,18 +4926,12 @@ function _region_reconcile_impl!(r::Region)
             return "region[$(r.name)]: nothing left to keep here — allocation released"
         end
         host, alloc = region_place!(r)
-        if isempty(host)
-            st = alloc === nothing ? :none : alloc.state
-            return st === :unreachable ? "region[$(r.name)]: cannot reach $(r.host) to ask for a node" :
-                   st === :pending ? "region[$(r.name)]: queued on $(r.host), waiting for a node" :
-                   "region[$(r.name)]: $(r.host) granted no node"
-        end
+        isempty(host) && return "region[$(r.name)]: " * placement_note(r, alloc).text
     end
     t = _region_target(r; at = (host, alloc === nothing ? "" : alloc.id))
     roster = list_remote_workers(host)
     mine = [w for w in roster
-            if _manifest_get(w["manifest"], "region") == r.name &&
-               _manifest_get(w["manifest"], "hub") == gethostname()]
+            if _manifest_get(w["manifest"], "region") == r.name && _manifest_ours(w["manifest"])]
     # A region's def can change (new preload/transport) — its old idle workers still carry the region tag
     # but the wrong env dir/transport, so they can't serve it. `fits` distinguishes usable warm from stale.
     fits(w) = _worker_env_fits(w, t.project, string(r.transport))
@@ -4683,6 +5053,110 @@ function _ensure_park_sweeper!()
     return nothing
 end
 
+# ── Telemetry from workers no notebook holds ────────────────────────────────────────────────────
+# A worker publishes a sample every two seconds whether or not anything is listening; a hub only
+# receives them over a connection to it. So for each remote worker this hub started that no notebook
+# holds (detached, a warm-pool member), it keeps a connection used for nothing else, and the worker's
+# samples reach the history and every page as an attached worker's do. Found by the roster reads
+# (`list_remote_workers`); dropped when the worker is gone or attached, and with its ssh session.
+# Never signs in: with no session to the host there is nothing to watch over.
+mutable struct Watched
+    conn::Any
+    tunnel::Any
+end
+const _WATCHED = Dict{Tuple{String,Int},Watched}()
+const _WATCH_DIALING = Set{Tuple{String,Int}}()
+const _WATCH_LOCK = ReentrantLock()
+
+"The workers this hub is watching for telemetry only, as `(host, port)`."
+watched_workers() = lock(() -> collect(keys(_WATCHED)), _WATCH_LOCK)
+
+"""
+The connection names of the wires this hub holds to workers no notebook has: parked ones and telemetry
+watches. Their workers are still running, so their telemetry history is kept.
+"""
+function held_conns()
+    name(c) = try; String(c.name); catch; ""; end
+    out = lock(() -> String[name(w.conn) for w in values(_WATCHED)], _WATCH_LOCK)
+    lock(_PARK_LOCK) do
+        for p in values(_PARKED); push!(out, name(p.conn)); end
+    end
+    return filter!(!isempty, out)
+end
+
+# Does the hub already have a live wire to this worker (a notebook's, a parked one, or a watch)?
+function _hub_has_wire(host::AbstractString, port::Int)
+    nm = "slate-$(host)-$(port)"
+    mgr = try; _manager(); catch; return false; end
+    return try
+        lock(mgr.lock) do
+            any(c -> getfield(c, :name) == nm && getfield(c, :status) in (:connected, :stalled), mgr.connections)
+        end
+    catch
+        false
+    end
+end
+
+function _unwatch!(host::AbstractString, port::Int)
+    w = lock(() -> pop!(_WATCHED, (String(host), port), nothing), _WATCH_LOCK)
+    w === nothing && return nothing
+    try; _kaimon().disconnect!(w.conn); catch; end
+    w.tunnel === nothing || (try; close_tunnel(w.tunnel); catch; end)
+    return nothing
+end
+
+# The host whose ssh session reaches `host`: itself, or the login host of a node routed through one.
+_session_of(host::AbstractString) = (v = via(host); v === nothing ? String(host) : String(v.host))
+
+# Drop the watches that go over `host`'s session (the workers on it and on nodes routed through it).
+_unwatch_host!(host::AbstractString) =
+    for (h, p) in watched_workers(); _session_of(h) == String(host) && _unwatch!(h, p); end
+
+# `host` is the roster's: the host whose filesystem holds the manifests. A worker on a node routed
+# through it is dialed at its `node`, over the same session.
+function _watch_roster!(host::AbstractString, ws)
+    h = String(host)
+    sess = _session_of(h)
+    if !Sweep.connected(sess)
+        _unwatch_host!(sess)
+        return nothing
+    end
+    want = Set{Tuple{String,Int}}()
+    for w in ws
+        port = Int(get(w, "port", 0)); port > 0 || continue
+        (get(w, "alive", false) === true && get(w, "state", "") != "attached") || continue
+        mf = String(get(w, "manifest", ""))
+        _manifest_ours(mf) || continue
+        sp = tryparse(Int, _manifest_get(mf, "stream_port")); sp === nothing && continue
+        node = _manifest_get(mf, "node")
+        node = isempty(node) ? h : node
+        _session_of(node) == sess || continue            # no route to that node from here
+        key = (node, port)
+        push!(want, key)
+        lock(() -> haskey(_WATCHED, key) || key in _WATCH_DIALING, _WATCH_LOCK) && continue
+        _hub_has_wire(node, port) && continue
+        tr = _manifest_get(mf, "transport") == "direct" ? :direct : :tunnel
+        lock(() -> push!(_WATCH_DIALING, key), _WATCH_LOCK)
+        Threads.@spawn try
+            r = _dial_worker(RemoteTarget(node; transport = tr), port, sp; deadline = 15.0,
+                             label = "telemetry", quiet = true)
+            if r.conn !== nothing
+                lock(() -> (_WATCHED[key] = Watched(r.conn, r.tunnel)), _WATCH_LOCK)
+                _ensure_poller!()
+                _rlog("telemetry: watching worker-$port on $node (no notebook holds it)")
+            end
+        catch e
+            _rlog("telemetry: could not watch worker-$port on $node — " * first(sprint(showerror, e), 120))
+        finally
+            lock(() -> delete!(_WATCH_DIALING, key), _WATCH_LOCK)
+        end
+    end
+    for (wh, p) in watched_workers()
+        (_session_of(wh) == sess && !((wh, p) in want)) && _unwatch!(wh, p)
+    end
+    return nothing
+end
+
 # The probe (one POSIX-sh command string, sent as a SINGLE ssh argv token like the launch line)
 # that enumerates workers: for each `worker-<port>.json` it emits port, liveness (pgrep), the
 # log's mtime (last activity) and size, the state sidecar, and the raw manifest — delimited with
@@ -4698,22 +5172,30 @@ printf '\002'
 for f in worker-*.json; do
   [ -f "$f" ] || continue
   port="${f#worker-}"; port="${port%.json}"
-  alive=0; pgrep -f "worker-$port.jl" >/dev/null 2>&1 && alive=1
-  sz=0; mt=0
+  now=$(date +%s)
+  sz=0; mt=0; smt=0
   if [ -f "worker-$port.log" ]; then
     sz=$(wc -c < "worker-$port.log" | awk '{print $1+0}')
     mt=$(stat -c %Y "worker-$port.log" 2>/dev/null || stat -f %m "worker-$port.log" 2>/dev/null || echo 0)
   fi
+  [ -f "worker-$port.stats" ] &&
+    smt=$(stat -c %Y "worker-$port.stats" 2>/dev/null || stat -f %m "worker-$port.stats" 2>/dev/null || echo 0)
+  # A scheduler region's worker runs on a compute node, and this probe runs where the directory is
+  # read, usually the login node, whose `pgrep` cannot see that process. The worker rewrites its stats
+  # sidecar every 2 s, and the directory is shared, so a fresh one is the liveness signal there.
+  alive=0
+  if pgrep -f "worker-$port.jl" >/dev/null 2>&1 || [ $(( now - smt )) -lt 90 ]; then alive=1; fi
   # Collect the record of a worker that is GONE. A process ends but its manifest stays, and the
   # roster is built from manifests, so every host accumulated an entry per worker it had ever run.
   # Nothing else removes them: every reap in the hub is aimed at one host and port, or at a region
   # it is currently using.
   #
-  # Two conditions, both required. `pgrep` says the process is not there, so there is nothing to
-  # orphan. And it has been quiet far longer than any restart or reattach takes, so a probe racing
-  # a worker that is coming back cannot delete a manifest still in use. The LOG stays: it is the
-  # only account of what the worker did, and it is not what puts the entry in the roster.
-  if [ "$alive" = "0" ] && [ "$mt" -gt 0 ] && [ $(( $(date +%s) - mt )) -gt 21600 ]; then
+  # Not alive, and neither its log nor its stats have been written for an hour: a live worker
+  # stamps its stats every 2 s, and a restart writes a new manifest, so nothing still uses this
+  # one. The LOG stays: it is the only account of what the worker did, and it is not what puts the
+  # entry in the roster.
+  last=$mt; [ "$smt" -gt "$last" ] && last=$smt
+  if [ "$alive" = "0" ] && [ "$last" -gt 0 ] && [ $(( now - last )) -gt 3600 ]; then
     rm -f "$f" "worker-$port.state" "worker-$port.stats"
     continue
   fi
@@ -4738,7 +5220,9 @@ pre-telemetry worker). Reads the on-host manifests over one ssh call. `[]` if un
 function list_remote_workers(host)
     ok, out = _ssh_capture(host, `$(_workers_probe_sh())`)   # one token → the remote login shell runs the script verbatim
     ok || return Any[]
-    return _parse_workers(out)
+    ws = _parse_workers(out)
+    try; _watch_roster!(host, ws); catch; end
+    return ws
 end
 
 _workers_probe_sh() = replace(_WORKERS_PROBE_SH, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
@@ -4776,6 +5260,16 @@ function _manifest_get(json::AbstractString, key::AbstractString)
     m === nothing ? "" : replace(replace(m.captures[1], "\\\"" => "\""), "\\\\" => "\\")
 end
 
+# Is this manifest's worker OURS — spawned by this hub, not merely by this machine? `hub` is the
+# hostname, and two hubs on one laptop (the installed extension beside a worktree's, or an `--ai`
+# host beside either) share the per-user worker directory and the attach records, so a hostname
+# match let one hub reattach to, adopt, and reap the other's workers for the same notebook. The
+# owner tag is the reaper's identity (`worker_owner_tag`: state home + hub port). A manifest with
+# no owner at all is treated as foreign: a hub running older code keeps writing them, and adopting
+# those is exactly the cross-hub capture this exists to stop.
+_manifest_ours(json::AbstractString) =
+    _manifest_get(json, "hub") == gethostname() && _manifest_get(json, "owner") == worker_owner_tag()
+
 # Every port listening on `host`, whoever owns it. `ss` on Linux, `netstat` where there is none.
 # An unreadable answer is an empty set, which leaves allocation where it was rather than refusing.
 function busy_ports(host::AbstractString)
@@ -4797,9 +5291,9 @@ end
 # Everything a start asks the host before it launches, in one command: the provisioning state
 # (`_host_state`), what is listening, and the worker roster. On a scheduler node each command is a
 # job step that costs seconds to create. `nothing` when the host did not answer.
-function _start_survey(host::AbstractString, projrel::AbstractString)
+function _start_survey(host::AbstractString, projrel::AbstractString; stamp::AbstractString = "$projrel/$_ENV_STAMP")
     ok, txt = try
-        _run_on(String(host), _host_state_script(projrel) * "echo '" * _SURVEY_SPLIT * "'\n" *
+        _run_on(String(host), _host_state_script(projrel; stamp) * "echo '" * _SURVEY_SPLIT * "'\n" *
                               _busy_ports_sh() * "\n" * _workers_probe_sh())
     catch
         (false, "")
@@ -4890,7 +5384,7 @@ function _find_live_worker(host, label, parent; workers = nothing)
         mf = w["manifest"]
         (_manifest_get(mf, "notebook") == String(label) &&
          _manifest_get(mf, "parent") == String(parent) &&
-         _manifest_get(mf, "hub") == gethostname()) || continue
+         _manifest_ours(mf)) || continue
         sp = tryparse(Int, _manifest_get(mf, "stream_port")); sp === nothing && continue
         push!(matches, (w["port"], sp))
     end
@@ -4907,6 +5401,7 @@ end
 # ("slate-<host>-<port>") — exact per worker, never a same-port worker on another host. Called BOTH on
 # reap (mark it dead everywhere) and self-healingly in the dial loop when "Already connected" is hit.
 function _evict_worker_conn!(host, port::Int)
+    _unwatch!(String(host), port)          # a telemetry-only wire gives way to whatever needs this worker
     nm = "slate-$(host)-$(port)"
     mgr = try; _manager(); catch; return 0; end
     K = _kaimon()

@@ -307,14 +307,14 @@ end
         pure = parse_report("#%% code id=src\ndata = [1,2,3]\n\n#%% code id=fit\nm = sum(data)")
         build_dependencies!(pure)
         @test !isempty(ReportEngine._memo_key(pure, pure.cells[2]))  # pure upstream stays keyable
-        # A SWEEP's value is whatever has landed in its store, so the same source returns an empty
+        # A JOB's value is whatever has landed in its store, so the same source returns an empty
         # result on the run that submits and every unit an hour later. Keyed off source alone, a
         # reopened notebook restored analysis computed while the sweep was still empty — a guard
         # cell reporting "0 rows" against a finished 1.6M-row dataset, with nothing to show for it.
         #
         # The sweep therefore DECLARES an identity for its results, which reaches the key the same
         # way a reactive's does. So a reader stays cacheable — and re-keys when the units move.
-        sw = parse_report("#%% sweep id=run\nres = @sweep(paramgrid(i = 1:2)) do p\n    p.i\nend\n" *
+        sw = parse_report("#%% job id=run\nres = @sweep(paramgrid(i = 1:2)) do p\n    p.i\nend\n" *
                           "#%% code id=take\nds = res.dataset\n" *
                           "#%% code id=plot\nn = length(ds)\n")
         build_dependencies!(sw)
@@ -589,7 +589,7 @@ end
     @testset "WebPage renders self-contained HTML" begin
         w = ReportEngine.WebPage(css = "body{color:red}", html = "<h1>hi</h1>", js = "console.log(1)")
         h = sprint(show, MIME"text/html"(), w)
-        @test h == "<style>body{color:red}</style><h1>hi</h1><script>console.log(1)</script>"
+        @test h == "<style>body{color:red}</style><h1>hi</h1><script>{\nconsole.log(1)\n}</script>"
         # `</script>` / `</style>` in content are escaped so they can't close the tag early
         w2 = ReportEngine.WebPage(js = "a='</script>'", css = "x</style>")
         h2 = sprint(show, MIME"text/html"(), w2)

@@ -123,7 +123,8 @@
     loading: false, timer: 0, behind: 0,
   };
 
-  const call = (action, arg, opts) =>
+  // The sweep card's channel, or a caller's own source of the same four actions (`openSource`).
+  const call = (action, arg, opts) => S.src ? S.src(action, arg || '', opts || {}) :
     window.slateCall(S.ch, Object.assign({ action, arg: arg || '' }, opts || {}));
 
   // ── Chrome ─────────────────────────────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@
     el.innerHTML = `
       <div class="modal logv">
         <div class="logv-head">
-          <strong>Job output</strong>
+          <strong class="logv-title">Job output</strong>
           <select class="logv-sweep" title="which sweep in this notebook"></select>
           <span class="logv-err"></span>
           <button class="logv-x" title="close">✕</button>
@@ -249,12 +250,28 @@
   function open(key, ch, opts) {
     build();
     el.classList.add('show');
+    S.src = null; el.classList.remove('logv-one');
+    q('.logv-title').textContent = 'Job output';
     S.key = key; S.ch = ch || chanOf(key);
     S.wantChunk = (opts && opts.chunk) || '';
     paintSweeps();
     loadFiles();
     if (!S.timer) S.timer = setInterval(poll, POLL_MS);
     if (!S.filesTimer) S.filesTimer = setInterval(listing, FILES_MS);
+  }
+
+  // One file from a caller that is not a sweep, a worker's log: `call(action, arg, opts)` answers the
+  // same `logs`/`log_stat`/`log_slice`/`log_search` actions with a promise. There is one file, so
+  // the file list and the sweep picker are hidden.
+  function openSource({ key, title, call }) {
+    build();
+    el.classList.add('show', 'logv-one');
+    q('.logv-title').textContent = title || 'Log';
+    S.src = call; S.key = key || 'source'; S.ch = '';
+    S.path = ''; S.pages = []; S.hits = null; S.counts = null;
+    q('.logv-sweep').style.display = 'none';
+    loadFiles();
+    if (!S.timer) S.timer = setInterval(poll, POLL_MS);
   }
 
   // Every sweep in the notebook, from the registry each card reports into. A sweep with no channel
@@ -264,6 +281,7 @@
 
   function paintSweeps() {
     const sel = q('.logv-sweep'), all = entries();
+    if (S.src) { sel.style.display = 'none'; return; }
     // Named by the CELL, which is what a reader recognises and can scroll to. A run key is a hash
     // of what the sweep IS, which makes it stable and unreadable in equal measure.
     sel.innerHTML = all.map(s => {
@@ -862,5 +880,5 @@
   // The addressing is the part that has to be right and the part a browser cannot show you is
   // wrong: an off-by-one in a byte offset looks like a highlight on the neighbouring line. Exposed
   // so `test/js/logview_window.mjs` can pin it without a DOM.
-  window.slateLogs = { open, close, _test: { S, cut, visible, sevOf, setSev, paintLine, roleOf, recordHtml, hitLines, refilterHits, fileStatus, levelPattern } };
+  window.slateLogs = { open, openSource, close, _test: { S, cut, visible, sevOf, setSev, paintLine, roleOf, recordHtml, hitLines, refilterHits, fileStatus, levelPattern } };
 })();

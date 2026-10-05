@@ -78,7 +78,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .imrow select.runonsel{max-width:100%;width:100%;}
 .modal-bg{position:fixed;inset:0;background:rgba(5,8,16,.66);display:none;align-items:center;justify-content:center;z-index:50;}
 .modal-bg.show{display:flex;}
-#modalbg{z-index:90;}   /* shared confirm/alert sits above the publishing dashboard (also .modal-bg z-index:50) */
+#modalbg{z-index:100;}   /* shared confirm/alert sits above the publishing dashboard (.modal-bg z-index:50) and the telemetry view */
 .modal{background:#141828;border:1px solid #2a2e40;border-radius:10px;padding:18px 20px;max-width:520px;width:90%;box-shadow:0 16px 48px rgba(0,0,0,.55);}
 .modal .msg{color:#d4d8e8;font-size:.92rem;line-height:1.5;margin-bottom:16px;white-space:pre-wrap;word-break:break-word;}
 .modal .row{display:flex;justify-content:flex-end;gap:10px;}
@@ -123,6 +123,24 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rtbody::-webkit-scrollbar-thumb:hover{background:#569cd6;}
 /* The focus view REPLACES the tab content rather than extending it, so it can have the room back. */
 .remotesmodal.focusmode{max-width:860px;}
+/* Machines: a list on the left, the selected machine on the right. */
+.remotesmodal.widemode{max-width:980px;}
+.mchsplit{display:grid;grid-template-columns:200px minmax(0,1fr);gap:18px;align-items:start;}
+.mchlist{display:flex;flex-direction:column;gap:4px;position:sticky;top:0;}
+.mchrow{display:flex;flex-direction:column;gap:2px;padding:7px 10px;border:1px solid #21253a;border-radius:8px;background:#0d1120;cursor:pointer;transition:border-color .12s,background .12s;}
+.mchrow:hover{border-color:#33395a;background:#101423;}
+.mchrow.sel{border-color:#569cd6;background:rgba(86,156,214,.08);}
+.mchname{color:#e6e9f5;font-weight:600;font-size:.86rem;}
+.mchmeta{color:#6a7090;font-size:.72rem;font-family:Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mchrow.new{border-style:dashed;}
+.mchrow.new .mchname{color:#9aa3c0;font-weight:500;}
+.mchdetail{min-width:0;}
+.mchhead{display:flex;align-items:center;gap:10px;margin:2px 0 13px;}
+.mchhead .rppformhead{margin:0;flex:1 1 auto;min-width:0;}
+.mchdetail .rppcfg{border-bottom:none;}
+.mchempty{padding:30px 0;text-align:center;}
+.modal .mchhead .rppregdel{opacity:1;border-color:#2a2e40;}
+@media(max-width:760px){.mchsplit{grid-template-columns:1fr;}.mchlist{position:static;}}
 /* Standard top-right modal close (✕) — consistent across modals; Esc also closes. `.modal .modalx`
    specificity (0,2,1) beats the `.modal button` base rule so it stays a bare glyph, no button chrome. */
 .modal .modalx{position:absolute;top:8px;right:10px;background:none;border:none;box-shadow:none;color:#6a7090;font-size:1.15rem;line-height:1;cursor:pointer;padding:4px 8px;z-index:3;}
@@ -250,6 +268,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rppregrow:hover{border-color:#33395a;background:#101423;}
 .rppregrow.sel{border-color:#569cd6;background:rgba(86,156,214,.08);}
 .rppregname{color:#e6e9f5;font-weight:600;font-size:.86rem;flex:0 0 auto;}
+.rppregkind{flex:0 0 auto;font-size:.7rem;color:#8a90a8;border:1px solid #2a2e40;border-radius:4px;padding:0 5px;}
 .rppregmeta{color:#6a7090;font-size:.75rem;flex:1 1 auto;font-family:Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .rppregst.err{color:#e0a03a;font-size:.73rem;flex:0 0 auto;}
 .modal .rppregdel{flex:0 0 auto;padding:2px 8px;font-size:.74rem;line-height:1.3;border-radius:6px;color:#8a90a8;border-color:transparent;background:transparent;opacity:.6;}
@@ -289,31 +308,6 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rppworker{cursor:pointer;border-radius:7px;}
 .rppworker:hover{background:rgba(86,156,214,.06);}
 /* worker detail popup (manifest + live stats + CPU/mem history) */
-.wdmodal{max-width:620px;position:relative;}
-.wdhead{display:flex;align-items:baseline;gap:9px;margin:0 0 12px;padding-right:30px;}
-.wdhead strong{font-size:1.05rem;color:#fff;font-family:Menlo,monospace;}
-.wdhead .wdsub{color:#9aa3c0;font-size:.82rem;}
-.wdgrid{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:.8rem;margin-bottom:14px;}
-.wdgrid .k{color:#6a7090;}
-.wdgrid .v{color:#cdd3e6;font-family:Menlo,monospace;word-break:break-all;}
-.wdgrid .v.link{color:#7cc0ff;cursor:pointer;}
-.wdgrid .v.link:hover{text-decoration:underline;}
-.wdstats{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
-.wdstat{background:#0d1120;border:1px solid #21253a;border-radius:7px;padding:4px 10px;}
-.wdstat .l{display:block;color:#6a7090;font-size:.68rem;}
-.wdstat b{color:#e6ebf7;font-weight:600;font-size:.82rem;}
-.wdchart{margin-bottom:10px;}
-.wdchtitle{display:flex;justify-content:space-between;align-items:baseline;color:#8a90a8;font-size:.74rem;margin-bottom:3px;}
-.wdchtitle b{color:#cdd3e6;font-weight:600;font-family:Menlo,monospace;}
-.wdsvg{width:100%;height:64px;display:block;background:#0d1120;border:1px solid #21253a;border-radius:7px;}
-.wdnodata{color:#6a7090;font-size:.75rem;padding:16px 0;text-align:center;background:#0d1120;border:1px solid #21253a;border-radius:7px;}
-.wdaxis{display:flex;justify-content:space-between;color:#565c78;font-size:.66rem;margin-top:2px;font-family:Menlo,monospace;}
-/* What a detached-but-warm worker is still good for — answers "why is this thing still running?". */
-.wdhint{color:#8a90a8;font-size:.74rem;line-height:1.45;background:#0d1120;border:1px solid #21253a;border-radius:7px;padding:7px 10px;margin:-4px 0 14px;}
-/* Destructive action footer (reap) — separated by a rule so it reads as an action, not more telemetry. */
-.wdacts{display:flex;align-items:center;gap:10px;margin-top:14px;padding-top:11px;border-top:1px solid #21253a;}
-.wdactnote{flex:1 1 auto;color:#6a7090;font-size:.73rem;}
-.wdacterr{color:#e57575;}
 .modal .rppreap[disabled],.modal .rppsysbtn[disabled]{opacity:.55;cursor:default;}
 /* activity monitor: only the region NAME opens its config (hover-highlighted); worker rows hover-border for clickability */
 .actgroupname{cursor:pointer;border-radius:5px;padding:1px 5px;margin:0 -3px;transition:background .12s,color .12s;}
@@ -414,6 +408,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .actrss{color:#9aa3c0;font-family:Menlo,monospace;font-size:.74rem;text-align:right;}
 .actrun{color:#7cc0ff;font-size:.74rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .actrun.idle{color:#5a6070;}
+.actstopped{display:flex;align-items:center;gap:10px;padding:3px 2px;font-size:.74rem;color:#6a7090;}
+.actstopped .ports{font-family:Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
+.actstopped button{margin-left:auto;padding:1px 9px;font-size:.72rem;border-radius:5px;color:#a0a6c0;background:transparent;border:1px solid #33395a;cursor:pointer;}
+.actstopped button:hover{border-color:#569cd6;color:#d4d8e8;}
 .actempty{color:#6a7090;font-size:.76rem;padding:3px 1px;}
 .sitecards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;align-items:start;}
 .sitecard{position:relative;display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto auto;column-gap:11px;align-items:center;
@@ -644,14 +642,24 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // open path — the Open button, Recents, and the standalone-import "Run" — since all route here.
   function _saveLaunchPref(){try{localStorage.setItem('slateLaunchOnOpen',document.getElementById('openlaunch').checked?'1':'0');}catch(e){}}
   (function(){try{var v=localStorage.getItem('slateLaunchOnOpen'),el=document.getElementById('openlaunch');if(el&&v!==null)el.checked=(v==='1');}catch(e){}})();
-  function openPath(p, runon){p=(p||'').trim();if(!p)return;
+  // A notebook written in an older file format is refused (409) with what updating it changes: it
+  // opens only once the update is agreed to, which keeps a copy of the original beside it.
+  function askFormatUpdate(u){
+    var msg='Update “'+u.name+'” to the current notebook format?\n\nIt is written in format '+u.format+
+      '. Opening it updates it to format '+u.current+':\n'+(u.changes||[]).map(function(c){return '•  '+c.replace(/`/g,'');}).join('\n')+
+      '\n\nA copy of the original is saved beside it as '+u.backup+'.';
+    return modal(msg,[{label:'Don\u2019t open',value:false},{label:'Update and open',value:true,cls:'primary'}]);}
+  function openPath(p, runon, update){p=(p||'').trim();if(!p)return;
     if(runon===undefined) runon=_runonOf('openrunon');
     var launchEl=document.getElementById('openlaunch'), launch=launchEl?launchEl.checked:true;
     try{localStorage.setItem('slateLastDir', window.PLATFORM.dirOf(p));}catch(e){}   // remember the directory
     showLoading((launch?('Opening “'+p+'” — starting the worker'+(runon&&runon!=='local'?' on '+runon:'')):('Opening “'+p+'” inactive — static preview'))+'…');
-    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,runon:runon,autorun:true,inactive:!launch})})
-      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-      .then(function(d){pushRecent(d.path||p);location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
+    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,runon:runon,autorun:true,inactive:!launch,update:!!update})})
+      .then(function(r){
+        if(r.status===409) return r.json().then(function(u){hideLoading();
+          return askFormatUpdate(u).then(function(yes){if(yes) openPath(p, runon, true); return null;});});
+        return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(d){if(!d)return;pushRecent(d.path||p);location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
   // ── Import a self-contained .jl (one carrying a Slate.bundle footer) ─────────
   var importBg=document.getElementById('importbg'),imSrc=document.getElementById('imsrc'),
       imTarget=document.getElementById('imtarget'),imLog=document.getElementById('imlog'),
@@ -677,6 +685,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   }
   // Open a file — classify it server-side first, then dispatch. (Falls back to a plain open if the
   // classify request itself fails, so a transient hiccup still opens a normal notebook.)
+  (function(){try{var q=new URLSearchParams(location.search).get('open');
+    if(q){history.replaceState(null,'',location.pathname);setTimeout(function(){openMaybeStandalone(q);},0);}}catch(e){}})();
   function openMaybeStandalone(p){
     fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();})
       .then(function(info){_dispatchOpen(p,info);})
@@ -2063,7 +2073,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 <!-- Home-page Preact island: the remote-activity monitor + worker-detail popup (replaces the former
      inline innerHTML render). Bridges to the vanilla Remotes modal via window.slateOpen* helpers. -->
 <script src="/assets/js/model.js"></script>   <!-- one worker/allocation model; classic, so the modules below can rely on it -->
-<script src="/assets/js/schedopts.js"></script>   <!-- the scheduler-option catalogue, shared with the sweep cell editor -->
+<script src="/assets/js/schedopts.js"></script>   <!-- the scheduler-option catalogue, shared with the job cell editor -->
 <script type="module" src="/assets/js/activity.js"></script>
 <!-- Remotes modal island: host setup + SSE preflight + known-hosts list + xfer + the region focus view
      (imports Focus from remotes-focus.js) + the run-on pickers. Driven by shared signals (stores.js). -->

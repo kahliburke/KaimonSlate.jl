@@ -219,6 +219,30 @@ function _rec_matrix_html(io::IO, M::AbstractMatrix, field::AbstractString)
     return true
 end
 
+# How many items a vector field shows before saying how many more there are.
+const _REC_VEC_ITEMS = 40
+
+function _rec_vector_html(io::IO, v::AbstractVector)
+    n = length(v)
+    shown = n > _REC_VEC_ITEMS ? v[firstindex(v):firstindex(v) + _REC_VEC_ITEMS - 1] : v
+    more = n - length(shown)
+    if all(x -> x isa Number, shown) && !isempty(shown)
+        s = "[" * join((_rec_round(sprint(show, x; context = :compact => true)) for x in shown), ", ") *
+            (more > 0 ? ", … $more more]" : "]")
+        print(io, "<span class=\"srec-v\">", _rec_esc(s), "</span>")
+        return
+    end
+    print(io, "<span class=\"srec-list\">")
+    isempty(v) && print(io, "<span class=\"srec-v srec-text\">empty</span>")
+    for x in shown
+        t = x isa Symbol ? ":" * String(x) : string(x)
+        print(io, "<span class=\"srec-item\">", _rec_esc(length(t) > 80 ? first(t, 79) * "…" : t), "</span>")
+    end
+    more > 0 && print(io, "<span class=\"srec-more\">… ", more, " more</span>")
+    print(io, "</span>")
+    return nothing
+end
+
 function _rec_value_html(io::IO, v, depth::Int, field::AbstractString)
     if v isa NamedTuple && !isempty(v) && depth < _RECORD_MAX_DEPTH
         _record_fields(io, v, depth + 1, field)
@@ -244,6 +268,12 @@ function _rec_value_html(io::IO, v, depth::Int, field::AbstractString)
     end
     if v isa Bool
         print(io, "<span class=\"srec-v srec-bool ", v ? "yes" : "no", "\">", v ? "true" : "false", "</span>")
+        return
+    end
+    # A vector shows its items. Its text display opens with a summary line
+    # (`16-element Vector{String}:`), which is all a one-line field would otherwise show.
+    if v isa AbstractVector && (eltype(v) <: Union{AbstractString,Symbol,Number} || all(x -> x isa Union{AbstractString,Symbol,Number}, v))
+        _rec_vector_html(io, v)
         return
     end
     if v isa AbstractString

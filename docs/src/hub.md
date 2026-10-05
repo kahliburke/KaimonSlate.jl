@@ -121,7 +121,6 @@ noted.
 | `probe_timeout` | `KAIMONSLATE_PROBE_TIMEOUT` | `4` | `:direct` TCP port-open probe. |
 | `firewall_giveup` | `KAIMONSLATE_FIREWALL_GIVEUP` | `10` | Sustained SYN-drop ⇒ declare a firewall and fail fast. |
 | `pkg_op_timeout` | `KAIMONSLATE_PKG_OP_TIMEOUT` | `900` | Package add/rm/reconstruct — a heavy stack's resolve + precompile. |
-| `sync_parent_timeout` | `KAIMONSLATE_SYNC_PARENT_TIMEOUT` | `600` | Parent-project `/src` sync. |
 | `blob_xfer_timeout` | `KAIMONSLATE_BLOB_XFER_TIMEOUT` | `600` | Whole-binding / direct-blob boundary move. |
 | `blob_chunk_timeout` | `KAIMONSLATE_BLOB_CHUNK_TIMEOUT` | `20` | Per-chunk ZMQ recv/send timeout on a transfer. |
 | `sysimage_lock_stale` | `KAIMONSLATE_SYSIMAGE_LOCK_STALE` | `1800` | Concurrent sysimage-build lock staleness window. |

@@ -12,12 +12,13 @@ const RE = ReportEngine
 
 # A roster entry as `list_remote_workers` returns it. Region/hub default to an adoptable-by-us shape.
 mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostname(),
+         owner = RE.worker_owner_tag(),   # spawned by THIS hub — the ownership testset varies it
          transport = "tunnel", project = "~/.cache/kaimonslate/remote/examples",
          stream_port = port + 1) = Dict{String,Any}(
     "port" => port, "alive" => alive, "state" => state, "lastActivity" => 0, "logBytes" => 0,
     "stateSince" => 0, "stats" => "",
-    "manifest" => "{\"notebook\":\"\",\"region\":\"$region\",\"hub\":\"$hub\",\"transport\":\"$transport\"," *
-                  "\"project\":\"$project\",\"stream_port\":\"$stream_port\"}")
+    "manifest" => "{\"notebook\":\"\",\"region\":\"$region\",\"hub\":\"$hub\",\"owner\":\"$owner\"," *
+                  "\"transport\":\"$transport\",\"project\":\"$project\",\"stream_port\":\"$stream_port\"}")
 
 @testset "remote pool + park bookkeeping" begin
 
@@ -112,6 +113,25 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
             @test sv.state["payload"] == "abc123" && haskey(sv.state, "env")
             @test issubset(9300:9302, sv.busy) && only(sv.roster)["port"] == 9300
             @test !haskey(sv.state, "alive")                     # the roster stays out of the state
+        end
+
+        # A worker on a compute node is invisible to the login node's `pgrep`; its stats sidecar, on
+        # the shared filesystem, is what says it is alive. A record quiet for an hour is collected.
+        mktempdir() do home
+            wd = mkpath(joinpath(home, RE._REMOTE_WORKER))
+            for p in (9400, 9410, 9420)
+                write(joinpath(wd, "worker-$p.json"), "{\"notebook\":\"nb\"}")
+                write(joinpath(wd, "worker-$p.log"), "x")
+            end
+            write(joinpath(wd, "worker-9400.stats"), "{}")                    # written just now
+            write(joinpath(wd, "worker-9410.stats"), "{}")
+            touch_at(f, ago) = run(`touch -t $(Libc.strftime("%Y%m%d%H%M.%S", time() - ago)) $(joinpath(wd, f))`)
+            touch_at("worker-9410.stats", 600); touch_at("worker-9410.log", 600)   # stopped ten minutes ago
+            touch_at("worker-9420.log", 7200)                                       # stopped two hours ago
+            out = read(setenv(`sh -c $(RE._workers_probe_sh())`, merge(ENV, Dict("HOME" => home)); dir = home), String)
+            alive = Dict(w["port"] => w["alive"] for w in RE._parse_workers(out))
+            @test alive == Dict(9400 => true, 9410 => false)
+            @test !isfile(joinpath(wd, "worker-9420.json")) && isfile(joinpath(wd, "worker-9420.log"))
         end
 
         # For a worker that binds on ANOTHER machine, this one's loopback is not the question.
@@ -314,6 +334,44 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         @test RE._manifest_get(s, "missing") == ""
     end
 
+    @testset "worker ownership: a hub only sees its own workers and attach records" begin
+        # Two hubs on one machine: same hostname, different state home / port ⇒ different owner tags.
+        env_a = ("KAIMONSLATE_HOME" => "/tmp/hub-a", "KAIMONSLATE_PORT" => "8765")
+        env_b = ("KAIMONSLATE_HOME" => "/tmp/hub-b", "KAIMONSLATE_PORT" => "8902")
+        tag_a = withenv(() -> RE.worker_owner_tag(), env_a...)
+        tag_b = withenv(() -> RE.worker_owner_tag(), env_b...)
+        @test tag_a != tag_b
+        host = gethostname()
+        mf(owner) = RE._flat_json(["notebook" => "nb", "parent" => "/p", "hub" => host, "owner" => owner, "port" => "9100"])
+        withenv(env_a...) do
+            @test RE._manifest_ours(mf(tag_a))
+            @test !RE._manifest_ours(mf(tag_b))                       # the other hub's worker on this machine
+            @test !RE._manifest_ours(mf(""))                          # written by a hub on older code: foreign
+            @test !RE._manifest_ours(RE._flat_json(["hub" => "elsewhere", "owner" => tag_a]))   # another machine
+        end
+        # Attach records are keyed by owner too, and a record read back under a different owner is
+        # rejected even if it were found — the record is tried BEFORE any probe.
+        dir = mktempdir()
+        withenv("KAIMONSLATE_HOME" => dir, "KAIMONSLATE_PORT" => "8765") do
+            pa = RE._attach_path("h", "nb")
+            pb = withenv(() -> RE._attach_path("h", "nb"), "KAIMONSLATE_HOME" => dir, "KAIMONSLATE_PORT" => "8902")
+            @test pa != pb
+            RE._attach_record!("h", "nb"; port = 9100, stream_port = 9101, transport = :tunnel)
+            r = RE._attach_lookup("h", "nb")
+            @test r !== nothing && r.port == 9100
+            # Same file, other hub: unreadable as ours. (Force the path so the owner field is the gate.)
+            other = read(RE._attach_path("h", "nb"), String)
+            withenv("KAIMONSLATE_PORT" => "8902") do
+                write(RE._attach_path("h", "nb"), other)
+                @test RE._attach_lookup("h", "nb") === nothing
+                RE._attach_clear_port!("h", 9100)                     # must not touch the other hub's record
+            end
+            @test RE._attach_lookup("h", "nb") !== nothing
+            RE._attach_clear_port!("h", 9100)
+            @test RE._attach_lookup("h", "nb") === nothing
+        end
+    end
+
     @testset "_dev_deps: path deps detected; registry deps excluded" begin
         dir = mktempdir()
         write(joinpath(dir, "Manifest.toml"), """
@@ -330,7 +388,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         path = "."
         uuid = "5e9a7c2b-1d4f-4a6e-b3c8-0f2a9d5e8b71"
         """)
-        d = Dict(RE._dev_deps(joinpath(dir, "Manifest.toml"), dir))
+        d = Dict(RE.Sweep.dev_deps(joinpath(dir, "Manifest.toml"), dir))
         @test !haskey(d, "JSON")                                   # registry dep (no path) → not a dev dep
         @test d["NeuroDSL"] == abspath(joinpath(dir, "../NeuroDSL"))
         @test rstrip(d["NeuroSlate"], '/') == abspath(dir)         # path="." → the project itself (self-skip target)
@@ -361,7 +419,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         NeuroDSL = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
         Registered = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
         """)
-        s = RE._rewrite_devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL"),
+        s = RE.Sweep.devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL"),
                                                  ("NotDeclared", "devsrc/NotDeclared")])
         jl = Base.julia_cmd()[1]
         io = IOBuffer()
@@ -397,7 +455,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         url = "https://example.invalid/NeuroDSL.jl"
         rev = "main"
         """)
-        s = RE._rewrite_devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL")])
+        s = RE.Sweep.devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL")])
         jl = Base.julia_cmd()[1]
         io = IOBuffer()
         # `homedir()` reads USERPROFILE on Windows and HOME elsewhere, so pinning only HOME
@@ -428,7 +486,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
                 @test RE._tunnel_alive_interval() == 5 && RE._tunnel_alive_count() == 3
                 @test RE._firewall_giveup() == 10.0
                 @test RE._connect_deadline_local() == 90.0
-                @test RE._pkg_op_timeout() == 900.0 && RE._sync_parent_timeout() == 600.0
+                @test RE._pkg_op_timeout() == 900.0
                 @test RE._blob_xfer_timeout() == 600.0
                 @test RE._blob_chunk_timeout_ms() == 20_000       # 20s → ms
                 @test RE._peer_bw_default() == 30.0e6             # 30 MB/s → bytes/s
@@ -451,8 +509,9 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
                 RE._REMOTE_CFG[] = Dict{String,Any}()
             end
             # the sysimage build lock window is interpolated (tunable) into the generated remote script
-            script = RE._sysimage_build_script("proj", "sysdir", 5.0)
-            @test occursin("< $(RE._sysimage_lock_stale())", script)
+            script = RE._sysimage_build_script(RE.region_set!("lockr"; host = "h"), "proj", Dict{String,String}[])
+            RE.region_delete!("lockr")
+            @test occursin("const STALE = $(RE._sysimage_lock_stale())", script)
             @test !any(a -> a isa Expr && a.head === :error, Meta.parseall(script).args)   # still valid Julia
         finally
             RE._REMOTE_CFG[] = saved

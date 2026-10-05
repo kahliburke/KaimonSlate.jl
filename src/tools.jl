@@ -1,10 +1,12 @@
 # Tool calls as cell values — `slate_tool` / `@tool` / `slate_tools`.
 #
-# A Kaimon session's gate tools (an extension's verbs, anything registered with
-# `KaimonGate.serve(tools=…)`) are normally reachable only by an AGENT, over MCP. They run in this
-# very process, so the notebook can call them too, and that is the point of this file: a tool call
-# becomes an ordinary cell value with a rich rendering, so an action an agent took is a durable,
-# inspectable, re-runnable part of the document instead of something that happened off-page.
+# A tool cell calls a Kaimon MCP tool, any tool the Kaimon server has: its own (`ping`,
+# `qdrant_list_collections`) and every extension's (`fusionkb.search`, named `<namespace>.<tool>`).
+# The call goes through the server's service endpoint, the same registry an agent reaches over
+# MCP, so a tool call becomes an ordinary cell value with a rich rendering: an action an agent took
+# is a durable, inspectable, re-runnable part of the document instead of something that happened
+# off-page. Tools registered in this worker's own gate (`KaimonGate.serve(tools=…)`) are the
+# fallback, for names the server does not know.
 #
 # What the rendering shows is deliberately more than the call: every parameter the tool DECLARES,
 # its type, whether it is required, and whether this call supplied it. A tool's schema is the part
@@ -22,17 +24,72 @@ _gate_module() = get(Base.loaded_modules, _GATE_PKGID, nothing)
 function _session_tools()
     g = _gate_module()
     g === nothing && return Any[]
-    isdefined(g, :_SESSION_TOOLS) || return Any[]
     try
-        return collect(getfield(g, :_SESSION_TOOLS)[])
+        # The registry sits behind an accessor; `_SESSION_TOOLS` is the older gate's global.
+        isdefined(g, :_session_tools) && return collect(Base.invokelatest(getfield(g, :_session_tools)))
+        isdefined(g, :_SESSION_TOOLS) && return collect(getfield(g, :_SESSION_TOOLS)[])
     catch
-        return Any[]
     end
+    return Any[]
 end
 
 _find_tool(name::AbstractString) =
     (i = findfirst(t -> getfield(t, :name) == name, _session_tools());
      i === nothing ? nothing : _session_tools()[i])
+
+# ── Tools on the Kaimon server ───────────────────────────────────────────────────────────────────
+
+"""A tool the Kaimon server serves: registry name, description and JSON-schema parameters."""
+struct ServerTool
+    name::String
+    description::String
+    parameters::Dict{String,Any}
+end
+
+"""Every tool the Kaimon server serves, or an empty vector when there is no gate or no server."""
+function _server_tools()
+    g = _gate_module()
+    (g === nothing || !isdefined(g, :list_tools)) && return ServerTool[]
+    try
+        return [ServerTool(string(t.name), string(t.description), Dict{String,Any}(t.parameters))
+                for t in Base.invokelatest(getfield(g, :list_tools))]
+    catch
+        return ServerTool[]
+    end
+end
+
+_find_server_tool(name::AbstractString, tools = _server_tools()) =
+    (i = findfirst(t -> t.name == name, tools); i === nothing ? nothing : tools[i])
+
+"""
+The panel's parameter rows for a server tool, in the shape the gate's own reflection produces, read
+off its JSON schema. The schema carries JSON types only, so `kind` is what the controls get.
+"""
+function _server_tool_meta(t::ServerTool)
+    props = get(t.parameters, "properties", Dict{String,Any}())
+    required = Set(String.(get(t.parameters, "required", String[])))
+    args = Dict{String,Any}[]
+    for (k, v) in props
+        kind = v isa AbstractDict ? String(get(v, "type", "any")) : "any"
+        push!(args, Dict{String,Any}("name" => String(k), "required" => k in required,
+            "is_kwarg" => !(k in required), "type_meta" => Dict{String,Any}("kind" => kind)))
+    end
+    sort!(args; by = a -> (!a["required"], a["name"]))
+    return Dict{String,Any}("name" => t.name, "description" => t.description, "arguments" => args)
+end
+
+"""
+A follow-up a reply names is usually bare (`job_status`) even when the tool that replied is an
+extension's (`fusionkb.ingest`), because the tool does not know the namespace it is served under.
+Resolve a bare name the server does not know to the replying tool's namespace.
+"""
+function _qualify_followup(called::AbstractString, caller::AbstractString, tools = _server_tools())
+    (occursin('.', called) || _find_server_tool(called, tools) !== nothing) && return String(called)
+    dot = findlast('.', caller)
+    dot === nothing && return String(called)
+    qualified = caller[1:dot] * called
+    return _find_server_tool(qualified, tools) === nothing ? String(called) : qualified
+end
 
 "Reflected metadata for one tool: its description and full declared parameter list."
 function _tool_meta(tool)
@@ -188,14 +245,15 @@ end
 """
     slate_tool(name; kwargs...) -> ToolCall
 
-Call a gate tool registered in this session by name, and return the call as a value.
+Call a Kaimon MCP tool by name, and return the call as a value.
 
-The tools are the same ones an agent sees over MCP, running in this process, so a notebook and an
-agent driving it act on one session rather than two copies of it. Arguments are coerced against
-the handler's signature by the gate's own dispatcher, so a wrong name or an unconvertible value is
-a clear error rather than a `MethodError`.
+`name` is the tool's name on the Kaimon server: a Kaimon tool (`"ping"`) or an extension's,
+qualified by its namespace (`"fusionkb.search"`). These are the tools an agent sees over MCP, so a
+notebook and an agent act on the same things. A name the server does not know is looked up among
+the tools registered in this worker's own gate, whose dispatcher coerces arguments against the
+handler's signature.
 
-    slate_tool("start_job"; target = "Main.NB.Widget", size = 4)
+    slate_tool("fusionkb.search"; query = "bootstrap current", limit = 5)
 
 `@tool` is the same thing in call syntax. `slate_tools()` lists what is available.
 """
@@ -213,7 +271,7 @@ function _register_invoke!(handlers, name::AbstractString)
     handlers === nothing && return ""
     channel = "__tool:" * String(name)
     handlers[channel] = function (a)
-        called = String(_payload_get(a, "__tool", name))
+        called = _qualify_followup(String(_payload_get(a, "__tool", name)), name)
         supplied = Pair{String,Any}[]
         for (k, v) in pairs(a)
             startswith(String(k), "__") && continue          # a panel control key, not an argument
@@ -231,14 +289,22 @@ end
 
 function slate_tool(name::AbstractString, args::AbstractVector; handlers = nothing)
     args = Pair{String,Any}[String(first(p)) => last(p) for p in args]
-    tool = _find_tool(name)
     at = _clock_now()
+    server = _server_tools()
+    st = _find_server_tool(name, server)
+    st === nothing || return _call_server_tool(st, args, at, handlers)
+    tool = _find_tool(name)
     if tool === nothing
-        avail = join(sort!([getfield(t, :name) for t in _session_tools()]), ", ")
+        _gate_module() === nothing && return ToolCall(String(name), args, Dict{String,Any}[], "", false, "",
+            "No Kaimon gate is loaded in this process, so there is no tool to call.", 0.0, at)
+        isempty(server) && isempty(_session_tools()) && return ToolCall(String(name), args,
+            Dict{String,Any}[], "", false, "",
+            "No tools reachable: the Kaimon server did not answer and this session registers none.", 0.0, at)
+        near = sort!(filter(n -> occursin(lowercase(split(name, '.')[end]), lowercase(n)),
+                            [[t.name for t in server]; [getfield(t, :name) for t in _session_tools()]]))
         return ToolCall(String(name), args, Dict{String,Any}[], "", false, "",
-                        isempty(avail) ?
-                        "No gate tools are registered in this session (is a Kaimon gate running?)." :
-                        "No tool named `$name` in this session. Available: $avail", 0.0, at)
+                        "No tool named `$name` on the Kaimon server or in this session." *
+                        (isempty(near) ? "" : " Similar: " * join(first(near, 12), ", ")), 0.0, at)
     end
 
     channel = _register_invoke!(handlers, name)
@@ -261,6 +327,27 @@ function slate_tool(name::AbstractString, args::AbstractVector; handlers = nothi
                         round(time() - t0, digits = 3), at, channel)
     catch e
         return ToolCall(String(name), args, params, desc, false, "",
+                        sprint(showerror, e), round(time() - t0, digits = 3), at, channel)
+    end
+end
+
+"""
+Call a tool on the Kaimon server through its service endpoint. The server resolves the name against
+its full registry and runs the handler (an extension's in that extension's process), coercing the
+arguments as it does for an agent's call.
+"""
+function _call_server_tool(st::ServerTool, args, at, handlers)
+    channel = _register_invoke!(handlers, st.name)
+    meta = _server_tool_meta(st)
+    params = Vector{Dict{String,Any}}(meta["arguments"])
+    argdict = Dict{String,Any}(k => v for (k, v) in args)
+    t0 = time()
+    try
+        res = Base.invokelatest(getfield(_gate_module(), :call_tool), Symbol(st.name), argdict)
+        return ToolCall(st.name, args, params, st.description, true, _as_text(res), "",
+                        round(time() - t0, digits = 3), at, channel)
+    catch e
+        return ToolCall(st.name, args, params, st.description, false, "",
                         sprint(showerror, e), round(time() - t0, digits = 3), at, channel)
     end
 end
@@ -316,7 +403,7 @@ as `["run_id" => x]` sidesteps hygiene entirely, because a string is not a symbo
 function _tool_expand(ex)
     (ex isa Expr && ex.head === :call) ||
         error("@tool expects a call, e.g. `@tool list_jobs()` or `@tool start_job(size = 4)`")
-    name = String(ex.args[1])
+    name = _tool_name(ex.args[1])
     pairs = Any[]
     for a in ex.args[2:end]
         if a isa Expr && (a.head === :kw || a.head === :(=))
@@ -332,26 +419,41 @@ function _tool_expand(ex)
     return Expr(:call, :slate_tool, name, Expr(:vect, pairs...))
 end
 
+# An extension's tool is `namespace.tool`, which parses as field access: `fusionkb.search`.
+_tool_name(x::Symbol) = String(x)
+_tool_name(x::QuoteNode) = _tool_name(x.value)
+function _tool_name(x::Expr)
+    x.head === :. && length(x.args) == 2 && return _tool_name(x.args[1]) * "." * _tool_name(x.args[2])
+    error("@tool expects a tool name like `ping` or `fusionkb.search`, got `$x`")
+end
+
 """
     slate_tools(; filter = "") -> table
 
-Every gate tool this session exposes, with its parameter count and first documentation line.
-These are the tools an agent can call; `filter` keeps only names containing that substring.
+Every tool a `@tool` cell can call: the Kaimon server's (its own and every extension's), then any
+registered in this worker's gate that the server does not also list. Each with its parameter
+count and first documentation line; `filter` keeps only names containing that substring.
 """
 function slate_tools(; filter::AbstractString = "")
-    ts = _session_tools()
     rows = NamedTuple[]
-    for t in ts
-        nm = getfield(t, :name)
-        (isempty(filter) || occursin(filter, nm)) || continue
-        meta = _tool_meta(t)
+    function add!(nm, meta, where)
+        (isempty(filter) || occursin(filter, nm)) || return
         ps = get(meta, "arguments", [])
         req = count(a -> get(a, "required", false) === true, ps)
         summary = _short(_first_prose_line(String(get(meta, "description", ""))), 110)
-        push!(rows, (tool = nm, params = length(ps), required = req, summary = summary))
+        push!(rows, (tool = nm, params = length(ps), required = req, where = where, summary = summary))
+    end
+    server = _server_tools()
+    for t in server
+        add!(t.name, _server_tool_meta(t), "server")
+    end
+    for t in _session_tools()
+        nm = getfield(t, :name)
+        startswith(nm, "__") && continue                       # the worker's own plumbing
+        _find_server_tool(nm, server) === nothing && add!(nm, _tool_meta(t), "session")
     end
     sort!(rows; by = r -> r.tool)
-    return isempty(rows) ? "no gate tools registered in this session" : slate_table(rows)
+    return isempty(rows) ? "no tools reachable (no Kaimon gate or server)" : slate_table(rows)
 end
 
 # ── Rendering ────────────────────────────────────────────────────────────────────────────────────

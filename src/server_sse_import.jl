@@ -415,6 +415,14 @@ function _start_watcher!(nb::LiveNotebook)
         sleep(15)
         stop[] || _broadcast(nb, "hb")
     end
+    # The project the notebook's env was forked from: a change there re-resolves the fork.
+    @async while !stop[]
+        sleep(3)
+        stop[] && break
+        try; _watch_fork!(nb); catch e
+            ReportEngine._rlog("fork: watching $(nb.id)'s project failed — " * first(sprint(showerror, e), 160))
+        end
+    end
     # Periodic safety net: a low-frequency snapshot of the current state, deduped by
     # hash so it's free when nothing changed. Catches any state that slipped past the
     # op-level checkpoints (and guarantees the "at least every minute" capture).

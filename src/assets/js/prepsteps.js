@@ -25,6 +25,11 @@ export function StepList(steps, clock = 0, lastOut = 0) {
 // The hub's log lines for a prepare, behind a toggle: the detail under a step's one-line summary, and
 // what is left to read when a step warned or failed. Kept open or shut per `key` across re-renders.
 const openActs = signal({});
+// A log that follows new lines only while it is scrolled to the bottom: reading back up holds it
+// there until it is scrolled down again.
+const atBottom = el => el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+export const follow = el => { if (el && el._follow !== false) el.scrollTop = el.scrollHeight; };
+export const noteScroll = e => { e.currentTarget._follow = atBottom(e.currentTarget); };
 const shortTime = l => String(l).replace(/^\[\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+\] /, '$1  ');
 export function Activity(lines, key) {
   if (!lines || !lines.length) return null;
@@ -32,7 +37,7 @@ export function Activity(lines, key) {
   const flip = () => { openActs.value = { ...openActs.value, [key]: !open }; };
   return html`<div class="rpplog">
     <button type="button" class="rpplogbtn" onClick=${flip}>${open ? '▾' : '▸'} Activity <span class="pddim">${lines.length} lines</span></button>
-    ${open ? html`<pre class="rpplogtext" ref=${el => { if (el) el.scrollTop = el.scrollHeight; }}>${lines.map(shortTime).join('\n')}</pre>` : null}
+    ${open ? html`<pre class="rpplogtext" ref=${el => follow(el)} onScroll=${noteScroll}>${lines.map(shortTime).join('\n')}</pre>` : null}
   </div>`;
 }
 
@@ -74,3 +79,49 @@ export function History(name, key) {
     </div>`}
   </div>`;
 }
+
+// The same two, always open, for a dialog that gives them a column of their own (regionprep.js):
+// the activity fills it and follows the newest line; the history lists its runs straight away.
+// A command's output arrives tagged on every line (`⟨sysimage on c1⟩`); the pane shows the tag once,
+// as a heading where it changes, so the lines keep their width for what they say.
+export function ActivityPane(lines) {
+  if (!lines || !lines.length) return html`<div class="pddim rppanempty">nothing yet</div>`;
+  const out = []; let tag = null, run = [];
+  const flush = () => { if (run.length) { out.push(run.join('\n') + '\n'); run = []; } };
+  for (const l of lines) {
+    const t = shortTime(l), m = /^(\S+\s+)⟨([^⟩]+)⟩\s?(.*)$/.exec(t);
+    const here = m ? m[2] : null;
+    if (here !== tag) { flush(); if (here) out.push(html`<span class="rppantag">${here}</span>`); tag = here; }
+    run.push(m ? m[1] + m[3] : t);
+  }
+  flush();
+  return html`<pre class="rpplogtext rppanelog" ref=${el => follow(el)} onScroll=${noteScroll}>${out}</pre>`;
+}
+export function HistoryPane(name, key) {
+  const h = hist.value[key] || {};
+  const put = p => { hist.value = { ...hist.value, [key]: { ...(hist.value[key] || {}), ...p } }; };
+  if (h.list === undefined && !h.loading) {
+    put({ loading: true, list: null });
+    fetch('/api/regions/prepare/reports?name=' + encodeURIComponent(name)).then(r => r.json())
+      .then(d => put({ list: (d && d.reports) || [], loading: false })).catch(() => put({ list: [], loading: false }));
+  }
+  const pick = id => {
+    if (h.sel === id) { put({ sel: '', report: null }); return; }
+    put({ sel: id, report: null });
+    fetch('/api/regions/prepare/report?name=' + encodeURIComponent(name) + '&id=' + encodeURIComponent(id))
+      .then(r => r.json()).then(d => put({ report: d && d.ok ? d.report : null })).catch(() => {});
+  };
+  return html`<div class="rpphist rppanehist">
+    ${!h.list ? html`<span class="pddim">…</span>`
+      : !h.list.length ? html`<span class="pddim rppanempty">none yet</span>`
+      : h.list.map(x => html`<div>
+          <div class=${'rpphistrow ' + x.outcome + (h.sel === x.id ? ' sel' : '')} onClick=${() => pick(x.id)}>
+            <span>${whenOf(x.id)}</span> <span class="rpphistout">${OUTCOME[x.outcome] || x.outcome}</span>
+            ${x.failures ? html`<span class="pddim"> · ${x.failures} failed</span>` : null}
+            ${x.warnings ? html`<span class="pddim"> · ${x.warnings} warned</span>` : null}</div>
+          ${h.sel === x.id && h.report ? html`<div class="rpphistrep">${StepList(h.report.steps)}${Activity(h.report.log, 'rep:' + key + ':' + h.sel)}</div>` : null}
+        </div>`)}
+  </div>`;
+}
+// A history to read again from the start the next time the pane opens (a prepare just ended).
+export const forgetHistory = key => { const v = { ...hist.value }; delete v[key]; hist.value = v; };

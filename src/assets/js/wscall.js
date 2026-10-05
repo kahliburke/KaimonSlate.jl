@@ -75,19 +75,8 @@
           try { window.onSlateHealth && window.onSlateHealth(m.data); } catch (_) {}
           return;
         }
-        if (m.t === 'telemetry') {                            // per-worker telemetry push (replaces the pill/popup stat poll)
-          // `alloc` rides every frame and used to be dropped here, so the walltime and idle clocks
-          // reached the page only on a one-shot fetch and then sat still while the hub recomputed
-          // them every couple of seconds.
-          try { window.onWorkerTelemetry && window.onWorkerTelemetry(m.side, m.stats, m.alloc); } catch (_) {}
-          return;
-        }
         if (m.t === 'log') {                                  // worker log line push (live tail into an open popup)
           try { window.onWorkerLog && window.onWorkerLog(m.side, m.line); } catch (_) {}
-          return;
-        }
-        if (m.t === 'workers') {                              // worker/pill list push (region spawn start/connect)
-          try { window.onWorkersUpdate && window.onWorkersUpdate(m.data); } catch (_) {}
           return;
         }
         const p = pending.get(m.id); if (!p) return;          // else: a call reply

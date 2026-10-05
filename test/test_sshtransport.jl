@@ -123,3 +123,32 @@ end
         @test isempty(T.remembered_prompts("clus"))
     end
 end
+
+# Needs a server: set KAIMONSLATE_SSH_TEST_HOST to a host this machine signs in to by key.
+@testset "commands on one session run side by side" begin
+    host = get(ENV, "KAIMONSLATE_SSH_TEST_HOST", "")
+    if isempty(host)
+        @test_skip "KAIMONSLATE_SSH_TEST_HOST is not set"
+    else
+        ask = (_...) -> nothing
+        try
+            @test first(T.exec(host, "true"; ask))                     # signed in
+            slow = Threads.@spawn T.exec(host, "sleep 6; echo slow"; ask)
+            sleep(1.0)
+            t0 = time(); ok, out = T.exec(host, "echo quick"; ask)
+            @test ok && strip(out) == "quick" && time() - t0 < 4      # not behind the sleep
+            # A forward carries a connection while a command runs: the far side's ssh banner arrives.
+            busy = Threads.@spawn T.exec(host, "sleep 4"; ask)
+            lp = let s = T.Sockets.listen(T.Sockets.localhost, 0); p = Int(T.Sockets.getsockname(s)[2]); close(s); p end
+            @test first(T.forward!(host, lp, "127.0.0.1", 22; ask))
+            sock = T.Sockets.connect(T.Sockets.localhost, lp)
+            t0 = time(); banner = readline(sock)
+            @test startswith(banner, "SSH-") && time() - t0 < 3
+            close(sock); T.unforward!(host, lp)
+            ok2, out2 = fetch(slow)
+            @test ok2 && strip(out2) == "slow" && first(fetch(busy))
+        finally
+            T.disconnect!(host)
+        end
+    end
+end

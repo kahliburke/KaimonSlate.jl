@@ -235,6 +235,9 @@ function connect_waiting!(host::AbstractString; wait_s::Real = 60)
     connected(h) && return (true, "")
     SshTransport.opening(h) && return (false, "a sign-in to $h is still under way")
     lock(_CONNECT_LOCK) do; delete!(_CONNECT_FAILED, h); end   # asked for: no backoff applies
+    # A session left over from a failed attempt (the host was down, or restarting) answers with that
+    # attempt's failure. Asked for explicitly, it is opened fresh, as the padlock's sign-in does.
+    SshTransport.opening(h) || SshTransport.disconnect!(h)
     ok = connect!(h)
     return (ok, ok ? "" : last_connect_failure(h))
 end
@@ -895,8 +898,8 @@ _dirlist(dirs) = join((shq(String(d)) for d in dirs), " ")
 # One sync at a time per mirror. A pull REPLACES the mirror's metadata dirs — remove, then extract —
 # so two of them on the same store interleave: one walks a directory while the other is writing into
 # it, and the `rm` fails with ENOTEMPTY on a directory that was empty when it started. That is not
-# hypothetical bookkeeping: a sweep cell running while its own card polls is two syncs on one store,
-# and a notebook with several sweep cells against one cluster is more.
+# hypothetical bookkeeping: a job cell running while its own card polls is two syncs on one store,
+# and a notebook with several job cells against one cluster is more.
 #
 # The lock is held across the round trip, which also collapses a burst of concurrent syncs into one
 # useful fetch instead of several redundant ones.

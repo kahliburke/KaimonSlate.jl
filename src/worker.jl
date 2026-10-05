@@ -93,6 +93,8 @@ include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_sched
 include(joinpath(@__DIR__, "macroexpand.jl")) # _expand_cell_source — macro-aware deps (engine + worker)
 include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
 include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
+include(joinpath(@__DIR__, "gpustats.jl"))  # gpu_sample — the GPUs' load from NVML, for the telemetry sample
+include(joinpath(@__DIR__, "sysstats.jl"))  # sys_sample! — host, process and job figures from /proc and the cgroup
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 include(joinpath(@__DIR__, "prepare.jl"))   # PrepareTracker — classify precompile output into structured status (shared w/ engine)
@@ -586,6 +588,12 @@ function _memo_restore(cellkey::String; unread::Vector{String} = String[],
     if MemoStore.restores_no_bindings(mf) && !isempty(writes)
         return miss("entry binds nothing but the cell defines $(join(writes, ", ")) — refusing an unfaithful restore")
     end
+    # An entry must bind every name the cell defines NOW. One that lacks a name (written for an older
+    # version of the cell, or synced from elsewhere) restores the output while leaving that name
+    # undefined, and a reader fails on it. A name the run itself left undefined is recorded as such.
+    let lacking = MemoStore.unbound_writes(mf, writes)
+        isempty(lacking) || return miss("entry does not bind $(join(lacking, ", ")), which the cell defines")
+    end
     # An entry that ELIDED a display object (stored the wire image, not the object — see
     # `_memo_store`) is only faithful while that name stays UNREAD. A reader added since means the
     # real object is needed → treat as a miss; the re-run re-stores WITH the object (its name is no
@@ -730,6 +738,7 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
     evict[] = (root, key)
     entries = Dict{String,Any}[]
     elided = Dict{String,Any}[]
+    absent = String[]        # declared writes this run left undefined (a branch not taken)
     # Read each declared write at the LATEST world age. A global the cell defines for the FIRST
     # time this run lives in a binding partition NEWER than this method's captured (older) world
     # age, so a naive `isdefined`/`getglobal` here would not observe it — and we'd wrongly skip
@@ -741,6 +750,7 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
         s = Symbol(nm)
         if !Base.invokelatest(isdefined, m, s)
             @info "slate memo: a declared write is undefined post-run — cached without it" key = cellkey name = nm
+            push!(absent, nm)
             continue
         end
         v = Base.invokelatest(getglobal, m, s)
@@ -805,6 +815,7 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
             "bindings" => entries,
             "wire" => Dict{String,Any}("codec" => "jls", "blob" => wh, "bytes" => wn))
         isempty(elided) || (mf["elided"] = elided)  # restore checks these against CURRENT readers
+        isempty(absent) || (mf["absent"] = absent)  # left undefined on purpose: not a gap in the entry
         MemoStore.write_manifest(root, key, mf)
         _memo_gc()
         if trace !== nothing
@@ -831,7 +842,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
                    memo_names::Vector{String}, memo_threshold::Float64,
                    memo_force::Bool = false, memo_always::Bool = false,
                    memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[];
-                   slate_ctx = nothing)
+                   memo_restore_only::Bool = false, slate_ctx = nothing)
     cid = replace(filename, r"^cell:" => "")
     # The decision record for this eval (see _MEMO_TRACE): filled in as the memo layer acts,
     # committed at every exit — `slate.memo_trace` reads it back.
@@ -859,6 +870,15 @@ function _eval_one(source::String, filename::String, memo_key::String,
         end
     elseif !isempty(memo_key) && memo_force
         tr["miss"] = "explicit ▶ run (memo_force) — restore skipped, fresh result re-stores"
+    end
+    # A locked cell asked to restore and nothing else: with no entry it is not run at all, and the hub
+    # holds it until its own ▶.
+    if memo_restore_only
+        tr["action"] = "held"
+        tr["note"] = "locked — restore only, " * String(get(tr, "miss", "no stored result"))
+        _trace_commit!(cid, tr)
+        return merge(_interrupted_wire(), (exception = nothing, memo = "absent",
+                                           memo_why = String(get(tr, "miss", "no stored result"))))
     end
     local r
     try
@@ -936,7 +956,7 @@ function __slate_eval(source::String; filename::String = "string",
                      memo_key::String = "", memo_names::Vector{String} = String[],
                      memo_threshold::Float64 = 0.0, memo_force::Bool = false,
                      memo_always::Bool = false, memo_unread::Vector{String} = String[],
-                     memo_safe::Vector{String} = String[],
+                     memo_safe::Vector{String} = String[], memo_restore_only::Bool = false,
                      ctx_region::String = "", ctx_notebook::String = "", ctx_docid::String = "",
                      ctx_regions::Vector{String} = String[],
                      ctx_attrs::Vector{String} = String[],
@@ -951,7 +971,7 @@ function __slate_eval(source::String; filename::String = "string",
                            ctx_docid)
     try
         return _eval_one(source, filename, memo_key, memo_names, memo_threshold, memo_force,
-                         memo_always, memo_unread, memo_safe; slate_ctx = ctx)
+                         memo_always, memo_unread, memo_safe; memo_restore_only, slate_ctx = ctx)
     finally
         lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, cid); end
         # A cell that loaded a package registers ITS gate tools during this eval (a model package's
@@ -1068,7 +1088,8 @@ function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
                   Float64(_cell_get(c, "memo_threshold", 0.0)),
                   _cell_get(c, "memo_force", false) === true,
                   _cell_get(c, "memo_always", false) === true,
-                  Vector{String}(String[String(x) for x in _cell_get(c, "memo_unread", String[])]))
+                  Vector{String}(String[String(x) for x in _cell_get(c, "memo_unread", String[])]);
+                  memo_restore_only = _cell_get(c, "memo_restore_only", false) === true)
     end
     # Track each task so __slate_cancel can interrupt it; drop it once it finishes.
     onspawn = (id, t) -> lock(_CANCEL_LOCK) do; _RUNNING_TASKS[id] = t; end
@@ -1937,31 +1958,6 @@ function __slate_fork(envdir, parent)
     end
 end
 
-"Re-resolve a forked notebook env against the CURRENT parent (called when the parent's
-Manifest changed): re-seed from the parent, then re-add the notebook's own packages so the
-two stay one consistent environment. Returns `{ok, adds}`."
-function __slate_sync_parent(envdir, parent)
-    try
-        e = String(envdir); p = String(parent)
-        fdeps = Set{String}()
-        fpf = joinpath(e, "Project.toml")
-        isfile(fpf) && (fdeps = Set(keys(get(Pkg.TOML.parsefile(fpf), "deps", Dict{String,Any}()))))
-        pdeps = Set{String}(); pname = ""
-        ppf = joinpath(p, "Project.toml")
-        if isfile(ppf)
-            pt = Pkg.TOML.parsefile(ppf)
-            pdeps = Set(keys(get(pt, "deps", Dict{String,Any}())))
-            pname = string(get(pt, "name", ""))
-        end
-        adds = sort(collect(setdiff(fdeps, pdeps, Set([pname, ""]))))   # the notebook's own packages
-        _seed_notebook_env!(e, p)
-        isempty(adds) || Pkg.add(adds; preserve = Pkg.PRESERVE_ALL)
-        return Dict{String,Any}("ok" => true, "adds" => adds)
-    catch e
-        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
-    end
-end
-
 "Reconstruct a notebook env from its `.jl` footer: seed from the parent, then add the
 notebook's own packages at the recorded versions. Called on open when the env dir is
 absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is a list of
@@ -2075,7 +2071,7 @@ function __slate_pkg(op, name)
             return Dict{String,Any}("ok" => true, "message" => "updated $(join(tokens, ", "))")
         elseif o == "add"
             s = _pkg_add_specs(tokens)
-            isempty(s.adds) || Pkg.add(s.adds)
+            add_installed_first!(s.adds)
             isempty(s.devs) || Pkg.develop(s.devs)
             return Dict{String,Any}("ok" => true, "message" => "added $(join(s.labels, ", "))")
         else
@@ -2133,7 +2129,7 @@ function __slate_pkg_parent(op, name, parent)
         o = String(op)
         if o == "add"
             s = _pkg_add_specs(tokens)
-            isempty(s.adds) || Pkg.add(s.adds)
+            add_installed_first!(s.adds)
             isempty(s.devs) || Pkg.develop(s.devs)
             msg = "added $(join(s.labels, ", ")) to the project"
         elseif o == "rm"
@@ -2415,34 +2411,77 @@ function _start_src_watcher()
     @async while true
         try
             sleep(0.4)
-            R = Main.Revise
-            _seed_new_src_defs!()             # baseline newly-loaded files so their first edit diffs cleanly
-            (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || continue
-            queue = collect(R.revision_queue)
-            before = _qe_keys(R)
-            thrown = nothing
-            try; R.revise(); catch e; thrown = e; end
-            emsg = _revise_error_msg(R, thrown, before)
-            if !isempty(emsg)
-                @warn "slate hot-reload: revise error" error = emsg
-                if emsg != _LAST_SRC_ERR[]
-                    _LAST_SRC_ERR[] = emsg
-                    KaimonGate._publish_stream("slate_revise_err", emsg)
-                end
-            else
-                _LAST_SRC_ERR[] = ""
-                names = _changed_names(queue)
-                _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
-                @info "slate hot-reload: revised" files = length(queue) changed = names
-                isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
-                _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
-            end
+            _apply_revisions!()
         catch e
             try; @warn "slate hot-reload: watcher iteration failed" exception = e; catch; end
             try; sleep(0.5); catch; end
         end
     end
     return nothing
+end
+
+const _APPLY_LOCK = ReentrantLock()
+
+# Apply what Revise has queued and report it: the changed definitions, or the error a save left.
+function _apply_revisions!()
+    lock(_APPLY_LOCK) do
+        R = Main.Revise
+        _seed_new_src_defs!()             # baseline newly-loaded files so their first edit diffs cleanly
+        (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || return nothing
+        queue = collect(R.revision_queue)
+        before = _qe_keys(R)
+        thrown = nothing
+        try; R.revise(); catch e; thrown = e; end
+        emsg = _revise_error_msg(R, thrown, before)
+        if !isempty(emsg)
+            @warn "slate hot-reload: revise error" error = emsg
+            if emsg != _LAST_SRC_ERR[]
+                _LAST_SRC_ERR[] = emsg
+                KaimonGate._publish_stream("slate_revise_err", emsg)
+            end
+        else
+            _LAST_SRC_ERR[] = ""
+            names = _changed_names(queue)
+            _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
+            @info "slate hot-reload: revised" files = length(queue) changed = names
+            isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
+            _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
+        end
+        return nothing
+    end
+end
+
+"""
+Files the hub has just written into this worker's copies of its sources (`paths`, \$HOME-relative or
+absolute). Each that Revise tracks is queued for revision and applied now: a copy written from another
+machine, as a cluster's login node writes for a compute node, raises no change event here, and the
+hub waits on this before running a cell. Returns `{queued}`.
+"""
+function __slate_files_changed(paths)
+    isdefined(Main, :Revise) || return Dict{String,Any}("queued" => 0)
+    R = Main.Revise
+    want = Set{String}()
+    for p in paths
+        s = String(p)
+        f = startswith(s, "~/") ? joinpath(homedir(), s[3:end]) : isabspath(s) ? s : joinpath(homedir(), s)
+        push!(want, try; realpath(f); catch; f; end)
+    end
+    n = 0
+    try
+        Base.@lock R.revise_lock for (id, pd) in R.pkgdatas
+            id == R.NOPACKAGE && continue
+            base = R.basedir(pd)
+            for rel in R.srcfiles(pd)
+                f = joinpath(base, rel)
+                (try; realpath(f); catch; f; end) in want || continue
+                push!(R.revision_queue, (pd, rel)); n += 1
+            end
+        end
+    catch e
+        @warn "slate hot-reload: could not queue the files the hub sent" exception = e
+    end
+    n > 0 && _apply_revisions!()
+    return Dict{String,Any}("queued" => n)
 end
 
 "Apply pending Revise revisions; return the changed top-level def names (manual / testing)."
@@ -2727,7 +2766,6 @@ function tools()
         KaimonGate.GateTool("__slate_project_deps", __slate_project_deps),
         KaimonGate.GateTool("__slate_env_info", __slate_env_info),
         KaimonGate.GateTool("__slate_fork", __slate_fork),
-        KaimonGate.GateTool("__slate_sync_parent", __slate_sync_parent),
         KaimonGate.GateTool("__slate_reconstruct", __slate_reconstruct),
         KaimonGate.GateTool("__slate_bundle_info", __slate_bundle_info),
         KaimonGate.GateTool("__slate_extension_manifest", __slate_extension_manifest),
@@ -2738,6 +2776,7 @@ function tools()
         KaimonGate.GateTool("__slate_pkg_parent", __slate_pkg_parent),
         KaimonGate.GateTool("__slate_registry_add", __slate_registry_add),
         KaimonGate.GateTool("__slate_revise", __slate_revise),
+        KaimonGate.GateTool("__slate_files_changed", __slate_files_changed),
     ]
 end
 
@@ -2946,11 +2985,26 @@ function _telemetry_loop!(stats_path::String)
         (-1, -1)
     end
     lastc = cputime(); lastw = time(); memo = -1; tick = 0; spin = 0
+    g0 = Base.gc_num(); last_ttsp = g0.total_time_to_safepoint; last_gct = g0.total_time
+    sys = try; SysSampler(); catch; nothing; end
     lastsb, lastst = sysstat()
     while true
         sleep(2.0)
         tick += 1
         c = cputime(); w = time()
+        # A sample that comes late says this thread could not run. What held it: collections waiting
+        # for a thread to reach a GC safepoint, collecting itself, or neither (this thread kept from
+        # running by something else in the process). Logged here and sent with the sample.
+        g = Base.gc_num()
+        stall = ""
+        if w - lastw > 6.0
+            held = w - lastw - 2.0
+            ttsp = (g.total_time_to_safepoint - last_ttsp) / 1e9
+            gct = (g.total_time - last_gct) / 1e9
+            @warn "slate telemetry: the sampler was held $(round(held; digits = 1))s" waiting_for_safepoint_s = round(ttsp; digits = 1) collecting_s = round(gct; digits = 1) max_time_to_safepoint_s = round(g.max_time_to_safepoint / 1e9; digits = 1)
+            stall = ",\"stall\":{\"held_s\":$(round(held; digits = 1)),\"safepoint_s\":$(round(ttsp; digits = 1)),\"gc_s\":$(round(gct; digits = 1))}"
+        end
+        last_ttsp = g.total_time_to_safepoint; last_gct = g.total_time
         cpu = (c >= 0 && lastc >= 0 && w > lastw) ? round(100 * (c - lastc) / (w - lastw); digits = 1) : -1.0
         lastc = c; lastw = w
         (memo < 0 || tick % 15 == 0) && (memo = _dir_bytes(joinpath(_memo_dir(), "blobs")))
@@ -2985,10 +3039,17 @@ function _telemetry_loop!(stats_path::String)
         load1 = try; round(Sys.loadavg()[1]; digits = 2); catch; -1.0; end
         smt = try; Int(Sys.total_memory()); catch; 0; end
         smf = try; Int(Sys.free_memory()); catch; 0; end
+        gpus = try; gpu_sample_json(gpu_sample()); catch; "[]"; end
+        hpj = try
+            x = sys_sample!(sys)
+            ",\"host\":$(sys_json(x.host)),\"proc\":$(sys_json(x.proc)),\"job\":$(sys_json(x.job))"
+        catch
+            ""
+        end
         line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
                "\"running\":$running,\"warm\":\"$warm\",\"memo_bytes\":$memo," *
                "\"sys_cpu\":$syscpu,\"load1\":$load1,\"sys_mem_total\":$smt,\"sys_mem_free\":$smf," *
-               "\"last_eval_mono\":$(_LAST_EVAL_AT[])," *
+               "\"last_eval_mono\":$(_LAST_EVAL_AT[]),\"gpus\":$gpus$hpj$stall," *
                "\"ts\":$(round(Int, time()))}"
         try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
         isempty(stats_path) || try                          # roster sidecar — remote workers only
@@ -3029,19 +3090,16 @@ Base.flush(t::_LogTee) = flush(t.inner)
 Base.isopen(t::_LogTee) = isopen(t.inner)
 Base.get(t::_LogTee, k, d) = get(t.inner, k, d)   # IOContext property probing (e.g. :color) delegates through
 
-# A logger wrapper that drops ONE benign message: `Base.Docs`' "Replacing docs for `X`" warning.
-# Reactive re-evaluation redefines a cell's documented structs/functions on every run, so Base.Docs
-# would warn each time — noise the user can't act on (the docstring is still registered, which is
-# exactly what feeds the docs index). Everything else passes through untouched.
-struct _DocsQuietLogger{L<:Logging.AbstractLogger} <: Logging.AbstractLogger
-    inner::L
-end
-Logging.min_enabled_level(l::_DocsQuietLogger) = Logging.min_enabled_level(l.inner)
-Logging.catch_exceptions(l::_DocsQuietLogger) = Logging.catch_exceptions(l.inner)
-Logging.shouldlog(l::_DocsQuietLogger, args...) = Logging.shouldlog(l.inner, args...)
-function Logging.handle_message(l::_DocsQuietLogger, level, message, args...; kwargs...)
-    (level == Logging.Warn && occursin("Replacing docs for", string(message))) && return nothing
-    return Logging.handle_message(l.inner, level, message, args...; kwargs...)
+# A process started from a sysimage inherits each package global as it was when the image was saved.
+# GPUCompiler sets up LLVM's targets once per process, behind a flag that a compile during the image's
+# build leaves set; a worker from that image would skip the setup and find no GPU target. Cleared at
+# boot, the first compile here does it. A GPUCompiler loaded later starts with it clear anyway.
+function _reset_image_once_flags!()
+    for (id, m) in Base.loaded_modules
+        id.name == "GPUCompiler" && isdefined(m, :__llvm_initialized) || continue
+        try; getfield(m, :__llvm_initialized)[] = false; catch; end
+    end
+    return nothing
 end
 
 """
@@ -3057,6 +3115,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                data_port::Int = 0, warm_deps::Bool = false, stats_path::String = "",
                blob_curve::Bool = true, blob_bind::String = "", blob_free_port::Bool = false)
     _STREAM_PORT[] = stream_port   # publish for `__slate_ports` (hub-assigned today; the hub owns only the gate)
+    _reset_image_once_flags!()
     # Install the task-demux as stdout/stderr + a task-local capture display, so cell evaluators can
     # run CONCURRENTLY in this one process while each captures its own output (see demux.jl, capture.jl
     # DemuxCapture). Non-cell output falls through to the real streams (the worker log). Once installed,
@@ -3069,11 +3128,16 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         # Tee the log stream so every formatted record ALSO PUBs on `slate_log` (→ hub → the worker popup,
         # live) while still writing to the worker-<port>.log file. Mirrors the pipe that `worker_log_tail`
         # reads, so the pushed lines and the polled snapshot are the same text.
-        Base.global_logger(_DocsQuietLogger(Logging.ConsoleLogger(_LogTee(stderr), Logging.Info;
+        #
+        # Base's own logger type, not a wrapper: GPUCompiler asks the GLOBAL logger for its level from
+        # inside type inference, in a fixed world, and a logger type defined by a package loaded after
+        # that world has no method there. A cell's own logger (capture.jl) is task-local, and is where
+        # a cell's "Replacing docs" warnings are dropped.
+        Base.global_logger(Logging.ConsoleLogger(_LogTee(stderr), Logging.Info;
             meta_formatter = (lvl, m, g, id, f, l) -> begin
                 c, pre, suf = Logging.default_metafmt(lvl, m, g, id, f, l)
                 (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)
-            end)))
+            end))
     catch e; @warn "slate: timestamp logger install failed" exception = e; end
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
@@ -3207,7 +3271,10 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # Sample every worker — local kernels too. The `.stats` sidecar is still remote-only (empty
     # stats_path skips it), but the `slate_telemetry` PUB now flows from every worker process, so the
     # hub's watchdog can see cpu/rss/gc on a local kernel and not just remote regions.
-    Threads.@spawn try
+    # On an interactive thread: Julia never preempts a task, so a sampler in the default pool waits
+    # behind cells that keep every default thread busy (BLAS calls, tight loops), and a worker that is
+    # working hard would look silent.
+    Threads.@spawn :interactive try
         _telemetry_loop!(stats_path)
     catch e
         @warn "slate worker: telemetry sampler died" exception = e

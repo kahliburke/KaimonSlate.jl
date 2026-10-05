@@ -330,7 +330,7 @@ abstract type Kernel end
 
 "Release a kernel's resources (kill a local gate worker; detach a spawned-remote one unless
 `kill_remote=true` — see the GateKernel method). No-op for in-process."
-shutdown!(::Kernel; kill_remote::Bool = false) = nothing
+shutdown!(::Kernel; kill_remote::Bool = false, wait::Bool = true) = nothing
 
 """
     kernel_connected(kernel) -> Bool
@@ -415,7 +415,7 @@ eval_capture(k::InProcessKernel, report::Report, source::AbstractString, filenam
 # From the machine's registry: a cluster is a machine, and the same one is referenced by every
 # notebook that names it and by any region on it.
 function _cluster_attr_args(::Report)
-    reg = try; clusters_all(); catch; Dict{String,Any}[]; end
+    reg = try; clusters_resolved(); catch; Dict{String,Any}[]; end
     return String[string(get(c, "name", ""), ".", k, "=", v)
                   for c in reg
                   for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]
@@ -435,9 +435,15 @@ end
 # Memo-aware entry (5-arg `memo` = (; key, names, threshold)). Default: ignore caching and just
 # evaluate — only the gate kernel (real notebooks) implements durable memoization. Keeps in-process
 # and test kernels working unchanged. `region`/`regions` flow through to the execution context.
-eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo;
-             region::AbstractString = "", regions::AbstractVector = String[]) =
-    eval_capture(k, report, source, filename; region = region, regions = regions)
+# A restore-only run (a locked cell not run by its own ▶) has nothing to restore from here, so it does
+# not run either.
+function eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo;
+                      region::AbstractString = "", regions::AbstractVector = String[])
+    (memo !== nothing && hasproperty(memo, :restore_only) && memo.restore_only === true) &&
+        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", nothing, nothing, 0.0, Any[], "",
+                          Any[], Any[], "absent", "this kernel keeps no durable results")
+    return eval_capture(k, report, source, filename; region = region, regions = regions)
+end
 
 """
     PendingKernel <: Kernel
@@ -863,7 +869,7 @@ function pkg_op(k::InProcessKernel, ::Report, op::AbstractString, name::Abstract
         ensure_notebook_env!(k.envdir)   # first add materialises it — base mode until then
     end
     r = _in_env(dir) do
-        op == "add"    ? Pkg.add(String(name)) :
+        op == "add"    ? add_installed_first!([Pkg.PackageSpec(name = String(name))]) :
         op == "update" ? Pkg.update(String(name)) :
                          Pkg.rm(String(name))
         return Dict{String,Any}("ok" => true, "message" => "")
@@ -1173,7 +1179,7 @@ end
 # upstream SOURCES, so it's only total if every upstream value is a function of its source. A
 # `nocache`/`volatile` upstream (re-runs produce fresh values from the same source) or an :opaque
 # barrier (include(): effects from outside the source) breaks that — restoring downstream against a
-# re-run impure producer would silently resurrect the PREVIOUS run's values. A SWEEP upstream has the
+# re-run impure producer would silently resurrect the PREVIOUS run's values. A JOB upstream has the
 # same property — its value is what has landed in its store — but is NOT poisoned: it declares an
 # identity for those results (`:value_identity`), which reaches the key through `_STATE_DIGESTS` and
 # moves it when they change. That is the whole point of the declaration; without one it would have to

@@ -59,7 +59,7 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         # `UndefVarError` on every cold open, then fine when re-run by hand.
         src = "#%% code id=grid\nzs = 1:4\n" *
               "#%% md id=prose\n## a heading\n" *
-              "#%% sweep id=vol\nvolume = @sweep(paramgrid(z = zs)) do p\n    p.z\nend\n" *
+              "#%% job id=vol\nvolume = @sweep(paramgrid(z = zs)) do p\n    p.z\nend\n" *
               "#%% code id=plot\nframes = collect(volume)\n" *
               "#%% tool id=call\n@tool deploy()\n"
         r = RE.parse_report(src)
@@ -81,13 +81,13 @@ cell(src) = RE.Cell("c", RE.CODE, src)
     end
 
     @testset "a fresh worker restales every kind that runs" begin
-        # A blank namespace loses every global — and, for a sweep cell, the channel its card's
+        # A blank namespace loses every global — and, for a job cell, the channel its card's
         # buttons call. Restaling only CODE left a card on screen whose Submit reached a handler
         # that no longer existed, which looks like a dead button rather than a lost worker.
         src = "#%% code id=a\nx = 1\n" *
               "#%% md id=note\n## prose\n" *
               "#%% web id=w\n@web(html\"<b>hi</b>\")\n" *
-              "#%% sweep id=s\nv = @sweep(paramgrid(i = 1:2)) do p\n    p.i\nend\n" *
+              "#%% job id=s\nv = @sweep(paramgrid(i = 1:2)) do p\n    p.i\nend\n" *
               "#%% tool id=t\n@tool deploy()\n"
         r = RE.parse_report(src)
         for c in r.cells; c.state = RE.FRESH; end

@@ -7,6 +7,8 @@ import { signal, effect } from '@preact/signals';
 import { detail, focusHost, editRegion, pendingRegion, regions, parked, loadRegions, schedInfo, loadScheduler } from './stores.js';
 import { hostTransport } from './hoststore.js';
 import { StepList, Activity, History } from './prepsteps.js';
+import { clusters } from './clusters.js';
+import { OptionsTable } from './optstable.js';
 // One answer to "is a node held" and "what is giving it back called", shared with the notebook's
 // pills and panels — these used to be worked out here, and differently in two other files. model.js
 // is a classic script loaded before every module, so it is always here by the time this runs.
@@ -27,12 +29,17 @@ const fName = signal(''), fWarm = signal(0), fPre = signal(''), fRoot = signal('
 // When the host fronts a scheduler, `host` is where you ASK, not where the work runs — the node is
 // granted, not chosen. These are what the request needs.
 const fSched = signal('none'), fPart = signal(''), fWall = signal(''), fCpus = signal(''),
-      fMem = signal(''), fGpus = signal(''), fAcct = signal(''), fIdle = signal(''), fWarn = signal('');
+      fMem = signal(''), fGpus = signal(''), fAcct = signal(''), fIdle = signal(''), fWarn = signal(''),
+      fSubmit = signal('');   // SLURM: '' (the machine's), 'sbatch' or 'salloc'
 // Everything the fixed fields cannot say, as ordered rows so a half-typed one does not vanish while
 // you are still typing it. Stored as a map; kept as a list here because two blank names are two
 // rows to the eye and one key to a map.
 const fOpts = signal([]);          // [{k, v}]
 const fGrace = signal('');         // liveness grace ("" = what Prepare measured, or the hub default)
+const fMachine = signal('');       // the machine it runs on ("" = this host, with every setting automatic)
+// What the region's machine supplies for whatever the region leaves blank: shown as placeholders, so
+// the form edits only what the region changes and a save never copies the machine's values in.
+const fInherit = signal({});
 const prep = signal({});           // region name -> last /api/regions/prepare payload
 const fPro = signal('');
 const fMore = signal(false);       // the disclosure
@@ -45,17 +52,15 @@ const filledExtras = () =>
 const pj = (s) => { try { return JSON.parse(s || '{}'); } catch (_) { return {}; } };
 const fmtB = (b) => window.slateBytes(b, { compact: true });
 const ago = (u) => { let s = Math.max(0, Math.floor(Date.now() / 1000 - (+u || 0))); return s < 90 ? s + 's ago' : s < 5400 ? Math.round(s / 60) + 'm ago' : s < 172800 ? Math.round(s / 3600) + 'h ago' : Math.round(s / 86400) + 'd ago'; };
-const regionsOn = (h) => regions.value.filter(r => r.host === h);
+// A host's regions, the machine's own first, then the rest by name.
+const _M = window.slateModel;
+const regionsOn = (h) => regions.value.filter(r => r.host === h)
+  .sort((a, b) => (_M.regionKind(a) === 'machine' ? 0 : 1) - (_M.regionKind(b) === 'machine' ? 0 : 1) || a.name.localeCompare(b.name));
 const confirmP = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg, ok, cls) : Promise.resolve(window.confirm(msg)));
 
 // ── data ──────────────────────────────────────────────────────────────────────────
 function fetchRoster(h) { fetch('/api/remote-workers?host=' + encodeURIComponent(h)).then(r => r.json()).then(d => { roster.value = { ...roster.value, [h]: (d && d.workers) || [] }; }).catch(() => { roster.value = { ...roster.value, [h]: [] }; }); }
 function loadSysimage(name) { fetch('/api/sysimage?region=' + encodeURIComponent(name)).then(r => r.json()).then(d => { sysd.value = { ...sysd.value, [name]: d }; if (d && d.ok && d.building) setTimeout(() => loadSysimage(name), 4000); }).catch(() => {}); }
-function buildSysimage(name) {
-  sysd.value = { ...sysd.value, [name]: { ...(sysd.value[name] || {}), ok: true, building: true } };
-  fetch('/api/sysimage/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ region: name }) })
-    .then(r => r.json()).then(d => { if (!d || !d.ok) { sysd.value = { ...sysd.value, [name]: { ok: false, error: (d && d.error) || 'build failed to start' } }; return; } setTimeout(() => loadSysimage(name), 3000); }).catch(() => {});
-}
 // The server returns codes with the values behind them. The wording is here, beside the fields.
 // ── preparing a region ──────────────────────────────────────────────────────────────
 // Polled while one runs, so each step's outcome lands as it happens; the region list reloads once
@@ -95,10 +100,11 @@ function ReadinessRow(name) {
   const d = prep.value[name];
   const running = !!(d && d.preparing && d.preparing.running);
   const rec = (d && d.readiness) || {};
+  const site = rec.site || {};
   const has = !!rec.prepared_at;
   const head = running ? html`<span class="pddim"><span class="hydspin"></span> preparing</span>`
     : !has ? html`<span class="pddim">not prepared</span>`
-    : rec.stale ? html`<span class="rppsyswarn">⚠ ${rec.stale}</span>`
+    : site.stale ? html`<span class="rppsyswarn">⚠ ${site.stale}</span>`
     : html`<span class=${rec.ok ? 'rppsysok' : 'rppsyswarn'}>${rec.ok ? '✓ prepared' : '⚠ prepared with failures'} · ${ago(rec.prepared_at)}</span>`;
   return html`<div class="rpprow"><label>Readiness</label><div class="rppsysbox rppprep">
       <div class="rppprephead">${head}
@@ -107,13 +113,15 @@ function ReadinessRow(name) {
       ${(running || has) ? StepList(running ? d.preparing.steps : rec.steps, running ? d.preparing.now : 0, running ? d.preparing.last_output : 0) : null}
       ${Activity(running ? d.preparing.log : (d && d.last_log), 'reg:' + name)}
       ${History(name, 'reg:' + name)}
-      ${(!running && rec.prologue) ? html`<div class="pddim">site prologue <code>${rec.prologue}</code></div>` : null}
+      ${(!running && site.site_prologue) ? html`<div class="pddim">site prologue <code>${site.site_prologue}</code></div>` : null}
+      ${(!running && site.prepared_at) ? html`<div class="pddim">depot <code>${site.depot || '~/.julia'}</code></div>` : null}
       ${(!running && rec.liveness_grace_s) ? html`<div class="pddim">liveness grace ${rec.liveness_grace_s}s</div>` : null}
       ${(!running && rec.envs) ? Object.values(rec.envs).map(e => html`<div class="pddim">${[
           'tested ' + String(e.project || '').split('/').slice(-2).join('/'),
-          'loads in ' + e.load_s + 's',
+          e.by && e.by !== name ? 'by ' + e.by : '',
+          e.load_s ? 'loads in ' + e.load_s + 's' : '',
           e.cuda ? 'CUDA ' + (String(e.cuda.functional).startsWith('true') ? 'ok' : 'not functional') : '',
-          ago(e.prepared_at)].filter(Boolean).join(' · ')}${e.changed ? html` · <span class="rppsyswarn">packages changed since</span>` : null}</div>`) : null}
+          ago(e.tested_at || e.prepared_at)].filter(Boolean).join(' · ')}${e.changed ? html` · <span class="rppsyswarn">packages changed since</span>` : null}</div>`) : null}
     </div></div>`;
 }
 
@@ -152,12 +160,12 @@ function saveRegion() {
   const alloc = scheduler === 'none' ? {} : {
     partition: (fPart.value || '').trim(), walltime: (fWall.value || '').trim(),
     cpus: Math.max(0, parseInt(fCpus.value, 10) || 0), mem: (fMem.value || '').trim(),
-    gpus: (fGpus.value || '').trim(), account: (fAcct.value || '').trim(),
+    gpus: (fGpus.value || '').trim(), account: (fAcct.value || '').trim(), submit: fSubmit.value,
     idle_release: (fIdle.value || '').trim(), idle_warn: (fWarn.value || '').trim(),
     options: optMap, prologue: (fPro.value || '').trim() };
   rmsg.value = { text: warm > 0 ? 'Saving + warming…' : 'Saving…' };
   const liveness_grace = (fGrace.value || '').trim();
-  fetch('/api/regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, host: h, warm, preload, transport, base_port, data_root, sysimage, scheduler, liveness_grace, ...alloc }) })
+  fetch('/api/regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, host: h, machine: fMachine.value, warm, preload, transport, base_port, data_root, sysimage, scheduler, liveness_grace, ...alloc }) })
     .then(r => r.json()).then(d => {
       if (!d || !d.ok) { rmsg.value = { text: saveError(d), err: true }; return; }
       const ports = (base_port && warm > 0) ? (' · ports ' + base_port + '–' + (base_port + 3 * warm - 1)) : '', rootS = data_root ? (' · root ' + data_root) : '';
@@ -167,8 +175,10 @@ function saveRegion() {
       if (warm > 0) { let n = 0; (function poll() { if (focusHost.value !== h) return; fetchRoster(h); if (++n < 6) setTimeout(poll, 2500); })(); }
     }).catch(() => { rmsg.value = { text: 'request failed', err: true }; });
 }
-function deleteRegion(h, name) {
-  confirmP('Delete region `' + name + '`?\nIts workers are reaped. On a scheduler region the allocation is released too.', 'Delete', 'danger').then(ok => {
+function deleteRegion(h, name, reset = false) {
+  confirmP(reset ? 'Reset `' + name + '` to its machine\'s settings?\nWhat was changed here is dropped; its workers and node stay.'
+                 : 'Delete region `' + name + '`?\nIts workers are reaped. On a scheduler region the allocation is released too.',
+           reset ? 'Reset' : 'Delete', reset ? '' : 'danger').then(ok => {
     if (!ok) return;
     fetch('/api/regions/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(r => r.json())
       .then(() => { if (editRegion.value && editRegion.value.name === name) editRegion.value = null; loadRegions(); fetchRoster(h); }).catch(() => {});
@@ -197,17 +207,14 @@ function restartWorker(h, port) {
 // ── sysimage note (live checkbox + cached server status) ──────────────────────────
 function sysNote(name, checked, editing) {
   const d = sysd.value[name];
-  // Unchecking doesn't delete a built image — it's kept on the host and reused if re-enabled (unchanged).
+  // Turning it off keeps the built image on the machine; turning it back on uses it again.
   if (!checked) return (d && d.current)
-    ? html`<span class="pddim">off — a built image is kept (<code>${d.current}.so</code>) and reused if you re-enable</span>`
-    : html`<span class="pddim">off — workers boot plain</span>`;
-  if (d && d.compiler === false) return html`<span class="rppsyswarn">⚠ no C compiler on ${d.host || ''} — install build tools (e.g. <code>apt install build-essential</code>) to enable sysimages</span>`;
-  if (!editing) return html`<span class="pddim">will be built in the background after the region’s first worker starts</span>`;
-  if (!d) return html`<span class="pddim">checking build status…</span>`;
-  if (!d.ok || d.reachable === false) return html`<span class="pddim">build status unavailable</span>`;
+    ? html`<span class="pddim">off — the built image is kept and used again if you turn it back on</span>`
+    : html`<span class="pddim">off — workers start without one</span>`;
+  if (!editing || !d) return html`<span class="pddim">built when the region is prepared</span>`;
   if (d.building) return html`<div class="rppsysstat"><span class="rppsysbuilding"><span class="hydspin"></span> building…</span></div>`;
-  if (d.current) return html`<div class="rppsysstat"><span class=${d.stale ? 'rppsyswarn' : 'rppsysok'}>${d.stale ? '⚠ out of date' : '✓ built'} · <code>${d.current}.so</code> · ${fmtB(d.bytes)}${d.built ? ' · ' + ago(d.built) : ''}</span><button class="rppsysbtn" title=${d.stale ? 'code/deps changed since this image was built — rebuild' : 'rebuild the worker sysimage for this env'} onClick=${() => buildSysimage(name)}>Rebuild</button></div>`;
-  return html`<div class="rppsysstat"><span class="pddim">will be built in the background on the next worker start</span><button class="rppsysbtn" title="build it now (detached on the host)" onClick=${() => buildSysimage(name)}>Build now</button></div>`;
+  if (d.current) return html`<div class="rppsysstat"><span class="rppsysok">✓ built · ${fmtB(d.bytes)} · ${d.packages} packages${d.cpu ? ' · ' + d.cpu : ''}${d.built ? ' · ' + ago(d.built) : ''}</span></div>`;
+  return html`<span class="pddim">built when a notebook prepares this region</span>`;
 }
 
 // ── the allocation a scheduler region is holding ────────────────────────────────────
@@ -251,13 +258,19 @@ function RegionList() {
   const h = focusHost.value, regs = regionsOn(h), e = editRegion.value, newSel = !(e && e.name);
   return html`<div>
     <div class="rppreglist">
-      ${regs.map(r => html`<div class=${'rppregrow' + (e && e.name === r.name ? ' sel' : '')} onClick=${() => editRegion.value = r}>
-        <span class="rppregname">${isSched(r) ? '⎈' : '🖧'} ${r.name}</span>
+      ${regs.map(r => { const kind = _M.regionKind(r); return html`<div class=${'rppregrow' + (e && e.name === r.name ? ' sel' : '')} onClick=${() => editRegion.value = r}>
+        <span class="rppregname">${kind === 'machine' ? '🖥' : isSched(r) ? '⎈' : '🖧'} ${r.name}</span>
+        ${kind === 'machine' ? html`<span class="rppregkind">machine</span>` : kind === 'variant' ? html`<span class="rppregkind">on ${r.machine}</span>` : null}
         <span class="rppregmeta">${(r.node && r.node !== r.host) ? 'on ' + r.node + ' · ' : ''}${isSched(r)
           ? (r.walltime || '') + (r.partition ? ' · ' + r.partition : '') + (r.walltime || r.partition ? ' · ' : '')
           : 'warm ' + (+r.warm || 0) + ' · '}${r.transport || 'tunnel'}${r.sysimage ? ' · ⚙ sysimage' : ''}${r.data_root ? ' · root ' + r.data_root : ''}</span>
         ${(r.status && !r.status.ok) ? html`<span class="rppregst err">⚠ ${r.status.msg}</span>` : null}
-        <button class="rppregdel" title=${isSched(r) ? 'delete this region (releases any allocation it holds)' : 'delete this region (reaps its warm workers)'} onClick=${ev => { ev.stopPropagation(); deleteRegion(h, r.name); }}>✕</button></div>`)}
+        ${kind === 'machine'
+          // The machine's own region is the machine; removing it only drops what was changed here.
+          ? (r.own && Object.keys(r.own).length
+              ? html`<button class="rppregdel" title="drop the changes made here and take the machine's settings again" onClick=${ev => { ev.stopPropagation(); deleteRegion(h, r.name, true); }}>reset</button>`
+              : null)
+          : html`<button class="rppregdel" title=${isSched(r) ? 'delete this region (releases any allocation it holds)' : 'delete this region (reaps its warm workers)'} onClick=${ev => { ev.stopPropagation(); deleteRegion(h, r.name); }}>✕</button>`}</div>`; })}
       <div class=${'rppregrow rppregnew' + (newSel ? ' sel' : '')} title="create a new region on this host" onClick=${() => editRegion.value = null}>
         <span class="rppregname">＋ New region</span><span class="rppregmeta">a new compute def on ${h}</span></div>
     </div>
@@ -266,7 +279,9 @@ function RegionList() {
 function Editor() {
   const h = focusHost.value, e = editRegion.value, editing = !!(e && e.name);
   return html`<div class="rppcfg">
-    <div class="rppformhead">${editing ? ('Edit region “' + e.name + '”') : ('New region on ' + h)}</div>
+    <div class="rppformhead">${!editing ? ('New region on ' + h)
+      : _M.regionKind(e) === 'machine' ? ('The machine “' + e.name + '” as a region')
+      : ('Edit region “' + e.name + '”')}</div>
     <div class="rpprow"><label>Name</label>${editing
       ? html`<input class="rppname" readonly value=${e.name}/>`
       : html`<input class="rppname" autocomplete="off" placeholder="e.g. gpu, bigmem" value=${fName.value} onInput=${ev => fName.value = ev.target.value}/>`}</div>
@@ -278,6 +293,7 @@ function Editor() {
     <div class="rpprow"><label>Liveness</label><input class="rppn" type="text" autocomplete="off" placeholder="auto"
       title="how long a worker may go without answering before its connection is dropped, e.g. 3m; blank uses what Prepare measured"
       value=${fGrace.value} onInput=${ev => fGrace.value = ev.target.value}/></div>
+    ${MachineRow()}
     ${SchedulerRows()}
     ${AllocationRow(editing ? e.name : '')}
     ${ReadinessRow(editing ? e.name : '')}
@@ -319,35 +335,10 @@ function MoreRows(kind) {
       <span class="pddim" style="font-size:.76rem">scheduler options and a startup command</span></div>
     ${!fMore.value ? null : html`
       <div class="rpprow rppmorebody"><label>Options</label>
-        <div class="rppopts">
-          ${rows.map((r, i) => {
-            const key = SO ? SO.toKey(r.k) : (r.k || '');
-            const warn = SO ? SO.warnFor(key, kind) : '';
-            const hits = (SO && fOptMenu.value === i) ? SO.matches(r.k, kind, SO.MENU_MAX, SO.FIELD_OWNED) : [];
-            const pick = o => {
-              setRow(i, { k: SO.spellOf(o, kind) });
-              fOptMenu.value = -1;
-            };
-            return html`<div class=${'rppoptrow' + (warn ? ' unknown' : '')}>
-              <input class="rppoptk" autocomplete="off" spellcheck="false" placeholder="option"
-                     value=${r.k}
-                     onInput=${ev => { setRow(i, { k: ev.target.value }); fOptMenu.value = i; }}
-                     onFocus=${() => fOptMenu.value = i}
-                     onBlur=${() => setTimeout(() => { if (fOptMenu.value === i) fOptMenu.value = -1; }, 120)}/>
-              <input class="rppoptv" autocomplete="off" spellcheck="false" placeholder="value"
-                     title="leave blank for a switch such as exclusive"
-                     value=${r.v} onInput=${ev => setRow(i, { v: ev.target.value })}/>
-              <button type="button" class="rppoptdel" title="remove this option" tabindex="-1"
-                      onClick=${() => delRow(i)}>✕</button>
-              ${warn ? html`<span class="rppoptwarn">${warn}</span>` : null}
-              ${hits.length ? html`<div class="rppoptmenu">
-                ${hits.map(o => html`<div class="rppoptmi"
-                    onMouseDown=${ev => { ev.preventDefault(); pick(o); }}>
-                  <span class="rppoptminame">${SO.spellOf(o, kind)}</span>
-                  <span class="rppoptmihint">${SO.hintOf(o, kind)}</span></div>`)}
-              </div>` : null}</div>`;
-          })}
-          <button type="button" class="rppoptadd" onClick=${addRow}>+ option</button>
+        <div>
+          ${OptionsTable(fOpts, fOptMenu, kind)}
+          ${Object.keys(fInherit.value.options || {}).length ? html`<div class="rppfieldhint">from the machine: ${
+            Object.entries(fInherit.value.options).map(([k, v]) => v ? k + '=' + v : k).join(' · ')} (a row here overrides one)</div>` : null}
           <div class="rppfieldhint">Sent as the scheduler spells them. An unlisted name is still
             sent: a site has its own, and dropping one silently is worse than not suggesting it.</div>
         </div></div>
@@ -360,6 +351,25 @@ function MoreRows(kind) {
             allocation itself only holds the node, so this is the one place that reaches the
             worker's environment. A failure here stops the worker rather than booting it
             unconfigured.</span></div></div>`}`;
+}
+
+// The machines defined on this host. Naming one gives the region its scheduler, account, Julia,
+// depot and prologue; with none the region runs on the host directly, every machine setting automatic.
+function MachineRow() {
+  const h = focusHost.value;
+  const ms = clusters.value.filter(c => c.host === h);
+  if (!ms.length && !fMachine.value) return null;
+  const pick = v => {
+    fMachine.value = v;
+    const m = ms.find(c => c.name === v);
+    if (m) fSched.value = (m.kind === 'exec' || m.kind === 'local') ? 'none' : (m.kind || 'slurm');
+  };
+  return html`<div class="rpprow"><label>Machine</label>
+    <select class="rpptr" value=${fMachine.value} onChange=${ev => pick(ev.target.value)}>
+      <option value="">none — ${h} directly</option>
+      ${ms.map(c => html`<option value=${c.name}>${c.name}</option>`)}
+      ${fMachine.value && !ms.some(c => c.name === fMachine.value) ? html`<option value=${fMachine.value}>${fMachine.value} (not on ${h})</option>` : null}
+    </select></div>`;
 }
 
 function SchedulerRows() {
@@ -387,22 +397,29 @@ function SchedulerRows() {
     ${chosen === 'none' ? null : html`
       <div class="rpprow"><label>Partition</label>
         ${parts.length ? html`<select class="rpptr" value=${fPart.value} onChange=${ev => fPart.value = ev.target.value}>
-            <option value="">(site default)</option>
+            <option value="">${fInherit.value.partition ? '(machine: ' + fInherit.value.partition + ')' : '(site default)'}</option>
             ${parts.map(p => html`<option value=${p.name} disabled=${p.up === false}>${p.name}${p.gpus ? ' · ' + p.gpus : ''}${p.maxtime ? ' · ≤' + p.maxtime : ''}${p.up === false ? ' (down)' : ''}</option>`)}
           </select>`
-          : html`<input class="rpppre" autocomplete="off" placeholder="queue name (blank = site default)" value=${fPart.value} onInput=${ev => fPart.value = ev.target.value}/>`}</div>
+          : html`<input class="rpppre" autocomplete="off" placeholder=${fInherit.value.partition ? 'machine: ' + fInherit.value.partition : 'queue name (blank = site default)'} value=${fPart.value} onInput=${ev => fPart.value = ev.target.value}/>`}</div>
       <div class="rpprow"><label>Walltime</label>
-        <input class="rppn" autocomplete="off" placeholder="01:00:00" value=${fWall.value} onInput=${ev => fWall.value = ev.target.value}/>
+        <input class="rppn" autocomplete="off" placeholder=${fInherit.value.walltime || '01:00:00'} value=${fWall.value} onInput=${ev => fWall.value = ev.target.value}/>
         <span class="pddim" style="font-size:.76rem">how long to hold it — it bills for the time held, not used</span></div>
+      ${chosen === 'pbs' ? null : html`<div class="rpprow"><label>Request with</label>
+        <select class="rpptr" value=${fSubmit.value} onChange=${ev => fSubmit.value = ev.target.value}>
+          <option value="">${fInherit.value.submit ? '(machine: ' + fInherit.value.submit + ')' : 'sbatch'}</option>
+          ${fInherit.value.submit ? html`<option value="sbatch">sbatch</option>` : null}
+          <option value="salloc">salloc</option>
+        </select>
+        <span class="pddim" style="font-size:.76rem">salloc for an interactive QOS</span></div>`}
       <div class="rpprow"><label>Resources</label>
       <div class="rppfields">
-        ${[['cpus', fCpus, 'cpus', 'tasks/cores to request'],
-           ['memory', fMem, '16G', 'per node'],
-           ['gpus', fGpus, '1', 'or a100:2'],
-           ['account', fAcct, '', 'project to bill']].map(([name, sig, ph, hint]) => html`
+        ${[['cpus', fCpus, fInherit.value.cpus > 0 ? String(fInherit.value.cpus) : 'cpus', 'tasks/cores to request'],
+           ['memory', fMem, fInherit.value.mem === '0' ? '0 · whole node' : (fInherit.value.mem || '16G'), 'per node · default: send none'],
+           ['gpus', fGpus, fInherit.value.gpus || '1', 'or a100:2'],
+           ['account', fAcct, fInherit.value.account || '', 'project to bill']].map(([name, sig, ph, hint]) => html`
           <label class="rppfield"><span class="rppfieldname">${name}</span>
             <input class="rppport" autocomplete="off" placeholder=${ph}
-                   title=${hint + ' (blank = site default)' +
+                   title=${hint + (fInherit.value[name === 'memory' ? 'mem' : name] ? ' (blank = the machine\'s)' : ' (blank = site default)') +
                             (name === 'gpus' && !parts.some(p => p.gpus)
                               ? '. No partition on this host reports GPUs.' : '')}
                    value=${sig.value} onInput=${ev => sig.value = ev.target.value}/>
@@ -428,7 +445,7 @@ function Roster() {
       : !rs.length ? html`<div class="rppempty">No workers on ${h} yet.</div>`
       : rs.map(w => {
         const mf = pj(w.manifest), st = pj(w.stats), tel = [];
-        if (st.cpu !== undefined && st.cpu >= 0) tel.push('cpu ' + st.cpu + '%');
+        if (st.cpu !== undefined && st.cpu >= 0) tel.push('cpu ' + window.slateModel.coresText(st.cpu));
         if (st.rss) tel.push('rss ' + fmtB(st.rss));
         if (st.memo_bytes > 0) tel.push('memo ' + fmtB(st.memo_bytes));
         const warm = st.warm || '', wc = warm.indexOf('ready') === 0 ? '#56d364' : warm.indexOf('warming') === 0 ? '#e8a13f' : '#8a90a8';
@@ -444,7 +461,7 @@ function Roster() {
             <button class="rppreap" title="kill this worker + remove its files" onClick=${ev => { ev.stopPropagation(); reapWorker(h, +w.port); }}>✕ Reap</button></div></div>`;
       })
     }</div>
-    <div class="rtfpark">${parkedFor.map(p => html`<div class="rpppark">⇄ parked: ${p.label} → :${p.port} <span style="opacity:.7">(idle ${p.idle_s}s)</span></div>`)}</div></div>`;
+    <div class="rtfpark">${parkedFor.map(p => html`<div class="rpppark">⇄ parked: ${p.label} → :${p.port} <span style="opacity:.7">(idle ${Math.max(0, Math.round(window.slateModel.hubNow() - p.since))}s)</span></div>`)}</div></div>`;
 }
 // The breadcrumb "Remotes ›" returns to the host list — just clear the focus signal (the modal island
 // renders the list whenever focusHost is '').
@@ -461,23 +478,27 @@ effect(() => { const h = focusHost.value; if (h) { loadRegions(); fetchRoster(h)
 effect(() => {   // seed the editor form from the selected region (or blank for "new")
   const e = editRegion.value, h = focusHost.value; if (!h) return;
   if (e && e.name) { fName.value = e.name; fWarm.value = +e.warm || 0; fPre.value = e.preload || ''; fRoot.value = e.data_root || ''; fTr.value = e.transport || 'tunnel'; fPort.value = e.base_port > 0 ? e.base_port : ''; fSys.value = !!e.sysimage;
-    fSched.value = e.scheduler || 'none'; fPart.value = e.partition || ''; fWall.value = e.walltime || '';
-    fCpus.value = e.cpus > 0 ? e.cpus : ''; fMem.value = e.mem || ''; fGpus.value = e.gpus || ''; fAcct.value = e.account || ''; fIdle.value = e.idle_release || ''; fWarn.value = e.idle_warn || '';
+    // On a machine, the shape fields show what the REGION sets; the machine's values are placeholders.
+    const own = e.machine ? (e.own || {}) : e;
+    fInherit.value = e.machine ? (e.inherits || {}) : {};
+    fSched.value = e.scheduler || 'none'; fPart.value = own.partition || ''; fWall.value = own.walltime || '';
+    fCpus.value = own.cpus > 0 ? own.cpus : ''; fMem.value = own.mem || ''; fGpus.value = own.gpus || ''; fAcct.value = own.account || ''; fIdle.value = e.idle_release || ''; fWarn.value = e.idle_warn || '';
+    fSubmit.value = own.submit || '';
     // A map has no order, so the rows are sorted: the form reads the same on every open.
-    fOpts.value = Object.keys(e.options || {}).sort().map(k => ({ k, v: (e.options || {})[k] }));
-    fPro.value = e.prologue || ''; fGrace.value = e.liveness_grace || '';
+    fOpts.value = Object.keys(own.options || {}).sort().map(k => ({ k, v: (own.options || {})[k] }));
+    fPro.value = e.prologue || ''; fGrace.value = e.liveness_grace || ''; fMachine.value = e.machine || '';
     // Open the fold when the REGION has something folded away, so a saved setting is never out of
     // sight. Read from `e`, never from the form's own signals: `filledExtras()` reads `fOpts`, which
     // would subscribe this seeding effect to it — then adding a row would re-run the seed, reset the
     // rows to what was stored, and the new row would vanish as the fold snapped shut.
     fMore.value = Object.keys(e.options || {}).length > 0 || !!(e.prologue || '').trim(); }
-  else { fName.value = ''; fWarm.value = 0; fPre.value = ''; fRoot.value = ''; fTr.value = hostTransport(h); fPort.value = ''; fSys.value = false;
+  else { fMachine.value = ''; fInherit.value = {}; fName.value = ''; fWarm.value = 0; fPre.value = ''; fRoot.value = ''; fTr.value = hostTransport(h); fPort.value = ''; fSys.value = false;
     // A NEW region on a host that fronts a scheduler defaults to using it, with a walltime already
     // filled in: an allocation with no end time is the one people forget they are holding.
     const si = schedInfo.value[h];
     fSched.value = (si && si.suggested) ? si.suggested : 'none';
     fPart.value = ''; fWall.value = fSched.value === 'none' ? '' : '01:00:00';
-    fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; fIdle.value = ''; fWarn.value = '';
+    fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; fIdle.value = ''; fWarn.value = ''; fSubmit.value = '';
     fOpts.value = []; fPro.value = ''; fMore.value = false; fGrace.value = ''; }
   rmsg.value = null;
 });

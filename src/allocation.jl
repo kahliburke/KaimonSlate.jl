@@ -36,7 +36,13 @@ struct Allocation
     state::Symbol       # :running | :pending | :none | :unreachable
     node::String        # the compute host, once it exists
     timeleft::String    # what the scheduler says is left, for display
+    start::String       # while queued: when the scheduler expects to start it, if it has said
+    reason::String      # while queued: what it is waiting on (Priority, Resources, a limit)
+    said::String        # when a request was turned down: the scheduler's reason
+    cpus::Int           # the CPUs the scheduler holds for it, which can exceed those asked for (0: not said)
 end
+Allocation(name, id, state, node, timeleft; start = "", reason = "", said = "", cpus = 0) =
+    Allocation(name, id, state, node, timeleft, start, reason, said, cpus)
 
 Base.show(io::IO, a::Allocation) =
     a.state === :unreachable ? print(io, "Allocation(", a.name, ": host unreachable)") :
@@ -157,12 +163,14 @@ end
 
 # ── Asking a scheduler what it holds ─────────────────────────────────────────────────────────
 
-# SLURM answers in one line per job, which is what `-o` is for.
+# SLURM answers in one line per job, which is what `-o` is for. `%S` is the expected start of a
+# pending job (once the scheduler has planned one), `%r` what it is waiting on, and `%C` the CPUs
+# it holds: SLURM raises them to cover the memory asked for.
 _slurm_find_script(name) =
-    "squeue -h -n " * shq(name) * " -o '%i|%T|%N|%L' 2>/dev/null"
+    "squeue -h -n " * shq(name) * " -o '%i|%T|%N|%L|%S|%r|%C' 2>/dev/null"
 
 # PBS has no per-name query and no output format of its own, so one `qstat -f` is filtered by name
-# into the same five fields. `%L` has no equivalent either: what is LEFT is the walltime asked for
+# into the same fields, with the planned start and the scheduler's comment last. `%L` has no equivalent either: what is LEFT is the walltime asked for
 # minus the walltime used, and both are attributes on the job.
 #
 # `qselect` first for the reason `BatchLauncher._PBS_POLL` gives: `-u` silently overrides `-f`.
@@ -172,8 +180,8 @@ ids=\$(qselect -u "\$USER" 2>/dev/null)
 [ -n "\$ids" ] || exit 0
 qstat -f \$ids 2>/dev/null | awk -v want=$(shq(name)) '
   function out() {
-    if (n == want && n != "") print id "|" s "|" eh "|" wt "|" used
-    id = ""; n = ""; s = ""; eh = ""; wt = ""; used = ""
+    if (n == want && n != "") print id "|" s "|" eh "|" wt "|" used "|" est "|" cm
+    id = ""; n = ""; s = ""; eh = ""; wt = ""; used = ""; est = ""; cm = ""
   }
   function val()  { v = substr(\$0, index(\$0, "= ") + 2); sub(/[ \\t\\r]+\$/, "", v); return v }
   /^Job Id:/                            { out(); id = substr(\$0, index(\$0, ":") + 2); sub(/[ \\t\\r]+\$/, "", id) }
@@ -182,6 +190,8 @@ qstat -f \$ids 2>/dev/null | awk -v want=$(shq(name)) '
   /^[ \\t]*exec_host = /                 { eh = val() }
   /^[ \\t]*Resource_List.walltime = /    { wt = val() }
   /^[ \\t]*resources_used.walltime = /   { used = val() }
+  /^[ \\t]*estimated.start_time = /       { est = val() }
+  /^[ \\t]*comment = /                   { cm = val() }
   END                                   { out() }'
 """
 
@@ -219,9 +229,23 @@ function find_allocation(kind::Symbol, host::AbstractString, name::AbstractStrin
                kind === :slurm ? first_node(strip(f[3])) : pbs_first_node(strip(f[3]))
         left = length(f) >= 4 ? String(strip(f[4])) : ""
         kind === :pbs && (left = _pbs_timeleft(left, length(f) >= 5 ? strip(f[5]) : ""))
-        return Allocation(String(name), String(strip(f[1])), state, node, left)
+        at(i) = length(f) >= i ? String(strip(f[i])) : ""
+        start, why = state === :pending ? (kind === :slurm ? (at(5), at(6)) : (at(6), at(7))) : ("", "")
+        cpus = kind === :slurm ? something(tryparse(Int, at(7)), 0) : 0
+        return Allocation(String(name), String(strip(f[1])), state, node, left;
+                          start = _start_time(start), reason = why in ("None", "(null)") ? "" : why, cpus)
     end
     return Allocation(String(name), "", :none, "", "")
+end
+
+# A planned start as it reads beside a queued job: the time alone when it is today. SLURM prints
+# `2026-10-02T07:40:00`, or `N/A` before it has planned one; PBS's form is shown as it comes.
+function _start_time(s::AbstractString)
+    s = strip(String(s))
+    (isempty(s) || s in ("N/A", "Unknown")) && return ""
+    m = match(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})", s)
+    m === nothing && return String(s)
+    return m.captures[1] == Libc.strftime("%Y-%m-%d", time()) ? String(m.captures[2]) : m.captures[1] * " " * m.captures[2]
 end
 
 # What is left of a PBS allocation, which the scheduler does not report directly.
@@ -245,7 +269,7 @@ end
 # follow up. The node is reached with `srun --overlap`, which joins the running job either way.
 # The catalogued options a region carries, spelled for the scheduler it is asking. The catalogue and
 # the spellings are `Sweep.sched_options()` and `BatchLauncher.sbatch_flag`/`pbs_flag` — the same
-# ones a sweep cell edits and submits against, so one cluster described twice says one thing.
+# ones a job cell edits and submits against, so one cluster described twice says one thing.
 #
 # An option this scheduler cannot express is DROPPED, not guessed at. The catalogue already knows
 # which those are: `pbs_flag` answers "" when PBS has no way to say it, and a `select=…` fragment
@@ -297,25 +321,49 @@ function _option_args(kind::Symbol, options)
     return args
 end
 
-function _slurm_request_script(name; walltime, partition, cpus, mem, gpus, account, extra,
-                               options = Dict{String,String}())
-    args = String["-J", shq(name), "-t", shq(walltime), "-o", "/dev/null"]
+# What the request asks for, as SLURM flags, whichever command carries it.
+function _slurm_request_args(name; walltime, partition, cpus, mem, gpus, account, extra,
+                             options = Dict{String,String}())
+    args = String["-J", shq(name), "-t", shq(walltime)]
     # `cpus` is cores for the single task, the same meaning it carries on the batch path
     # (`_SBATCH_RENAME`). `-n` is `--ntasks`, which would fan every command in the node out
     # once per core.
     cpus > 0 && append!(args, ["--ntasks", "1", "--cpus-per-task", string(cpus)])
     isempty(partition) || append!(args, ["-p", shq(partition)])
-    isempty(mem)       || append!(args, ["--mem", shq(mem)])
+    (isempty(mem) || BatchLauncher.queue_default(mem)) || append!(args, ["--mem", shq(mem)])
     isempty(gpus)      || append!(args, ["--gpus", shq(gpus)])
     isempty(account)   || append!(args, ["-A", shq(account)])
     append!(args, _option_args(:slurm, options))
     isempty(extra)     || push!(args, extra)
+    return args
+end
+
+function _slurm_request_script(name; kw...)
+    args = _slurm_request_args(name; kw...)
     return """
-    sbatch $(join(args, " ")) 2>&1 <<'SLATE_HOLD_EOF'
+    sbatch -o /dev/null $(join(args, " ")) 2>&1 <<'SLATE_HOLD_EOF'
     #!/bin/sh
     # Slate holds this node for a notebook. SLURM ends the job at its walltime.
     sleep 2147483647
     SLATE_HOLD_EOF
+    """
+end
+
+# An interactive QOS takes no batch jobs, so the same request goes through `salloc`. `--no-shell`
+# makes it exit once the node is granted and leave the allocation held, as the sleeping batch job
+# does. It waits until then, so it runs detached on the login node and the session is not held while
+# the queue decides. What it said in its first seconds comes back: queued, or why not. Until the
+# grant the request lives in that process, so a login node going down takes it with it.
+function _slurm_salloc_script(name; kw...)
+    args = _slurm_request_args(name; kw...)
+    log = "\$HOME/.cache/kaimonslate/salloc-" * replace(String(name), r"[^A-Za-z0-9._-]" => "_") * ".log"
+    return """
+    mkdir -p "\$HOME/.cache/kaimonslate"; L="$log"; D=\$(command -v setsid || true)
+    \$D nohup salloc --no-shell $(join(args, " ")) > "\$L" 2>&1 < /dev/null &
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      sleep 1; grep -qE 'job allocation|queued and waiting|error' "\$L" 2>/dev/null && break
+    done
+    cat "\$L"
     """
 end
 
@@ -325,7 +373,7 @@ function _pbs_request_script(name; walltime, partition, cpus, mem, gpus, account
                             options = Dict{String,String}())
     res = Dict{Symbol,Any}()
     cpus > 0 && (res[:cpus] = cpus)
-    isempty(mem)  || (res[:mem] = String(mem))
+    (isempty(mem) || BatchLauncher.queue_default(mem)) || (res[:mem] = String(mem))
     isempty(gpus) || (res[:gpus] = String(gpus))
     # `defaults = false`: an allocation states only what was asked for, so an unset memory is the
     # queue's own default rather than a number Slate invented — the same as `salloc` above.
@@ -357,14 +405,27 @@ function request_allocation!(kind::Symbol, host::AbstractString, name::AbstractS
                              cpus::Integer = 1, mem::AbstractString = "",
                              gpus::AbstractString = "", account::AbstractString = "",
                              extra::AbstractString = "",
-                             options = Dict{String,String}())
+                             options = Dict{String,String}(), submit::AbstractString = "")
     cur = find_allocation(kind, host, name)
     cur.state === :none || return cur   # already held, or unreachable — either way, do not submit
-    mk = kind === :slurm ? _slurm_request_script :
+    mk = kind === :slurm ? (submit == "salloc" ? _slurm_salloc_script : _slurm_request_script) :
          kind === :pbs   ? _pbs_request_script : _unsupported_scheduler(kind)
     ok, out = run_there(host, mk(name; walltime, partition, cpus, mem, gpus, account, extra, options))
-    ok || @debug "allocation request failed" kind out
-    return find_allocation(kind, host, name)
+    a = find_allocation(kind, host, name)
+    a.state === :none || return a
+    # Nothing queued: the scheduler refused the request, and its words are the only account of why.
+    said = _refusal(out)
+    return Allocation(a.name, "", :none, "", "";
+                      said = isempty(said) ? (ok ? "the job ended as soon as it was queued" : "") : said)
+end
+
+# The scheduler's reason from a refused submission: its error lines, without the prefixes and the
+# generic trailer SLURM adds.
+function _refusal(out::AbstractString)
+    ls = [strip(replace(l, r"^(sbatch|salloc|qsub): (error: )?" => "")) for l in split(String(out), '\n')
+          if !isempty(strip(l)) && !occursin(r"^allocation failure: Unspecified error"i, strip(l)) &&
+             !occursin(r"^(Submitted batch job|salloc: (Pending|Granted) job allocation|salloc: job \d+ queued)"i, strip(l))]
+    return first(join(ls, " "), 400)
 end
 
 """

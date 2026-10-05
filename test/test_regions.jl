@@ -342,9 +342,9 @@ const RE = KaimonSlate.ReportEngine
                     # The site is prepared but this project was never tried here.
                     @test why() == NS.WAIT_NEEDS_PREPARE
                     # Tried: it goes on to placement (here, the opening run's wait).
-                    env = Dict{String,Any}(RE._proj_key(d) => Dict{String,Any}("project" => d, "load_s" => 1.0,
-                        "fingerprint" => RE._env_fingerprint(d, RE._infra_spec())))
-                    RE.region_set!("gpu"; readiness = merge(saved, Dict{String,Any}("envs" => env)))
+                    rg = RE.region_get("gpu")
+                    RE.record_env_test!(rg.host, d, RE.region_node_type(rg); by = "gpu", status = "ok",
+                                        depot = RE.region_depot(rg), load_s = 1.0)
                     lock(NS._OPENING_RUN_LOCK) do; push!(NS._OPENING_RUN, "needsprep"); end
                     @test why() == NS.WAIT_NOT_REQUESTED
                     # Its packages changed after they were tested: the install belongs in a prepare.
@@ -355,9 +355,11 @@ const RE = KaimonSlate.ReportEngine
                     @test only(values(RE.readiness_view(r)["envs"]))["changed"] === true
                     write(joinpath(d, "Project.toml"), "name = \"P\"\n")
                     @test why() == NS.WAIT_NOT_REQUESTED
-                    # A site that changed since sends it back through preparing.
-                    RE.region_set!("gpu"; readiness = merge(saved, Dict{String,Any}("envs" => env, "stale" => "changed")))
+                    # A machine that changed since sends it back through preparing.
+                    gh = RE.region_get("gpu").host
+                    RE.host_facts_merge!(gh, Dict{String,Any}("stale" => "changed"))
                     @test why() == NS.WAIT_NEEDS_PREPARE
+                    RE.host_facts_set!(gh, Dict{String,Any}())
                     # A region never prepared at all, likewise.
                     RE.region_set!("gpu"; readiness = Dict{String,Any}())
                     @test why() == NS.WAIT_NEEDS_PREPARE
@@ -368,6 +370,14 @@ const RE = KaimonSlate.ReportEngine
                     end
                     try
                         @test why() == NS.WAIT_PREPARING
+                        # A cell already waiting says what for, and the pill says preparing, not queued.
+                        RE.mark_blocked!(c, NS.WAIT_NEEDS_PREPARE, "login")
+                        NS._mark_region_preparing!(nb, "gpu")
+                        @test c.blocked == NS.WAIT_PREPARING
+                        # (Signed out outranks it: nothing can start until someone signs in.)
+                        w = only(filter(w -> w["side"] == "gpu", NS._workers_json(nb)))
+                        @test w["face"] == (get(w, "noteCode", "") == "not_signed_in" ? "signed out" : "preparing")
+                        @test get(w, "noteCode", "") == "not_signed_in" || occursin("being prepared", w["note"])
                         own = try; NS._region_kernel!(nb, "gpu"; preparing = true); ""
                               catch e; e isa NS.RegionWaiting ? e.why : "error"; end
                         @test own != NS.WAIT_PREPARING && own != NS.WAIT_NEEDS_PREPARE
@@ -390,6 +400,409 @@ const RE = KaimonSlate.ReportEngine
                     lock(NS._OPENING_RUN_LOCK) do; delete!(NS._OPENING_RUN, "needsprep"); end
                     RE.region_set!("gpu"; readiness = saved)
                 end
+            end
+
+            @testset "facts: one description of the hub, published as a diff" begin
+                # A worker entry as a fact holds still between real changes: no telemetry, and the
+                # instant a duration counts from rather than the duration.
+                f = NS._worker_fact(Dict{String,Any}("side" => "gpu", "stats" => "{}", "clockSamples" => 9,
+                                                     "clockRttMs" => 1.234, "walltimeLeft" => 600, "idleFor" => 12))
+                @test !haskey(f, "stats") && !haskey(f, "clockSamples") && f["clockRttMs"] == 1.2
+                @test abs(f["until"] - (time() + 600)) < 2 && abs(f["lastUsed"] - (time() - 12)) < 2
+                @test !haskey(f, "walltimeLeft") && !haskey(f, "idleFor")
+
+                rep = RE.parse_report("#%% code id=c\n1\n")
+                nb = NS.LiveNotebook("factsnb", joinpath(mktempdir(), "factsnb.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                hub = (lock = ReentrantLock(), notebooks = Dict{String,Any}("factsnb" => nb))
+                prev = NS._FACTS_HUB[]
+                ch = Channel{String}(16)
+                lock(() -> push!(NS._FACT_LISTENERS, ch), NS._FACT_LISTENERS_LOCK)
+                try
+                    NS._FACTS_HUB[] = hub
+                    lock(() -> empty!(NS._FACTS), NS._FACTS_LOCK)
+                    r1 = NS.facts_refresh!()
+                    first_frame = KaimonSlate.JSON.parse(take!(ch))
+                    r2 = NS.facts_refresh!()                      # nothing changed: nothing sent
+                    quiet = !isready(ch)
+                    delete!(hub.notebooks, "factsnb")
+                    r3 = NS.facts_refresh!()
+                    gone = KaimonSlate.JSON.parse(take!(ch))
+                    @test haskey(first_frame["set"], "worker/factsnb/") && first_frame["rev"] == r1
+                    # The region registry is published beside the workers.
+                    @test all(haskey(first_frame["set"], "region/" * r.name) for r in RE.regions())
+                    @test (r2, quiet) == (r1, true)
+                    @test r3 == r1 + 1 && "worker/factsnb/" in gone["del"]
+                    @test NS.facts_snapshot()["rev"] == r3
+                    # A worker no notebook holds sends its samples under the host and port its roster
+                    # lists it by.
+                    NS._telemetry_push!(hub, "slate-login-node-9106", (cpu = 3.0,))
+                    smp = KaimonSlate.JSON.parse(take!(ch))
+                    @test (smp["t"], smp["key"]) == ("sample", "roster/login-node:9106")
+                finally
+                    NS._FACTS_HUB[] = prev
+                    lock(() -> filter!(c -> c !== ch, NS._FACT_LISTENERS), NS._FACT_LISTENERS_LOCK)
+                end
+            end
+
+            @testset "a source change reaches its host copy, and only the change travels" begin
+                srcdir, dest = mktempdir(), mktempdir()
+                mkpath(joinpath(srcdir, "src", "sub")); mkpath(joinpath(srcdir, "ext"))
+                write(joinpath(srcdir, "src", "A.jl"), "a"); write(joinpath(srcdir, "src", "sub", "b.jl"), "b")
+                write(joinpath(srcdir, "notes.txt"), "n"); write(joinpath(srcdir, "src", "x.cov"), "c")
+                cp(srcdir, dest; force = true)                       # the copy as a provision left it
+                ex = [".git", "*.cov"]
+                @test sort!(collect(keys(RE._sync_files(srcdir, ex)))) == ["src/A.jl", "src/sub/b.jl"]
+                s = RE.SyncSource(srcdir)
+                d = RE.SyncDest("", dest, ex, "", RE._sync_files(srcdir, ex), Dict{String,Any}(), false)
+                write(joinpath(srcdir, "src", "sub", "b.jl"), "bb")  # a subfolder, a new extension, a removal
+                write(joinpath(srcdir, "ext", "E.jl"), "e"); rm(joinpath(srcdir, "src", "A.jl"))
+                write(joinpath(srcdir, "notes.txt"), "changed")      # outside what is watched
+                @test RE._sync_dest!(s, d, RE._sync_files(srcdir, ex))
+                @test (read(joinpath(dest, "src", "sub", "b.jl"), String), isfile(joinpath(dest, "ext", "E.jl")),
+                       isfile(joinpath(dest, "src", "A.jl")), read(joinpath(dest, "notes.txt"), String)) ==
+                      ("bb", true, false, "n")
+                @test d.sent == RE._sync_files(srcdir, ex)
+            end
+
+            @testset "a save reaches the copy without anything asking for it" begin
+                proj, dest = mktempdir(), mktempdir()
+                mkpath(joinpath(proj, "src")); write(joinpath(proj, "src", "P.jl"), "p")
+                cp(proj, dest; force = true)
+                t = RE.RemoteTarget(""; project = dest)
+                try
+                    RE.start_sync!(t, proj; sent = true)
+                    sleep(0.3)
+                    write(joinpath(proj, "src", "P.jl"), "edited")
+                    f = joinpath(dest, "src", "P.jl")
+                    @test timedwait(() -> read(f, String) == "edited", 5.0; pollint = 0.05) === :ok
+                finally
+                    RE.stop_sync!(t)
+                end
+                @test !haskey(RE._SYNC_SOURCES, proj)
+            end
+
+            @testset "one watch per source directory, kept while a kernel uses a copy of it" begin
+                proj = mktempdir(); mkpath(joinpath(proj, "src")); write(joinpath(proj, "src", "P.jl"), "p")
+                t1 = RE.RemoteTarget("synchost"; project = "~/r/one", job = "5")
+                t2 = RE.RemoteTarget("synchost"; project = "~/r/two", job = "5")
+                RE.start_sync!(t1, proj; sent = true); RE.start_sync!(t2, proj; sent = true)
+                @test length(lock(() -> RE._SYNC_SOURCES[proj].dests, RE._SYNC_LOCK)) == 2
+                RE.stop_sync!(t1)
+                @test haskey(RE._SYNC_SOURCES, proj)                 # the other kernel still uses it
+                RE.stop_sync_job!("synchost", "5")
+                @test !haskey(RE._SYNC_SOURCES, proj)
+            end
+
+            @testset "a worker's process is read from outside when it sends nothing" begin
+                r = NS._proc_cpu_rss(getpid())
+                @test r !== nothing && r[1] > 0 && r[2] > 0
+                @test NS._proc_cpu_rss(typemax(Int32)) === nothing    # no such process
+            end
+
+            @testset "a worker's crash is reported where it happened" begin
+                log = """
+                [ Info: slate eval: ran cell
+                └  cell = "more_imports"
+
+                [44773] signal 11 (2): Segmentation fault: 11
+                in expression starting at cell:model_cycles:2
+                potential_derivatives at /src/potentialgrid.jl:0 [inlined]
+                #_qfm_system#262 at /src/qfm.jl:81
+                closed_orbit at /src/cycles.jl:35 [inlined]
+                unknown function (ip: 0x70361d458b) at (unknown file)
+                jl_apply at julia.h:2394 [inlined]
+                start_task at task.c:1253
+                Allocations: 136699565 (Pool: 136696745; Big: 2820); GC: 62
+                """
+                @test RE.crash_report(log) == "signal 11 (2): Segmentation fault: 11, in cell model_cycles\n" *
+                    "  potential_derivatives at /src/potentialgrid.jl:0\n  #_qfm_system#262 at /src/qfm.jl:81\n" *
+                    "  closed_orbit at /src/cycles.jl:35"
+                @test RE.crash_report("[ Info: all fine\n") == ""
+            end
+
+            @testset "a node's worker is filed under its login host after its route is gone" begin
+                RE.region_set!("filedtest"; host = "loginx", scheduler = :slurm)
+                @test NS._filed_under(RE.RemoteTarget("nodey"; region = "filedtest")) == "loginx"
+                @test NS._filed_under(RE.RemoteTarget("loginx"; region = "filedtest")) == ""
+                @test NS._filed_under(RE.RemoteTarget("nodey")) == ""
+                RE.region_delete!("filedtest")
+            end
+
+            @testset "telemetry is watched only on workers this hub started and nothing holds" begin
+                ws = Any[Dict{String,Any}("port" => 9300, "alive" => true, "state" => "idle",
+                                          "manifest" => "{\"hub\":\"elsewhere\",\"stream_port\":\"9301\"}")]
+                RE._watch_roster!("not-signed-in.invalid", ws)     # no session: nothing to watch over
+                RE._watch_roster!("x", ws)                          # not ours either way
+                @test isempty(RE.watched_workers()) && isempty(RE._WATCH_DIALING)
+            end
+
+            @testset "a ▶ on a cell already running its code does not queue a second run" begin
+                rep = RE.parse_report("#%% code id=r\n1\n")
+                nb = NS.LiveNotebook("rerun", joinpath(mktempdir(), "rerun.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                nb.closed = true
+                c = only(rep.cells)
+                RE.mark_running!(c)
+                try
+                    NS.edit_cell!(nb, "r", c.source; force = true, run = false)
+                    @test c.state == RE.RUNNING && !("r" in get(NS._FORCE_RUN, "rerun", Set{String}()))
+                finally
+                    delete!(NS._FORCE_RUN, "rerun")
+                end
+            end
+
+            @testset "editing a locked cell without running it leaves no pending run" begin
+                rep = RE.parse_report("#%% code id=k locked\n1\n")
+                nb = NS.LiveNotebook("lockedit", joinpath(mktempdir(), "lockedit.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                nb.closed = true
+                pending() = "k" in get(NS._FORCE_RUN, "lockedit", Set{String}())
+                try
+                    NS.edit_cell!(nb, "k", "2"; run = false)
+                    quiet = pending()
+                    NS.edit_cell!(nb, "k", "3"; run = true)
+                    @test (quiet, pending()) == (false, true)
+                finally
+                    delete!(NS._FORCE_RUN, "lockedit")
+                end
+            end
+
+            @testset "held locked cells are re-armed once per worker connection" begin
+                rep = RE.parse_report("#%% code id=L locked region=gpu\n1\n")
+                nb = NS.LiveNotebook("rearm", joinpath(mktempdir(), "rearm.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                nb.closed = true                                  # no runner: the restale is what is under test
+                c = only(rep.cells)
+                hold!() = RE.mark_blocked!(c, NS.WAIT_LOCKED, "L")
+                k1, k2 = (conn = (name = "w1",),), (conn = (name = "w2",),)
+                hold!(); first_up = NS._rearm_locked!(nb, "gpu", k1)
+                hold!(); again = NS._rearm_locked!(nb, "gpu", k1)        # same worker: never again
+                state_again = c.state
+                new_worker = NS._rearm_locked!(nb, "gpu", k2)
+                @test (first_up, again, state_again, new_worker, c.state) == (1, 0, RE.BLOCKED, 1, RE.STALE)
+            end
+
+            @testset "each completed run is kept with when it started and ended" begin
+                rep = RE.parse_report("#%% code id=q\n1\n")
+                nb = NS.LiveNotebook("runlog", joinpath(mktempdir(), "runlog.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                c = only(rep.cells)
+                c.output = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "1", nothing, nothing, 250.0)
+                NS._run_log!(nb, "gpu", c)
+                r = only(NS._runs_since("runlog", "gpu", 0))
+                @test (r.id, round(r.t1 - r.t0; digits = 3), r.err) == ("q", 0.25, false)
+                @test isempty(NS._runs_since("runlog", "gpu", r.t1)) && isempty(NS._runs_since("runlog", "local", 0))
+            end
+
+            @testset "a kernel whose session was lost waits on that session" begin
+                k = RE.GateKernel(mktempdir())
+                @test NS._lost_session_of(k) == ""                    # never lost: nothing to wait on
+                NS._session_lost!(k, "lost-host.invalid")
+                waiting = NS._lost_session_of(k)
+                NS._session_regained!("lost-host.invalid")
+                @test (waiting, NS._lost_session_of(k)) == ("lost-host.invalid", "")
+            end
+
+            @testset "a region bring-up banner moves the version when it starts and ends" begin
+                rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
+                nb = NS.LiveNotebook("narrate", joinpath(mktempdir(), "narrate.jl"), rep, RE.GateKernel(mktempdir()), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                v0 = nb.version
+                stop = NS._narrate_region_bringup!(nb, nb.kernel, "gpu", "gpu (node)")
+                started = (nb.version, get(rep.meta, "hydrating", false), get(rep.meta, "hydratingKind", ""),
+                           get(rep.meta, "hydratingSide", ""))
+                # A second cell arriving during the same bring-up leaves the banner to the first.
+                NS._narrate_region_bringup!(nb, nb.kernel, "gpu", "gpu (node)")()
+                stop()
+                @test (started, nb.version, haskey(rep.meta, "hydrating"), haskey(rep.meta, "hydratingSide")) ==
+                      ((v0 + 1, true, "remote", "gpu"), v0 + 2, false, false)
+                # No bring-up ahead: no banner and no version change.
+                NS._narrate_region_bringup!(nb, RE.InProcessKernel(), "gpu", "gpu (node)")()
+                @test nb.version == v0 + 2
+            end
+
+            @testset "a running region cell is judged only by its own kernel" begin
+                rep = RE.parse_report("#%% code id=c region=gpu\nsleep(1)\n")
+                nb = NS.LiveNotebook("orphan", joinpath(mktempdir(), "orphan.jl"), rep, RE.GateKernel(mktempdir()), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                c = only(rep.cells)
+                # A worker not connected yet still has its bring-up ahead; an in-process kernel has none.
+                @test NS._region_bringup_pending(nb, nb.kernel)
+                @test !NS._region_bringup_pending(nb, RE.InProcessKernel())
+                c.state = RE.RUNNING
+                NS._RUN_SINCE[(nb.id, "c")] = time() - 60
+                sweep!(answered, asked) = (NS._LAST_RUNNING[nb.id] = (Set{String}(), Set(answered), Set(asked));
+                                           NS._reconcile_nb_runs!(nb))
+                try
+                    # The main kernel answers, the busy region worker misses its ping: nothing is known.
+                    sweep!(["local"], ["local", "gpu"]); sweep!(["local"], ["local", "gpu"])
+                    @test c.state == RE.RUNNING
+                    # No kernel for its region at all: nothing can be running it.
+                    sweep!(["local"], ["local"]); sweep!(["local"], ["local"])
+                    @test c.state == RE.STALE
+                finally
+                    delete!(NS._LAST_RUNNING, nb.id); delete!(NS._RUN_SINCE, (nb.id, "c"))
+                end
+            end
+
+            @testset "closing does not wait on a worker still starting" begin
+                # A close finds the kernel's lock held (a spawn in progress) and returns at once; the
+                # ending happens once the lock is free. A restart still waits, so it starts fresh.
+                k = RE.GateKernel(mktempdir())
+                held, release = Channel{Nothing}(1), Channel{Nothing}(1)
+                spawn = Threads.@spawn lock(k.lock) do; put!(held, nothing); take!(release); end   # as a spawn holds it
+                take!(held)
+                t0 = time(); RE.shutdown!(k; wait = false)
+                @test time() - t0 < 1.0 && k.closing
+                put!(release, nothing); wait(spawn)
+                t0 = time(); while k.closing && time() - t0 < 5; sleep(0.05); end
+                @test !k.closing && !k.close_kill
+                RE.shutdown!(k)                                  # wait = true takes the lock as before
+                @test !k.closing
+                # A closed notebook gets no region kernel, and its runner is not started.
+                rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
+                nb = NS.LiveNotebook("closed", joinpath(mktempdir(), "closed.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                nb.closed = true
+                @test_throws ErrorException NS._region_kernel!(nb, "gpu")
+                NS._ensure_runner!(nb)
+                @test !get(NS._RUNNERS, nb.id, false)
+                @test NS._restale_region_cells!(nb, "gpu") == 0
+            end
+
+            @testset "a notebook's opening run is not shown as a bundle being rebuilt" begin
+                rep = RE.parse_report("#%% code id=c\n1\n")
+                nb = NS.LiveNotebook("hyd", joinpath(mktempdir(), "hyd.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                # Hydrating with a saved preview and no kind: a live notebook's run, not a bundle's "env".
+                rep.meta["hydrating"] = true; rep.meta["preview"] = Dict{String,Any}()
+                kind() = (s = NS.state_json(nb); (s isa AbstractString ? KaimonSlate.JSON.parse(s) : s)["hydratingKind"])
+                @test kind() == "run"
+                rep.meta["hydratingKind"] = "env"; @test kind() == "env"        # a bundle says so itself
+                rep.meta["hydratingKind"] = "boot"; @test kind() == "boot"
+            end
+
+            @testset "GPU readings ride the telemetry sample" begin
+                # The sampler, loaded as the worker loads it. Without NVML (no NVIDIA driver here) it
+                # reports no GPUs rather than failing; its JSON round-trips through the hub's parser.
+                G = Module(:GpuStatsT)
+                Base.invokelatest(Base.include, G, joinpath(pkgdir(KaimonSlate), "src", "gpustats.jl"))
+                gs = Base.invokelatest(G.gpu_sample)
+                @test gs isa Vector
+                g1 = (i = 0, name = "A \"100\"", util = 80, util_max = 97, mem_util = 30, mem_used = Int64(4) << 30,
+                      mem_total = Int64(40) << 30, temp = 70, power_w = 250.5, power_limit_w = 250.0,
+                      sm_mhz = 1215, sm_max_mhz = 1410, throttle = ["power cap"], proc_mem = Int64(1) << 30)
+                g2 = merge(g1, (i = 1, util = 40, mem_used = Int64(2) << 30, proc_mem = Int64(-1)))
+                line = "{\"cpu\":1.0,\"gpus\":" * Base.invokelatest(G.gpu_sample_json, [g1, g2]) * ",\"ts\":1}"
+                s = RE._parse_telemetry(line)
+                @test length(s.gpus) == 2 && s.gpus[1].name == "A \"100\"" && s.gpus[2].util == 40
+                @test NS._gpu_util(s) == 60.0 && NS._gpu_mem(s) == Int64(6) << 30
+                @test Base.invokelatest(G.gpu_sample_json, NamedTuple[]) == "[]"
+                # A sample without GPUs, or from a worker that predates them, charts as -1.
+                s0 = RE._parse_telemetry("{\"cpu\":1.0,\"ts\":1}")
+                @test isempty(s0.gpus) && NS._gpu_util(s0) == -1 && NS._gpu_mem(s0) == -1
+                @test s.gpus[1].throttle == ["power cap"] && s.gpus[1].sm_max_mhz == 1410 && s.gpus[1].util_max == 97
+                # A worker that sends no peak reads its utilization as the peak.
+                @test RE._parse_telemetry("{\"cpu\":1.0,\"gpus\":[{\"i\":0,\"util\":12}],\"ts\":1}").gpus[1].util_max == 12
+            end
+
+            @testset "host, process and job figures ride the sample and are logged per notebook" begin
+                S = Module(:SysStatsT)
+                Base.invokelatest(Base.include, S, joinpath(pkgdir(KaimonSlate), "src", "sysstats.jl"))
+                smp = Base.invokelatest(S.SysSampler)
+                Base.invokelatest(S.sys_sample!, smp); sleep(0.2)
+                x = Base.invokelatest(S.sys_sample!, smp)
+                @test x.proc["threads"] >= 1 && haskey(x.proc, "alloc_rate") && x.host["ncpu"] >= 1   # on any OS
+                Sys.islinux() || @test !haskey(x.host, "cores")                  # Linux-only figures are absent
+                line = "{\"cpu\":1.0,\"running\":[\"c1\"],\"host\":{\"cores\":[10.0,90.0,60.0],\"mem_avail\":5}," *
+                       "\"proc\":" * Base.invokelatest(S.sys_json, x.proc) * ",\"job\":{\"mem_max\":100,\"mem_cur\":40},\"ts\":1}"
+                s = RE._parse_telemetry(line)
+                @test s.host["cores"] isa Vector{Float64} && s.job["mem_max"] == 100
+                # The log keeps a summary of the cores, and which cells were running.
+                d = KaimonSlate.JSON.parse(NS._telemetry_line("gpu", s))
+                @test d["side"] == "gpu" && d["running"] == ["c1"] && !haskey(d["host"], "cores")
+                @test d["host"]["cores_n"] == 3 && d["host"]["cores_max"] == 90.0 && d["host"]["cores_busy"] == 2
+                # Written per notebook and day; an earlier day is compressed, one past retention removed.
+                withenv("KAIMONSLATE_CACHE_HOME" => mktempdir()) do
+                    rep = RE.parse_report("#%% code id=c1\n1\n")
+                    nb = NS.LiveNotebook("tel", joinpath(mktempdir(), "tel nb.jl"), rep, RE.InProcessKernel(), 1,
+                                         String[], String[], ReentrantLock(), Channel{String}[],
+                                         ReentrantLock(), "", false, Dict{String,String}())
+                    NS._telemetry_log!(nb, "gpu", s)
+                    dir = NS.telemetry_dir(nb)
+                    today = KaimonSlate.NotebookServer.Dates.format(KaimonSlate.NotebookServer.Dates.now(), "yyyy-mm-dd")
+                    @test length(readlines(joinpath(dir, today * ".jsonl"))) == 1
+                    old = joinpath(dir, "2000-01-01.jsonl"); write(old, "{}\n")
+                    prev = string(KaimonSlate.NotebookServer.Dates.Date(today) - KaimonSlate.NotebookServer.Dates.Day(1))
+                    write(joinpath(dir, prev * ".jsonl"), "{}\n")
+                    NS._telemetry_tidy!(dir, today)
+                    @test !isfile(old) && isfile(joinpath(dir, prev * ".jsonl.zst")) && !isfile(joinpath(dir, prev * ".jsonl"))
+                end
+            end
+
+            @testset "the watchdog judges by capacity and behaviour" begin
+                GiB = Int64(2)^30
+                function smp(t; cpu = 50.0, running = String[], memmax = -1, memcur = -1, avail = -1,
+                             total = 0, gpus = "[]", psi = 0.0, gc = 0)
+                    job = memmax > 0 ? ",\"job\":{\"mem_max\":$memmax,\"mem_cur\":$memcur}" : ""
+                    host = ",\"host\":{\"mem_avail\":$avail,\"psi_mem\":$psi}"
+                    run = "[" * join(("\"$r\"" for r in running), ",") * "]"
+                    x = RE._parse_telemetry("{\"cpu\":$cpu,\"gc_ms\":$gc,\"running\":$run,\"sys_mem_total\":$total," *
+                                            "\"gpus\":$gpus$job$host,\"ts\":1}")
+                    merge(x, (rcv = t,))
+                end
+                kinds(al) = sort!([(a.kind, a.sev) for a in al])
+                T = 10_000.0
+                hist(f; n = 30, dt = 2.0) = [f(T - (n - k) * dt) for k in 1:n]
+                # Big work on a big box: 10 GiB of 250 GiB, a core pinned by a running cell. Nothing to say.
+                h = hist(t -> smp(t; cpu = 100.0, running = ["c1"], avail = 240GiB, total = 250GiB))
+                @test isempty(NS._kernel_alerts("pm", h; now = T))
+                # The job's limit is what counts, not the node's.
+                h = hist(t -> smp(t; memmax = 56GiB, memcur = 54GiB, avail = 150GiB, total = 250GiB))
+                @test kinds(NS._kernel_alerts("pm", h; now = T)) == [("memory-low", "crit")]
+                h = hist(t -> smp(t; memmax = 56GiB, memcur = 50GiB))
+                @test kinds(NS._kernel_alerts("pm", h; now = T)) == [("memory-low", "warn")]
+                # Growing toward the limit fast enough to run out within a minute.
+                h = [smp(T - (30 - k) * 2.0; memmax = 56GiB, memcur = 20GiB + k * GiB) for k in 1:30]
+                al = NS._kernel_alerts("pm", h; now = T)
+                @test kinds(al) == [("memory-low", "crit")] && occursin("out in about", only(al).detail)
+                # Busy with nothing running; and a cell running with nothing happening.
+                h = hist(t -> smp(t; cpu = 97.0); n = 16)
+                @test kinds(NS._kernel_alerts("pm", h; now = T)) == [("busy-idle", "warn")]
+                h = hist(t -> smp(t; cpu = 0.5, running = ["c1"]); n = 200)
+                al = NS._kernel_alerts("pm", h; now = T, quiet_cells = ["c1"])
+                @test kinds(al) == [("no-activity", "info")] && only(al).scope == "cell" && only(al).target == "c1"
+                @test isempty(NS._kernel_alerts("pm", h; now = T))          # not a code cell: a job waits by design
+                # GPUs: nearly full memory warns; heat holding the clocks down is for information; the power
+                # cap of a GPU working flat out is neither.
+                g(used, thr) = "[{\"i\":0,\"util\":99,\"mem_used\":$used,\"mem_total\":$(40GiB),\"throttle\":[$thr]}]"
+                @test kinds(NS._kernel_alerts("pm", hist(t -> smp(t; gpus = g(39GiB, "")); n = 3); now = T)) == [("gpu-memory", "warn")]
+                @test kinds(NS._kernel_alerts("pm", hist(t -> smp(t; gpus = g(GiB, "\"thermal (hardware)\"")); n = 3); now = T)) ==
+                      [("gpu-throttle", "info")]
+                @test isempty(NS._kernel_alerts("pm", hist(t -> smp(t; gpus = g(GiB, "\"power cap\"")); n = 3); now = T))
+                # Silent while a cell runs.
+                h = hist(t -> smp(t; running = ["c1"]); n = 3)
+                @test kinds(NS._kernel_alerts("pm", h; now = T + 60)) == [("unreachable", "crit")]
+            end
+
+            @testset "the supervisor's remote work for a region runs one at a time" begin
+                gate = Channel{Nothing}(1)
+                @test NS._region_work!(() -> take!(gate), "rw", :release)
+                @test !NS._region_work!(() -> nothing, "rw", :release)      # one in flight already
+                @test NS._region_work!(() -> nothing, "rw", :notice)        # another kind is its own
+                put!(gate, nothing)
+                t0 = time(); while ("rw", :release) in NS._REGION_WORK && time() - t0 < 5; sleep(0.02); end
+                @test NS._region_work!(() -> nothing, "rw", :release)       # free again once it finished
             end
 
             @testset "a cell whose input is waiting waits with it" begin
@@ -494,7 +907,7 @@ const RE = KaimonSlate.ReportEngine
             end
 
             # ── what the fixed fields cannot say ──────────────────────────────────────────────
-            # A region carries the same scheduler options a sweep cell does, spelled by the same
+            # A region carries the same scheduler options a job cell does, spelled by the same
             # catalogue, so one cluster described for a sweep and for a region says one thing.
             @testset "a region's scheduler options reach the request" begin
                 S = RE.Sweep
@@ -723,6 +1136,16 @@ const RE = KaimonSlate.ReportEngine
                 @test RE._host_for_files("elsewhere") == "elsewhere"
                 # SLURM joins the running job rather than logging in again.
                 @test occursin("srun --jobid=4242 --overlap", RE._in_allocation(v, "c1", "hostname"))
+                # A step that cannot start says so within a bound instead of holding the session.
+                @test occursin("--immediate=$(RE._STEP_START_S)", RE._in_allocation(v, "c1", "hostname"))
+                # A node that takes an ssh from its login node is reached that way, with no step, and
+                # the command still sees the job it is in.
+                lock(() -> push!(RE._NODE_SSH, "c1"), RE._VIA_LOCK)
+                cmd = RE._in_allocation(v, "c1", "hostname")
+                @test startswith(cmd, "ssh ") && !occursin("srun", cmd) && occursin("SLURM_JOB_ID=", cmd) && occursin("4242", cmd)
+                # The same job routed again keeps it; another job asks again.
+                RE.route!("c1", "login", "4242"); @test RE._node_by_ssh("c1")
+                RE.route!("c1", "login", "4243"); @test !RE._node_by_ssh("c1")
             finally
                 RE.route!("c1", "")
             end
@@ -822,13 +1245,18 @@ const RE = KaimonSlate.ReportEngine
                 @test occursin("through login", msg) && occursin("padlock", msg)
                 @test !occursin("ssh/config", msg) && !occursin("key-based", msg)
 
-                # A file syncer pointed at the node, as a worker on it would have started, and one
-                # sending to a host of the same name outside the job (a single-node cluster's login).
+                # A source copy kept for a worker on the node, and one for a host of the same name
+                # outside the job (a single-node cluster's login).
                 jobkey = RE._sync_base(RE.RemoteTarget("c9"; project = "proj", job = "77"))
                 @test jobkey == "c9#77:proj"
+                srcdir = mktempdir()
                 lock(RE._SYNC_LOCK) do
-                    RE._SYNCERS[jobkey] = RE.SyncWatcher(Task(() -> nothing), true)
-                    RE._SYNCERS["c9:other"] = RE.SyncWatcher(Task(() -> nothing), true)
+                    s = RE.SyncSource(srcdir)
+                    nosent = Dict{String,Tuple{Int,Float64}}()
+                    s.dests["c9:proj"] = RE.SyncDest("c9", "proj", String[], "", nosent, Dict{String,Any}(jobkey => nothing), false)
+                    s.dests["c9:other"] = RE.SyncDest("c9", "other", String[], "", copy(nosent),
+                                                      Dict{String,Any}("c9:other" => nothing), false)
+                    RE._SYNC_SOURCES[srcdir] = s
                 end
                 lock(RE._REGION_PLACE_LOCK) do
                     RE._REGION_PLACE["leased"] =
@@ -837,9 +1265,9 @@ const RE = KaimonSlate.ReportEngine
                 @test RE.region_host(r) == "login"             # past it: nothing placed, ask again
                 @test !RE._region_holds_node(r)
                 @test RE.via("c9") === nothing                 # the route goes with the allocation
-                @test !haskey(RE._SYNCERS, jobkey)             # …and so does the job's syncer
-                @test haskey(RE._SYNCERS, "c9:other")          # …and only the job's
-                lock(RE._SYNC_LOCK) do; delete!(RE._SYNCERS, "c9:other"); end
+                @test !haskey(RE._SYNC_SOURCES[srcdir].dests, "c9:proj")   # …and so does the job's copy
+                @test haskey(RE._SYNC_SOURCES[srcdir].dests, "c9:other")   # …and only the job's
+                lock(RE._SYNC_LOCK) do; delete!(RE._SYNC_SOURCES, srcdir); end
                 @test !haskey(RE._REGION_PLACE, "leased")
                 # An unrouted host keeps the plain advice — that one really is an ssh/config problem.
                 @test occursin("~/.ssh/config", RE._unreachable("workstation"))
@@ -874,10 +1302,12 @@ const RE = KaimonSlate.ReportEngine
                                    "stale" => "")
             RE.region_set!("prep"; readiness = rec)
             r = RE.region_get("prep")                   # through the file, as a restarted hub reads it
-            @test r.readiness["prologue"] == "module unload cudatoolkit"
             @test occursin("✓ Read the site", RE.readiness_text(r))
-            # The site's fix runs first, then the region's own.
-            @test RE._region_prologue("prep") == "{ module unload cudatoolkit ; module load x ; } && "
+            # The site's fix belongs to the machine and runs first; the region's own prologue after it.
+            RE.host_facts_merge!("login", Dict{String,Any}("site_prologue" => "module unload cudatoolkit"))
+            @test endswith(RE.machine_setup(RE.region_machine(r)), "{ module unload cudatoolkit ; } && ")
+            @test RE._region_prologue("prep") == "{ module load x ; } && "
+            @test occursin("site prologue: module unload cudatoolkit", RE.readiness_text(r))
             # Editing another field keeps the record.
             RE.region_set!("prep"; walltime = "00:10:00")
             @test RE.region_get("prep").readiness["liveness_grace_s"] == 120
@@ -896,7 +1326,7 @@ const RE = KaimonSlate.ReportEngine
         steps = Tuple{String,String}[]
         step(f, title) = (st = try; first(f()); catch; "fail"; end; push!(steps, (title, st)); st)
         ran = String[]
-        worker = (start = () -> nothing,
+        worker = (start = (_ = false) -> nothing,
                   run = code -> (push!(ran, code); "load=12.5\ncuda=true devices=4\nsyscuda=\n"))
         measured = Dict{String,Any}()
         RE._prepare_in_worker!(step, measured, "proj", worker)
@@ -906,7 +1336,7 @@ const RE = KaimonSlate.ReportEngine
         sent = only(ran)
         # A worker that does not come up is not asked to load anything.
         empty!(steps); empty!(ran)
-        RE._prepare_in_worker!(step, Dict{String,Any}(), "proj", (start = () -> error("no"), run = worker.run))
+        RE._prepare_in_worker!(step, Dict{String,Any}(), "proj", (start = (_ = false) -> error("no"), run = worker.run))
         @test steps == [("Start the notebook's worker", "fail")] && isempty(ran)
         # The code it sends runs in a module of its own (its imports are top-level there) and reports.
         mktempdir() do d
@@ -943,7 +1373,8 @@ const RE = KaimonSlate.ReportEngine
             rec = RE.prepare_region!("unreach")
             @test rec["ok"] == false
             @test rec["steps"][1]["status"] == "fail" && occursin("Sign in", rec["steps"][1]["step"])
-            @test isempty(rec["stamps"])                     # nothing was read, so nothing to compare
+            # Nothing was read, so the machine has nothing recorded to compare a start with.
+            @test isempty(RE.host_facts("slate-test-unreachable.invalid"))
             r = RE.region_get("unreach")
             @test r.readiness["report"] == rec["report"]
             reps = RE.prepare_reports("unreach")
@@ -1044,11 +1475,11 @@ const RE = KaimonSlate.ReportEngine
         saw = String[]
         prev = ST._ON_DROP[]
         try
-            ST.on_drop!(h -> push!(saw, h))
-            ST._announce_drop("login")
-            @test saw == ["login"]
+            ST.on_drop!((h, died) -> push!(saw, "$h:$died"))
+            ST._announce_drop("login"); ST._announce_drop("login", true)
+            @test saw == ["login:false", "login:true"]
             # A listener that throws must not break disconnecting — that would strand the session.
-            ST.on_drop!(_ -> error("boom"))
+            ST.on_drop!((_, _) -> error("boom"))
             @test ST._announce_drop("login") === nothing
         finally
             ST._ON_DROP[] = prev

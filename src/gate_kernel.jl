@@ -38,6 +38,10 @@ function effective_worker_threads(kthreads::AbstractString)
     return get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
 end
 
+# BLAS and OpenMP threads per worker. Each Julia thread may call into BLAS, so a library free to use
+# every core multiplies with the Julia threads and oversubscribes the machine.
+worker_blas_threads() = get(ENV, "KAIMONSLATE_BLAS_THREADS", "1")
+
 # The extra-flags string a worker would actually spawn with, given a per-kernel override
 # `kflags`: per-kernel override → global setting → env → "" (none). Mirrors `effective_worker_threads`.
 function effective_worker_extra_flags(kflags::AbstractString)
@@ -402,6 +406,11 @@ mutable struct GateKernel <: Kernel
                      # policy: `prepare!` then refuses to re-dial/cold-spawn until an EXPLICIT run clears
                      # it (a reactive cascade errors instead), so a flaky region isn't silently replaced
                      # behind the user's back. Always false under the `auto` policy (eager re-dial).
+    # Set by a `shutdown!` that found a spawn holding `lock`: the spawn ends its worker when it finishes
+    # (`_close_after_spawn!`), as `close_kill` says, and clears both. A kernel is reused after a shutdown
+    # (a restart prepares it again), so this marks one close in progress, not a dead kernel.
+    closing::Bool
+    close_kill::Bool
     online::Any      # optional `line::String -> nothing` callback: a COLD LOCAL spawn's stdout/stderr,
                      # streamed line-by-line (mirrors the remote path's `_bringup_note`/`_run_streamed`) —
                      # so a slow first-run precompile narrates itself into the UI instead of looking hung.
@@ -410,7 +419,7 @@ mutable struct GateKernel <: Kernel
                nbdir::AbstractString = "",
                pending::Vector = Any[], threads::AbstractString = "", extra_flags::AbstractString = "",
                label::AbstractString = "", target = nothing, online = nothing) =
-        new(String(project), String(parent), String(nbdir), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), String(extra_flags), false, String(label), target, nothing, 0, false, online)
+        new(String(project), String(parent), String(nbdir), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), String(extra_flags), false, String(label), target, nothing, 0, false, false, false, online)
 end
 
 """
@@ -442,16 +451,97 @@ function notebook_env_dir(path::AbstractString)
     ap = abspath(String(path))
     key = replace(splitext(basename(ap))[1], r"[^A-Za-z0-9_-]" => "_") *
           "-" * string(hash(ap) % 0xffffffff; base = 16, pad = 8)
-    return joinpath(first(DEPOT_PATH), "environments", "kaimonslate", key)
+    return joinpath(notebook_envs_root(), key)
+end
+
+# Where every notebook's own environment lives. KAIMONSLATE_NOTEBOOK_ENVS moves it, which the test
+# suite does so it leaves nothing in the depot.
+notebook_envs_root() = get(ENV, "KAIMONSLATE_NOTEBOOK_ENVS", "") |>
+    r -> isempty(r) ? joinpath(first(DEPOT_PATH), "environments", "kaimonslate") : r
+
+# The notebook an environment belongs to, written into it, so one whose notebook is gone can be found.
+const _NOTEBOOK_MARK = ".slate-notebook"
+function mark_notebook_env!(dir::AbstractString, notebook::AbstractString)
+    (isempty(notebook) || !isdir(dir)) && return nothing
+    f, ap = joinpath(dir, _NOTEBOOK_MARK), abspath(String(notebook))
+    (isfile(f) && read(f, String) == ap) && return nothing
+    try; write(f, ap); catch; end
+    return nothing
+end
+
+# What a notebook env may hold and still be nothing but an environment: anything else (a detached
+# notebook's assets and data live in its env dir) means it is never removed.
+const _ENV_ONLY = r"^(Julia)?(Project|Manifest)(-v\d+\.\d+)?\.toml$|^LocalPreferences\.toml$|^\.slate[-_]"
+
+function _has_deps(dir)
+    f = joinpath(dir, "Project.toml")
+    t = isfile(f) ? Pkg.TOML.tryparsefile(f) : nothing
+    return t isa AbstractDict && !isempty(get(t, "deps", Dict()))
+end
+
+# Notebook files under `roots` named one of `names` (`<name>.jl`), skipping hidden and vendored trees.
+function _notebooks_named(roots, names::Set{String})
+    found = Dict{String,Vector{String}}()
+    for root in roots, (dir, dirs, files) in walkdir(root; onerror = _ -> nothing)
+        filter!(d -> !startswith(d, '.') && !(d in ("node_modules", "Library", "compiled", "artifacts")), dirs)
+        for f in files
+            endswith(f, ".jl") || continue
+            n = replace(f[1:end-3], r"[^A-Za-z0-9_-]" => "_")
+            n in names && push!(get!(found, n, String[]), joinpath(dir, f))
+        end
+    end
+    return found
+end
+
+"""
+    prune_notebook_envs(; apply = false, roots = [homedir()], unmatched = false) -> Vector{NamedTuple}
+
+Each notebook env under `notebook_envs_root()` with what happens to it: `:keep` or `:remove`, why, and
+its size. Removed: an env whose notebook (named by its `.slate-notebook`) is gone, and an env that
+holds only a `Project.toml` with no packages, which opening its notebook recreates. An env with no
+record is looked for among the notebooks under `roots` by the path hash in its name, and marked when
+found; one that matches no notebook is `:unmatched`, removed only with `unmatched = true`. An env that
+holds anything but environment files is always kept. Nothing is deleted unless `apply`.
+"""
+function prune_notebook_envs(; apply::Bool = false, roots = [homedir()], unmatched::Bool = false)
+    root = notebook_envs_root()
+    isdir(root) || return NamedTuple[]
+    dirs = [joinpath(root, d) for d in readdir(root) if isdir(joinpath(root, d))]
+    name(d) = replace(basename(d), r"-[0-9a-f]{8}$" => "")
+    bytes(d) = sum((filesize(joinpath(r, f)) for (r, _, fs) in walkdir(d) for f in fs); init = 0)
+    unknown = [d for d in dirs if !isfile(joinpath(d, _NOTEBOOK_MARK)) && _has_deps(d)]
+    cands = isempty(unknown) ? Dict{String,Vector{String}}() : _notebooks_named(roots, Set(name.(unknown)))
+    out = NamedTuple[]
+    for d in dirs
+        verdict, why = if any(f -> !occursin(_ENV_ONLY, f), readdir(d))
+            :keep, "holds files besides its environment"
+        elseif isfile(joinpath(d, _NOTEBOOK_MARK))
+            nb = strip(read(joinpath(d, _NOTEBOOK_MARK), String))
+            isfile(nb) ? (:keep, nb) : (:remove, "notebook gone: " * nb)
+        elseif !_has_deps(d)
+            :remove, "no packages"
+        else
+            nb = findfirst(p -> notebook_env_dir(p) == d, get(cands, name(d), String[]))
+            if nb === nothing
+                (unmatched ? :remove : :unmatched), "no notebook found for it"
+            else
+                p = cands[name(d)][nb]; mark_notebook_env!(d, p); (:keep, p)
+            end
+        end
+        push!(out, (; dir = d, verdict, why, bytes = bytes(d)))
+        (apply && verdict === :remove) && (try; rm(d; recursive = true); catch; end)
+    end
+    return out
 end
 
 # Ensure a notebook env exists on disk (an empty `Project.toml` is enough for the worker
 # to activate it and for `Pkg.add` to populate it). Seeds `[deps]` from `seed_toml` when
 # given (the reproducibility footer's embedded notebook Project.toml).
-function ensure_notebook_env!(dir::AbstractString; seed_toml::AbstractString = "")
+function ensure_notebook_env!(dir::AbstractString; seed_toml::AbstractString = "", notebook::AbstractString = "")
     mkpath(dir)
     proj = joinpath(dir, "Project.toml")
     isfile(proj) || write(proj, isempty(seed_toml) ? "" : seed_toml)
+    mark_notebook_env!(dir, notebook)
     return dir
 end
 
@@ -502,15 +592,51 @@ function _parse_telemetry(raw::AbstractString)
          # When the WORKER last had work, on ITS monotonic clock. Meaningless here until mapped
          # through `ClockTrack`; `-1` from a worker too old to report it.
          last_eval_mono = Float64(get(d, "last_eval_mono", -1.0)),
+         # One reading per GPU the worker's job can use (gpustats.jl); empty where there are none.
+         gpus    = _parse_gpus(get(d, "gpus", nothing)),
+         # Host, process and job (cgroup) figures (sysstats.jl), as the worker sent them: what a
+         # machine cannot say is absent, so these stay dictionaries rather than fixed fields.
+         host    = _dict_of(get(d, "host", nothing)),
+         proc    = _dict_of(get(d, "proc", nothing)),
+         job     = _dict_of(get(d, "job", nothing)),
          ts      = Float64(get(d, "ts", 0.0)),
-         rcv     = time())
+         rcv     = time(),
+         # "worker" when the worker sent it; "host" when the hub read it from outside the process.
+         src     = "worker",
+         # Set on the first sample after the sampler was held: for how long, and how much of that went
+         # to collections waiting for a thread to reach a safepoint, and to collecting.
+         stall   = _dict_of(get(d, "stall", nothing)))
     catch
         nothing
     end
 end
 
+_parse_gpus(x) = x isa AbstractVector ?
+    [(i = Int(get(g, "i", 0)), name = String(get(g, "name", "")), util = Int(get(g, "util", -1)),
+      util_max = Int(get(g, "util_max", get(g, "util", -1))),
+      mem_util = Int(get(g, "mem_util", -1)), mem_used = Int64(get(g, "mem_used", -1)),
+      mem_total = Int64(get(g, "mem_total", -1)), temp = Int(get(g, "temp", -1)),
+      power_w = Float64(get(g, "power_w", -1.0)), power_limit_w = Float64(get(g, "power_limit_w", -1.0)),
+      sm_mhz = Int(get(g, "sm_mhz", -1)), sm_max_mhz = Int(get(g, "sm_max_mhz", -1)),
+      throttle = String[String(t) for t in get(g, "throttle", Any[])], proc_mem = Int64(get(g, "proc_mem", -1)))
+     for g in x if g isa AbstractDict] : NamedTuple[]
+
+# Number lists (the per-core figures, a few hundred a sample) are kept as plain vectors: the ring holds
+# an hour of samples per worker, and a list of boxed numbers costs several times as much.
+_dict_of(x) = x isa AbstractDict ?
+    Dict{String,Any}(String(k) => (v isa AbstractVector ? Float64[Float64(e) for e in v if e isa Real] : v)
+                     for (k, v) in x) : Dict{String,Any}()
+
 function _record_telemetry!(conn_name::AbstractString, raw::AbstractString)
     s = _parse_telemetry(raw); s === nothing && return nothing
+    isempty(s.stall) || _rlog("telemetry: $conn_name was held $(get(s.stall, "held_s", "?"))s — " *
+        "$(get(s.stall, "safepoint_s", "?"))s waiting for a thread to reach a GC safepoint, " *
+        "$(get(s.stall, "gc_s", "?"))s collecting")
+    return record_sample!(conn_name, s)
+end
+
+"Keep one telemetry sample for a kernel connection and pass it to the page, wherever it was taken."
+function record_sample!(conn_name::AbstractString, s)
     lock(_STATS_LOCK) do
         h = get!(_KERNEL_STATS, String(conn_name), Any[])
         push!(h, s)
@@ -614,6 +740,12 @@ function _ensure_poller!()
                     # human DISPLAY label (`display_name`) — once a session carries a notebook-filename
                     # label, display_name diverges from name and a `session_name` lookup silently misses,
                     # dropping every slate_refresh/progress/hot-reload event (dead reactivity).
+                    # A sample is the worker's, not a notebook's: kept whichever wire brought it (a
+                    # notebook's, a parked one, or one held only for telemetry).
+                    if m.channel == "slate_telemetry"
+                        _record_telemetry!(m.conn_name, String(m.data))
+                        continue
+                    end
                     rid = lock(_GATE_SESSION_LOCK) do; get(_GATE_SESSION, m.conn_name, nothing); end
                     rid === nothing && continue
                     if m.channel == "slate_refresh"
@@ -658,8 +790,6 @@ function _ensure_poller!()
                         end
                     elseif m.channel == "slate_emit_bin"      # a raw binary numeric frame (bytes carry channel+meta+dtype+shape+payload)
                         m.data isa Vector{UInt8} && push!(binemits, (rid, m.data))
-                    elseif m.channel == "slate_telemetry"     # worker's 2s sample — per-kernel ring + WS push
-                        _record_telemetry!(m.conn_name, String(m.data))
                     elseif m.channel == "slate_log"           # worker log record → live tail push (no store)
                         _relay_log!(m.conn_name, String(m.data))
                     elseif m.channel == "slate_prepare"       # env precompile progress → "Preparing packages" banner
@@ -845,7 +975,7 @@ function _spawn_worker!(k::GateKernel)
     # (small ops are faster single-threaded anyway; bump KAIMONSLATE_BLAS_THREADS for big dense
     # linear algebra). Julia's task threads PARK when idle — no spin; the interactive threads are
     # reserved for keeping the gate loop (heartbeats/cancels) + reactive handling snappy under load.
-    blas = get(ENV, "KAIMONSLATE_BLAS_THREADS", "1")
+    blas = worker_blas_threads()
     # Worker Julia threads ("<compute>,<interactive>"). Configurable via the Kaimon extension TUI panel
     # (NotebookServer sets WORKER_THREADS[]); env overrides; adaptive default below. More compute threads enable
     # true multi-core CPU parallelism for independent cells — note Julia 1.12's strict world-age for
@@ -969,6 +1099,50 @@ function _boot_failure_message(k::GateKernel)
     end
     print(io, "\n  full log: ", k.logpath)
     return String(take!(io))
+end
+
+"""
+    crash_report(log) -> String
+
+Julia's report of a fatal signal in a worker log, cut to what says where it happened: the signal, the
+cell it was running, and the frames of the code that was running, without Julia's own. `""` when the
+log holds none.
+"""
+function crash_report(log::AbstractString)
+    lines = split(String(log), '\n')
+    i = findlast(l -> occursin(r"signal \d+ \(\d+\): ", l), lines)
+    i === nothing && return ""
+    io = IOBuffer()
+    print(io, strip(replace(lines[i], r"^\[\d+\]\s*" => "")))
+    frames = 0
+    for l in @view lines[i+1:end]
+        s = strip(l)
+        (isempty(s) || startswith(s, "Allocations:")) && break
+        m = match(r"^in expression starting at cell:([^:]+)", s)
+        if m !== nothing
+            print(io, ", in cell ", m.captures[1]); continue
+        end
+        m = match(r"^(.+?) at (.+?:\d+)", s)
+        (m === nothing || occursin(r"^(unknown function|jl_|ijl_|_jl|start_task)", m.captures[1]) ||
+         occursin(r"\.(c|h|cpp):\d+$", m.captures[2])) && continue
+        print(io, "\n  ", m.captures[1], " at ", m.captures[2])
+        (frames += 1) >= 8 && break
+    end
+    return String(take!(io))
+end
+
+# The error a cell gets when its eval failed in transport: what ended the worker, if it ended. A worker
+# that crashed answers nothing, so the transport error alone says only that no reply came.
+function _eval_failure(k::GateKernel, e)
+    msg = sprint(showerror, e)
+    rep = try; crash_report(worker_log_tail(k; lines = 120)); catch; ""; end
+    if isempty(rep) && _worker_died(k)
+        sig = try; k.proc.termsignal; catch; 0; end
+        rep = sig > 0 ? "killed by signal $sig" * (sig == 9 ? " (the system may have run out of memory)" : "") :
+                        "exited (code $(try; k.proc.exitcode; catch; "?"; end))"
+    end
+    isempty(rep) && return msg
+    return "the worker crashed: " * rep * (isempty(k.logpath) ? "" : "\nfull log: " * k.logpath)
 end
 
 function _connect!(k::GateKernel)
@@ -1138,6 +1312,7 @@ function prepare!(k::GateKernel, report::Report; explicit::Bool = false)
             # connection reconnects on the next prepare (gate on `conn === nothing`).
             if k.conn === nothing
                 k.conn, k.tunnel = spawn_and_connect_remote!(k, k.target, k.parent)
+                k.closing && (_close_after_spawn!(k); error("this kernel was shut down while its worker started"))
                 lock(_GATE_SESSION_LOCK) do; _GATE_SESSION[k.conn.name] = report.id; end
                 _ensure_poller!()
                 # Carry the local memo store over NOW — the eval that triggered this prepare
@@ -1161,12 +1336,12 @@ function prepare!(k::GateKernel, report::Report; explicit::Bool = false)
             # locked-cell restores the open path just did).
             replaced = k.proc !== nothing
             _kill_worker!(k)                      # tear down a dead/old proc before replacing (no leak/orphan)
+            fork_refresh(k, report)               # a forked env behind its parent project is re-resolved first
             _spawn_worker!(k)
             _connect!(k)
             lock(_GATE_SESSION_LOCK) do; _GATE_SESSION[k.conn.name] = report.id; end   # route this worker's stream events back to the notebook
             _ensure_poller!()
             _reconstruct_env!(k)                  # env dir absent but footer has a delta → rebuild it
-            _maybe_sync_parent!(k)                # forked + parent drifted → re-resolve once, up front
             # A worker that DIED (OOM, segfault, an `exit()` in a cell) took every binding with it,
             # but the cells still record the state they were in when it was alive. Left alone, the
             # notebook claims to be fresh while nothing is defined, and the next run of a downstream
@@ -1210,8 +1385,6 @@ end
 _connect_deadline_local() = _rcfg("connect_deadline_local", "KAIMONSLATE_CONNECT_DEADLINE_LOCAL", 90.0)
 # Gate timeout for a package op (add/rm/reconstruct) — a heavy stack's resolve + precompile is minutes.
 _pkg_op_timeout()         = _rcfg("pkg_op_timeout",         "KAIMONSLATE_PKG_OP_TIMEOUT",         900.0)
-# Gate timeout for a parent-project /src sync.
-_sync_parent_timeout()    = _rcfg("sync_parent_timeout",    "KAIMONSLATE_SYNC_PARENT_TIMEOUT",    600.0)
 
 kernel_connected(k::GateKernel) = k.conn !== nothing
 
@@ -1250,6 +1423,11 @@ function _wire_to_output(wire)
                       hasproperty(wire, :live) && wire.live === true)
 end
 
+# A remote worker runs a cell only on the sources as they are here now (`sync_flush!`). A copy that
+# cannot be sent is logged there; the cell still runs, on what the host has.
+_flush_sources!(k::GateKernel) =
+    k.target isa RemoteTarget && (try; sync_flush!(k); catch e; _rlog("sync: flush before a cell failed — " * first(sprint(showerror, e), 160)); end)
+
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
                       region::AbstractString = "", regions::AbstractVector = String[])
     wire = try
@@ -1257,13 +1435,14 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         # surface as this cell's error, NOT propagate up through eval_stale!/sync_from_file! and 500
         # the whole `state` request (which bricks the notebook in the browser).
         prepare!(k, report)
+        _flush_sources!(k)
         # `filename` is a kwarg on the worker tool — GateTool strips optional POSITIONAL args, so it
         # must ride as a keyword (Dict key → kwarg) to survive the hop. See worker.jl `__slate_eval`.
         # `ctx_*` seed the worker's task-local Slate execution context (see `_build_slate_ctx`).
         _tool(k, "__slate_eval", Dict{String,Any}("source" => String(source), "filename" => String(filename),
               _ctx_args(report, region, regions, filename)...); timeout = _eval_timeout())
     catch e
-        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
+        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", _eval_failure(k, e), nothing, 0.0)
     end
     return _wire_to_output(wire)
 end
@@ -1286,14 +1465,14 @@ _ctx_args(report::Report, region::AbstractString, regions::AbstractVector,
     # walltime/partition/memory, which belong to the cell rather than to its code. Wired as
     # `"k=v"` strings because the gate's tool args carry no dict type.
     "ctx_attrs"    => _attr_args(report, filename),
-    # This machine's named compute targets, flattened to `"<cluster>.<key>=<value>"` so a sweep cell
+    # This machine's named compute targets, flattened to `"<cluster>.<key>=<value>"` so a job cell
     # can say `cluster=hpc` and have the definition resolved where the sweep actually runs.
     "ctx_clusters" => _cluster_args(report))
 
 # From the machine's registry: a cluster is a machine, and the same one is referenced by every
 # notebook that names it and by any region on it.
 function _cluster_args(::Report)
-    reg = try; clusters_all(); catch; Dict{String,Any}[]; end
+    reg = try; clusters_resolved(); catch; Dict{String,Any}[]; end
     return String[string(get(c, "name", ""), ".", k, "=", v)
                   for c in reg
                   for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]
@@ -1306,11 +1485,11 @@ function _attr_args(report::Report, filename::AbstractString)
     for c in report.cells
         c.id == cid && (d = Dict{String,String}(cell_attrs(c)); break)
     end
-    # The cell's footer-stored scheduler options (`Slate.sweep`) go OVER its header attrs. The two
+    # The cell's footer-stored scheduler options (`Slate.job`) go OVER its header attrs. The two
     # say the same kind of thing, but only the footer can hold a value with an `=` or a space in it,
     # so it is where the editor writes and where the answer must come from when both name a setting.
     # Merged here rather than downstream so everything reading `ctx.attrs` sees one resolved view.
-    sw = get(report.meta, "sweepopts", nothing)
+    sw = get(report.meta, "jobopts", nothing)
     if sw !== nothing
         for (k, v) in get(sw, cid, Dict{String,String}()); d[String(k)] = String(v); end
     end
@@ -1450,6 +1629,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
     (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions)
     wire = try
         prepare!(k, report)
+        _flush_sources!(k)
         _tool(k, "__slate_eval", Dict{String,Any}(
             "source" => String(source), "filename" => String(filename),
             _ctx_args(report, region, regions, filename)...,
@@ -1460,12 +1640,14 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
             # so older 3-field memo tuples (agent scratch evals) still work.
             "memo_force" => (hasproperty(memo, :force) && memo.force === true),
             "memo_always" => (hasproperty(memo, :always) && memo.always === true),
+            # a locked cell not run by its own ▶: restore, or report that there was nothing to restore
+            "memo_restore_only" => (hasproperty(memo, :restore_only) && memo.restore_only === true),
             # names nothing downstream reads — display objects among them store as wire-image only
             "memo_unread" => (hasproperty(memo, :unread) ? collect(String, memo.unread) : String[]),
             # names nothing downstream MUTATES — restore may zero-copy (mmap/arrow view)
             "memo_safe" => (hasproperty(memo, :safe) ? collect(String, memo.safe) : String[])); timeout = _eval_timeout())
     catch e
-        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
+        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", _eval_failure(k, e), nothing, 0.0)
     end
     return _wire_to_output(wire)
 end
@@ -1823,7 +2005,8 @@ function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::Abstrac
         (r isa AbstractDict && get(r, :ok, get(r, "ok", false)) == false) &&
             return Dict{String,Any}("ok" => false, "message" => "fork failed: " * string(get(r, :message, get(r, "message", "?"))))
         k.project = k.envdir                        # the worker is now on the forked env
-        _write_parent_marker!(k)                    # record the parent baseline we seeded from
+        stamp_env!(k.envdir, k.parent)              # record the parent this fork was seeded from
+        isempty(k.nbdir) || mark_notebook_env!(k.envdir, joinpath(k.nbdir, k.label))
     end
     try
         # Generous timeout — Pkg.add of a heavy package (a full Makie stack, etc.) resolves + precompiles
@@ -1849,19 +2032,21 @@ function registry_add(k::GateKernel, report::Report, url::AbstractString)
     end
 end
 
-# Hash of the parent's Manifest (its content) — the baseline a forked env was seeded from.
-# Stored in the env as a marker so we can detect parent drift and auto re-resolve on open.
-# `parent_manifest` resolves it the way the loader does, so a workspace member reads the shared
-# manifest at the workspace root rather than a `Manifest.toml` it does not have.
-function _parent_manifest_hash(parent::AbstractString)
-    isempty(parent) && return ""
-    mf = parent_manifest(parent)
-    isempty(mf) && return ""
-    return string(hash(read(mf, String)); base = 16)
-end
-_parent_marker_path(k::GateKernel) = joinpath(k.envdir, ".slate_parent_manifest")
-function _write_parent_marker!(k::GateKernel)
-    try; isempty(k.envdir) || write(_parent_marker_path(k), _parent_manifest_hash(k.parent)); catch; end
+# A notebook's forked env follows its parent project: when the parent has changed since the fork was
+# seeded (a dependency added, a re-resolve), the fork is re-resolved before a worker starts in it, or
+# the worker fails to load a package the parent now needs. The hub installs the rebuild
+# (`_rebuild_notebook_env!`), since it knows the notebook's own packages, which the re-seed from the
+# parent does not.
+const FORK_REFRESH = Ref{Any}(nothing)
+function fork_refresh(k::GateKernel, report)
+    f = FORK_REFRESH[]
+    f === nothing && return false
+    try
+        return f(k, report) === true
+    catch e
+        _rlog("fork: re-resolving $(basename(k.envdir)) failed — " * first(sprint(showerror, e), 160))
+        return false
+    end
 end
 
 # Rebuild a notebook env from its `.jl` footer when the env dir is absent (e.g. a fresh
@@ -1873,27 +2058,11 @@ function _reconstruct_env!(k::GateKernel)
         _tool(k, "__slate_reconstruct",
               Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent, "pkgs" => k.pending);
               timeout = _pkg_op_timeout())
-        _write_parent_marker!(k)
+        stamp_env!(k.envdir, k.parent)
         empty!(k.pending)   # clear ONLY on success — a failed rebuild keeps `pending` so the next use retries
     catch e
         e isa InterruptException && rethrow()
         @warn "KaimonSlate: notebook env reconstruction failed — keeping pending packages to retry" exception = (e, catch_backtrace())
-    end
-    return
-end
-
-# Auto re-resolve a forked notebook env when its parent's Manifest has changed since we
-# seeded it (keeps the one-env invariant: parent updates flow in, notebook adds preserved).
-function _maybe_sync_parent!(k::GateKernel)
-    (isempty(k.parent) || _base_mode(k)) && return
-    cur = _parent_manifest_hash(k.parent)
-    isempty(cur) && return
-    prev = try; isfile(_parent_marker_path(k)) ? read(_parent_marker_path(k), String) : ""; catch; ""; end
-    cur == prev && return
-    try
-        _tool(k, "__slate_sync_parent", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent); timeout = _sync_parent_timeout())
-        _write_parent_marker!(k)
-    catch
     end
     return
 end
@@ -1982,14 +2151,45 @@ process left running warm (namespace + packages + memo store) with its state sid
 a surviving worker would be wrong: an explicit restart (reattach would make it a no-op), the
 preflight probe, and reap. An ATTACHED worker (`k.remote`) is never ours to kill either way.
 """
-function shutdown!(k::GateKernel; kill_remote::Bool = false)
-    K = _kaimon()
-    lock(k.lock) do
-        # `send_shutdown!` tells the worker process to EXIT — only a local worker (or an explicit
-        # remote kill) gets it. An attached worker isn't ours; a detaching remote must keep running.
-        wants_exit = !(k.remote || (k.target isa RemoteTarget && !kill_remote))
-        (wants_exit && k.conn !== nothing) && (try; K.send_shutdown!(k.conn); catch; end)
-        _kill_worker!(k; kill_remote)   # proc === nothing for remote → no process kill; clears conn + routing
+function shutdown!(k::GateKernel; kill_remote::Bool = false, wait::Bool = true)
+    if wait                                # a restart: the worker is gone before it prepares again
+        lock(() -> _shutdown_locked!(k, kill_remote), k.lock)
+        return nothing
     end
+    # A close does not wait. A spawn holds the lock for as long as the worker takes to start, which can
+    # be minutes on a cluster: it sees `closing` when it finishes and ends the worker as this close
+    # asked. Anything else holding the lock is brief, and a task finishes the close after it.
+    k.close_kill = k.close_kill || kill_remote
+    k.closing = true
+    if trylock(k.lock)
+        try
+            _shutdown_locked!(k, k.close_kill); k.closing = false; k.close_kill = false
+        finally
+            unlock(k.lock)
+        end
+    else
+        Threads.@spawn lock(k.lock) do
+            k.closing || return             # the spawn ended it already
+            try; _shutdown_locked!(k, k.close_kill); catch; end
+            k.closing = false; k.close_kill = false
+        end
+    end
+    return nothing
+end
+
+function _shutdown_locked!(k::GateKernel, kill_remote::Bool)
+    # `send_shutdown!` tells the worker process to EXIT — only a local worker (or an explicit
+    # remote kill) gets it. An attached worker isn't ours; a detaching remote must keep running.
+    wants_exit = !(k.remote || (k.target isa RemoteTarget && !kill_remote))
+    (wants_exit && k.conn !== nothing) && (try; _kaimon().send_shutdown!(k.conn); catch; end)
+    _kill_worker!(k; kill_remote)   # proc === nothing for remote → no process kill; clears conn + routing
+    return nothing
+end
+
+# A worker that finished starting after its kernel was shut down: ended now, as the close asked.
+# Runs under `k.lock`, from the spawn that held it.
+function _close_after_spawn!(k::GateKernel)
+    try; _shutdown_locked!(k, k.close_kill); catch; end
+    k.closing = false; k.close_kill = false
     return nothing
 end

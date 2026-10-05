@@ -8,18 +8,24 @@
 # The notebook's own environment is not prepared here. It changes during a session, so it stays with
 # provisioning, which a matching fingerprint makes free.
 
+# The loaded modules, or nothing on a site without a module system. Asked of the shell first: the
+# error a missing `module` prints names the shell's path, which differs between the login node and a
+# compute node, and a stamp made of it reads as a changed site on every start.
+const _MODULES_LINE = raw"echo \"modules=$(type module >/dev/null 2>&1 && module -t list 2>&1 | grep -v ':$' | sort | tr '\n' ' ')\""
+
 # What the probe reads. One line per fact, `key=value`, so a site that lacks one tool loses one fact.
-const _PROBE_SCRIPT = raw"""
+const _PROBE_SCRIPT = replace(raw"""
 echo "arch=$(uname -m)"
 echo "cpu=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//')"
 echo "cores=$(nproc 2>/dev/null)"
 echo "home=$HOME"
-echo "modules=$( (module -t list 2>&1) 2>/dev/null | grep -v ':$' | tr '\n' ' ')"
+MODULES_LINE
 echo "cudalibs=$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -i cuda | tr '\n' ' ')"
 echo "julia=$(PATH="$HOME/.juliaup/bin:$PATH" julia --version 2>/dev/null)"
 echo "gpus=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
 echo "gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
-"""
+echo "scratch=${SCRATCH:-${PSCRATCH:-}}"
+""", "MODULES_LINE" => _MODULES_LINE)
 
 function _parse_probe(out::AbstractString)
     d = Dict{String,String}()
@@ -48,10 +54,10 @@ end
 _grace_for(load_s::Real; floor_s::Real = 45) = max(Int(floor_s), ceil(Int, 2 * load_s + 30))
 
 # The fingerprints a start compares against the record. A start reads them as part of `_host_state`.
-const _STAMP_SCRIPT = raw"""
+const _STAMP_SCRIPT = replace(raw"""
 echo "julia=$(PATH="$HOME/.juliaup/bin:$PATH" julia --version 2>/dev/null)"
-echo "modules=$( (module -t list 2>&1) 2>/dev/null | grep -v ':$' | sort | tr '\n' ' ')"
-"""
+MODULES_LINE
+""", "MODULES_LINE" => _MODULES_LINE)
 
 _stamps_of(facts::AbstractDict) = Dict{String,Any}(
     "julia" => get(facts, "julia", ""),
@@ -205,41 +211,163 @@ worker on a granted node to time its loads and check its GPUs. `project` (a note
 folder; the region's preload when empty) is installed and loaded on that node (on the host itself for
 a region without a scheduler), which is where CUDA is checked, and leaves the environment there ready
 for that project's first start. `keep_node` leaves the node held for the notebook that asked.
-`worker` is that notebook's own worker, as `(start = () -> …, run = code -> stdout)`: when given, the
+`worker` is that notebook's own worker, as `(start = fresh -> …, run = code -> stdout)` (`fresh` replaces a running one): when given, the
 packages are loaded in it rather than in a throwaway process, and it stays up for the notebook's cells.
 Returns the readiness record, which is
 also stored in the region. Runs to the end even when a step fails, recording each step's outcome, so
 one problem does not hide the next. Blocking; callers that cannot wait spawn it.
 """
 function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothing,
-                         project::AbstractString = "", keep_node::Bool = false, worker = nothing)
+                         project::AbstractString = "", keep_node::Bool = false, worker = nothing,
+                         rebuild_sysimage::Bool = false)
     r = region_get(name)
     r === nothing && error("no region '$name'")
     isempty(r.host) && error("region '$(r.name)' has no host")
     ref = _reference_env(isempty(strip(project)) ? r.preload : project)   # checked before anything runs
-    state = Dict{String,Any}("region" => r.name, "running" => true, "started" => time(),
-                             "steps" => Any[], "host" => r.host, "project" => ref[1],
-                             "id" => Dates.format(Dates.now(Dates.UTC), "yyyymmddTHHMMSS"))
-    lock(_PREPARING_LOCK) do
-        cur = get(_PREPARING, r.name, nothing)
-        (cur !== nothing && cur["running"] === true) && error("region '$(r.name)' is already being prepared")
-        _PREPARING[r.name] = state
-    end
+    host = r.host
+    m = region_machine(r)
     facts = Dict{String,Any}()
     measured = Dict{String,Any}()
+    finish = function (ok, state)
+        hostf = get(facts, "host", Dict{String,String}())
+        nodef = get(facts, "node", Dict{String,String}())
+        rt = Float64(get(measured, "runtime_load_s", 0.0))
+        prev = region_get(r.name)
+        old = prev === nothing ? Dict{String,Any}() : prev.readiness
+        isempty(hostf) || _record_site!(host, hostf, nodef, m.prologue * "\n" * r.prologue, state["id"])
+        # The region's part: the node, the loads timed there, and each project tested.
+        rec = Dict{String,Any}(
+            "prepared_at" => time(), "ok" => ok, "steps" => deepcopy(state["steps"]),
+            "facts" => isempty(nodef) ? Dict{String,Any}() : Dict{String,Any}("node" => nodef),
+            "measured" => rt > 0 ? Dict{String,Any}("runtime_load_s" => rt) : Dict{String,Any}(),
+            "liveness_grace_s" => rt > 0 ? _grace_for(rt) : 0,
+            "report" => state["id"])   # the full log is in the report, not here
+        # The project's load is the machine's to keep: a sweep on the same kind of node runs in it too.
+        if haskey(measured, "env_load_s")
+            el = Float64(measured["env_load_s"])
+            try
+                record_env_test!(host, ref[1], region_node_type(r); by = r.name,
+                    status = String(get(measured, "env_status", "ok")), depot = machine_depot(m),
+                    load_s = el, liveness_grace_s = _grace_for(rt + el), cuda = get(measured, "cuda", nothing),
+                    report = state["id"])
+            catch e
+                _rlog("prepare[$(r.name)]: could not record the environment's test — $(sprint(showerror, e))")
+            end
+        end
+        # The image its workers boot from, when this prepare built one or found it current; an earlier
+        # one stands otherwise.
+        m = get(measured, "sysimage", nothing)
+        if m isa AbstractDict && get(m, "result", "") in ("built", "current")
+            rec["sysimage"] = _sysimage_record(m)
+        elseif haskey(old, "sysimage")
+            rec["sysimage"] = old["sysimage"]
+        end
+        # A prepare that reached no node keeps what an earlier node stage found.
+        if isempty(nodef) && !isempty(old)
+            if rt == 0 && haskey(old, "measured")
+                rec["measured"] = old["measured"]
+                rec["liveness_grace_s"] = get(old, "liveness_grace_s", 0)
+            end
+            of = get(old, "facts", nothing)
+            (of isa AbstractDict && haskey(of, "node")) && (rec["facts"]["node"] = of["node"])
+        end
+        try; region_set!(r.name; readiness = rec); catch e
+            _rlog("prepare[$(r.name)]: could not store the record — $(sprint(showerror, e))")
+        end
+        return rec
+    end
+    return _run_prepare(r.name, host, ref[1]; finish) do step, note
+        signed = _site_steps!(step, host, m, facts; own = r.prologue)
+        signed == "fail" && return
+        step("Worker runtime on $host") do
+            ("ok", _provision_runtime!(host))
+        end
+        if !isempty(r.data_root)
+            step("Data root $(r.data_root)") do
+                q = Sweep.shq_path(r.data_root)
+                ok, out = _run_on(host, "mkdir -p $q && test -w $q && echo ok")
+                (ok && occursin("ok", out)) ? ("ok", "exists and is writable") :
+                    ("fail", "cannot create or write it: " * first(strip(out), 200))
+            end
+        end
+        # Fetching the project's packages needs the network and nothing else, so on a cluster it
+        # happens here, on the login node, where it costs no allocation. They are compiled on a node.
+        if r.scheduler !== :none && !isempty(ref[1])
+            step("Download $(basename(ref[1]))'s packages") do
+                t = _region_target(r; origin_env = ref[1], at = (String(host), ""))
+                provision_remote!(t, ref[2]; precompile = false)
+                ("ok", "")
+            end
+        end
+        run_node = node === nothing ? (r.scheduler !== :none && isempty(r.readiness)) : node
+        if r.scheduler === :none
+            _prepare_env!(r, step, measured, ref, host, _region_prologue(r.name); worker, rebuild_sysimage)
+        elseif run_node
+            _prepare_on_node!(r, step, facts, measured, ref; keep_node, note, worker, rebuild_sysimage)
+        end
+    end
+end
+
+# What a launch needs to know of a built image (`sysimage_plan`), kept in the region's readiness.
+_sysimage_record(m) = Dict{String,Any}(k => m[k] for k in ("key", "dir", "cpu", "image", "bytes", "packages",
+                                                           "spec", "listed", "built_at") if haskey(m, k))
+function _record_sysimage!(name, m)
+    r = region_get(name); r === nothing && return nothing
+    try
+        region_set!(r.name; readiness = merge(r.readiness, Dict{String,Any}("sysimage" => _sysimage_record(m))))
+    catch e
+        _rlog("prepare[$name]: could not record the sysimage — $(sprint(showerror, e))")
+    end
+    return nothing
+end
+
+# The machine's part of what a prepare found: what any worker or task on this host meets. Its stamps
+# and module fix are read on a node when one was, since a start compares them there; a prepare that
+# reached no node keeps what an earlier one read on a node.
+function _record_site!(host, hostf, nodef, own::AbstractString, id)
+    oldh = host_facts(host)
+    hf = Dict{String,Any}("prepared_at" => time(), "facts" => hostf, "report" => id, "stale" => "")
+    if !isempty(nodef)
+        merge!(hf, Dict{String,Any}("stamps" => _stamps_of(nodef), "stamps_from" => "node",
+                                    "site_prologue" => _site_prologue(nodef, own)))
+    elseif get(oldh, "stamps_from", "") == "node"
+        for k in ("stamps", "stamps_from", "site_prologue"); hf[k] = oldh[k]; end
+    else
+        merge!(hf, Dict{String,Any}("stamps" => _stamps_of(hostf), "stamps_from" => "host",
+                                    "site_prologue" => _site_prologue(hostf, own)))
+    end
+    try; host_facts_merge!(host, hf); catch e
+        _rlog("prepare: could not store what it found on $host — $(sprint(showerror, e))")
+    end
+    return nothing
+end
+
+# The machinery every prepare shares. Its progress is kept in `_PREPARING` under `key`, step by step;
+# everything logged while it runs lands in `key`'s trace, which the page shows as its activity; and a
+# report is written when it starts and after every step, so one cut off mid-way still says how far it
+# got. `body(step, note)` runs the steps; `finish(ok, state)` stores what they found and returns the
+# record. Both run when a step fails, and `finish` runs when the body throws.
+function _run_prepare(body, key::AbstractString, host::AbstractString, project::AbstractString; finish)
+    key = String(key)
+    state = Dict{String,Any}("region" => key, "running" => true, "started" => time(),
+                             "steps" => Any[], "host" => host, "project" => project,
+                             "id" => Dates.format(Dates.now(Dates.UTC), "yyyymmddTHHMMSS"))
+    lock(_PREPARING_LOCK) do
+        cur = get(_PREPARING, key, nothing)
+        (cur !== nothing && cur["running"] === true) && error("'$key' is already being prepared")
+        _PREPARING[key] = state
+    end
     ok_all = Ref(true)
-    # Every `_rlog` from here on, however deep, lands in this region's trace: the page shows it as the
-    # prepare's activity, and the record keeps its tail. Restored at the end, for a caller's own task.
-    region_trace_reset!(r.name)
-    lock(_REGION_TRACE_LOCK) do; _REGION_FULL_LOG[r.name] = String[]; end
+    region_trace_reset!(key)
+    lock(_REGION_TRACE_LOCK) do; _REGION_FULL_LOG[key] = String[]; end
     was_region = _current_rlog_region()
-    task_local_storage(:slate_rlog_region, r.name)
-    _write_report!(r.name, state)
+    task_local_storage(:slate_rlog_region, key)
+    _write_report!(key, state)
     function step(f, title)
         s = Dict{String,Any}("step" => title, "status" => "running", "detail" => "", "secs" => 0.0,
                              "started" => time())
         lock(_PREPARING_LOCK) do; push!(state["steps"], s); end
-        _write_report!(r.name, state)
+        _write_report!(key, state)
         t0 = time()
         status, detail = try
             f()
@@ -250,8 +378,8 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
             s["status"] = status; s["detail"] = String(detail); s["secs"] = round(time() - t0; digits = 1)
         end
         status == "fail" && (ok_all[] = false)
-        _rlog("prepare[$(r.name)]: $title — $status" * (isempty(detail) ? "" : ": $(first(detail, 300))"))
-        _write_report!(r.name, state)
+        _rlog("prepare[$key]: $title — $status" * (isempty(detail) ? "" : ": $(first(detail, 300))"))
+        _write_report!(key, state)
         return status
     end
     # What a long step is doing now, shown under it while it runs and logged to the activity.
@@ -259,152 +387,115 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
         lock(_PREPARING_LOCK) do
             isempty(state["steps"]) || (state["steps"][end]["detail"] = String(text))
         end
-        _rlog("prepare[$(r.name)]: $text")
+        _rlog("prepare[$key]: $text")
         return nothing
     end
-    host = r.host
+    rec = Dict{String,Any}()
     try
-        signed = step("Sign in to $host") do
-            Sweep.connected(host) && return ("ok", "session already open")
-            ok, why = Sweep.connect_waiting!(host)
-            ok ? ("ok", "signed in with a key") :
-                ("fail", "could not sign in without a prompt" * (isempty(why) ? "" : ": " * first(strip(why), 300)) *
-                         " — use the padlock, then prepare again")
-        end
-        if signed != "fail"
-            step("Julia on $host") do
-                _ensure_julia!(host) || return ("fail", "no working julia after the install; see remote.log")
-                ok, out = _run_on(host, _julia_sh("julia --version"))
-                ok ? ("ok", strip(out)) : ("fail", strip(out))
-            end
-            step("Worker runtime on $host") do
-                ("ok", _provision_runtime!(host))
-            end
-            step("Read the site") do
-                ok, out = _run_on(host, _PROBE_SCRIPT)
-                ok || return ("fail", first(strip(out), 300))
-                merge!(facts, Dict("host" => _parse_probe(out)))
-                h = facts["host"]
-                ("ok", join(filter(!isempty, [get(h, "cpu", ""), get(h, "julia", ""),
-                                             isempty(get(h, "modules", "")) ? "" : "modules: " * h["modules"]]), " · "))
-            end
-            if !isempty(r.data_root)
-                step("Data root $(r.data_root)") do
-                    q = Sweep.shq_path(r.data_root)
-                    ok, out = _run_on(host, "mkdir -p $q && test -w $q && echo ok")
-                    (ok && occursin("ok", out)) ? ("ok", "exists and is writable") :
-                        ("fail", "cannot create or write it: " * first(strip(out), 200))
-                end
-            end
-            # Fetching the project's packages needs the network and nothing else, so on a cluster it
-            # happens here, on the login node, where it costs no allocation. They are compiled on a node.
-            if r.scheduler !== :none && !isempty(ref[1])
-                step("Download $(basename(ref[1]))'s packages") do
-                    t = _region_target(r; origin_env = ref[1], at = (String(host), ""))
-                    provision_remote!(t, ref[2]; precompile = false)
-                    ("ok", "")
-                end
-            end
-            run_node = node === nothing ? (r.scheduler !== :none && isempty(r.readiness)) : node
-            if r.scheduler === :none
-                _prepare_env!(r, step, measured, ref, host, _probed_prologue(r, facts); worker)
-            elseif run_node
-                _prepare_on_node!(r, step, facts, measured, ref; keep_node, note, worker)
-            end
-        end
+        body(step, note)
+    catch e
+        step(() -> ("fail", first(sprint(showerror, e), 600)), "Prepare")
     finally
-        hostf = get(facts, "host", Dict{String,String}())
-        nodef = get(facts, "node", Dict{String,String}())
-        seen = isempty(nodef) ? hostf : nodef         # the node is where the worker runs, when we got one
-        rt = Float64(get(measured, "runtime_load_s", 0.0))
-        prev = region_get(r.name)
-        old = prev === nothing ? Dict{String,Any}() : prev.readiness
-        # The site's part: what any worker here meets, whatever notebook it serves.
-        rec = Dict{String,Any}(
-            "prepared_at" => time(), "ok" => ok_all[], "steps" => deepcopy(state["steps"]),
-            "facts" => facts, "measured" => rt > 0 ? Dict{String,Any}("runtime_load_s" => rt) : Dict{String,Any}(),
-            "prologue" => _site_prologue(seen, prev === nothing ? r.prologue : prev.prologue),
-            "liveness_grace_s" => rt > 0 ? _grace_for(rt) : 0,
-            # Only what was actually read: a prepare that never reached the site has nothing to
-            # compare a start against, and blanks would mark every start as a changed site.
-            "stamps" => isempty(seen) ? Dict{String,Any}() : _stamps_of(seen), "stale" => "",
-            "report" => state["id"])   # the full log is in the report, not here
-        # One report per project tested here, keyed like the project's environment on the host. This
-        # prepare's replaces the one for its project; the others stand.
-        envs = Dict{String,Any}(get(old, "envs", Dict{String,Any}()))
-        if haskey(measured, "env_load_s")
-            el = Float64(measured["env_load_s"])
-            envs[_proj_key(ref[1])] = Dict{String,Any}(
-                "project" => ref[1], "fingerprint" => _env_fingerprint(ref[1], _infra_spec()),
-                "prepared_at" => time(), "status" => get(measured, "env_status", "ok"),
-                "load_s" => el, "liveness_grace_s" => _grace_for(rt + el),
-                "cuda" => get(measured, "cuda", nothing))
-        end
-        rec["envs"] = envs
-        # A host-only prepare keeps what an earlier node stage found: nothing here re-read the node.
-        if isempty(nodef) && !isempty(old)
-            if rt == 0 && haskey(old, "measured")
-                rec["measured"] = old["measured"]
-                rec["liveness_grace_s"] = get(old, "liveness_grace_s", 0)
-            end
-            of = get(old, "facts", nothing)
-            if of isa AbstractDict && haskey(of, "node")
-                rec["facts"]["node"] = of["node"]
-                rec["stamps"] = _stamps_of(of["node"])
-                rec["prologue"] = _site_prologue(of["node"], prev.prologue)
-            end
-        end
-        try; region_set!(r.name; readiness = rec); catch e
-            _rlog("prepare[$(r.name)]: could not store the record — $(sprint(showerror, e))")
+        rec = try
+            finish(ok_all[], state)
+        catch e
+            _rlog("prepare[$key]: could not store the record — $(sprint(showerror, e))")
+            Dict{String,Any}("prepared_at" => time(), "ok" => false, "steps" => deepcopy(state["steps"]),
+                             "report" => state["id"])
         end
         lock(_PREPARING_LOCK) do; state["running"] = false; state["record"] = rec; state["ended"] = time(); end
-        _write_report!(r.name, state)
-        lock(_REGION_TRACE_LOCK) do; delete!(_REGION_FULL_LOG, r.name); end
+        _write_report!(key, state)
+        lock(_REGION_TRACE_LOCK) do; delete!(_REGION_FULL_LOG, key); end
         task_local_storage(:slate_rlog_region, was_region)
     end
-    return lock(_PREPARING_LOCK) do; state["record"]; end
+    return rec
 end
 
-# What the host's probe calls for, applied now: the record is written at the end, and a node stage
-# that ran without it would report the very problem it already knows how to fix.
-function _probed_prologue(r::Region, facts)
-    parts = filter(!isempty, [_site_prologue(get(facts, "host", Dict{String,String}()), r.prologue),
-                              strip(r.prologue)])
-    return isempty(parts) ? "" : "{ " * join(parts, " ; ") * " ; } && "
+# The steps every prepare of a machine starts with: sign in, Julia, read the site, settle the depot.
+# What the site read calls for is recorded as soon as it is known, since the steps after these start
+# Julia there. Returns the sign-in's status; nothing else can run when it failed.
+function _site_steps!(step, host::AbstractString, m, facts; own::AbstractString = "")
+    signed = step("Sign in to $host") do
+        Sweep.connected(host) && return ("ok", "session already open")
+        ok, why = Sweep.connect_waiting!(host)
+        ok ? ("ok", "signed in with a key") :
+            ("fail", "could not sign in without a prompt" * (isempty(why) ? "" : ": " * first(strip(why), 300)) *
+                     " — use the padlock, then prepare again")
+    end
+    signed == "fail" && return signed
+    step("Julia on $host") do
+        # A machine that names its own julia is used as it is; otherwise juliaup at the hub's.
+        isempty(m.julia) && (_ensure_julia!(host) || return ("fail", "no working julia after the install; see remote.log"))
+        ok, out = _run_on(host, machine_setup(m) * "julia --version")
+        ok || return ("fail", strip(out))
+        v = match(r"(\d+\.\d+\.\d+)", out)
+        (v === nothing || v.captures[1] == string(VERSION)) ? ("ok", strip(out)) :
+            ("warn", "$(strip(out)), the hub runs $VERSION: results and environments may not carry across")
+    end
+    step("Read the site") do
+        ok, out = _run_on(host, _PROBE_SCRIPT)
+        ok || return ("fail", first(strip(out), 300))
+        merge!(facts, Dict("host" => _parse_probe(out)))
+        h = facts["host"]
+        # Recorded now, not at the end: the rest of this prepare starts Julia here, and has to
+        # start it with the module fix in place.
+        host_facts_merge!(host, Dict{String,Any}("site_prologue" => _site_prologue(h, m.prologue * "\n" * own),
+                                                 "scratch" => get(h, "scratch", "")))
+        ("ok", join(filter(!isempty, [get(h, "cpu", ""), get(h, "julia", ""),
+                                     isempty(get(h, "modules", "")) ? "" : "modules: " * h["modules"]]), " · "))
+    end
+    step("Depot") do
+        d = isempty(m.depot) ? _auto_depot(get(get(facts, "host", Dict{String,String}()), "scratch", "")) :
+            (_is_default_depot(m.depot) ? "" : m.depot)
+        if !isempty(d)
+            q = Sweep.shq_path(d)
+            ok, out = _run_on(host, "mkdir -p $q && test -w $q && echo ok")
+            (ok && occursin("ok", out)) ||
+                return ("fail", "cannot create or write $d: " * first(strip(out), 200))
+        end
+        # Automatic is resolved here, once, and every Julia on the machine runs in it from now.
+        isempty(m.depot) && host_facts_merge!(host, Dict{String,Any}("depot" => d))
+        ("ok", isempty(d) ? "~/.julia (no scratch filesystem found)" :
+               d * (isempty(m.depot) ? " (scratch)" : ""))
+    end
+    return signed
 end
+
+# The shell a prepare's own Julia runs in on a host of `r`: the machine's setup, which already carries
+# what reading the site found, then the region's prologue.
+_prepare_shell(r::Region) = machine_setup(region_machine(r)) * _region_prologue(r.name)
 
 # The node stage: a granted node, read the same way the host was, and a worker runtime loaded there
 # the way a worker loads it, timed. The region's preload environment, when it has one, is provisioned
 # and loaded too, which is where CUDA is checked. The node is given back at the end.
-# When the scheduler expects a pending job to start, as it prints it, or "" when it has no estimate.
-function _start_estimate(r::Region, id::AbstractString)
-    region_scheduler(r) === :slurm || return ""
-    ok, out = _run_on(r.host, "squeue -h --start -j " * Sweep.shq(id) * " -o %S 2>/dev/null")
-    t = ok ? strip(out) : ""
-    return (isempty(t) || t == "N/A") ? "" : replace(t, "T" => " ")
-end
-
 function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Bool = false, note = _ -> nothing,
-                           worker = nothing)
+                           worker = nothing, rebuild_sysimage::Bool = false)
     # A node held before the prepare started belongs to whoever is using it, and stays theirs.
     held_before = _region_holds_node(r)
     got = step("Get a node from $(r.scheduler)") do
         deadline = time() + 30 * 60
-        t0 = time()
+        t0 = time(); shown = ""
         while time() < deadline
             nodehost, a = region_place!(r; wait_s = 30)
-            isempty(nodehost) || return ("ok", "$nodehost (job $(a === nothing ? "?" : a.id))")
-            a === nothing && return ("fail", "the scheduler granted nothing and reported no request")
-            a.state === :unreachable && return ("fail", "cannot reach $(r.host) to ask for a node")
-            est = isempty(a.id) ? "" : _start_estimate(r, a.id)
-            note("queued as job $(a.id) for $(round(Int, (time() - t0) / 60))m" *
-                 (isempty(est) ? "" : " · estimated start $est"))
+            if !isempty(nodehost)
+                # A node the region already held comes back without its allocation; its route has the job.
+                if a === nothing
+                    v = via(nodehost); job = v === nothing ? "" : v.job
+                    return ("ok", nodehost * (isempty(job) ? "" : " (job $job)") * ", already held")
+                end
+                p = placement_note(r, a)
+                return (p.grown ? "warn" : "ok", p.text)
+            end
+            p = placement_note(r, a; waited = time() - t0)
+            p.state === :queued || return ("fail", p.text)
+            p.text == shown || note(p.text)   # a line when something changed, not one per poll
+            shown = p.text
         end
         ("fail", "no node within 30 minutes; the request was left queued")
     end
     got == "ok" || return nothing
     node = region_host(r)
-    pro = _probed_prologue(r, facts)
+    pro = _region_prologue(r.name)
     try
         step("Read the node") do
             ok, out = _run_on(node, _PROBE_SCRIPT)
@@ -430,14 +521,14 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
         # with a different CPU from the one that built the package images recompiles them here.
         worker === nothing && step("Load the worker runtime") do
             t0 = time()
-            ok, out = _run_on(node, pro * _julia_sh("julia --startup-file=no --project=\$HOME/$_REMOTE_KGATE_ENV " *
+            ok, out = _run_on(node, _prepare_shell(r) * _julia_sh("julia --startup-file=no --project=\$HOME/$_REMOTE_KGATE_ENV " *
                                                     "-e 'using KaimonGate, Revise'"); timeout = 1800.0)
             secs = round(time() - t0; digits = 1)
             ok || return ("fail", first(strip(out), 400))
             measured["runtime_load_s"] = secs
             ("ok", "$(secs)s")
         end
-        _prepare_env!(r, step, measured, ref, node, pro; worker)
+        _prepare_env!(r, step, measured, ref, node, pro; worker, rebuild_sysimage)
     finally
         if keep_node
             step(() -> ("ok", region_host(r) * (haskey(measured, "worker_start_s") ? " · its worker is up" : "")),
@@ -463,6 +554,8 @@ for (_, p) in Pkg.dependencies()
     try; Core.eval(Main, Expr(:import, Expr(:., Symbol(p.name)))); catch; end
 end
 println("load=", round(time() - t0; digits = 1))
+println("pid=", getpid(), " on ", gethostname())
+println("image=", unsafe_string(Base.JLOptions().image_file))
 if isdefined(Main, :CUDA)
     C = getfield(Main, :CUDA)
     println("cuda=", C.functional(), " devices=", C.functional() ? length(C.devices()) : 0)
@@ -474,7 +567,7 @@ end
 # Install the reference project's environment where its workers will run, load every package in it
 # with timing, and check CUDA when it is among them. On a scheduler region `host` is the granted node;
 # elsewhere it is the host itself. The environment stays installed, stamped, for the project's start.
-function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothing)
+function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothing, rebuild_sysimage::Bool = false)
     isempty(ref[1]) && return nothing
     name = basename(ref[1])
     t = _region_target(r; origin_env = ref[1])
@@ -487,14 +580,23 @@ function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothi
     # Compiled here, where the workers run, and timed apart from loading: the load time below is what
     # every start pays, which is what the liveness grace is made from; this is paid once.
     step("Precompile $name") do
-        t0 = time()
         ok, out = _ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.precompile()",
-                              "precompile $name on $host"; stream = true)
-        ok ? ("ok", "$(round(time() - t0; digits = 1))s") : ("fail", first(strip(out), 400))
+                              "precompile $name on $host"; stream = true, setup = t.setup)
+        ok ? ("ok", "") : ("fail", first(strip(out), 400))   # the step shows its own time
+    end
+    # A region that boots its workers from a sysimage gets it built here, on the node type its workers
+    # run on and in their shell, before the worker below starts, so that start is the one it speeds up.
+    (r.sysimage || rebuild_sysimage) && step("Build the sysimage") do
+        status, detail, m = build_sysimage!(r, t, host; prologue = pro, force = rebuild_sysimage)
+        measured["sysimage"] = m
+        # Recorded now, not when the prepare ends: the load and the worker start below boot from it.
+        get(m, "result", "") in ("built", "current") && _record_sysimage!(r.name, m)
+        (status, detail * (r.sysimage ? "" : " · the region does not boot from it until sysimage is on"))
     end
     worker === nothing || return _prepare_in_worker!(step, measured, name, worker)
     step("Load $name") do
-        ok, out = _run_on(host, pro * _julia_sh("julia --startup-file=no --project=\$HOME/$rel -e " * Sweep.shq(_LOAD_CODE));
+        ok, out = _run_on(host, t.setup * pro * _sysimage_jopt_sh(t) * "; " *
+                                _julia_sh("julia \$JOPT --startup-file=no --project=\$HOME/$rel -e " * Sweep.shq(_LOAD_CODE));
                           timeout = 1800.0)
         ok || return ("fail", first(strip(out), 400))
         _load_result!(measured, out)
@@ -511,7 +613,14 @@ function _load_result!(measured, out::AbstractString)
     isempty(cuda) || (measured["cuda"] = Dict("functional" => cuda, "system_libs" => sys))
     status = (startswith(cuda, "false") || !isempty(sys)) ? "warn" : "ok"
     measured["env_status"] = status
-    return (status, "loaded in $(measured["env_load_s"])s" *
+    # Which process loaded them: for a notebook's prepare, the worker its cells then run on.
+    pid = get(f, "pid", "")
+    isempty(pid) || (measured["worker_pid"] = pid)
+    # Whether the process booted from a built sysimage rather than Julia's own.
+    img = get(f, "image", "")
+    measured["booted_sysimage"] = !isempty(img) && !(basename(img) in ("sys.so", "sys.dylib", "sys.dll"))
+    return (status, "loaded in $(measured["env_load_s"])s" * (measured["booted_sysimage"] ? " from the sysimage" : "") *
+                    (isempty(pid) ? "" : " · process $pid") *
                     (isempty(cuda) ? "" : " · CUDA functional=$cuda") *
                     (isempty(sys) ? "" : " · CUDA libraries from the system: $(first(sys, 200))"))
 end
@@ -519,9 +628,12 @@ end
 # The notebook's own worker: started the way its cells would start it, and the packages loaded in it,
 # so the first run after preparing finds both done. Its start is the runtime's load time.
 function _prepare_in_worker!(step, measured, name, worker)
+    # A worker already running booted from whatever image there was then: when this prepare built a new
+    # one, the notebook's worker is replaced so it boots from it.
+    fresh = get(get(measured, "sysimage", Dict()), "result", "") == "built"
     up = step("Start the notebook's worker") do
         t0 = time()
-        worker.start()
+        worker.start(fresh)
         measured["worker_start_s"] = measured["runtime_load_s"] = round(time() - t0; digits = 1)
         ("ok", "up in $(measured["worker_start_s"])s")
     end
@@ -537,15 +649,16 @@ end
 """
     readiness_check!(t::RemoteTarget; seen = nothing)
 
-On a start, compare what a prepared region recorded about its site with what the host reports now,
-and mark the region stale when they differ. `seen` is the host's state when the caller already read
+On a start, compare what preparing recorded about the region's machine with what its host reports
+now, and mark the machine stale when they differ. `seen` is the host's state when the caller already read
 it (`_host_state`); otherwise one command reads the stamps. Never blocks the start.
 """
 function readiness_check!(t::RemoteTarget; seen = nothing)
     isempty(t.region) && return nothing
     r = region_get(t.region)
-    (r === nothing || isempty(r.readiness)) && return nothing
-    want = get(r.readiness, "stamps", nothing)
+    r === nothing && return nothing
+    hf = host_facts(r.host)
+    want = get(hf, "stamps", nothing)
     (want isa AbstractDict && !isempty(want)) || return nothing
     if seen === nothing
         ok, out = _run_on(t.ssh_host, _STAMP_SCRIPT)
@@ -555,36 +668,42 @@ function readiness_check!(t::RemoteTarget; seen = nothing)
     now = _stamps_of(seen)
     diffs = [k for k in keys(now) if String(get(want, k, "")) != String(now[k])]
     stale = isempty(diffs) ? "" : "changed since prepared: " * join(sort(diffs), ", ")
-    stale == String(get(r.readiness, "stale", "")) && return nothing
-    rec = copy(r.readiness); rec["stale"] = stale
-    region_set!(r.name; readiness = rec)
-    isempty(stale) || _rlog("region[$(r.name)]: $stale — prepare it again")
+    stale == String(get(hf, "stale", "")) && return nothing
+    host_facts_merge!(r.host, Dict{String,Any}("stale" => stale))
+    isempty(stale) || _rlog("$(r.host): $stale — prepare it again")
     return nothing
 end
 
 # ── Reading it back ──────────────────────────────────────────────────────────────────────────
-"What preparing `r` found for the project whose environment is `origin_env`, or `nothing`."
+"The machine's record of `origin_env`'s environment on the kind of node region `r` gets, or `nothing`."
 function env_report(r::Region, origin_env::AbstractString)
     isempty(origin_env) && return nothing
-    envs = get(r.readiness, "envs", nothing)
-    envs isa AbstractDict || return nothing
-    e = get(envs, _proj_key(origin_env), nothing)
+    e = get(tested_envs(r.host), Sweep.env_key(origin_env, region_node_type(r)), nothing)
     return e isa AbstractDict ? e : nothing
 end
 
-# Whether a tested project's environment is still the one that was tested.
-env_unchanged(e::AbstractDict) = isdir(String(get(e, "project", ""))) &&
-    _env_fingerprint(String(e["project"]), _infra_spec()) == String(get(e, "fingerprint", ""))
+"The machine's tested environments on region `r`'s kind of node, each marked `changed` when it is no longer the one tested."
+function region_envs(r::Region)
+    depot = region_depot(r); nt = region_node_type(r)
+    Dict{String,Any}(k => merge(Dict{String,Any}(e), Dict{String,Any}("changed" => !env_unchanged(e; depot)))
+                     for (k, e) in tested_envs(r.host) if e isa AbstractDict && get(e, "node_type", "") == nt)
+end
 
-# The record as the page shows it: each tested project marked `changed` when its environment is no
-# longer the one that was tested.
+# Whether a tested project's environment is still the one that was tested, in the depot it is in now.
+env_unchanged(e::AbstractDict; depot::AbstractString = "") = isdir(String(get(e, "project", ""))) &&
+    _env_fingerprint(String(e["project"]), _infra_spec(); depot) == String(get(e, "fingerprint", ""))
+
+"The depot region `r`'s workers use."
+region_depot(r::Region) = machine_depot(region_machine(r))
+
+# The record as the page shows it. The machine's part comes along as `site`, with the depot in use, and
+# `envs` are the environments tested on this region's kind of node, by it or by anything else there.
 function readiness_view(r::Region)
-    isempty(r.readiness) && return r.readiness
     rec = copy(r.readiness)
-    envs = get(rec, "envs", nothing)
-    envs isa AbstractDict || return rec
-    rec["envs"] = Dict{String,Any}(k => (e isa AbstractDict ? merge(Dict{String,Any}(e), Dict{String,Any}("changed" => !env_unchanged(e))) : e)
-                                   for (k, e) in envs)
+    hf = host_facts(r.host)
+    isempty(hf) || (delete!(hf, "envs"); rec["site"] = merge(hf, Dict{String,Any}("depot" => region_depot(r))))
+    envs = region_envs(r)
+    isempty(envs) || (rec["envs"] = envs)
     return rec
 end
 
@@ -606,18 +725,22 @@ function readiness_text(r::Region)
     isempty(rec) && return "not prepared"
     io = IOBuffer()
     at = Dates.format(Dates.unix2datetime(Float64(get(rec, "prepared_at", 0))), "yyyy-mm-dd HH:MM") * " UTC"
-    stale = String(get(rec, "stale", ""))
+    hf = host_facts(r.host)
+    stale = String(get(hf, "stale", ""))
+    depot = region_depot(r)
     println(io, "prepared $at — ", get(rec, "ok", false) === true ? "ok" : "with failures",
             isempty(stale) ? "" : " — STALE ($stale)")
-    pro = String(get(rec, "prologue", ""))
+    pro = String(get(hf, "site_prologue", ""))
     isempty(pro) || println(io, "  site prologue: $pro")
-    envs = get(rec, "envs", nothing)
-    if envs isa AbstractDict
+    println(io, "  depot: ", isempty(depot) ? "~/.julia" : depot)
+    envs = region_envs(r)
+    if !isempty(envs)
         for (_, e) in sort!(collect(envs); by = first)
             c = get(e, "cuda", nothing)
-            println(io, "  tested with $(e["project"]): loads in $(e["load_s"])s",
+            by = String(get(e, "by", ""))
+            println(io, "  tested with $(e["project"])", by == r.name ? "" : " (by $by)", ": loads in $(get(e, "load_s", 0))s",
                     c isa AbstractDict ? ", CUDA functional=$(c["functional"])" : "",
-                    env_unchanged(e) ? "" : " (its environment has changed since)")
+                    e["changed"] ? " (its environment has changed since)" : "")
         end
     end
     g = get(rec, "liveness_grace_s", 0)
