@@ -21,13 +21,14 @@
 # notebook's parent project (Project.toml + /src), all copied over and kept in sync so the remote
 # worker's Revise hot-reloads exactly like local. Package *adds* execute on the remote worker.
 #
-# `import Sockets`, `FileWatching` — stdlib. SSH rides the session in `SshTransport` (no subprocess,
+# `import Sockets` — stdlib; `BetterFileWatching` wakes the source sync on a save. SSH rides the session in `SshTransport` (no subprocess,
 # so hostnames/paths can't inject). KaimonGate CURVE bits are reached through the client the
 # hub already uses (`connect_tcp!(…; server_key=…)` does the client-side CURVE itself).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 import Sockets
-import FileWatching
+import BetterFileWatching
+import CancellationTokens
 import Dates
 import Mmap
 import SHA as _SHA
@@ -1598,107 +1599,231 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
 end
 
 # ── continuous sync ────────────────────────────────────────────────────────────
-# Watch the local parent project (/src + Project.toml) and send changes to the remote on
-# change, so the remote worker's Revise hot-reloads exactly like local. One task per target;
-# coalesced (a burst of saves → one transfer). Package adds happen on the remote worker itself.
-mutable struct SyncWatcher
-    task::Task
-    running::Bool
-end
-const _SYNCERS = Dict{String,SyncWatcher}()   # keyed by "host:remote_project"
-const _SYNC_LOCK = ReentrantLock()
+# A remote worker loads the notebook's parent project and its dev'd packages from copies on the host,
+# and Revise there reloads what changes in those copies. Keeping them current is the hub's job: it
+# holds one watch per local source directory, however many notebooks and hosts use it, and sends each
+# change to every copy of it. A cell bound for a remote worker flushes first (`sync_flush!`), so it
+# never runs older code than a local worker whose Revise saw the same save.
+#
+# What decides a send is a comparison: the size and mtime of each file in the directory's `src/` and
+# `ext/` (the files directly in it when it has neither) against what each copy was last sent. A save
+# raises a filesystem event that starts the comparison at once. A check every `_SYNC_POLL_S` starts it
+# anyway, for the change no event reports: a network filesystem written from another machine, or a
+# `src/` or `ext/` made after the watch began. It is one stat per file. The flush before a remote cell
+# makes the same comparison, so a cell never waits on either.
 
-# A syncer's key: the host and project it sends to, and the scheduler job when the host is a granted
-# node, so a released allocation stops its own syncers and no one else's on a node of the same name.
+"One remote copy of a source directory: what it was last sent, and the kernels that load from it."
+mutable struct SyncDest
+    host::String
+    remotedir::String                       # $HOME-relative or absolute, as `_put_file` takes it
+    excludes::Vector{String}
+    region::String
+    sent::Dict{String,Tuple{Int,Float64}}   # rel path => (size, mtime) as last sent
+    kernels::Dict{String,Any}               # owner key ("host:project") => the kernel to tell
+    failing::Bool
+end
+
+mutable struct SyncSource
+    dir::String
+    dests::Dict{String,SyncDest}            # "host:remotedir" => copy
+    task::Union{Task,Nothing}
+    sending::ReentrantLock                  # one send at a time per source: the poll and a flush
+    wake::Base.Event                        # a save, or the next check, is due
+    cancel::CancellationTokens.CancellationTokenSource
+end
+SyncSource(dir::AbstractString) = SyncSource(String(dir), Dict{String,SyncDest}(), nothing, ReentrantLock(),
+                                             Base.Event(true), CancellationTokens.CancellationTokenSource())
+
+const _SYNC_SOURCES = Dict{String,SyncSource}()   # local dir => its watch
+const _SYNC_LOCK = ReentrantLock()
+const _SYNC_POLL_S = 10.0
+# More changed files than this go as one archive of the directory rather than file by file.
+const _SYNC_FILEWISE_MAX = 16
+
+# Who keeps a copy current: the host and project it serves, and the scheduler job when the host is a
+# granted node, so a released allocation drops its own copies and no one else's on a node of that name.
 _sync_base(t::RemoteTarget) = isempty(t.job) ? string(t.ssh_host, ":", t.project) :
                                                string(_sync_job_prefix(t.ssh_host, t.job), t.project)
 _sync_job_prefix(host, job) = string(host, "#", job, ":")
 
-function start_sync!(t::RemoteTarget, parent_project::AbstractString)
-    (isempty(parent_project) && !isdir(parent_project)) && return
-    base = _sync_base(t)
+# The files a source directory's watch covers, by '/'-separated path relative to it.
+function _sync_files(dir::AbstractString, excludes::Vector{String})
+    out = Dict{String,Tuple{Int,Float64}}()
+    scope = String[d for d in ("src", "ext") if isdir(joinpath(dir, d))]
+    paths = isempty(scope) ? (f for f in readdir(dir) if isfile(joinpath(dir, f))) :
+            (relpath(joinpath(r, f), dir) for d in scope
+                 for (r, _, fs) in walkdir(joinpath(dir, d); onerror = _ -> nothing) for f in fs)
+    for p in paths
+        rel = replace(String(p), '\\' => '/')
+        Sweep._excluded(rel, excludes) && continue
+        st = try; stat(joinpath(dir, rel)); catch; continue; end
+        out[rel] = (Int(st.size), st.mtime)
+    end
+    return out
+end
+
+"""
+    start_sync!(t, parent_project; kernel = nothing, sent = false)
+
+Keep `t`'s host copies of the notebook's parent project (its `src/`, into the worker env) and of each
+dev'd package (into `devsrc/<name>`) current, telling `kernel` which files changed. `sent` says the
+copies were just sent whole (a provision), so only later changes travel; otherwise the first check
+sends whatever differs.
+"""
+function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = nothing, sent::Bool = false)
+    (isempty(parent_project) || !isdir(parent_project)) && return
+    owner = _sync_base(t)
+    pairs = Tuple{String,String,Vector{String}}[
+        (String(parent_project), String(t.project), ["Manifest.toml", "Project.toml", ".git", "*.cov"])]
+    # Read the SAME env whose Manifest provisioning replicated (origin_env, else the parent) to find the
+    # dev'd packages; skip the project itself and any vanished source.
+    env = isempty(t.origin_env) ? parent_project : t.origin_env
+    for (name, lpath) in Sweep.dev_deps(joinpath(env, "Manifest.toml"), env)
+        rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
+        isdir(lpath) || continue
+        push!(pairs, (String(lpath), "$_REMOTE_DEVSRC/$name", [".git", "*.cov"]))
+    end
     lock(_SYNC_LOCK) do
-        # 1. the notebook's parent project /src → t.project (project code hot-reload). NEVER the env
-        #    files, or we'd clobber the replicated Project/Manifest (the exact env provisioning set up).
-        _start_syncer!(base, t.ssh_host, parent_project,
-                       isdir(joinpath(parent_project, "src")) ? joinpath(parent_project, "src") : parent_project,
-                       t.project, ["Manifest.toml", "Project.toml", ".git", "*.cov"])
-        # 2. each dev'd path dep → devsrc/<name>, so a local package the notebook develops stays fresh on
-        #    the remote and Revise hot-reloads its edits there — the "kept up to date" half of dev-dep
-        #    provisioning. Read the SAME env whose Manifest provisioning replicated (origin_env, else the
-        #    parent) to discover which deps are dev'd; skip the project itself and any vanished source.
-        env = isempty(t.origin_env) ? parent_project : t.origin_env
-        for (name, lpath) in Sweep.dev_deps(joinpath(env, "Manifest.toml"), env)
-            rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
-            isdir(lpath) || continue
-            _start_syncer!("$base:dev:$name", t.ssh_host, lpath,
-                           isdir(joinpath(lpath, "src")) ? joinpath(lpath, "src") : lpath,
-                           "$_REMOTE_DEVSRC/$name", [".git", "*.cov"])
+        for (dir, remotedir, excludes) in pairs
+            src = get!(() -> SyncSource(dir), _SYNC_SOURCES, dir)
+            d = get!(src.dests, string(t.ssh_host, ":", remotedir)) do
+                SyncDest(String(t.ssh_host), remotedir, excludes, String(t.region),
+                         sent ? _sync_files(dir, excludes) : Dict{String,Tuple{Int,Float64}}(),
+                         Dict{String,Any}(), false)
+            end
+            d.kernels[owner] = kernel
+            (src.task === nothing || istaskdone(src.task)) && (src.task = Threads.@spawn _sync_poll(src))
         end
     end
     return nothing
 end
 
-# Start one keyed filesystem→remote syncer if not already running (call with _SYNC_LOCK held).
-function _start_syncer!(key::AbstractString, host::AbstractString, localdir::AbstractString,
-                        watchdir::AbstractString, remotedir::AbstractString, excludes::Vector{String})
-    k = String(key)
-    (haskey(_SYNCERS, k) && _SYNCERS[k].running) && return
-    _SYNCERS[k] = SyncWatcher(Threads.@spawn(_sync_task(String(host), String(localdir), String(watchdir),
-                                                        String(remotedir), excludes, k)), true)
-    return nothing
+# Bring one copy up to date: the changed files, then the removals, then each kernel that loads from it
+# is told. Returns whether the copy now matches. Call with `src.sending` held.
+function _sync_dest!(src::SyncSource, d::SyncDest, now::Dict{String,Tuple{Int,Float64}})
+    changed = String[rel for (rel, v) in now if get(d.sent, rel, nothing) != v]
+    gone = String[rel for rel in keys(d.sent) if !haskey(now, rel)]
+    (isempty(changed) && isempty(gone)) && return true
+    ok = try
+        if length(changed) > _SYNC_FILEWISE_MAX
+            _send_dir!(d.host, src.dir, d.remotedir; excludes = d.excludes, region = d.region, filter = true)
+        else
+            all(rel -> _put_file(d.host, read(joinpath(src.dir, rel)), d.remotedir * "/" * rel), changed)
+        end &&
+        (isempty(gone) || first(_run_on(_host_for_files(d.host),
+            "rm -f " * join((Sweep.shq_path(d.remotedir * "/" * rel) for rel in gone), ' '))))
+    catch e
+        _rlog("sync: sending $(basename(src.dir)) → $(d.host):$(d.remotedir) failed — " * first(sprint(showerror, e), 160))
+        false
+    end
+    if !ok
+        d.failing || _rlog("sync: $(basename(src.dir)) → $(d.host):$(d.remotedir) is behind; retrying")
+        d.failing = true
+        return false
+    end
+    d.failing && _rlog("sync: $(basename(src.dir)) → $(d.host):$(d.remotedir) caught up")
+    d.failing = false
+    d.sent = now
+    _rlog("sync: $(basename(src.dir)) → $(d.host): " *
+          join(vcat(changed, ["−" * g for g in gone])[1:min(end, 6)], ", ") *
+          (length(changed) + length(gone) > 6 ? ", …" : ""))
+    paths = String[d.remotedir * "/" * rel for rel in vcat(changed, gone)]
+    for k in values(d.kernels)
+        (k isa GateKernel && k.conn !== nothing) || continue
+        try; _tool(k, "__slate_files_changed", Dict{String,Any}("paths" => paths); timeout = 60.0); catch; end
+    end
+    return true
 end
 
-# One sync task: watch `watchdir`, and on any change send `localdir` → `remotedir`,
-# coalescing bursts. Generic over what's synced so BOTH the parent project (/src hot-reload) and each
-# dev'd path dep (devsrc/<name>, so a local package's edits Revise-reload on the remote) share it.
-function _sync_task(host::AbstractString, localdir::AbstractString, watchdir::AbstractString,
-                    remotedir::AbstractString, excludes::Vector{String}, key::String)
-    while get(_SYNCERS, key, nothing) !== nothing && _SYNCERS[key].running
-        try
-            ev = FileWatching.watch_folder(watchdir, 2.0)      # block until a change, or time out
-            # A TIMEOUT is not a change. Sending on one tars the whole directory and pushes it over
-            # ssh every couple of seconds for as long as the notebook is open, whether or not anyone
-            # edited anything — and once the host is gone, logs a failure at the same rate.
-            (ev.second.timedout) && continue
-            sleep(0.15)                                        # coalesce a burst of saves
-            _send_dir!(host, localdir, remotedir; excludes = excludes)
+# The events that wake a watch: a save anywhere under the directory's `src/` and `ext/` (the directory
+# itself when it has neither), collected over a short latency so a burst of saves is one wake. Each
+# runs until the watch is cancelled.
+function _sync_events!(src::SyncSource)
+    token = CancellationTokens.get_token(src.cancel)
+    subs = String[joinpath(src.dir, d) for d in ("src", "ext") if isdir(joinpath(src.dir, d))]
+    for sub in (isempty(subs) ? [src.dir] : subs)
+        Threads.@spawn try
+            BetterFileWatching.watch_folder(_ -> notify(src.wake), sub, token; latency = 0.15)
         catch e
-            @warn "slate remote: sync loop error" host = host dir = localdir exception = (e,) maxlog = 3
-            sleep(1.0)
+            CancellationTokens.is_cancellation_requested(token) ||
+                _rlog("sync: no change events for $sub (checked every $(_SYNC_POLL_S)s instead) — " *
+                      first(sprint(showerror, e), 160))
         end
     end
-    try; FileWatching.unwatch_folder(watchdir); catch; end
+    Threads.@spawn while !CancellationTokens.is_cancellation_requested(token)
+        sleep(_SYNC_POLL_S)
+        notify(src.wake)
+    end
+    notify(src.wake)                                # one comparison now, for what changed before the watch
     return nothing
 end
 
-# Stop every syncer for this target — the parent-project watcher AND each dev-dep watcher (keyed
-# `<base>:dev:<name>`), so a teardown leaves no orphaned sync loops.
-function stop_sync!(t::RemoteTarget)
-    base = _sync_base(t)
-    lock(_SYNC_LOCK) do
-        for key in collect(keys(_SYNCERS))
-            (key == base || startswith(key, base * ":")) || continue
-            _SYNCERS[key].running = false
-            delete!(_SYNCERS, key)
+function _sync_poll(src::SyncSource)
+    _sync_events!(src)
+    while true
+        wait(src.wake)
+        dests = lock(() -> collect(values(src.dests)), _SYNC_LOCK)
+        isempty(dests) && return nothing
+        try
+            lock(src.sending) do
+                for d in dests
+                    now = _sync_files(src.dir, d.excludes)
+                    now == d.sent || _sync_dest!(src, d, now)
+                end
+            end
+        catch e
+            _rlog("sync: watching $(src.dir) failed — " * first(sprint(showerror, e), 160))
+        end
+    end
+end
+
+"""
+    sync_flush!(k)
+
+Bring every host copy `k`'s worker loads from up to date now, and have its Revise take the changes in,
+before a cell runs there. Costs one look at each source tree when nothing changed.
+"""
+function sync_flush!(k)
+    t = k.target
+    t isa RemoteTarget || return nothing
+    owner = _sync_base(t)
+    work = lock(_SYNC_LOCK) do
+        [(s, d) for s in values(_SYNC_SOURCES) for d in values(s.dests) if haskey(d.kernels, owner)]
+    end
+    for (s, d) in work
+        lock(s.sending) do
+            now = _sync_files(s.dir, d.excludes)
+            now == d.sent || _sync_dest!(s, d, now)
         end
     end
     return nothing
 end
 
-# Every syncer sending to a node within scheduler job `job`, whatever project it watches: for when
-# the allocation is what went away rather than one target on it.
-function stop_sync_job!(host::AbstractString, job::AbstractString)
-    pre = _sync_job_prefix(host, job)
+# Drop the copies `keep(d, owner)` says to, and a watch left with none ends on its next check.
+function _sync_drop!(drop)
     lock(_SYNC_LOCK) do
-        for key in collect(keys(_SYNCERS))
-            startswith(key, pre) || continue
-            _SYNCERS[key].running = false
-            delete!(_SYNCERS, key)
+        for (dir, s) in collect(_SYNC_SOURCES)
+            for (key, d) in collect(s.dests)
+                for owner in collect(keys(d.kernels)); drop(d, owner) && delete!(d.kernels, owner); end
+                isempty(d.kernels) && delete!(s.dests, key)
+            end
+            if isempty(s.dests)
+                delete!(_SYNC_SOURCES, dir)
+                CancellationTokens.cancel(s.cancel)
+                notify(s.wake)                      # its loop sees no copies left and ends
+            end
         end
     end
     return nothing
 end
+
+"Stop keeping `t`'s copies current (its kernel is going)."
+stop_sync!(t::RemoteTarget) = (o = _sync_base(t); _sync_drop!((d, owner) -> owner == o))
+
+# Every copy kept for kernels within scheduler job `job` on `host`: for when the allocation is what
+# went away rather than one target on it.
+stop_sync_job!(host::AbstractString, job::AbstractString) =
+    (pre = _sync_job_prefix(host, job); _sync_drop!((d, owner) -> startswith(owner, pre)))
 
 # ── remote worker spawn + CURVE bootstrap ────────────────────────────────────────
 # The remote worker script — run as `julia <file>` (a FILE, NOT `-e`: verified on factorio that
@@ -1829,8 +1954,10 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     pro = _region_prologue(region)
     # Everything set up before the worker boots: cwd, PATH to the remote juliaup, the self-identifying
     # tag, the region prologue, and the sysimage resolve. Shared by both launch forms below.
+    # BLAS threads as a local worker has them; before the region's own setup, which may set its own.
+    blas = worker_blas_threads()
     setup = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && " *
-            t.setup * "$pro$siresolve"
+            "export OPENBLAS_NUM_THREADS=$blas OMP_NUM_THREADS=$blas && " * t.setup * "$pro$siresolve"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
     v = via(host)
     if v === nothing || isempty(v.job)
@@ -2109,7 +2236,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     fresh(sv) = sv !== nothing && time() - sv.at < 60
     function fresh_spawn()
         provision_remote!(t, parent_project; seen = fresh(survey) ? survey.state : nothing)
-        start_sync!(t, parent_project)
+        start_sync!(t, parent_project; kernel = k, sent = true)
         # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them;
         # else auto from _next_ports (9100+), floored above the roster.
         # The listening ports and the roster: the start's survey when it is recent, else one command.
@@ -2169,7 +2296,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         end
         _attach_record!(host, k.label; port = k.port, stream_port = k.stream_port,
                         transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip, job = t.job)
-        start_sync!(t, parent_project)          # non-blocking watcher; heals /src drift from the detached period
+        start_sync!(t, parent_project; kernel = k)   # sends what changed while it was detached
         # No provisioning here. The worker is live and loads from this environment, and rebuilding it
         # underneath competes with that load; every fresh spawn provisions for itself anyway.
         Threads.@spawn try

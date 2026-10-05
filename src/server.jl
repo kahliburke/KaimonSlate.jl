@@ -2119,7 +2119,7 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
         ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $host ($(r.transport))" *
                            (host == r.host ? "" : " via $(r.host)") *
                            (isempty(r.data_root) ? "" : " root=$(r.data_root)"))
-        k = ReportEngine.GateKernel(target.project; parent = parent, target = target,
+        k = ReportEngine.GateKernel(target.project; parent = parent, target = target, threads = r.threads,
                                     label = basename(abspath(nb.path)) * "#" * name)
         _REGION_KERNELS[(nb.id, name)] = k
         return k
@@ -2387,6 +2387,83 @@ function _dead_wire_grace(k)
     m = e === nothing ? get(r.readiness, "liveness_grace_s", nothing) : get(e, "liveness_grace_s", nothing)
     return m isa Real ? max(_DEAD_WIRE_GRACE, Float64(m)) : _DEAD_WIRE_GRACE
 end
+# A worker that missed a ping while its telemetry kept arriving: the gate answers each request on a
+# default-pool thread, which cells can keep busy, while telemetry is sent from an interactive one. Busy,
+# not gone, so no countdown runs; the time is kept for the pill.
+const _KERNEL_BUSY_SINCE = WeakKeyDict{Any,Float64}()
+const _TELEMETRY_FRESH_S = 10.0
+function _telemetry_fresh(k)
+    cn = try; String(k.conn.name); catch; return false; end
+    st = ReportEngine.kernel_stats(cn)
+    (st === nothing || time() - st.latest.rcv >= _TELEMETRY_FRESH_S) && return false
+    # A reading taken from outside says the process is there; only CPU time going up says it is working.
+    s = st.latest
+    return !(hasproperty(s, :src) && s.src == "host") || s.cpu >= _HOST_BUSY_CPU
+end
+
+# ── telemetry from outside a silent worker ──────────────────────────────────────────────────────
+# A worker sends its own samples, and nothing in its process runs while a garbage collection waits for
+# a thread inside code with no GC safepoint (one long loop, a call into a library). For as long as a
+# LOCAL worker's own samples are missing, the hub reads its process from the operating system and
+# records that reading in their place, marked `src = "host"`: the charts keep moving, and liveness can
+# tell a worker that is computing from one that is gone. A remote worker's process is out of reach.
+const _HOST_STALE_S = 5.0          # no sample from the worker for this long: read it from outside
+const _HOST_BUSY_CPU = 5.0         # % of a core, as read from outside, that counts as working
+const _HOST_LAST = WeakKeyDict{Any,Tuple{Float64,Float64}}()   # kernel → (wall time, cpu seconds) at the last look
+
+# CPU seconds and RSS bytes of a local process, read from the system without starting anything, or
+# `nothing`. The same sources the worker samples itself from (worker.jl `_telemetry_loop!`).
+function _proc_cpu_rss(pid::Integer)
+    if Sys.islinux()
+        try
+            s = read("/proc/$pid/stat", String)
+            f = split(s[findlast(')', s)+2:end])            # fields from 3 on (the name may hold spaces)
+            clk = ccall(:sysconf, Clong, (Cint,), 2)          # _SC_CLK_TCK
+            pg = ccall(:sysconf, Clong, (Cint,), 30)          # _SC_PAGESIZE
+            rss = parse(Int, split(read("/proc/$pid/statm", String))[2]) * pg
+            return ((parse(Int, f[12]) + parse(Int, f[13])) / clk, rss)
+        catch
+            return nothing
+        end
+    elseif Sys.isapple()
+        buf = Vector{UInt8}(undef, 256)                       # rusage_info_v0
+        ccall(:proc_pid_rusage, Cint, (Cint, Cint, Ptr{UInt8}), Int32(pid), Cint(0), buf) == 0 || return nothing
+        user, sys, rss = (reinterpret(UInt64, @view buf[r])[1] for r in (17:24, 25:32, 65:72))
+        return ((user + sys) / 1e9, Int(rss))
+    end
+    return nothing
+end
+
+# When the worker itself last sent a sample, from the kernel's ring.
+function _last_worker_sample(st)
+    for s in Iterators.reverse(st.history)
+        (hasproperty(s, :src) && s.src == "host") || return s
+    end
+    return nothing
+end
+
+function _host_sample!(k)
+    (k isa ReportEngine.GateKernel && k.conn !== nothing) || return nothing
+    p = k.proc
+    (p === nothing || !process_running(p)) && return nothing   # a local worker: its process is ours
+    cn = String(k.conn.name)
+    st = ReportEngine.kernel_stats(cn)
+    st === nothing && return nothing
+    w = _last_worker_sample(st)
+    if w === nothing || time() - w.rcv < _HOST_STALE_S
+        delete!(_HOST_LAST, k)
+        return nothing
+    end
+    r = _proc_cpu_rss(getpid(p))
+    r === nothing && return nothing
+    now = time()
+    prev = get(_HOST_LAST, k, nothing)
+    _HOST_LAST[k] = (now, r[1])
+    prev === nothing && return nothing                         # a rate needs two looks
+    cpu = round(100 * (r[1] - prev[2]) / max(now - prev[1], 1e-3); digits = 1)
+    ReportEngine.record_sample!(cn, merge(st.latest, (cpu = cpu, rss = r[2], ts = now, rcv = now, src = "host")))
+    return nothing
+end
 const _LIVENESS_PING_TIMEOUT = 8.0   # per-ping timeout; also how far to BACKDATE first-silence — when a ping first fails the worker has already been silent this long, so the countdown starts at ~8s, not 0
 const _LAST_RUNNING = Dict{String,Tuple{Set{String},Set{String},Set{String}}}()   # nb id → (running ids, sides that answered, sides asked) from the last sweep
 # Repeat-suppression for the unresponsive log. A wire that stays silent used to write one identical
@@ -2514,6 +2591,10 @@ function _liveness_sweep!(nb::LiveNotebook)
         catch e
             err = e
         end
+        if ok && haskey(_KERNEL_BUSY_SINCE, k)
+            delete!(_KERNEL_BUSY_SINCE, k)
+            try; facts_changed!(); catch; end
+        end
         if ok
             if haskey(_KERNEL_UNRESPONSIVE_SINCE, k)   # was unwell → recovered this sweep
                 el = round(Int, time() - _KERNEL_UNRESPONSIVE_SINCE[k])
@@ -2522,6 +2603,13 @@ function _liveness_sweep!(nb::LiveNotebook)
                     ReportEngine._rlog("liveness: $(nb.id)/$(_kernel_side_label(nb, k)) is answering again after $(el)s")
                 end
                 try; facts_changed!(); catch; end    # pill back to green immediately
+            end
+        elseif _telemetry_fresh(k)
+            delete!(_KERNEL_UNRESPONSIVE_SINCE, k); delete!(_LIVENESS_LOG_LAST, k)
+            if !haskey(_KERNEL_BUSY_SINCE, k)
+                _KERNEL_BUSY_SINCE[k] = time() - _LIVENESS_PING_TIMEOUT
+                ReportEngine._rlog("liveness: $(nb.id)/$(_kernel_side_label(nb, k)) missed a ping but its telemetry is arriving — busy, not gone")
+                try; facts_changed!(); catch; end
             end
         elseif k.conn !== conn0
             # The connection was replaced while the ping was out (a worker running older code is being
@@ -3336,6 +3424,12 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
     end
     try; _sweep_idle_regions!(h)              # hub-wide too: a region is not a notebook's to release
     catch e; ReportEngine._rlog("supervisor: region sweep error: " * first(sprint(showerror, e), 120))
+    end
+    try
+        for nb in lock(h.lock) do; collect(values(h.notebooks)); end, k in _nb_kernels(nb)
+            _host_sample!(k)
+        end
+    catch e; ReportEngine._rlog("supervisor: outside sample error: " * first(sprint(showerror, e), 120))
     end
     try; _sweep_stale_conn_state!(h)          # drop the series of workers that are gone
     catch e; ReportEngine._rlog("supervisor: conn-state sweep error: " * first(sprint(showerror, e), 120))

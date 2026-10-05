@@ -38,6 +38,10 @@ function effective_worker_threads(kthreads::AbstractString)
     return get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
 end
 
+# BLAS and OpenMP threads per worker. Each Julia thread may call into BLAS, so a library free to use
+# every core multiplies with the Julia threads and oversubscribes the machine.
+worker_blas_threads() = get(ENV, "KAIMONSLATE_BLAS_THREADS", "1")
+
 # The extra-flags string a worker would actually spawn with, given a per-kernel override
 # `kflags`: per-kernel override → global setting → env → "" (none). Mirrors `effective_worker_threads`.
 function effective_worker_extra_flags(kflags::AbstractString)
@@ -596,7 +600,12 @@ function _parse_telemetry(raw::AbstractString)
          proc    = _dict_of(get(d, "proc", nothing)),
          job     = _dict_of(get(d, "job", nothing)),
          ts      = Float64(get(d, "ts", 0.0)),
-         rcv     = time())
+         rcv     = time(),
+         # "worker" when the worker sent it; "host" when the hub read it from outside the process.
+         src     = "worker",
+         # Set on the first sample after the sampler was held: for how long, and how much of that went
+         # to collections waiting for a thread to reach a safepoint, and to collecting.
+         stall   = _dict_of(get(d, "stall", nothing)))
     catch
         nothing
     end
@@ -620,6 +629,14 @@ _dict_of(x) = x isa AbstractDict ?
 
 function _record_telemetry!(conn_name::AbstractString, raw::AbstractString)
     s = _parse_telemetry(raw); s === nothing && return nothing
+    isempty(s.stall) || _rlog("telemetry: $conn_name was held $(get(s.stall, "held_s", "?"))s — " *
+        "$(get(s.stall, "safepoint_s", "?"))s waiting for a thread to reach a GC safepoint, " *
+        "$(get(s.stall, "gc_s", "?"))s collecting")
+    return record_sample!(conn_name, s)
+end
+
+"Keep one telemetry sample for a kernel connection and pass it to the page, wherever it was taken."
+function record_sample!(conn_name::AbstractString, s)
     lock(_STATS_LOCK) do
         h = get!(_KERNEL_STATS, String(conn_name), Any[])
         push!(h, s)
@@ -958,7 +975,7 @@ function _spawn_worker!(k::GateKernel)
     # (small ops are faster single-threaded anyway; bump KAIMONSLATE_BLAS_THREADS for big dense
     # linear algebra). Julia's task threads PARK when idle — no spin; the interactive threads are
     # reserved for keeping the gate loop (heartbeats/cancels) + reactive handling snappy under load.
-    blas = get(ENV, "KAIMONSLATE_BLAS_THREADS", "1")
+    blas = worker_blas_threads()
     # Worker Julia threads ("<compute>,<interactive>"). Configurable via the Kaimon extension TUI panel
     # (NotebookServer sets WORKER_THREADS[]); env overrides; adaptive default below. More compute threads enable
     # true multi-core CPU parallelism for independent cells — note Julia 1.12's strict world-age for
@@ -1082,6 +1099,50 @@ function _boot_failure_message(k::GateKernel)
     end
     print(io, "\n  full log: ", k.logpath)
     return String(take!(io))
+end
+
+"""
+    crash_report(log) -> String
+
+Julia's report of a fatal signal in a worker log, cut to what says where it happened: the signal, the
+cell it was running, and the frames of the code that was running, without Julia's own. `""` when the
+log holds none.
+"""
+function crash_report(log::AbstractString)
+    lines = split(String(log), '\n')
+    i = findlast(l -> occursin(r"signal \d+ \(\d+\): ", l), lines)
+    i === nothing && return ""
+    io = IOBuffer()
+    print(io, strip(replace(lines[i], r"^\[\d+\]\s*" => "")))
+    frames = 0
+    for l in @view lines[i+1:end]
+        s = strip(l)
+        (isempty(s) || startswith(s, "Allocations:")) && break
+        m = match(r"^in expression starting at cell:([^:]+)", s)
+        if m !== nothing
+            print(io, ", in cell ", m.captures[1]); continue
+        end
+        m = match(r"^(.+?) at (.+?:\d+)", s)
+        (m === nothing || occursin(r"^(unknown function|jl_|ijl_|_jl|start_task)", m.captures[1]) ||
+         occursin(r"\.(c|h|cpp):\d+$", m.captures[2])) && continue
+        print(io, "\n  ", m.captures[1], " at ", m.captures[2])
+        (frames += 1) >= 8 && break
+    end
+    return String(take!(io))
+end
+
+# The error a cell gets when its eval failed in transport: what ended the worker, if it ended. A worker
+# that crashed answers nothing, so the transport error alone says only that no reply came.
+function _eval_failure(k::GateKernel, e)
+    msg = sprint(showerror, e)
+    rep = try; crash_report(worker_log_tail(k; lines = 120)); catch; ""; end
+    if isempty(rep) && _worker_died(k)
+        sig = try; k.proc.termsignal; catch; 0; end
+        rep = sig > 0 ? "killed by signal $sig" * (sig == 9 ? " (the system may have run out of memory)" : "") :
+                        "exited (code $(try; k.proc.exitcode; catch; "?"; end))"
+    end
+    isempty(rep) && return msg
+    return "the worker crashed: " * rep * (isempty(k.logpath) ? "" : "\nfull log: " * k.logpath)
 end
 
 function _connect!(k::GateKernel)
@@ -1362,6 +1423,11 @@ function _wire_to_output(wire)
                       hasproperty(wire, :live) && wire.live === true)
 end
 
+# A remote worker runs a cell only on the sources as they are here now (`sync_flush!`). A copy that
+# cannot be sent is logged there; the cell still runs, on what the host has.
+_flush_sources!(k::GateKernel) =
+    k.target isa RemoteTarget && (try; sync_flush!(k); catch e; _rlog("sync: flush before a cell failed — " * first(sprint(showerror, e), 160)); end)
+
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
                       region::AbstractString = "", regions::AbstractVector = String[])
     wire = try
@@ -1369,13 +1435,14 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         # surface as this cell's error, NOT propagate up through eval_stale!/sync_from_file! and 500
         # the whole `state` request (which bricks the notebook in the browser).
         prepare!(k, report)
+        _flush_sources!(k)
         # `filename` is a kwarg on the worker tool — GateTool strips optional POSITIONAL args, so it
         # must ride as a keyword (Dict key → kwarg) to survive the hop. See worker.jl `__slate_eval`.
         # `ctx_*` seed the worker's task-local Slate execution context (see `_build_slate_ctx`).
         _tool(k, "__slate_eval", Dict{String,Any}("source" => String(source), "filename" => String(filename),
               _ctx_args(report, region, regions, filename)...); timeout = _eval_timeout())
     catch e
-        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
+        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", _eval_failure(k, e), nothing, 0.0)
     end
     return _wire_to_output(wire)
 end
@@ -1562,6 +1629,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
     (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions)
     wire = try
         prepare!(k, report)
+        _flush_sources!(k)
         _tool(k, "__slate_eval", Dict{String,Any}(
             "source" => String(source), "filename" => String(filename),
             _ctx_args(report, region, regions, filename)...,
@@ -1579,7 +1647,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
             # names nothing downstream MUTATES — restore may zero-copy (mmap/arrow view)
             "memo_safe" => (hasproperty(memo, :safe) ? collect(String, memo.safe) : String[])); timeout = _eval_timeout())
     catch e
-        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
+        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", _eval_failure(k, e), nothing, 0.0)
     end
     return _wire_to_output(wire)
 end

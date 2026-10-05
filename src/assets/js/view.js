@@ -919,7 +919,7 @@ function _regPicker(c, reg) {
   const sel = opt('', 'local (main kernel)') + group('Machines', machines) +
               group('Regions', regs.filter(r => M.regionKind(r) !== 'machine'));
   return `<div class="blkrow"><span>Runs on</span><div>` +
-         `<select class="regpick" onchange="window.setCellRegion('${c.id}', this.value)">${sel}</select></div></div>`;
+         `<select class="regpick" onchange="window.pickCellRegion('${c.id}', this.value)">${sel}</select></div></div>`;
 }
 // The region's definition as the notebook knows it, or null for the main kernel.
 function _regDef(reg) {
@@ -960,9 +960,9 @@ function _regRender(c, reg, load, alloc) {
   h += `<div class="regpfoot"><a href="/#remotes">Manage regions and workers in Remotes</a></div>`;
   return h;
 }
-window.setCellRegion = function (id, name) {
-  const keep = (typeof _curTags === 'function' ? _curTags(id) : []).filter(t => !t.startsWith('region='));
-  if (typeof setTags === 'function') setTags(id, name ? [...keep, 'region=' + name] : keep);
+// The panel's picker: the one way a cell's region is set (`setCellRegion`, regions.js), then the panel goes.
+window.pickCellRegion = function (id, name) {
+  setCellRegion(id, name);
   _regClose();
 };
 function _regClose() { if (_regPanel) _regPanel.classList.remove('on'); _regFor = ''; }
@@ -1610,7 +1610,7 @@ function markBlank(el, c) {
   el.classList.toggle('cell-blank', blank);
 }
 window.slateMarkBlank = markBlank;
-function resetCellRevs() { for (const k in _cellRev) delete _cellRev[k]; }
+function resetCellRevs() { for (const k in _cellRev) delete _cellRev[k]; _stateVersion = -1; }
 window.slateRevIsNew = revIsNew;
 window.slateRevMark = revMark;
 window.slateResetCellRevs = resetCellRevs;
@@ -1741,7 +1741,16 @@ function backrefInfo(ev, cellId) {
 }
 window.backrefInfo = backrefInfo;
 
+// The newest full state applied. A full state is the answer to a request, and an answer can arrive
+// after one to a later request: a state GET started before an edit, answered after the edit's own
+// reply. Applying it would put the page back to before the edit. `version` only rises within a hub
+// process; a reconnect clears this (`resetCellRevs`), as the hub may have restarted.
+let _stateVersion = -1;
 function _publishState(state) {
+  if (state && typeof state.version === 'number') {
+    if (state.version < _stateVersion) return;
+    _stateVersion = state.version;
+  }
   nbState = state;
   // Remember this notebook's file path so a reconnect after a server restart can ask the server
   // to re-open it by path (the in-memory registry is empty after a restart — see panels.js _probe).

@@ -212,6 +212,10 @@
         return 'not signed in to ' + (w.noteHost || 'the host') + ' — use the padlock at the top of the page';
       case 'unresponsive':
         return 'worker stopped responding — press ▶ or re-run to reconnect';
+      case 'busy_no_reply': {
+        const el = Math.max(0, Math.round(hubNow() - (+w.busySince || 0)));
+        return 'busy for ' + el + 's — every thread is occupied, so it is not answering requests; telemetry continues';
+      }
       case 'no_reply': {
         // Counted here, from when it stopped answering: the hub says when, not for how long.
         const el = Math.max(0, Math.round(hubNow() - (+w.unresponsiveSince || 0)));

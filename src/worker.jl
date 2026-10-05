@@ -2411,34 +2411,77 @@ function _start_src_watcher()
     @async while true
         try
             sleep(0.4)
-            R = Main.Revise
-            _seed_new_src_defs!()             # baseline newly-loaded files so their first edit diffs cleanly
-            (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || continue
-            queue = collect(R.revision_queue)
-            before = _qe_keys(R)
-            thrown = nothing
-            try; R.revise(); catch e; thrown = e; end
-            emsg = _revise_error_msg(R, thrown, before)
-            if !isempty(emsg)
-                @warn "slate hot-reload: revise error" error = emsg
-                if emsg != _LAST_SRC_ERR[]
-                    _LAST_SRC_ERR[] = emsg
-                    KaimonGate._publish_stream("slate_revise_err", emsg)
-                end
-            else
-                _LAST_SRC_ERR[] = ""
-                names = _changed_names(queue)
-                _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
-                @info "slate hot-reload: revised" files = length(queue) changed = names
-                isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
-                _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
-            end
+            _apply_revisions!()
         catch e
             try; @warn "slate hot-reload: watcher iteration failed" exception = e; catch; end
             try; sleep(0.5); catch; end
         end
     end
     return nothing
+end
+
+const _APPLY_LOCK = ReentrantLock()
+
+# Apply what Revise has queued and report it: the changed definitions, or the error a save left.
+function _apply_revisions!()
+    lock(_APPLY_LOCK) do
+        R = Main.Revise
+        _seed_new_src_defs!()             # baseline newly-loaded files so their first edit diffs cleanly
+        (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || return nothing
+        queue = collect(R.revision_queue)
+        before = _qe_keys(R)
+        thrown = nothing
+        try; R.revise(); catch e; thrown = e; end
+        emsg = _revise_error_msg(R, thrown, before)
+        if !isempty(emsg)
+            @warn "slate hot-reload: revise error" error = emsg
+            if emsg != _LAST_SRC_ERR[]
+                _LAST_SRC_ERR[] = emsg
+                KaimonGate._publish_stream("slate_revise_err", emsg)
+            end
+        else
+            _LAST_SRC_ERR[] = ""
+            names = _changed_names(queue)
+            _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
+            @info "slate hot-reload: revised" files = length(queue) changed = names
+            isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
+            _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
+        end
+        return nothing
+    end
+end
+
+"""
+Files the hub has just written into this worker's copies of its sources (`paths`, \$HOME-relative or
+absolute). Each that Revise tracks is queued for revision and applied now: a copy written from another
+machine, as a cluster's login node writes for a compute node, raises no change event here, and the
+hub waits on this before running a cell. Returns `{queued}`.
+"""
+function __slate_files_changed(paths)
+    isdefined(Main, :Revise) || return Dict{String,Any}("queued" => 0)
+    R = Main.Revise
+    want = Set{String}()
+    for p in paths
+        s = String(p)
+        f = startswith(s, "~/") ? joinpath(homedir(), s[3:end]) : isabspath(s) ? s : joinpath(homedir(), s)
+        push!(want, try; realpath(f); catch; f; end)
+    end
+    n = 0
+    try
+        Base.@lock R.revise_lock for (id, pd) in R.pkgdatas
+            id == R.NOPACKAGE && continue
+            base = R.basedir(pd)
+            for rel in R.srcfiles(pd)
+                f = joinpath(base, rel)
+                (try; realpath(f); catch; f; end) in want || continue
+                push!(R.revision_queue, (pd, rel)); n += 1
+            end
+        end
+    catch e
+        @warn "slate hot-reload: could not queue the files the hub sent" exception = e
+    end
+    n > 0 && _apply_revisions!()
+    return Dict{String,Any}("queued" => n)
 end
 
 "Apply pending Revise revisions; return the changed top-level def names (manual / testing)."
@@ -2733,6 +2776,7 @@ function tools()
         KaimonGate.GateTool("__slate_pkg_parent", __slate_pkg_parent),
         KaimonGate.GateTool("__slate_registry_add", __slate_registry_add),
         KaimonGate.GateTool("__slate_revise", __slate_revise),
+        KaimonGate.GateTool("__slate_files_changed", __slate_files_changed),
     ]
 end
 
@@ -2941,12 +2985,26 @@ function _telemetry_loop!(stats_path::String)
         (-1, -1)
     end
     lastc = cputime(); lastw = time(); memo = -1; tick = 0; spin = 0
+    g0 = Base.gc_num(); last_ttsp = g0.total_time_to_safepoint; last_gct = g0.total_time
     sys = try; SysSampler(); catch; nothing; end
     lastsb, lastst = sysstat()
     while true
         sleep(2.0)
         tick += 1
         c = cputime(); w = time()
+        # A sample that comes late says this thread could not run. What held it: collections waiting
+        # for a thread to reach a GC safepoint, collecting itself, or neither (this thread kept from
+        # running by something else in the process). Logged here and sent with the sample.
+        g = Base.gc_num()
+        stall = ""
+        if w - lastw > 6.0
+            held = w - lastw - 2.0
+            ttsp = (g.total_time_to_safepoint - last_ttsp) / 1e9
+            gct = (g.total_time - last_gct) / 1e9
+            @warn "slate telemetry: the sampler was held $(round(held; digits = 1))s" waiting_for_safepoint_s = round(ttsp; digits = 1) collecting_s = round(gct; digits = 1) max_time_to_safepoint_s = round(g.max_time_to_safepoint / 1e9; digits = 1)
+            stall = ",\"stall\":{\"held_s\":$(round(held; digits = 1)),\"safepoint_s\":$(round(ttsp; digits = 1)),\"gc_s\":$(round(gct; digits = 1))}"
+        end
+        last_ttsp = g.total_time_to_safepoint; last_gct = g.total_time
         cpu = (c >= 0 && lastc >= 0 && w > lastw) ? round(100 * (c - lastc) / (w - lastw); digits = 1) : -1.0
         lastc = c; lastw = w
         (memo < 0 || tick % 15 == 0) && (memo = _dir_bytes(joinpath(_memo_dir(), "blobs")))
@@ -2991,7 +3049,7 @@ function _telemetry_loop!(stats_path::String)
         line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
                "\"running\":$running,\"warm\":\"$warm\",\"memo_bytes\":$memo," *
                "\"sys_cpu\":$syscpu,\"load1\":$load1,\"sys_mem_total\":$smt,\"sys_mem_free\":$smf," *
-               "\"last_eval_mono\":$(_LAST_EVAL_AT[]),\"gpus\":$gpus$hpj," *
+               "\"last_eval_mono\":$(_LAST_EVAL_AT[]),\"gpus\":$gpus$hpj$stall," *
                "\"ts\":$(round(Int, time()))}"
         try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
         isempty(stats_path) || try                          # roster sidecar — remote workers only
@@ -3213,7 +3271,10 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # Sample every worker — local kernels too. The `.stats` sidecar is still remote-only (empty
     # stats_path skips it), but the `slate_telemetry` PUB now flows from every worker process, so the
     # hub's watchdog can see cpu/rss/gc on a local kernel and not just remote regions.
-    Threads.@spawn try
+    # On an interactive thread: Julia never preempts a task, so a sampler in the default pool waits
+    # behind cells that keep every default thread busy (BLAS calls, tight loops), and a worker that is
+    # working hard would look silent.
+    Threads.@spawn :interactive try
         _telemetry_loop!(stats_path)
     catch e
         @warn "slate worker: telemetry sampler died" exception = e

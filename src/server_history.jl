@@ -1319,6 +1319,10 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             end)
             # Started by the region's prepare, which loads the packages in it before handing it over.
             (code == "bringup" && !isempty(side) && ReportEngine.prepare_running(side)) && (d["face"] = "preparing")
+        elseif (busy = get(_KERNEL_BUSY_SINCE, k, nothing)) !== nothing
+            d["noteCode"] = "busy_no_reply"
+            d["busySince"] = round(Float64(busy); digits = 1)
+            d["status"] = "ok"
         elseif since !== nothing
             d["status"] = "degraded"
             # When it stopped answering, not for how long: the page counts. Only a remote wire

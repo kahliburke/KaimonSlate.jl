@@ -446,6 +446,82 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            @testset "a source change reaches its host copy, and only the change travels" begin
+                srcdir, dest = mktempdir(), mktempdir()
+                mkpath(joinpath(srcdir, "src", "sub")); mkpath(joinpath(srcdir, "ext"))
+                write(joinpath(srcdir, "src", "A.jl"), "a"); write(joinpath(srcdir, "src", "sub", "b.jl"), "b")
+                write(joinpath(srcdir, "notes.txt"), "n"); write(joinpath(srcdir, "src", "x.cov"), "c")
+                cp(srcdir, dest; force = true)                       # the copy as a provision left it
+                ex = [".git", "*.cov"]
+                @test sort!(collect(keys(RE._sync_files(srcdir, ex)))) == ["src/A.jl", "src/sub/b.jl"]
+                s = RE.SyncSource(srcdir)
+                d = RE.SyncDest("", dest, ex, "", RE._sync_files(srcdir, ex), Dict{String,Any}(), false)
+                write(joinpath(srcdir, "src", "sub", "b.jl"), "bb")  # a subfolder, a new extension, a removal
+                write(joinpath(srcdir, "ext", "E.jl"), "e"); rm(joinpath(srcdir, "src", "A.jl"))
+                write(joinpath(srcdir, "notes.txt"), "changed")      # outside what is watched
+                @test RE._sync_dest!(s, d, RE._sync_files(srcdir, ex))
+                @test (read(joinpath(dest, "src", "sub", "b.jl"), String), isfile(joinpath(dest, "ext", "E.jl")),
+                       isfile(joinpath(dest, "src", "A.jl")), read(joinpath(dest, "notes.txt"), String)) ==
+                      ("bb", true, false, "n")
+                @test d.sent == RE._sync_files(srcdir, ex)
+            end
+
+            @testset "a save reaches the copy without anything asking for it" begin
+                proj, dest = mktempdir(), mktempdir()
+                mkpath(joinpath(proj, "src")); write(joinpath(proj, "src", "P.jl"), "p")
+                cp(proj, dest; force = true)
+                t = RE.RemoteTarget(""; project = dest)
+                try
+                    RE.start_sync!(t, proj; sent = true)
+                    sleep(0.3)
+                    write(joinpath(proj, "src", "P.jl"), "edited")
+                    f = joinpath(dest, "src", "P.jl")
+                    @test timedwait(() -> read(f, String) == "edited", 5.0; pollint = 0.05) === :ok
+                finally
+                    RE.stop_sync!(t)
+                end
+                @test !haskey(RE._SYNC_SOURCES, proj)
+            end
+
+            @testset "one watch per source directory, kept while a kernel uses a copy of it" begin
+                proj = mktempdir(); mkpath(joinpath(proj, "src")); write(joinpath(proj, "src", "P.jl"), "p")
+                t1 = RE.RemoteTarget("synchost"; project = "~/r/one", job = "5")
+                t2 = RE.RemoteTarget("synchost"; project = "~/r/two", job = "5")
+                RE.start_sync!(t1, proj; sent = true); RE.start_sync!(t2, proj; sent = true)
+                @test length(lock(() -> RE._SYNC_SOURCES[proj].dests, RE._SYNC_LOCK)) == 2
+                RE.stop_sync!(t1)
+                @test haskey(RE._SYNC_SOURCES, proj)                 # the other kernel still uses it
+                RE.stop_sync_job!("synchost", "5")
+                @test !haskey(RE._SYNC_SOURCES, proj)
+            end
+
+            @testset "a worker's process is read from outside when it sends nothing" begin
+                r = NS._proc_cpu_rss(getpid())
+                @test r !== nothing && r[1] > 0 && r[2] > 0
+                @test NS._proc_cpu_rss(typemax(Int32)) === nothing    # no such process
+            end
+
+            @testset "a worker's crash is reported where it happened" begin
+                log = """
+                [ Info: slate eval: ran cell
+                └  cell = "more_imports"
+
+                [44773] signal 11 (2): Segmentation fault: 11
+                in expression starting at cell:model_cycles:2
+                potential_derivatives at /src/potentialgrid.jl:0 [inlined]
+                #_qfm_system#262 at /src/qfm.jl:81
+                closed_orbit at /src/cycles.jl:35 [inlined]
+                unknown function (ip: 0x70361d458b) at (unknown file)
+                jl_apply at julia.h:2394 [inlined]
+                start_task at task.c:1253
+                Allocations: 136699565 (Pool: 136696745; Big: 2820); GC: 62
+                """
+                @test RE.crash_report(log) == "signal 11 (2): Segmentation fault: 11, in cell model_cycles\n" *
+                    "  potential_derivatives at /src/potentialgrid.jl:0\n  #_qfm_system#262 at /src/qfm.jl:81\n" *
+                    "  closed_orbit at /src/cycles.jl:35"
+                @test RE.crash_report("[ Info: all fine\n") == ""
+            end
+
             @testset "a node's worker is filed under its login host after its route is gone" begin
                 RE.region_set!("filedtest"; host = "loginx", scheduler = :slurm)
                 @test NS._filed_under(RE.RemoteTarget("nodey"; region = "filedtest")) == "loginx"
@@ -1157,13 +1233,18 @@ const RE = KaimonSlate.ReportEngine
                 @test occursin("through login", msg) && occursin("padlock", msg)
                 @test !occursin("ssh/config", msg) && !occursin("key-based", msg)
 
-                # A file syncer pointed at the node, as a worker on it would have started, and one
-                # sending to a host of the same name outside the job (a single-node cluster's login).
+                # A source copy kept for a worker on the node, and one for a host of the same name
+                # outside the job (a single-node cluster's login).
                 jobkey = RE._sync_base(RE.RemoteTarget("c9"; project = "proj", job = "77"))
                 @test jobkey == "c9#77:proj"
+                srcdir = mktempdir()
                 lock(RE._SYNC_LOCK) do
-                    RE._SYNCERS[jobkey] = RE.SyncWatcher(Task(() -> nothing), true)
-                    RE._SYNCERS["c9:other"] = RE.SyncWatcher(Task(() -> nothing), true)
+                    s = RE.SyncSource(srcdir)
+                    nosent = Dict{String,Tuple{Int,Float64}}()
+                    s.dests["c9:proj"] = RE.SyncDest("c9", "proj", String[], "", nosent, Dict{String,Any}(jobkey => nothing), false)
+                    s.dests["c9:other"] = RE.SyncDest("c9", "other", String[], "", copy(nosent),
+                                                      Dict{String,Any}("c9:other" => nothing), false)
+                    RE._SYNC_SOURCES[srcdir] = s
                 end
                 lock(RE._REGION_PLACE_LOCK) do
                     RE._REGION_PLACE["leased"] =
@@ -1172,9 +1253,9 @@ const RE = KaimonSlate.ReportEngine
                 @test RE.region_host(r) == "login"             # past it: nothing placed, ask again
                 @test !RE._region_holds_node(r)
                 @test RE.via("c9") === nothing                 # the route goes with the allocation
-                @test !haskey(RE._SYNCERS, jobkey)             # …and so does the job's syncer
-                @test haskey(RE._SYNCERS, "c9:other")          # …and only the job's
-                lock(RE._SYNC_LOCK) do; delete!(RE._SYNCERS, "c9:other"); end
+                @test !haskey(RE._SYNC_SOURCES[srcdir].dests, "c9:proj")   # …and so does the job's copy
+                @test haskey(RE._SYNC_SOURCES[srcdir].dests, "c9:other")   # …and only the job's
+                lock(RE._SYNC_LOCK) do; delete!(RE._SYNC_SOURCES, srcdir); end
                 @test !haskey(RE._REGION_PLACE, "leased")
                 # An unrouted host keeps the plain advice — that one really is an ssh/config problem.
                 @test occursin("~/.ssh/config", RE._unreachable("workstation"))
