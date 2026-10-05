@@ -170,6 +170,11 @@ const RE = KaimonSlate.ReportEngine
                                  readiness = Dict{String,Any}("prepared_at" => 1.0, "stale" => ""))
             @test RE.region_scheduler(gpu) === :slurm
             @test RE.region_host(gpu) == "login"
+            # Its workers use the CPUs the allocation holds; an ordinary host keeps the shared default.
+            @test RE.region_threads(RE.region_set!("thr"; host = "login", scheduler = :slurm, cpus = 32)) == "30,2"
+            @test RE.region_threads(RE.region_set!("thr"; cpus = 2)) == "2,1"
+            @test RE.region_threads(RE.region_set!("thr"; threads = "16,1")) == "16,1"
+            @test RE.region_threads(plain) == ""
 
             @testset "an auto region asks its host which scheduler it runs" begin
                 bin = mktempdir()

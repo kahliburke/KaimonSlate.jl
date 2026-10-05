@@ -4469,6 +4469,16 @@ _remote_env_key(origin_env, parent) = _proj_key(isempty(String(origin_env)) ? pa
 # running. That worker keeps its port and drops out of `_port_floor`, which is what the allocator
 # later walks into. Disjoint bases per host keep the records disjoint too, since they are keyed by
 # port — so this is the same setting answering both.
+# The thread spec a region's workers start with. A region that sets one gets it. An allocation is the
+# notebook's alone, so on a scheduler region that says how many CPUs it holds, the worker uses them
+# all, two of them as interactive threads for the gate. Otherwise the worker default applies, which
+# caps a host several notebooks may share.
+function region_threads(r::Region)
+    isempty(strip(r.threads)) || return r.threads
+    (r.scheduler !== :none && r.cpus > 0) || return ""
+    return r.cpus > 2 ? string(r.cpus - 2, ",2") : string(r.cpus, ",1")
+end
+
 function _region_target(r::Region; origin_env::AbstractString = r.preload,
                         at::Tuple{AbstractString,AbstractString} = region_where(r))
     host, job = at
@@ -4959,7 +4969,7 @@ function _region_reconcile_impl!(r::Region)
                  for _ in 1:deficit]
             end
         for (port, sp) in ports
-            _launch_worker!(t, port, sp; label = "", parent = "", threads = r.threads,
+            _launch_worker!(t, port, sp; label = "", parent = "", threads = region_threads(r),
                             warm = true, region = r.name, warm_deps = !isempty(r.preload))
         end
         return "region[$(r.name)]: launched $(length(ports)) worker(s) → $(r.warm) warm on $host$cleaned"

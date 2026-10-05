@@ -2123,7 +2123,7 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
         ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $host ($(r.transport))" *
                            (host == r.host ? "" : " via $(r.host)") *
                            (isempty(r.data_root) ? "" : " root=$(r.data_root)"))
-        k = ReportEngine.GateKernel(target.project; parent = parent, target = target, threads = r.threads,
+        k = ReportEngine.GateKernel(target.project; parent = parent, target = target, threads = ReportEngine.region_threads(r),
                                     label = basename(abspath(nb.path)) * "#" * name)
         _REGION_KERNELS[(nb.id, name)] = k
         return k
