@@ -420,6 +420,18 @@ const RE = KaimonSlate.ReportEngine
                     @test b.state == RE.BLOCKED
                     @test a.state == RE.STALE
                     @test get(NS._FORCE_RUN, "waits", Set{String}()) == Set(["a"])
+                    # A region that needs preparing is offered one by running its cell, so the same.
+                    delete!(NS._FORCE_RUN, "waits")
+                    RE.mark_blocked!(a, NS.WAIT_NEEDS_PREPARE, "login", "gpu")
+                    push!(get!(Set{String}, NS._FORCE_RUN, "waits"), "b")
+                    NS._eval_one!(nb, b)
+                    @test a.state == RE.STALE && get(NS._FORCE_RUN, "waits", Set{String}()) == Set(["a"])
+                    # A queue wait is not helped by running anything; the marker is used up all the same.
+                    delete!(NS._FORCE_RUN, "waits")
+                    RE.mark_blocked!(a, NS.WAIT_QUEUED, "login", "gpu")
+                    push!(get!(Set{String}, NS._FORCE_RUN, "waits"), "b")
+                    NS._eval_one!(nb, b)
+                    @test a.state == RE.BLOCKED && !haskey(NS._FORCE_RUN, "waits")
                 finally
                     lock(NS._RUNNER_LOCK) do; delete!(NS._RUNNERS, "waits"); end
                     lock(nb.lock) do; delete!(NS._FORCE_RUN, "waits"); end

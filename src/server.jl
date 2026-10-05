@@ -3717,10 +3717,11 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         u === nothing && return (false, false)
         ReportEngine.mark_blocked!(cell, u.blocked, u.blocked_host, u.blocked_region)
         _broadcast_progress(nb, cell)
-        # A ▶ on this cell asks for what it waits on. A node nobody has asked for yet is asked for by
-        # running the cell that needs it, so the force passes to that cell.
+        # A ▶ on this cell asks for what it waits on. A node nobody has asked for yet, or a prepare
+        # nobody has been offered, comes from running the cell that needs it, so the force passes there.
         forced = _take_force!(nb.id, cell.id)
-        (forced && u.blocked == WAIT_NOT_REQUESTED && ReportEngine.restale!(u)) || return (true, false)
+        (forced && u.blocked in (WAIT_NOT_REQUESTED, WAIT_NEEDS_PREPARE) && ReportEngine.restale!(u)) ||
+            return (true, false)
         push!(get!(Set{String}, _FORCE_RUN, nb.id), u.id)
         nb.version += 1
         (true, true)
