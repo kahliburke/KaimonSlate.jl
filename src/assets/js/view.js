@@ -738,7 +738,7 @@ function cellHeaderInner(c) {
     // width). The action buttons overlay it while the cell is hovered or selected (notebook.css), so
     // the two share the same right-hand space instead of adding up and clipping on a narrow cell.
     '<span class="cellhdr-info">' +
-    `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
+    `<span class="cdur">${c.duration != null ? window.slateDuration(c.duration) : ''}</span>` +
     `<span class="previewslot">${_previewBadge(c)}</span>` +
     `<span class="memoslot">${_memoBadge(c)}</span>` +
     `<span class="badge">${c.state}</span>` +

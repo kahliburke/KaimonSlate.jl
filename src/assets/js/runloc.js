@@ -193,7 +193,7 @@ function rlTest() {
     const m = running ? '<span class="hydspin"></span>' : s.status === 'ok' ? '✓' : s.status === 'skip' ? '–' : '✗';
     el.className = 'rlstep ' + (running ? 'run' : s.status);
     el.innerHTML = '<span class="rlmark">' + m + '</span> <b>' + _rlEsc(s.name) + '</b> <span class="rlms">' +
-      (running ? '…' : s.ms + 'ms') + '</span>' + (s.detail ? '<div class="rldetail">' + _rlEsc(s.detail) + '</div>' : '');
+      (running ? '…' : window.slateDuration(s.ms)) + '</span>' + (s.detail ? '<div class="rldetail">' + _rlEsc(s.detail) + '</div>' : '');
   });
   es.addEventListener('done', e => {
     let d = {}; try { d = JSON.parse(e.data); } catch (_) {}

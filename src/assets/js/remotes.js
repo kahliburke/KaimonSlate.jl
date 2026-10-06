@@ -78,7 +78,7 @@ function TestSteps() {
     ${s.note ? html`<div class="rtnote"><span class="hydspin"></span> ${s.note}</div>` : null}
     ${s.verdict ? html`<div class=${'rtverdict ' + (s.verdict.ok ? 'ok' : 'fail')}>${s.verdict.text}</div>` : null}
     <div>${s.rows.map(r => html`<div class=${'rtstep ' + (r.status === 'run' ? 'run' : r.status)}>
-      <span class="rtmark">${mark(r.status)}</span> <b>${r.name}</b> <span class="rtms">${r.status === 'run' ? '…' : r.ms + 'ms'}</span>
+      <span class="rtmark">${mark(r.status)}</span> <b>${r.name}</b> <span class="rtms">${r.status === 'run' ? '…' : window.slateDuration(r.ms)}</span>
       ${r.detail ? html`<div class="rtdetail">${r.detail}</div>` : null}</div>`)}</div>
     ${s.err ? html`<div class="rtnote err">${s.err}</div>` : null}`;
 }

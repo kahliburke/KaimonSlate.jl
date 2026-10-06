@@ -268,7 +268,7 @@ function Telemetry() {
       yAxis: { type: 'category', data: ids, axisLabel: { width: 80, overflow: 'truncate' } },
       tooltip: { formatter: (p) => {
         const [, a, b, id, kind] = p.data.value, d = b - a;
-        return id + ' · ' + (d < 1000 ? Math.round(d) + ' ms' : (d / 1000).toFixed(d < 10000 ? 1 : 0) + ' s') +
+        return id + ' · ' + window.slateDuration(d) +
                ' · ' + ({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })[kind];
       } },
       series: [{ type: 'custom', encode: { x: [1, 2], y: 0 },

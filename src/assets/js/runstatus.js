@@ -38,7 +38,7 @@
     .filter((c) => c.state === 'errored').map((c) => c.id);
 
   const now = () => performance.now();
-  const fmt = (ms) => ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
+  const fmt = (ms) => window.slateDuration(ms);
   const esc = s => window.slateEscHtml(s);
   const setLive = (id, s) => { try { window.slateStore && window.slateStore.setLiveState(id, s); } catch (_) {} };
 
@@ -102,12 +102,13 @@
   // Tick the live elapsed time INTO THE TIME SLOT (.cdur), not the state badge — so there's one time
   // display that counts up during the run and settles to the worker's final duration on celldone (the
   // header re-renders only on state changes, so between them this owns .cdur). The badge stays the
-  // state word ("running"); progress % rides the floating chip. Formatted to match the final "N ms".
+  // state word ("running"); progress % rides the floating chip. Formatted by `slateDuration`, as the
+  // final duration is.
   function renderTimers() {
     if (!revealed) return;
     for (const [id, t] of running) {
       const d = document.querySelector(`.cell[data-cid="${id}"] .cdur`);
-      if (d) d.textContent = Math.round(now() - t) + ' ms';
+      if (d) d.textContent = fmt(now() - t);
     }
   }
 

@@ -716,7 +716,7 @@ end
                        "settings_section_links.mjs", "logview_window.mjs",
                        "sweep_tile_panel.mjs", "agent_toolrow.mjs",
                        "specialist_ask_routing.mjs", "echarts_dark_labels.mjs",
-                       "teardown_output.mjs", "carry_mounted.mjs")
+                       "teardown_output.mjs", "carry_mounted.mjs", "duration_fmt.mjs")
             io = IOBuffer()
             ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", script))`; stdout = io, stderr = io))
             ok || print(String(take!(io)))
