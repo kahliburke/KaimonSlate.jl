@@ -3228,10 +3228,10 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     (_MEMO_OK && !_SWEEP_OK) && @warn "slate worker: batch fabric unavailable — @sweep is not defined" exception = _SWEEP_ERR[]
     # Prewarm the eval path: the package image holds most of what the first run through
     # `_eval_one`/`run_capture` compiles (see the workload at the end of this file); this pays for
-    # what it does not, which otherwise lands under the user's first cell. Compile it NOW, in the background: the port is already serving, so
-    # a real eval arriving mid-prewarm just serializes with it harmlessly (same total, never
-    # worse) — while an idle-spawned worker (warm pool, detach target) has it fully paid before
-    # anyone attaches. "1 + 1" exercises exactly the measured slow path; it writes no globals.
+    # what it does not, which otherwise lands under the user's first cell. Compile it NOW, in the
+    # background: the port is already serving, so a real eval arriving mid-prewarm just serializes
+    # with it harmlessly (same total, never worse) — while an idle-spawned worker (warm pool,
+    # detach target) has it fully paid before anyone attaches. "1 + 1" exercises exactly the measured slow path; it writes no globals.
     Threads.@spawn try
         _after_hub_attached()   # DEFERRED: this is the biggest boot compile — let the hub attach on a clear CPU first
         t0 = time()
@@ -3296,17 +3296,82 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
 end
 
 
-# Precompile workload: run cells through the eval path while this module is being compiled into a
-# package image, so a worker's first cell does not pay to compile it. Cells go into `_WarmNS` because
-# precompilation can only evaluate into the module being compiled; `__init__` replaces it.
+# Precompile workload, run while this module is compiled into a package image so a worker does not
+# compile these paths at boot. Cells go into `_WarmNS` because precompilation can only evaluate into
+# the module being compiled; `__init__` replaces it.
 module _WarmNS end
+
+# The gate a hub dials: serve it as `start` does (CURVE, allow-listed), then connect the way the hub
+# does and make the calls it makes on attach. Its keys and session files go to a throwaway cache dir.
+function _gate_workload()
+    ZMQ = KaimonGate.ZMQ
+    cache = mktempdir()
+    old = get(ENV, "XDG_CACHE_HOME", nothing)
+    ENV["XDG_CACHE_HOME"] = cache
+    ctx = sock = nothing
+    try
+        cpub, csec = KaimonGate.curve_keypair()
+        port = let l = Sockets.listen(Sockets.localhost, 0)
+            p = Int(Sockets.getsockname(l)[2]); close(l); p
+        end
+        redirect_stdout(devnull) do
+            KaimonGate.serve(; mode = :tcp, host = "127.0.0.1", port = port, stream_port = port + 1,
+                             tools = tools(), force = true, allow_mirror = false,
+                             allow_restart = false, spawned_by = "slate",
+                             curve = true, allowed_clients = [cpub])
+        end
+        ctx = ZMQ.Context()
+        sock = ZMQ.Socket(ctx, ZMQ.DEALER)
+        KaimonGate.make_curve_client!(sock, KaimonGate._curve_server_public(), cpub, csec)
+        sock.rcvtimeo = 60_000   # a cold handshake on a slow CPU takes seconds
+        sock.linger = 0
+        ZMQ.connect(sock, "tcp://127.0.0.1:$port")
+        reqs = ((type = :ping,), (type = :list_tools,),
+                (type = :tool_call, name = "__slate_ports", arguments = Dict{String,Any}()),
+                (type = :tool_call, name = "__slate_running", arguments = Dict{String,Any}()))
+        for req in reqs
+            io = IOBuffer(); Serialization.serialize(io, req)
+            ZMQ.send(sock, UInt8[0x01]; more = true)
+            ZMQ.send(sock, take!(io))
+            ZMQ.recv(sock)
+            while sock.rcvmore; ZMQ.recv(sock); end
+        end
+        # What ran above ran on the gate's own tasks, through `invokelatest`, and an image keeps another
+        # package's compiled code only when this package's code reaches it. Name it so it is kept: the
+        # requests' handler, and the bodies of the gate's tasks.
+        for req in reqs
+            precompile(KaimonGate.handle_message, (typeof(req),))
+            precompile(Serialization.serialize, (IOBuffer, typeof(KaimonGate.handle_message(req))))
+        end
+        for acc in (:_gate_task, :_zap_task, :_stream_task)
+            t = isdefined(KaimonGate, acc) ? getfield(KaimonGate, acc)() : nothing
+            t isa Task && precompile(t.code, ())
+        end
+    finally
+        sock === nothing || close(sock)
+        ctx === nothing || close(ctx)
+        # The ZAP handler notices its closed socket on its next receive timeout. Wait for it, or the
+        # image build waits on its open poll handle.
+        zap = isdefined(KaimonGate, :_zap_task) ? KaimonGate._zap_task() : nothing
+        redirect_stdout(KaimonGate.stop, devnull)
+        zap === nothing || timedwait(() -> istaskdone(zap), 5.0)
+        old === nothing ? delete!(ENV, "XDG_CACHE_HOME") : (ENV["XDG_CACHE_HOME"] = old)
+        rm(cache; recursive = true, force = true)
+    end
+end
+
 if ccall(:jl_generating_output, Cint, ()) == 1
     try
         _NS[] = _new_ns(_WarmNS)
         __slate_eval("1 + 1"; filename = "cell:__prewarm__")
         __slate_eval("x = sum(rand(10)); x"; filename = "cell:__prewarm__")
     catch e
-        @warn "SlateWorker precompile workload failed" exception = (e, catch_backtrace())
+        @warn "SlateWorker precompile workload (eval) failed" exception = (e, catch_backtrace())
+    end
+    try
+        _gate_workload()
+    catch e
+        @warn "SlateWorker precompile workload (gate) failed" exception = (e, catch_backtrace())
     end
 end
 
