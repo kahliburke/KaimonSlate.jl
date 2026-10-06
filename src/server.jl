@@ -1906,6 +1906,15 @@ _stamp_withdraw!(name::AbstractString, t::Float64 = time()) = lock(_PLACING_LOCK
     prev
 end
 
+# When each notebook last asked for work (`_eval!` with `fresh`: a run, an edit, a restart), under
+# `_PLACING_LOCK`. A withdrawal after it means the run still going was asked for before the request
+# was withdrawn, so its cells do not ask for a node again; only a later request does.
+const _RUN_ASKED_AT = Dict{String,Float64}()
+_run_asked!(nb::LiveNotebook) = lock(_PLACING_LOCK) do; _RUN_ASKED_AT[nb.id] = time(); end
+_withdrawn_since_asked(nb::LiveNotebook, name::AbstractString) = lock(_PLACING_LOCK) do
+    get(_WITHDRAWN_AT, String(name), 0.0) > get(_RUN_ASKED_AT, nb.id, 0.0)
+end
+
 # A request for a node is still wanted when a placement task runs for it and no withdrawal has
 # arrived since that task started.
 _region_queued(name::AbstractString) =
@@ -2179,6 +2188,7 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
                     _connect_in_background!(name, nb, r.host)
                     throw(RegionWaiting(WAIT_CONNECTING, r.host, r.name))
                 end
+                _withdrawn_since_asked(nb, name) && throw(RegionWaiting(WAIT_NOT_REQUESTED, r.host, r.name))
                 _place_in_background!(name, nb; by_run = true)
                 # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
                 # placement task re-runs this cell itself when the scheduler grants a node.
@@ -4276,14 +4286,16 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
         ReportEngine._rlog("region: prime before $(cell.id) on $host failed: " *
                            first(sprint(showerror, e), 160))
         # The node went with its allocation: the cell waits for a new one instead of failing, and is
-        # re-run when it is granted.
+        # re-run when it is granted. An allocation released on request during this start leaves the
+        # cell waiting for a run instead, like every other cell of the withdrawn request.
         if !isempty(side) && _allocation_gone!(side, kernel)
             r = ReportEngine.region_get(String(side))
+            withdrawn = _withdrawn_since_asked(nb, side)
             lock(nb.lock) do
-                ReportEngine.mark_blocked!(cell, WAIT_QUEUED, r.host, r.name)
+                ReportEngine.mark_blocked!(cell, withdrawn ? WAIT_NOT_REQUESTED : WAIT_QUEUED, r.host, r.name)
                 _broadcast_progress(nb, cell)
             end
-            _place_in_background!(String(side), nb; by_run = true)
+            withdrawn || _place_in_background!(String(side), nb; by_run = true)
             try; facts_changed!(); catch; end
             return false
         end
@@ -5106,6 +5118,7 @@ function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool 
     # edit, an agent's add/edit, a restart. The exception is a reactive cascade, which continues the
     # run in progress and says so; making that the explicit case rather than the default means a new
     # call site is counted as a run rather than silently folded into the previous one.
+    fresh && _run_asked!(nb)
     p = lock(nb.lock) do; count(c -> c.state in (STALE, RUNNING), nb.report.cells); end
     p > 0 && _emit_pending(nb, p; fresh = fresh)
     _ensure_runner!(nb)

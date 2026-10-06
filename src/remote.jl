@@ -4846,6 +4846,19 @@ function _request_grown(r::Region, a, sched)
     return "$sched holds $(a.cpus) CPUs, not the $(r.cpus) asked for,$why"
 end
 
+# Jobs this hub just gave up (released, or found gone), with when. For a few seconds after a cancel
+# the scheduler can still list the job as running, and a placement asked for in that window would
+# adopt a node that is going away.
+const _GAVE_UP = Dict{String,Float64}()
+const _GAVE_UP_LOCK = ReentrantLock()
+const _GAVE_UP_FOR = 120.0
+_gave_up!(job::AbstractString) = isempty(job) || lock(_GAVE_UP_LOCK) do
+    filter!(kv -> time() - kv.second < _GAVE_UP_FOR, _GAVE_UP)
+    _GAVE_UP[String(job)] = time()
+end
+_gave_up_recently(job::AbstractString) =
+    lock(_GAVE_UP_LOCK) do; time() - get(_GAVE_UP, String(job), -Inf) < _GAVE_UP_FOR; end
+
 """
     region_place!(r; wait_s = 120) -> (host, allocation)
 
@@ -4867,6 +4880,10 @@ function region_place!(r::Region; wait_s::Real = 120)
     a = Sweep.allocation_node!(kind, r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
                                partition = r.partition, cpus = r.cpus, mem = r.mem,
                                gpus = r.gpus, account = r.account, options = r.options, submit = r.submit)
+    if Sweep.alive(a) && _gave_up_recently(a.id)
+        _rlog("region[$(r.name)]: job $(a.id) was just given up and is still ending; not placing on it")
+        a = Sweep.Allocation(a.name, "", :none, "", "")
+    end
     if !Sweep.alive(a)
         held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
         held === nothing || _unroute!(held.host, String(held.job))   # nothing is holding it now; the route is a lie
@@ -4978,6 +4995,7 @@ walltime ran out while the hub was not looking.
 function region_forget_placement!(r::Region)
     held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
     held === nothing && return false
+    _gave_up!(String(held.job))
     _unroute!(held.host, String(held.job))
     stop_sync_job!(held.host, held.job)
     # The data forwards go with the route, for the same reason `_placement` drops them when a lease

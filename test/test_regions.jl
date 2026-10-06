@@ -340,6 +340,9 @@ end
                         @test NS._allocation_gone!("lost", k) && held()
                         k.target = RE.RemoteTarget("c9"; job = "77", region = "lost")
                         @test !NS._allocation_gone!("lost", k)
+                        # The job of a forgotten placement is not placed on again while it is still ending.
+                        @test RE.region_forget_placement!(RE.region_get("lost")) && RE._gave_up_recently("77")
+                        @test !RE._gave_up_recently("78")
                     end
                 finally
                     lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "lost"); end
@@ -1137,6 +1140,10 @@ end
                         @test w.state == RE.BLOCKED && w.blocked == NS.WAIT_NOT_REQUESTED && w.blocked_region == "queue"
                         @test o.state == RE.BLOCKED && o.blocked == NS.WAIT_QUEUED && o.blocked_region == "other"
                         @test NS._cell_result_text(w) == "(run it to request a node)"
+                        # A run asked for before the withdrawal does not ask for a node again; a later one does.
+                        @test NS._withdrawn_since_asked(nb, "queue")
+                        NS._run_asked!(nb)
+                        @test !NS._withdrawn_since_asked(nb, "queue")
 
                         # A request that has not reached the scheduler yet is withdrawn too. Its
                         # placement task finds the stamp and releases whatever it submits.
@@ -1172,7 +1179,7 @@ end
                 finally
                     lock(NS._PLACING_LOCK) do
                         delete!(NS._PLACING, "queue"); delete!(NS._PLACING_SINCE, "queue")
-                        delete!(NS._WITHDRAWN_AT, "queue")
+                        delete!(NS._WITHDRAWN_AT, "queue"); delete!(NS._RUN_ASKED_AT, "withdraw")
                     end
                     RE.region_delete!("queue")
                 end
