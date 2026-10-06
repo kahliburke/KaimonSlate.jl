@@ -406,7 +406,9 @@ function Hot() {
 
 function Facts() {
   const P = pf.value, pr = P && P.profile, pp = P && P.prepared;
-  const dr = pr && pr.dropped ? Object.entries(pr.dropped).filter(([, v]) => v > 0) : [];
+  // Idle threads are not the cell's and say nothing about it; samples from other cells or the
+  // worker's own tasks are worth knowing were left out.
+  const dr = pr && pr.dropped ? Object.entries(pr.dropped).filter(([k, v]) => v > 0 && k !== 'idle') : [];
   return html`<div class="pffacts">
     ${pp ? html`<div class=${'pfprep' + (pp.ok ? '' : ' bad')}>
       ${pp.ok ? html`Compiled in ${ms(pp.compile_ms)}${pp.args && pp.args.length ? html`, with ${pp.args.join(', ')} as they are now` : ''}.
