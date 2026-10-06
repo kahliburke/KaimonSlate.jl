@@ -16,7 +16,7 @@ const runs = signal([]);          // completed cell runs the hub recorded: {id, 
 const range = signal(300);        // seconds shown; 0 = everything the hub holds
 const gpuPick = signal('all');    // the GPU charts: 'all' combined, 'each' one line per GPU, or one GPU's index
 const gcShow = signal('all');     // the timeline's collections: 'all', or 'full' only
-const gcBusy = signal('');        // the collection asked of the worker and not yet done: 'minor' or 'full'
+const gcBusy = signal(false);     // a collection asked of the worker and not yet done
 const failed = signal('');
 // The page's model changed (model.js): what the header and the caller's bar show comes from it.
 const modelTick = signal(0);
@@ -184,12 +184,12 @@ const gcOpacity = (g) => 0.35 + 0.65 * Math.min(1, g.one ? g.t / 50 : g.share * 
 
 // A collection run on the worker now, for the buttons. The next sample shows what it freed.
 async function collectNow(v, full) {
-  gcBusy.value = full ? 'full' : 'minor';
+  gcBusy.value = true;
   try {
     await fetch('/api/worker-gc', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ nb: v.nb, side: v.side || '', full }) });
   } catch (_) {}
-  gcBusy.value = '';
+  gcBusy.value = false;
 }
 
 // A cumulative milliseconds counter (GC time, compile time) as a share of wall time between samples.
@@ -555,9 +555,9 @@ function Telemetry() {
   const gcSel = gcEach ? html`<label class="tm-tog">
       <input type="checkbox" checked=${gcShow.value === 'full'}
              onChange=${(e) => { gcShow.value = e.currentTarget.checked ? 'full' : 'all'; }}/><i></i>full GC only</label>` : null;
-  const gcButtons = v.nb ? [['minor', 'Minor GC', false], ['full', 'Full GC', true]]
-      .map(([k, l, full]) => html`<button class="tm-btn" disabled=${!!gcBusy.value}
-                                          onClick=${() => collectNow(v, full)}>${gcBusy.value === k ? 'Collecting…' : l}</button>`) : null;
+  const gcButtons = v.nb ? [['Minor GC', false], ['Full GC', true]]
+      .map(([l, full]) => html`<button class="tm-btn" disabled=${gcBusy.value}
+                                          onClick=${() => collectNow(v, full)}>${l}</button>`) : null;
   const gcCtl = gcSel || gcButtons ? html`<span class="tm-gcctl">${gcSel}${gcButtons}</span>` : null;
 
   return html`<div class="tm-bg" onMouseDown=${e => e.target.classList.contains('tm-bg') && close()}>
