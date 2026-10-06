@@ -305,13 +305,12 @@ function _wpPaintStrip(ws) {
       '<button class="wpmi-tel" data-tel-side="' + _wpEsc(w.side || '') + '" title="Telemetry" aria-label="Telemetry">' +
       _WP_TEL_ICON + '</button></div>';
   }).join('');
-  const caret = ranked.length > 1 ? '<span class="wpill-caret">▾</span>' : '';
   // Fixed single slot: the pill reserves a min-width so it doesn't jump as the top worker changes, and the
   // LABEL elides (CSS ellipsis) if a region name is long — icon/stat/caret stay put.
   // No `title`: hovering opens the list of workers, which would sit under the tooltip.
   const html = '<span class="wpill wpill-top' + cls + '" data-toplist data-side="' + _wpEsc(side) +
     '"><span class="wtopicon">' + icon + '</span><span class="wtoplabel">' + _wpEsc(_wpLabel(side, top.host)) + '</span>' +
-    (face ? '<span class="wstat">' + _wpEsc(face) + '</span>' : '') + caret +
+    (face ? '<span class="wstat">' + _wpEsc(face) + '</span>' : '') +
     '<div class="wpill-menu" hidden>' + rows + '</div></span>';
   // Repainted on every change, so the list of workers is kept open across a repaint while it is
   // showing, and a repaint that would draw the same thing touches nothing.

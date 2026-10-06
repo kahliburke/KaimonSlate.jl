@@ -94,7 +94,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .topbar[data-pills="1"] #workerpills .wstat, .topbar[data-pills="2"] #workerpills .wstat,
 .topbar[data-pills="1"] .healthbadge .hb-detail, .topbar[data-pills="2"] .healthbadge .hb-detail { display:none; }
 .topbar[data-pills="2"] .runpill .rp-detail,
-.topbar[data-pills="2"] #workerpills .wtoplabel, .topbar[data-pills="2"] #workerpills .wpill-caret,
+.topbar[data-pills="2"] #workerpills .wtoplabel,
 .topbar[data-pills="2"] .healthbadge .hb-key { display:none; }
 /* Once collapsed to an icon, the pill's reserved width would leave the icon rattling in a half-empty
    chip, so drop the reservation at that stage only. */
@@ -2465,9 +2465,8 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
    jump as the top worker changes, and the LABEL elides on overflow so a long region name can't blow out the
    bar. It carries the ranked dropdown of ALL workers, anchored to it. */
 .wpill-top { position:relative; min-width:150px; max-width:300px; }
-.wpill-top .wtopicon, .wpill-top .wstat, .wpill-top .wpill-caret { flex:0 0 auto; }
+.wpill-top .wtopicon, .wpill-top .wstat { flex:0 0 auto; }
 .wpill-top .wtoplabel { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.wpill-caret { color:var(--dim); font-size:.7rem; }
 .wpill-menu { position:absolute; top:calc(100% + 5px); left:0; z-index:60; min-width:230px; cursor:default;
   display:flex; flex-direction:column; gap:2px; padding:4px; background:var(--bg2);
   border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 26px rgba(0,0,0,.4); }
