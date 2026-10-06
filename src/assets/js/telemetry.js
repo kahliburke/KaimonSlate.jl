@@ -564,13 +564,13 @@ function Telemetry() {
       ${head}${acts}
       <div class="tm-body">
         ${tiles}
-        <${Section} title="Timeline" aside=${html`${spanKey}${gcSel}`}>${running}</${Section}>
+        <${Section} title="Timeline" aside=${html`${spanKey}${gcSel}${gcButtons}`}>${running}</${Section}>
         <${Section} title="CPU" aside=${cpuLimit}><div class="tm-grid"><${Chart} option=${cpu}/>${heat ? html`<${Chart} option=${heat}/>` : null}</div></${Section}>
         <${Section} title="Memory" aside=${memLimitText}><${Chart} option=${mem}/></${Section}>
         ${gpuSec}
         ${io || psi ? html`<${Section} title=${io && psi ? 'I/O and pressure' : io ? 'I/O' : 'Pressure'}><div class="tm-grid">
           ${io ? html`<${Chart} option=${io}/>` : null}${psi ? html`<${Chart} option=${psi}/>` : null}</div></${Section}>` : null}
-        <${Section} title="Julia runtime" aside=${gcButtons}><div class="tm-grid"><${Chart} option=${julia}/><${Chart} option=${alloc}/>
+        <${Section} title="Julia runtime"><div class="tm-grid"><${Chart} option=${julia}/><${Chart} option=${alloc}/>
           ${memoStore ? html`<${Chart} option=${memoStore}/>` : null}</div></${Section}>
       </div></div></div>`;
 }
