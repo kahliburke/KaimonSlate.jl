@@ -33,7 +33,7 @@ const _wpMeter = (label, frac, text, warn, peak) => '<div class="wm-row"><span c
   '<span class="wm-bar' + (warn ? ' warn' : '') + '">' +
   (peak != null && frac != null && peak > frac ? '<span class="wm-peak" style="width:' + _wpPct(peak) + '%"></span>' : '') +
   '<span class="wm-fill" style="width:' + (frac == null ? 0 : _wpPct(frac)) + '%"></span></span>' +
-  '<span class="wm-v" title="' + text + '">' + text + '</span></div>';
+  '<span class="wm-v">' + text + '</span></div>';
 function _wpStatsChips(statsJson, note) {
   const warn = note ? '<span class="wchip wchip-warn">⚠ ' + _wpEsc(note) + '</span>' : '';
   let s; if (statsJson) { try { s = JSON.parse(statsJson); } catch (_) { s = null; } }
@@ -366,7 +366,7 @@ function _wpPaintTabs() {
     // A narrow tab ellipsizes the label, so carry the full name in the title - the tab is a picker,
     // and you should be able to read which worker it is even when the strip is crowded.
     return '<button class="wptab' + (side === _wpSide ? ' on' : '') + '" data-wptab="' + _wpEsc(side) +
-      '" title="' + _wpEsc(lbl) + '">' + _wpOverflowDot(w) + ' ' + _wpEsc(lbl) + '</button>';
+      '">' + _wpOverflowDot(w) + ' ' + _wpEsc(lbl) + '</button>';
   };
   const more = rest.length ? '<span class="wptab-more"><button class="wptab wptab-morebtn">+' + rest.length +
     ' ▾</button><div class="wptab-menu" hidden>' +
