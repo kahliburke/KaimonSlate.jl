@@ -130,13 +130,14 @@ function cellSource(id) {
          (((window.__slateState || {}).cells || []).find(c => c.id === id) || {}).source || '';
 }
 export async function openProfile(cellId) {
-  pf.value = { cell: cellId, side: '', status: 'idle', prepared: null, profile: null, source: cellSource(cellId), error: null };
+  pf.value = { cell: cellId, side: '', status: 'loading', prepared: null, profile: null, source: cellSource(cellId), error: null };
   sel.value = 0; zoom.value = 1; opened.value = new Set(); srcs.value = {}; view.value = { v0: 0, v1: 1 };
   codeAt.value = { file: 'cell:' + cellId, line: 0 };
   try {
     const r = await A('GET', '/api/profile/last?cell=' + encodeURIComponent(cellId));
     if (r && r.kind === 'result') apply(r);
   } catch (_) {}
+  if (pf.value && pf.value.cell === cellId && pf.value.status === 'loading') pf.value = { ...pf.value, status: 'idle' };
 }
 const close = () => { pf.value = null; hover.value = null; hotLine.value = null; };
 const prepare = () => pf.value && A('POST', '/api/profile/prepare', { cell: pf.value.cell });
@@ -328,7 +329,11 @@ function Flame() {
     el.addEventListener('wheel', wheel, { passive: false });
     return () => el.removeEventListener('wheel', wheel);
   }, [!!M]);
-  if (!M || !root) return html`<div class="pfflame pfempty">${pf.value && pf.value.status === 'running' ? 'profiling…' : 'Run the cell to profile it.'}</div>`;
+  const stt = pf.value && pf.value.status;
+  if (!M || !root) return html`<div class="pfflame pfempty">${
+    stt === 'loading' ? html`<span class="hydspin"></span>`
+    : stt === 'running' ? html`<span class="hydspin"></span> profiling`
+    : stt === 'preparing' ? html`<span class="hydspin"></span> compiling` : 'not profiled yet'}</div>`;
   const at = (ev) => {
     const c = cv.current; if (!c) return null;
     const b = c.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top, rs = drawn.current;
@@ -518,7 +523,7 @@ function Dock() {
         <span class="pftitle">Profile</span>
         <span class="pfcell">cell ${P.cell}</span>
         ${P.side ? html`<span class="pfside">on ${P.side}</span>` : null}
-        <span class="pfstatus">${P.status === 'preparing' ? 'compiling…' : P.status === 'running' ? 'running…' : ''}</span>
+        <span class="pfstatus">${busy ? html`<span class="hydspin"></span> ${P.status === 'preparing' ? 'compiling' : 'running'}` : ''}</span>
         ${P.status === 'error' ? html`<span class="pfwarn">${P.error}</span>` : null}
         <span class="pfsp"></span>
         <label class="pftog" title="fold library code into one bar per package">
@@ -608,7 +613,8 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pfzoom button:hover { border-color:#e8933a; }
 .pfzoom button[disabled] { opacity:.45; cursor:default; }
 .pfzx { min-width:38px; text-align:center; color:var(--dim); font-variant-numeric:tabular-nums; }
-.pfempty { display:flex; align-items:center; justify-content:center; color:var(--dim); font-size:.82rem; }
+.pfempty { display:flex; align-items:center; justify-content:center; gap:8px; color:var(--dim); font-size:.82rem; }
+.pfstatus { display:inline-flex; align-items:center; gap:6px; }
 .pftip { display:none; position:absolute; z-index:2; max-width:250px; pointer-events:none; padding:6px 8px;
   border-radius:6px; background:var(--bg2); border:1px solid var(--border); box-shadow:0 6px 20px rgba(0,0,0,.4);
   font-size:.72rem; color:var(--text); }

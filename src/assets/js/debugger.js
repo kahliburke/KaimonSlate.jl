@@ -25,6 +25,7 @@ const DEBUG_ROLE = 'debugger';   // which specialist this workspace is for
 const st = signal(null);      // the debug state from the server, or null when nothing is running
 const busy = signal(false);   // a verb is in flight — the controls disable rather than queue
 const focus = signal(false);  // focus view open
+const starting = signal('');  // the cell a session is being started on, until the kernel answers
 const probes = signal([]);    // scratchpad history: {expr, ok, repr, type, error}
 const changed = signal(new Set());  // names whose repr moved on the last step (for the flash)
 // Breakpoints, as the server holds them: [{file, line}]. `file` is `cell:<id>` for notebook code
@@ -216,6 +217,9 @@ function apply(next) {
 export async function startDebug(cellId) {
   if (busy.value) return;
   busy.value = true;
+  // The workspace opens now, saying it is starting: reaching the kernel and loading the
+  // interpreter can take a while, and a click that shows nothing reads as one that did nothing.
+  starting.value = cellId; focus.value = true;
   try {
     const source = (window.edText && window.edText(cellId)) || '';
     const r = await A('POST', '/api/debug/start', { cell: cellId, source });
@@ -223,7 +227,7 @@ export async function startDebug(cellId) {
     // agent's alike. Stepping is involved enough that the cell is never where you want to be.
     apply(r);
     probes.value = [];
-  } catch (e) { apply(null); } finally { busy.value = false; }
+  } catch (e) { apply(null); } finally { busy.value = false; starting.value = ''; }
 }
 export async function step(mode) {
   if (busy.value || !live.value) return;
@@ -1315,6 +1319,13 @@ function IntoPicker() {
 
 function Focus() {
   if (!focus.value) return null;
+  if (starting.value) return html`<div class="dbgfocusbg">
+    <div class="dbgfocus">
+      <div class="dbgfhead"><span class="dbgftitle">▸ stepping</span><span class="dbgfcell">cell ${starting.value}</span>
+        <span class="dbgsp"></span>
+        <button class="dbgfx" onClick=${() => focus.value = false}>✕</button></div>
+      <div class="dbgfloading"><span class="hydspin"></span> starting</div>
+    </div></div>`;
   const s = st.value;
   if (!s || s.finished) return null;
   return html`<div class="dbgfocusbg" onClick=${e => { if (e.target.classList.contains('dbgfocusbg')) focus.value = false; }}>
@@ -1616,6 +1627,7 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
    divider draggable, because a debugging session is not one shape. Sizes come from inline styles
    (the signals), so the grid template is set in JS; only the grips are styled here. */
 .dbgfbody { flex:1 1 auto; min-height:0; display:grid; }
+.dbgfloading { flex:1 1 auto; display:flex; align-items:center; justify-content:center; gap:8px; color:var(--dim); font-size:.82rem; }
 .dbgfmid { display:flex; flex-direction:column; min-width:0; min-height:0; }
 
 .dbggrip { background:transparent; flex:0 0 auto; position:relative; z-index:2; }

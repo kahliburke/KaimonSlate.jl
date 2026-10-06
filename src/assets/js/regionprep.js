@@ -118,7 +118,7 @@ function RegionPrep() {
   const why = d.reason || (s && s.reason) || '';
   return html`<div class="anbg"><div class="ancard rpcard" role="dialog" aria-modal="true">
     <div class="rphead">${d.batch ? html`Prepare ⚙ ${d.host} for sweeps` : html`Prepare 🖧 ${d.region}`}</div>
-    <div class="pddim rpsub">${d.host}${d.scheduler && d.scheduler !== 'none' ? ' · ' + d.scheduler : ''}</div>
+    <div class="pddim rpsub">${d.host}${d.scheduler && d.scheduler !== 'none' ? ' · ' + d.scheduler : ''}${!s ? html` <span class="hydspin"></span>` : null}</div>
     <div class="rpsplit">
       <div class="rppane">
         <div class="rptabs"><span class="rpstriplabel">Steps</span></div>
@@ -142,7 +142,9 @@ function RegionPrep() {
     <div class="rpbtns">
       ${err.value ? html`<span class="rppsyswarn" style="margin-right:auto">${err.value}</span>`
         : why && !running && !begun.value ? html`<div class="rpwhy">${why} ${explainPrepare(d, has)}</div>` : null}
-      ${awaiting.value ? html`<button class="anbtn primary" disabled>Starting…</button>`
+      ${!s && !awaiting.value && !begun.value ? html`<button class="anbtn primary" disabled><span class="hydspin"></span></button>
+                                                     <button class="anbtn" onClick=${() => dlg.value = null}>Later</button>`
+        : awaiting.value ? html`<button class="anbtn primary" disabled>Starting…</button>`
         : running ? html`<button class="anbtn" onClick=${() => dlg.value = null}>Hide</button>`
         : done ? html`<button class=${'anbtn' + (rec.ok ? '' : ' primary')} onClick=${prepare}>Prepare again</button>
                    <button class="anbtn" onClick=${() => dlg.value = null}>Close</button>`
