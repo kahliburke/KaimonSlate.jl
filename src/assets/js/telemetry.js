@@ -298,8 +298,8 @@ function Telemetry() {
 
   // Each chart ends at the limit that bounds it, and the section header says what that limit is.
   const limitKey = (t) => t ? html`<span class="tm-key">${t}</span>` : null;
-  const cpuLimit = limitKey(allow ? 'job allows ' + allow + (nc ? ' of ' + nc : '') + ' cores' : nc ? nc + ' cores' : '');
-  const memLimitText = limitKey(memLimit > 0 ? (job.mem_max > 0 ? 'job limit ' : 'host ') + B(memLimit) : '');
+  const cpuLimit = limitKey(cpuMax ? cpuMax + ' cores' : '');
+  const memLimitText = limitKey(memLimit > 0 ? B(memLimit) : '');
   const mem = base('', B, {
     yAxis: { type: 'value', max: memLimit > 0 ? memLimit : null, axisLabel: { formatter: B },
              splitLine: { lineStyle: { opacity: 0.25 } } },
