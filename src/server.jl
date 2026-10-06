@@ -2098,7 +2098,8 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
         if r.scheduler !== :none
             # Placed-or-not is asked of the placement, never inferred from the node name: a single-node
             # cluster grants a node named like the front door, so `region_host(r) == r.host` misreads.
-            if !ReportEngine._region_holds_node(r)   # nothing placed yet
+            # It is read from `at`, the placement the target is built from, so the two cannot differ.
+            if isempty(last(at))   # nothing placed yet
                 # A cell someone ran by hand during the opening run is a request all the same.
                 (_in_opening_run(nb.id) && isempty(get(_FORCE_RUN, nb.id, ()))) &&
                     throw(RegionWaiting(WAIT_NOT_REQUESTED, r.host, r.name))
@@ -4129,11 +4130,16 @@ end
 # worker that cannot start on a scheduler region is most often a node the cluster took back (a
 # cancelled job, a walltime that ran out), and the placement goes on naming it until something asks:
 # every run would be sent to the same dead node. When it is gone the placement is forgotten, so the
-# next one requests a node. An unreachable scheduler answers nothing and changes nothing.
-function _allocation_gone!(side::AbstractString)
+# next one requests a node. An unreachable scheduler answers nothing and changes nothing. A `kernel`
+# built in an allocation the region no longer names is gone without asking anyone: the placement has
+# already moved on, and the next run builds its kernel from the new one.
+function _allocation_gone!(side::AbstractString, kernel = nothing)
     r = ReportEngine.region_get(String(side))
     (r === nothing || r.scheduler === :none) && return false
-    _, job = ReportEngine.region_where(r)
+    at = ReportEngine.region_where(r)
+    tgt = kernel isa ReportEngine.GateKernel ? kernel.target : nothing
+    (tgt isa ReportEngine.RemoteTarget && !isempty(tgt.job) && (tgt.ssh_host, tgt.job) != at) && return true
+    job = last(at)
     isempty(job) && return false
     a = ReportEngine.region_allocation(r)
     (a === nothing || a.state === :unreachable) && return false
@@ -4206,7 +4212,7 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
                            first(sprint(showerror, e), 160))
         # The node went with its allocation: the cell waits for a new one instead of failing, and is
         # re-run when it is granted.
-        if !isempty(side) && _allocation_gone!(side)
+        if !isempty(side) && _allocation_gone!(side, kernel)
             r = ReportEngine.region_get(String(side))
             lock(nb.lock) do
                 ReportEngine.mark_blocked!(cell, WAIT_QUEUED, r.host, r.name)

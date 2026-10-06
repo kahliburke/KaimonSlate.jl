@@ -356,6 +356,14 @@ function route!(node::AbstractString, login::AbstractString, job::AbstractString
     return nothing
 end
 
+# Drop `node`'s route only while it still names `job`. Two regions placed on one node share its route,
+# so forgetting one allocation must not cut the other off from its job.
+function _unroute!(node::AbstractString, job::AbstractString)
+    v = via(node)
+    (v === nothing || v.job == job) && route!(node, "")
+    return nothing
+end
+
 # Nodes that have been reached through a login session at some point. The route itself is dropped the
 # moment an allocation ends, and what is left is a hostname that looks like any other — so a failure
 # to reach it reads as "sign in to c1", which is advice about a machine nobody signs in to.
@@ -875,7 +883,7 @@ end
 # on a live worker). The hub recomputes this on every reattach and reaps + cold-spawns any worker
 # whose stamp is behind — so editing `worker.jl` reprovisions the remote instead of silently running
 # stale code, and editing hub-only code leaves it alone. `KAIMONSLATE_SKIP_PAYLOAD_CHECK=1` turns the
-# check off — see `_payload_current`.
+# check off — see `_worker_current`.
 _payload_sha() = _files_sha(:payload, _payload_files())
 
 # A SHA over all of `src/`: the code the hub itself runs, for telling when it changed under a running
@@ -1921,13 +1929,13 @@ stop_sync_job!(host::AbstractString, job::AbstractString) =
 # + worker payload via `homedir()` on the remote, includes the payload, and serves. For :direct it
 # serves CURVE and allow-lists ONLY the hub's client pubkey (mutual auth: hub pins the server key).
 function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, parent::String,
-                               client_pub::String; warm_deps::Bool = false)
+                               client_pub::String; warm_deps::Bool = false,
+                               routed::Bool = via(t.ssh_host) !== nothing)
     # Loopback is right when the forward TERMINATES on this machine. It does not for a worker on an
     # allocated compute node: the session is on the LOGIN node and its `direct_tcpip` dials
     # `node:port` from there, so a loopback-only listener answers nobody. A routed worker therefore
     # binds every interface — and because that puts the port on the cluster's internal network for
     # the life of the allocation, CURVE comes with it rather than plaintext ZMQ.
-    routed = via(t.ssh_host) !== nothing
     bind = (t.transport === :direct || routed) ? "0.0.0.0" : "127.0.0.1"
     # CURVE on every transport, the forward that ends on this machine included. What it adds there
     # is not encryption, which SSH already gives that leg, but the ZAP allow-list: loopback is no
@@ -2003,13 +2011,42 @@ function _region_prologue(region::AbstractString)
     return isempty(p) ? "" : "{ " * p * " ; } && "
 end
 
+# Why a target built in an allocation is not started: the region holds that allocation no more.
+_allocation_ended(t::RemoteTarget) =
+    "slate remote: allocation $(t.job) on $(t.ssh_host) ended before its worker started; " *
+    "the next region cell asks for a new one"
+
+"""
+    _allocation_route(t) -> route | nothing
+
+The route into the allocation that target `t` was built in: the login host and scheduler of its
+region, and its job, while the region still holds that job on that node. `nothing` once the region
+holds another job or none. The route of the node itself is not used, because it is kept per node,
+and two regions with allocations on one node share it.
+"""
+function _allocation_route(t::RemoteTarget)
+    r = region_get(t.region)
+    r === nothing && return nothing
+    p = _placement(r)
+    (p !== nothing && p.host == t.ssh_host && String(p.job) == t.job) || return nothing
+    v = via(t.ssh_host)
+    return (host = r.host, job = t.job, kind = v !== nothing ? v.kind : region_scheduler(r))
+end
+
 function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
                          label::AbstractString, parent::AbstractString,
                          threads::AbstractString = "", extra_flags::AbstractString = "",
                          warm::Bool = false, region::AbstractString = "", warm_deps::Bool = false)
     host = t.ssh_host
+    # The route to launch through, read once. A target built inside an allocation is launched inside
+    # that allocation or not at all: on a single-node cluster the node answers to the name of the
+    # login host, so a launch over plain ssh after a release would start the worker outside any job,
+    # on a shared node, with every GPU in view.
+    v = isempty(t.job) ? via(host) : _allocation_route(t)
+    (isempty(t.job) || v !== nothing) || error(_allocation_ended(t))
     hubkey = _hub_client_pubkey()
-    script = _remote_worker_script(t, port, stream_port, t.project, hubkey; warm_deps = warm_deps)
+    script = _remote_worker_script(t, port, stream_port, t.project, hubkey; warm_deps = warm_deps,
+                                   routed = v !== nothing)
 
     # Ship the worker script as a FILE (verified: `-e` + nested-ssh quoting mangles it) and launch it
     # detached so it outlives the ssh exec. `setsid` gives a clean new session but is Linux-only
@@ -2048,7 +2085,6 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     setup = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && " *
             "export OPENBLAS_NUM_THREADS=$blas OMP_NUM_THREADS=$blas && " * t.setup * "$pro$siresolve"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
-    v = via(host)
     if v === nothing || isempty(v.job)
         # A plain ssh target (or a routed node that is not a scheduler job): launch the worker DETACHED
         # on the host itself so it outlives the ssh channel. `setsid` is Linux-only (absent on macOS), so
@@ -2136,22 +2172,44 @@ catch
     dv
 end
 
-# Is the live worker `k` running the CURRENT worker payload? Compares its boot-baked stamp
-# (`__slate_env_info().payload_sha`) to `_payload_sha()`. Stale — or an old worker that reports none —
-# ⇒ false, and `attached!` reaps + cold-spawns it. A flaky env_info call ⇒ true (don't reap on a
-# transient error; liveness is validated separately). ON by default — see the body.
-function _payload_current(k)::Bool
+# Can the live worker `k` serve a kernel whose target sits in scheduler job `job` ("" for none)? One
+# `__slate_env_info` call answers two questions, and a "no" to either makes the caller reap the
+# worker. A failed env_info call counts as "yes", so a transient error does not reap a worker;
+# liveness is checked separately.
+#
+# Does it run the current worker payload? Its stamp from boot (`payload_sha`) must equal
+# `_payload_sha()`. A stale stamp, or none from an old worker, is a "no". The check is on by
+# default, as the body says.
+#
+# Does it run inside that job? A worker found by record, probe or adoption can come from an earlier
+# allocation of the region, or from a launch that the release of one left outside any job. Such a
+# worker is not where the allocation of the kernel is.
+function _worker_current(k, job::AbstractString = "")::Bool
     # Reprovision-on-drift is ON by default (skip with KAIMONSLATE_SKIP_PAYLOAD_CHECK=1). The worker SWAP
     # is now safe: `k.ns_gen` bumps on a fresh namespace (cold spawn / adopt) and the region dedups fold it
     # into their key, so the swapped worker's blank namespace is re-primed / re-resourced / re-synced; and
     # `_tool` errors cleanly (not a MethodError) if a best-effort caller hits the transient nil-conn window.
-    get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") == "1" && return true
-    want = _payload_sha()
-    got = try
-        String(_infofield(_tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0), "payload_sha", ""))
+    # The job is checked whatever that switch says.
+    payload = get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") != "1"
+    (payload || !isempty(job)) || return true
+    info = try
+        _tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0)
     catch
         return true
     end
+    # The job first: a worker outside the kernel's allocation is replaced even while it computes, since
+    # keeping it is running work on a node the job does not hold.
+    if !isempty(job)
+        in_job = String(_infofield(info, "job", ""))
+        if in_job != job
+            _rlog("worker-$(k.port) for '$(k.label)' runs in " * (isempty(in_job) ? "no scheduler job" : "job $in_job") *
+                  ", not in allocation $job; replacing it")
+            return false
+        end
+    end
+    payload || return true
+    want = _payload_sha()
+    got = String(_infofield(info, "payload_sha", ""))
     got == want && return true
     # A worker still computing keeps its work: replacing it would kill a cell whose result nothing can
     # recover. It is swapped on an attach after it has finished.
@@ -2332,6 +2390,9 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     K = _kaimon()
     host = t.ssh_host
     _rlog("═══ REMOTE SPAWN requested: notebook worker → $host (transport=$(t.transport)) ═══")
+    # A target built in an allocation the region no longer holds goes no further: everything below is
+    # ssh hops to its node, and `_launch_worker!` would refuse it at the end anyway.
+    (isempty(t.job) || _allocation_route(t) !== nothing) || error(_allocation_ended(t))
 
     dial(port, stream_port; kw...) = _dial_worker(t, port, stream_port; label = k.label, kw...)
 
@@ -2414,8 +2475,9 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         k.conn = r.conn; k.tunnel = r.tunnel        # so the payload probe can gate-call this worker
         # A reused worker (park/record/probe/adopt) may be running an OLDER payload than the hub — a
         # live worker never re-includes its code, and `tools()` is fixed at boot, so a newly added
-        # gate tool can't appear on it. If its boot stamp is behind, reap it and cold-spawn fresh.
-        if !_payload_current(k)
+        # gate tool cannot appear on it. If its boot stamp is behind, or it runs outside the
+        # allocation of this kernel, reap it and cold-spawn fresh.
+        if !_worker_current(k, t.job)
             # Disconnected while the worker can still answer, then reaped. The other way round, the
             # close waits out its timeouts on a process that is already gone.
             try; K.disconnect!(r.conn); catch; end
@@ -4731,7 +4793,7 @@ function _placement(r::Region)
         (cur !== nothing && cur.until == p.until) && (delete!(_REGION_PLACE, r.name); true)
     end
     dropped === true || return nothing            # re-placed while we looked; that entry stands
-    route!(p.host, "")
+    _unroute!(p.host, String(p.job))
     # The file syncers go too, as in `region_forget_placement!`: left running, the next local save
     # sends the project to a node the scheduler has already handed to someone else.
     stop_sync_job!(p.host, p.job)
@@ -4809,7 +4871,7 @@ function region_place!(r::Region; wait_s::Real = 120)
                                gpus = r.gpus, account = r.account, options = r.options, submit = r.submit)
     if !Sweep.alive(a)
         held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
-        held === nothing || route!(held.host, "")   # nothing is holding it now; the route is a lie
+        held === nothing || _unroute!(held.host, String(held.job))   # nothing is holding it now; the route is a lie
         return ("", a)
     end
     # A compute node is normally not reachable from here at all — only through the login node. Record
@@ -4918,7 +4980,7 @@ walltime ran out while the hub was not looking.
 function region_forget_placement!(r::Region)
     held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
     held === nothing && return false
-    route!(held.host, "")
+    _unroute!(held.host, String(held.job))
     stop_sync_job!(held.host, held.job)
     # The data forwards go with the route, for the same reason `_placement` drops them when a lease
     # runs out: their far end is a node we no longer hold. A forward left open to a node that is gone
