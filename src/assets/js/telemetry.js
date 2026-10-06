@@ -201,6 +201,8 @@ function compact(option) {
                                                   nameGap: a.nameGap ?? 8 });
   for (const k of ['xAxis', 'yAxis']) if (o[k]) o[k] = Array.isArray(o[k]) ? o[k].map(axis) : axis(o[k]);
   if (o.legend) o.legend = Object.assign({}, o.legend, { textStyle: small(o.legend.textStyle) });
+  // An update replaces each series by id (`Chart`); one without an id is added again instead.
+  if (Array.isArray(o.series)) o.series = o.series.map((x, i) => x.id != null ? x : Object.assign({ id: x.name || 'series' + i }, x));
   return o;
 }
 
