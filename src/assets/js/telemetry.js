@@ -192,12 +192,21 @@ const line = (name, data, extra = {}) => {
 // Every time axis spans the same window, set by the view as it renders, so the charts line up with
 // each other and with the run timeline, whose spans can start before the first sample.
 let xWindow = null;
-// `active`: the pointer is over this chart. Only that chart shows its tooltip; the charts connected to
-// it show the time line alone.
+// `active`: the pointer is over this chart. Every connected chart shows its values at the hovered
+// time, and only this one heads them with the time, which would otherwise repeat in every box.
 function compact(option, active = false) {
   const o = Object.assign({ backgroundColor: 'transparent' }, option);
-  if (o.tooltip) o.tooltip = Object.assign({}, o.tooltip, { showContent: active && o.tooltip.showContent !== false,
-                                                            padding: [4, 8], textStyle: { fontSize: 11 } });
+  if (o.tooltip) {
+    const tt = o.tooltip, vf = tt.valueFormatter || ((v) => v);
+    const body = tt.formatter || ((ps) => ps.filter(p => p.value && p.value[1] != null).map(p =>
+      p.marker + p.seriesName + '<span style="float:right;margin-left:14px;font-weight:600">' + vf(p.value[1]) + '</span>').join('<br>'));
+    const fmt = tt.trigger !== 'axis' ? tt.formatter : (ps) => {
+      const list = Array.isArray(ps) ? ps : [ps], rows = body(list);
+      const head = active && list[0] ? new Date(+list[0].axisValue).toLocaleTimeString() : '';
+      return head && rows ? head + '<br>' + rows : rows || head;
+    };
+    o.tooltip = Object.assign({}, tt, { formatter: fmt, padding: [4, 8], textStyle: { fontSize: 11 } });
+  }
   if (xWindow && o.xAxis && !Array.isArray(o.xAxis) && o.xAxis.type === 'time')
     o.xAxis = Object.assign({}, o.xAxis, { min: xWindow[0], max: xWindow[1] });
   const small = (x) => Object.assign({ fontSize: 11 }, x || {});
@@ -360,8 +369,7 @@ function Telemetry() {
         if (!l || !l.length) return '';
         let top = 0; l.forEach((v, r) => { if (v > l[top]) top = r; });
         const total = l.reduce((a, v) => a + v, 0) / 100;
-        return new Date(+p.axisValue).toLocaleTimeString() + '<br>' + total.toFixed(1) + ' of ' + l.length +
-               ' cores<br>busiest core ' + own[top] + ' · ' + Math.round(l[top]) + '%';
+        return total.toFixed(1) + ' of ' + l.length + ' cores<br>busiest core ' + own[top] + ' · ' + Math.round(l[top]) + '%';
       } },
       // Drawn in one pass: a series this large is otherwise painted over several frames, which shows
       // as the map filling in on every update.
