@@ -3020,10 +3020,16 @@ function _gc_events(seen::Int, now::Float64)
     return String(take!(io)), n
 end
 
-"Run a collection now, a full one with `full`: for the telemetry view's buttons."
+"""
+Run a collection now, a full one with `full`: for the telemetry view's buttons. `GC.gc(true)` sweeps
+the whole heap only when the collection before it did not, so a full one asked for straight after
+another full one is incremental; it is run again then, which is then full.
+"""
 function __slate_gc(; full::Bool = false)
-    t = time_ns(); GC.gc(full)
-    return (; ms = round((time_ns() - t) / 1e6; digits = 1))
+    t = time_ns(); fs = Base.gc_num().full_sweep
+    GC.gc(full)
+    full && Base.gc_num().full_sweep == fs && GC.gc(true)
+    return (; ms = round((time_ns() - t) / 1e6; digits = 1), full = Base.gc_num().full_sweep > fs)
 end
 
 # ── Telemetry: one sample every 2s — PUBbed on the stream socket (an attached hub sees it live)
