@@ -377,15 +377,23 @@ via(host::AbstractString) = lock(_VIA_LOCK) do; get(_VIA, String(host), nothing)
 # Some partitions start one step at a time per job, so with the worker running in its step every
 # other command would wait for it to end. An ssh into a node you hold, which most sites allow, lands
 # in the job without a step.
-const _NODE_SSH = Set{String}()
-_node_by_ssh(node::AbstractString) = lock(_VIA_LOCK) do; String(node) in _NODE_SSH; end
+# Asked on first use for each job, since a node can be routed without being newly placed (a hub that
+# restarted finds its node still held); a node that refused is asked again after `_NODE_SSH_RETRY_S`,
+# as one still being configured refuses at first.
+const _NODE_SSH = Dict{String,Tuple{Bool,Float64}}()   # node → (takes an ssh, when that was found)
+const _NODE_SSH_RETRY_S = 60.0
+function _node_by_ssh(node::AbstractString)
+    known = lock(_VIA_LOCK) do; get(_NODE_SSH, String(node), nothing); end
+    known !== nothing && (first(known) || time() - last(known) <= _NODE_SSH_RETRY_S) && return first(known)
+    return _probe_node_ssh!(node)
+end
 
 # Whether `node` takes an ssh from its login node, remembered for the job it is routed in.
 function _probe_node_ssh!(node::AbstractString)
     v = via(node)
     (v === nothing || v.kind !== :slurm || isempty(v.job)) && return false
     ok, _ = Sweep.run_there(v.host, _ssh_into(node, "true"; connect_timeout = 10); timeout = 20.0)
-    lock(_VIA_LOCK) do; ok ? push!(_NODE_SSH, String(node)) : delete!(_NODE_SSH, String(node)); end
+    lock(_VIA_LOCK) do; _NODE_SSH[String(node)] = (ok, time()); end
     return ok
 end
 

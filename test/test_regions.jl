@@ -1611,18 +1611,24 @@ end
                 @test v !== nothing && v.host == "login" && v.job == "4242"
                 @test RE._host_for_files("c1") == "login"        # shared filesystem, login session
                 @test RE._host_for_files("elsewhere") == "elsewhere"
-                # SLURM joins the running job rather than logging in again.
+                # SLURM joins the running job rather than logging in again, on a node that refused an
+                # ssh a moment ago.
+                lock(() -> (RE._NODE_SSH["c1"] = (false, time())), RE._VIA_LOCK)
                 @test occursin("srun --jobid=4242 --overlap", RE._in_allocation(v, "c1", "hostname"))
                 # A step that cannot start says so within a bound instead of holding the session.
                 @test occursin("--immediate=$(RE._STEP_START_S)", RE._in_allocation(v, "c1", "hostname"))
                 # A node that takes an ssh from its login node is reached that way, with no step, and
                 # the command still sees the job it is in.
-                lock(() -> push!(RE._NODE_SSH, "c1"), RE._VIA_LOCK)
+                lock(() -> (RE._NODE_SSH["c1"] = (true, time())), RE._VIA_LOCK)
                 cmd = RE._in_allocation(v, "c1", "hostname")
                 @test startswith(cmd, "ssh ") && !occursin("srun", cmd) && occursin("SLURM_JOB_ID=", cmd) && occursin("4242", cmd)
-                # The same job routed again keeps it; another job asks again.
+                # The same job routed again keeps it; another job asks again, as does a refusal that
+                # has had time to change.
                 RE.route!("c1", "login", "4242"); @test RE._node_by_ssh("c1")
-                RE.route!("c1", "login", "4243"); @test !RE._node_by_ssh("c1")
+                RE.route!("c1", "login", "4243"); @test !haskey(RE._NODE_SSH, "c1")
+                lock(() -> (RE._NODE_SSH["c1"] = (false, time() - RE._NODE_SSH_RETRY_S - 1)), RE._VIA_LOCK)
+                @test !RE._node_by_ssh("c1")            # asked again: "login" is no host, so refused again
+                @test last(RE._NODE_SSH["c1"]) > time() - 30
             finally
                 RE.route!("c1", "")
             end
