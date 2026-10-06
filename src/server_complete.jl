@@ -812,10 +812,9 @@ end
 # restart puts a new worker on another port, so a view that names the side keeps following it; the
 # answer says where it runs now, and whether it is connected yet.
 function _side_telemetry(h::Hub, nbid::AbstractString, side::AbstractString, since::Real)
-    nb = lock(h.lock) do; get(h.notebooks, String(nbid), nothing); end
+    nb, k = _side_kernel(h, nbid, side)
     nb === nothing && return Dict("ok" => false, "error" => "the notebook is not open")
-    k = isempty(side) ? nb.kernel : lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
-    k isa ReportEngine.GateKernel || return Dict("ok" => false, "error" => "no worker for this side")
+    k === nothing && return Dict("ok" => false, "error" => "no worker for this side")
     conn = k.conn
     cn = conn === nothing ? "" : (try; String(conn.name); catch; ""; end)
     st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
@@ -825,6 +824,14 @@ function _side_telemetry(h::Hub, nbid::AbstractString, side::AbstractString, sin
                 "host" => k.target isa ReportEngine.RemoteTarget ? k.target.ssh_host : "local",
                 "samples" => [_sample_full(s) for s in hist if s.rcv > since],
                 "runs" => [Dict("id" => r.id, "t0" => r.t0, "t1" => r.t1, "memo" => r.memo, "err" => r.err) for r in runs])
+end
+
+# A notebook and its worker for `side` ("" the main kernel); `nothing` for whichever is not there.
+function _side_kernel(h::Hub, nbid::AbstractString, side::AbstractString)
+    nb = lock(h.lock) do; get(h.notebooks, String(nbid), nothing); end
+    nb === nothing && return nothing, nothing
+    k = isempty(side) ? nb.kernel : lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
+    return nb, k isa ReportEngine.GateKernel ? k : nothing
 end
 
 # The cell runs that ended after `since` on the worker at `host`:`port`, from the open notebook whose
@@ -1990,6 +1997,18 @@ function _make_router(h::Hub)
                    "samples" => [Dict("t" => round(s.rcv), "cpu" => s.cpu, "rss" => s.rss, "memo" => s.memo,
                                       "sys_cpu" => s.sys_cpu, "load1" => s.load1,
                                       "gpu" => _gpu_util(s), "gpu_mem" => _gpu_mem(s)) for s in hist]))
+    end)
+    # A collection run now on a notebook's worker, for the telemetry view: {nb, side, full}.
+    HTTP.register!(router, "POST", "/api/worker-gc", req -> begin
+        body = try; JSON.parse(String(req.body)); catch; Dict{String,Any}(); end
+        _, k = _side_kernel(h, String(get(body, "nb", "")), String(get(body, "side", "")))
+        (k === nothing || k.conn === nothing) && return _json(Dict("ok" => false, "error" => "no worker connected"))
+        r = try
+            ReportEngine._tool(k, "__slate_gc", Dict{String,Any}("full" => get(body, "full", false) === true); timeout = 120.0)
+        catch e
+            return _json(Dict("ok" => false, "error" => sprint(showerror, e)))
+        end
+        _json(Dict("ok" => true, "result" => r))
     end)
     # Sysimage build state for a region's env — one ssh to the host: is it built (key/size/age), building
     # now, is there a compiler. Feeds the Regions UI sysimage panel. Query {region}.
@@ -3658,7 +3677,13 @@ end
 _sample_part(s, k::Symbol) = hasproperty(s, k) ? getproperty(s, k) : Dict{String,Any}()
 
 # Every field of a sample, for the telemetry view (the history endpoint keeps to what its charts plot).
-_sample_full(s) = Dict{String,Any}(
+function _sample_full(s)
+    d = _sample_fields(s)
+    gc = hasproperty(s, :gc) ? s.gc : nothing
+    gc === nothing || (d["gc"] = [[round(e[1]; digits = 3), e[2], e[3], e[4]] for e in gc])
+    return d
+end
+_sample_fields(s) = Dict{String,Any}(
     "t" => round(s.rcv; digits = 1), "cpu" => s.cpu, "rss" => s.rss, "gc_ms" => s.gc_ms, "evals" => s.evals,
     "running" => s.running, "memo" => s.memo, "sys_cpu" => s.sys_cpu, "load1" => s.load1,
     "sys_mem_total" => s.sys_mem_total, "sys_mem_free" => s.sys_mem_free,

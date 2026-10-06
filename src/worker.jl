@@ -2729,6 +2729,7 @@ function tools()
         KaimonGate.GateTool("__slate_rerender_fig", __slate_rerender_fig),
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),
         KaimonGate.GateTool("__slate_running", __slate_running),
+        KaimonGate.GateTool("__slate_gc", __slate_gc),
         KaimonGate.GateTool("__slate_cancel", __slate_cancel),
         KaimonGate.GateTool("__slate_cancel_cells", __slate_cancel_cells),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
@@ -2952,6 +2953,79 @@ function _dir_bytes(d::AbstractString)
     return n
 end
 
+# ── Garbage collections ────────────────────────────────────────────────────────────────────────
+# Each collection, from Julia's post-GC callback (`jl_gc_set_cb_post_gc`): when it ended, its pause,
+# whether it swept the whole heap, and the live heap after. The callback runs on the collecting thread
+# once the world has resumed and finalizers have run, so it is as safe as a finalizer, and it does no
+# more than one: it allocates nothing, takes no lock and never yields. Callbacks never overlap (one
+# collection at a time), and the telemetry loop reads what was written before `_GC_COUNT` moved.
+const _GC_N = 4096
+const _GC_T = zeros(Float64, _GC_N)
+const _GC_PAUSE = zeros(Int64, _GC_N)
+const _GC_FULL = zeros(Bool, _GC_N)
+const _GC_LIVE = zeros(Int64, _GC_N)
+const _GC_COUNT = Threads.Atomic{Int}(0)
+const _GC_LAST = Ref{NTuple{2,Int64}}((0, 0))     # total GC time and full sweeps, at the last one
+const _GC_HOOKED = Threads.Atomic{Bool}(false)
+
+function _gc_after(::Cint)::Cvoid
+    g = Base.gc_num()
+    tt, fs = _GC_LAST[]
+    n = _GC_COUNT[]; i = n % _GC_N + 1
+    @inbounds begin
+        _GC_T[i] = time()
+        _GC_PAUSE[i] = Int64(g.total_time) - tt
+        _GC_FULL[i] = Int64(g.full_sweep) > fs
+        _GC_LIVE[i] = Base.gc_live_bytes()
+    end
+    _GC_LAST[] = (Int64(g.total_time), Int64(g.full_sweep))
+    _GC_COUNT[] = n + 1
+    return nothing
+end
+
+# The callback is part of Julia's embedding interface, which can change between versions: without it
+# the view falls back to what the cumulative counts in each sample say.
+function _gc_hook!()
+    _GC_HOOKED[] && return
+    try
+        g = Base.gc_num(); _GC_LAST[] = (Int64(g.total_time), Int64(g.full_sweep))
+        ccall(:jl_gc_set_cb_post_gc, Cvoid, (Ptr{Cvoid}, Cint), @cfunction(_gc_after, Cvoid, (Cint,)), 1)
+        _GC_HOOKED[] = true
+    catch e
+        @warn "slate telemetry: no per-collection GC events" exception = e
+    end
+    return
+end
+
+# The collections since the `seen`th, as JSON for the sample sent at `now`: `[age_ms, pause_ms, full,
+# live_bytes]` each, the age taken back from `now` on this machine's clock, so the hub can place them
+# against its own. A burst keeps the full collections and the longest pauses, `_GC_SEND` at most;
+# the cumulative counts carry the rest. Returns the JSON and the new count.
+const _GC_SEND = 64
+function _gc_events(seen::Int, now::Float64)
+    n = _GC_COUNT[]
+    ks = collect(max(seen, n - _GC_N + 1):n-1)
+    slot(k) = k % _GC_N + 1
+    if length(ks) > _GC_SEND
+        sort!(ks; by = k -> (!_GC_FULL[slot(k)], -_GC_PAUSE[slot(k)]))
+        ks = sort!(ks[1:_GC_SEND])
+    end
+    io = IOBuffer(); print(io, '[')
+    for (j, k) in enumerate(ks)
+        i = slot(k); j > 1 && print(io, ',')
+        print(io, '[', round(Int, 1000 * max(0.0, now - _GC_T[i])), ',', round(_GC_PAUSE[i] / 1e6; digits = 2), ',',
+              _GC_FULL[i] ? 1 : 0, ',', _GC_LIVE[i], ']')
+    end
+    print(io, ']')
+    return String(take!(io)), n
+end
+
+"Run a collection now, a full one with `full`: for the telemetry view's buttons."
+function __slate_gc(; full::Bool = false)
+    t = time_ns(); GC.gc(full)
+    return (; ms = round((time_ns() - t) / 1e6; digits = 1))
+end
+
 # ── Telemetry: one sample every 2s — PUBbed on the stream socket (an attached hub sees it live)
 # AND stamped into the `.stats` sidecar next to the worker script, atomically (the roster probe
 # cats it, so an IDLE pool worker still shows cpu/rss in `list_remote_workers`). Linux /proc for
@@ -3027,6 +3101,7 @@ function _telemetry_loop!(stats_path::String)
     try; Base.cumulative_compile_timing(true); catch; end   # counted, so a cell's own @time leaves it on
     lastc = cputime(); lastw = time(); memo = -1; tick = 0; spin = 0; disk = "[]"
     g0 = Base.gc_num(); last_ttsp = g0.total_time_to_safepoint; last_gct = g0.total_time
+    _gc_hook!(); gcseen = _GC_COUNT[]
     sys = try; SysSampler(); catch; nothing; end
     lastsb, lastst = sysstat()
     while true
@@ -3071,6 +3146,11 @@ function _telemetry_loop!(stats_path::String)
         end
         running = "[" * join(("\"" * replace(String(id), "\\" => "\\\\", "\"" => "\\\"") * "\"" for id in runids), ",") * "]"
         gcms = round(Int, Base.gc_num().total_time / 1e6)
+        gcev = ""
+        if _GC_HOOKED[]
+            j, gcseen = _gc_events(gcseen, time())
+            gcev = ",\"gc\":" * j
+        end
         warm = replace(_WARM_STATUS[], "\\" => "\\\\", "\"" => "\\\"")   # preload/precompile progress
         # System-wide load: host CPU% (delta), 1-min load average, and total/free RAM — the "in addition to
         # process-level" view for a region worker's whole box.
@@ -3090,7 +3170,7 @@ function _telemetry_loop!(stats_path::String)
         line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
                "\"running\":$running,\"warm\":\"$warm\",\"memo_bytes\":$memo," *
                "\"sys_cpu\":$syscpu,\"load1\":$load1,\"sys_mem_total\":$smt,\"sys_mem_free\":$smf," *
-               "\"last_eval_mono\":$(_LAST_EVAL_AT[]),\"gpus\":$gpus,\"disks\":$disk$hpj$stall," *
+               "\"last_eval_mono\":$(_LAST_EVAL_AT[]),\"gpus\":$gpus,\"disks\":$disk$hpj$stall$gcev," *
                "\"ts\":$(round(Int, time()))}"
         try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
         isempty(stats_path) || try                          # roster sidecar — remote workers only
@@ -3439,6 +3519,8 @@ function _precompile_start()
     precompile(_warm_deps, ())
     precompile(_prepare_env_task, ())
     precompile(_telemetry_task, (String,))
+    precompile(_gc_after, (Cint,))
+    precompile(_gc_events, (Int, Float64))
     precompile(_worker_logger, (_LogTee,))
     precompile(Tuple{typeof(Base.CoreLogging.shouldlog), Logging.ConsoleLogger, Logging.LogLevel, Module, Symbol, Symbol})
     precompile(Tuple{typeof(Base.CoreLogging.handle_message), Logging.ConsoleLogger, Logging.LogLevel, Vararg{Any, 6}})

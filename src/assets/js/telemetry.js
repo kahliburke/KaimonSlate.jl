@@ -15,6 +15,8 @@ const samples = signal([]);       // full samples, oldest first
 const runs = signal([]);          // completed cell runs the hub recorded: {id, t0, t1, memo, err}
 const range = signal(300);        // seconds shown; 0 = everything the hub holds
 const gpuPick = signal('all');    // the GPU charts: 'all' combined, 'each' one line per GPU, or one GPU's index
+const gcShow = signal('all');     // the timeline's collections: 'all', or 'full' only
+const gcBusy = signal('');        // the collection asked of the worker and not yet done: 'minor' or 'full'
 const failed = signal('');
 // The page's model changed (model.js): what the header and the caller's bar show comes from it.
 const modelTick = signal(0);
@@ -156,18 +158,38 @@ function cellSpans(s, done) {
 }
 const SPAN_COLOR = { ran: '#569cd6', running: '#56d364', restored: '#9d8fd6', err: '#e5636e' };
 
-// The intervals between samples in which the worker collected, from its cumulative counts: how many
-// pauses, how many of them full, and the GC time. A sample is the finest the counts resolve.
+// The worker's collections. Each one as it happened where the worker reports them (`gc`: [end, pause
+// ms, full, live bytes after]); otherwise the intervals between samples in which it collected, from
+// its cumulative counts, a sample being the finest those resolve.
 const GC_COLOR = '#8a93b8', GC_FULL = '#e8a33d';
 function gcSpans(s) {
   const out = [], P = (x) => x.proc || {};
   for (let i = 1; i < s.length; i++) {
-    const p = s[i - 1], x = s[i], n = P(x).gc_pauses - P(p).gc_pauses;
+    const p = s[i - 1], x = s[i];
+    if (Array.isArray(x.gc)) {
+      for (const [t, pause, full, live] of x.gc)
+        out.push({ a: t * 1000 - pause, b: t * 1000, n: 1, full: full ? 1 : 0, t: pause, live, one: true });
+      continue;
+    }
+    const n = P(x).gc_pauses - P(p).gc_pauses;
     if (!(P(p).gc_pauses >= 0) || !(n > 0)) continue;
     const full = Math.max(0, (P(x).gc_full ?? 0) - (P(p).gc_full ?? 0)), t = Math.max(0, x.gc_ms - p.gc_ms);
     out.push({ a: ms(p), b: ms(x), n, full, t, share: x.t > p.t ? Math.min(1, t / 1000 / (x.t - p.t)) : 0 });
   }
   return out;
+}
+// How dark a collection is drawn: an interval by the share of it spent collecting, one collection by
+// its pause, a quarter of the interval or 50 ms being the darkest.
+const gcOpacity = (g) => 0.35 + 0.65 * Math.min(1, g.one ? g.t / 50 : g.share * 4);
+
+// A collection run on the worker now, for the buttons. The next sample shows what it freed.
+async function collectNow(v, full) {
+  gcBusy.value = full ? 'full' : 'minor';
+  try {
+    await fetch('/api/worker-gc', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ nb: v.nb, side: v.side || '', full }) });
+  } catch (_) {}
+  gcBusy.value = '';
 }
 
 // A cumulative milliseconds counter (GC time, compile time) as a share of wall time between samples.
@@ -348,7 +370,9 @@ function Telemetry() {
     el.scrollIntoView({ block: el.getBoundingClientRect().height >= window.innerHeight * 0.9 ? 'start' : 'center',
                         behavior: 'smooth' });
   };
-  const gcs = gcSpans(s), lanes = gcs.length ? [...ids, 'GC'] : ids;
+  const gcAll = gcSpans(s), gcEach = gcAll.some(g => g.one);
+  const gcs = gcShow.value === 'full' ? gcAll.filter(g => g.full) : gcAll;
+  const lanes = gcs.length ? [...ids, 'GC'] : ids;
   // One bar drawer for runs and collections, kept inside the plot: nothing draws over the lane names
   // or past the last sample.
   const bar = (params, api) => {
@@ -366,6 +390,8 @@ function Telemetry() {
       tooltip: { formatter: (p) => {
         if (p.seriesId === 'gc') {
           const g = gcs[p.dataIndex];
+          if (g.one) return new Date(g.b).toLocaleTimeString() + ' · ' + (g.full ? 'full' : 'minor') + ' GC · ' +
+                            (g.t < 1 ? g.t.toFixed(2) + ' ms' : window.slateDuration(g.t)) + ' · ' + B(g.live) + ' live after';
           return 'GC · ' + g.n + (g.n > 1 ? ' pauses' : ' pause') + (g.full ? ' · ' + g.full + ' full' : '') +
                  ' · ' + window.slateDuration(g.t);
         }
@@ -377,7 +403,7 @@ function Telemetry() {
         data: spans.map(x => ({ value: [ids.indexOf(x.id), x.a, x.b, x.id, x.kind], itemStyle: { color: SPAN_COLOR[x.kind] } })) },
         gcs.length ? { id: 'gc', type: 'custom', encode: { x: [1, 2], y: 0 }, cursor: 'default', renderItem: bar,
           data: gcs.map(g => ({ value: [ids.length, g.a, g.b],
-                                itemStyle: { color: g.full ? GC_FULL : GC_COLOR, opacity: 0.35 + 0.65 * Math.min(1, g.share * 4) } })) } : null
+                                itemStyle: { color: g.full ? GC_FULL : GC_COLOR, opacity: gcOpacity(g) } })) } : null
       ].filter(Boolean) }}/>` : html`<div class="tm-none">no cell ran in this window</div>`;
 
   // Scaled to what the worker may use, so the headroom shows: the job's allowance on a scheduler
@@ -526,18 +552,25 @@ function Telemetry() {
         </div></div>`)}</div>
       <div class="tm-grid"><${Chart} option=${gpuBusy}/><${Chart} option=${gpuHeat}/></div></${Section}>` : null;
 
+  const gcSel = gcEach ? html`<span class="tm-seg">${[['all', 'all'], ['full', 'full only']]
+      .map(([k, l]) => html`<button class=${'tm-segb' + (gcShow.value === k ? ' on' : '')}
+                                    onClick=${() => { gcShow.value = k; }}>${l}</button>`)}</span>` : null;
+  const gcButtons = v.nb ? html`<span class="tm-seg">${[['minor', 'Minor GC', false], ['full', 'Full GC', true]]
+      .map(([k, l, full]) => html`<button class="tm-segb" disabled=${!!gcBusy.value}
+                                          onClick=${() => collectNow(v, full)}>${gcBusy.value === k ? 'Collecting…' : l}</button>`)}</span>` : null;
+
   return html`<div class="tm-bg" onMouseDown=${e => e.target.classList.contains('tm-bg') && close()}>
     <div class="tm-card" role="dialog" aria-modal="true">
       ${head}${acts}
       <div class="tm-body">
         ${tiles}
-        <${Section} title="Timeline" aside=${spanKey}>${running}</${Section}>
+        <${Section} title="Timeline" aside=${html`${spanKey}${gcSel}`}>${running}</${Section}>
         <${Section} title="CPU" aside=${cpuLimit}><div class="tm-grid"><${Chart} option=${cpu}/>${heat ? html`<${Chart} option=${heat}/>` : null}</div></${Section}>
         <${Section} title="Memory" aside=${memLimitText}><${Chart} option=${mem}/></${Section}>
         ${gpuSec}
         ${io || psi ? html`<${Section} title=${io && psi ? 'I/O and pressure' : io ? 'I/O' : 'Pressure'}><div class="tm-grid">
           ${io ? html`<${Chart} option=${io}/>` : null}${psi ? html`<${Chart} option=${psi}/>` : null}</div></${Section}>` : null}
-        <${Section} title="Julia runtime"><div class="tm-grid"><${Chart} option=${julia}/><${Chart} option=${alloc}/>
+        <${Section} title="Julia runtime" aside=${gcButtons}><div class="tm-grid"><${Chart} option=${julia}/><${Chart} option=${alloc}/>
           ${memoStore ? html`<${Chart} option=${memoStore}/>` : null}</div></${Section}>
       </div></div></div>`;
 }

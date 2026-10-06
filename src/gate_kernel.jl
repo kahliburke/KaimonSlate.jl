@@ -585,7 +585,7 @@ const _LOG_SINK = Ref{Any}(nothing)         # (conn_name::String, line::String) 
 # Parse one `slate_telemetry` line into a flat NamedTuple + hub arrival time; nothing on garbage.
 function _parse_telemetry(raw::AbstractString)
     try
-        d = JSON.parse(String(raw))
+        d = JSON.parse(String(raw)); rcv = time()
         (cpu     = Float64(get(d, "cpu", -1.0)),
          rss     = Int(get(d, "rss", 0)),
          gc_ms   = Int(get(d, "gc_ms", 0)),
@@ -611,7 +611,11 @@ function _parse_telemetry(raw::AbstractString)
          # Free space where the worker's data and memo store live, one entry per filesystem.
          disks   = [_dict_of(x) for x in something(get(d, "disks", nothing), Any[]) if x isa AbstractDict],
          ts      = Float64(get(d, "ts", 0.0)),
-         rcv     = time(),
+         rcv     = rcv,
+         # Each collection since the last sample: (when it ended on this clock, pause ms, full, live
+         # bytes after). The worker gives each one's age at sending, which places it here whatever
+         # the worker's own clock says.
+         gc      = _parse_gc(get(d, "gc", nothing), rcv),
          # "worker" when the worker sent it; "host" when the hub read it from outside the process.
          src     = "worker",
          # Set on the first sample after the sampler was held: for how long, and how much of that went
@@ -621,6 +625,11 @@ function _parse_telemetry(raw::AbstractString)
         nothing
     end
 end
+
+# `nothing` from a worker that does not report collections one by one, which is not the same as none.
+_parse_gc(x, rcv) = x isa AbstractVector ?
+    NTuple{4,Float64}[(rcv - Float64(e[1]) / 1000, Float64(e[2]), Float64(e[3]), Float64(e[4]))
+                      for e in x if e isa AbstractVector && length(e) >= 4 && all(v -> v isa Real, e)] : nothing
 
 _parse_gpus(x) = x isa AbstractVector ?
     [(i = Int(get(g, "i", 0)), name = String(get(g, "name", "")), util = Int(get(g, "util", -1)),

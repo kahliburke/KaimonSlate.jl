@@ -939,6 +939,18 @@ end
                 @test RE._parse_telemetry("{\"cpu\":1.0,\"gpus\":[{\"i\":0,\"util\":12}],\"ts\":1}").gpus[1].util_max == 12
             end
 
+            @testset "collections ride the sample, placed by their age" begin
+                s = RE._parse_telemetry("{\"cpu\":1.0,\"gc\":[[500,12.5,1,1048576],[0,0.3,0,900]],\"ts\":1}")
+                @test length(s.gc) == 2 && s.gc[1][2] == 12.5 && s.gc[1][3] == 1.0 && s.gc[2][4] == 900.0
+                @test s.rcv - s.gc[1][1] ≈ 0.5 && s.gc[2][1] == s.rcv
+                d = NS._sample_full(s)
+                @test d["gc"][1][2] == 12.5 && length(d["gc"]) == 2
+                # A worker that does not report them one by one is not one that had none.
+                s0 = RE._parse_telemetry("{\"cpu\":1.0,\"ts\":1}")
+                @test s0.gc === nothing && !haskey(NS._sample_full(s0), "gc")
+                @test isempty(RE._parse_telemetry("{\"cpu\":1.0,\"gc\":[],\"ts\":1}").gc)
+            end
+
             @testset "host, process and job figures ride the sample and are logged per notebook" begin
                 S = Module(:SysStatsT)
                 Base.invokelatest(Base.include, S, joinpath(pkgdir(KaimonSlate), "src", "sysstats.jl"))
