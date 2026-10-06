@@ -1902,8 +1902,12 @@ function _make_router(h::Hub)
         # Not running: the latest report's whole log, for the Activity view of a finished prepare.
         last = (st !== nothing && st["running"] === true) ? nothing :
                ReportEngine.prepare_report(r.name, String(get(r.readiness, "report", "")))
+        # Why the asking notebook needs the region prepared again ("" when it does not), so the dialog
+        # says so however it was opened. Read from what the hub holds; nothing is asked of the host.
+        nb = lock(h.lock) do; get(h.notebooks, String(get(q, "nb", "")), nothing); end
+        why = nb === nothing ? "" : try; _prepare_reason(r, _nb_origin_env(nb)); catch; ""; end
         _json(Dict("ok" => true, "preparing" => st, "readiness" => ReportEngine.readiness_view(r),
-                   "last_log" => last === nothing ? Any[] : get(last, "log", Any[])))
+                   "reason" => why, "last_log" => last === nothing ? Any[] : get(last, "log", Any[])))
     end)
     HTTP.register!(router, "POST", "/api/regions/delete", req -> begin
         b = _body(req)

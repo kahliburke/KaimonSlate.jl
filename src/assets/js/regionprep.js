@@ -20,7 +20,9 @@ const begun = signal(false);  // this dialog started (or found) a prepare
 const awaiting = signal(null); // { after: hub time of the last run seen, tries } | null
 
 function poll(name) {
-  fetch('/api/regions/prepare?name=' + encodeURIComponent(name)).then(r => r.json()).then(d => {
+  const nb = (window.__slateState || {}).id || '';
+  fetch('/api/regions/prepare?name=' + encodeURIComponent(name) + (nb ? '&nb=' + encodeURIComponent(nb) : ''))
+    .then(r => r.json()).then(d => {
     const cur = dlg.value;
     if (!cur || cur.region !== name || !d || !d.ok) return;
     const w = awaiting.value;
@@ -102,10 +104,13 @@ function RegionPrep() {
   const steps = running ? s.preparing.steps : (has ? rec.steps : null);
   const done = !running && has;
   const log = running ? s.preparing.log : (has ? s.last_log : null);
+  // Why it needs preparing: as pushed with the request, else as the hub reads it for this notebook.
+  // Shown until this dialog starts a prepare, over an earlier report as much as over none.
+  const why = d.reason || (s && s.reason) || '';
   return html`<div class="anbg"><div class="ancard rpcard" role="dialog" aria-modal="true">
     <div class="rphead">${d.batch ? html`Prepare ⚙ ${d.host} for sweeps` : html`Prepare 🖧 ${d.region}`}</div>
     <div class="pddim rpsub">${d.host}${d.scheduler && d.scheduler !== 'none' ? ' · ' + d.scheduler : ''}</div>
-    ${d.reason && !running && !done ? html`<div class="rppsyswarn rpsub">${d.reason}</div>` : null}
+    ${why && !running && !begun.value ? html`<div class="rppsyswarn rpsub">${why}</div>` : null}
     <div class="rpsplit">
       <div class="rppane">
         <div class="rptabs"><span class="rpstriplabel">Steps</span></div>
