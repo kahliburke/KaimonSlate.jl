@@ -335,7 +335,9 @@ function Telemetry() {
     const ends = t.map((v, ci) => v + (ci + 1 < t.length ? t[ci + 1] - v : gap(ci)) / 2);
     const loads = cols.map(x => { const c = (x.host || {}).cores || []; return own.map(k => c[k] ?? 0); });
     const data = [];
-    cols.forEach((x, ci) => loads[ci].forEach((v, row) => data.push([starts[ci], row, v, ends[ci]])));
+    // [sample time, row, load, start, end]: the sample time is what the time axis sees, so the hover
+    // snaps to the middle of a column; its edges are only drawn.
+    cols.forEach((x, ci) => loads[ci].forEach((v, row) => data.push([t[ci], row, v, starts[ci], ends[ci]])));
     // Dark when idle, through blue at moderate load, warming to red at full.
     const RAMP = ['#151a2b', '#1d3f7a', '#2f7fd0', '#36b3a8', '#e3c34a', '#f08a3c', '#e5484d'];
     // The sample nearest the hovered time.
@@ -354,9 +356,9 @@ function Telemetry() {
       } },
       // Drawn in one pass: a series this large is otherwise painted over several frames, which shows
       // as the map filling in on every update.
-      series: [{ type: 'custom', encode: { x: [0, 3], y: 1 }, data, progressive: 0,
+      series: [{ type: 'custom', encode: { x: 0, y: 1 }, data, progressive: 0,
         renderItem: (params, api) => {
-          const row = api.value(1), a = api.coord([api.value(0), row]), b = api.coord([api.value(3), row]);
+          const row = api.value(1), a = api.coord([api.value(3), row]), b = api.coord([api.value(4), row]);
           const h = api.size([0, 1])[1], cs = params.coordSys;
           const r = window.echarts.graphic.clipRectByRect(
             { x: a[0], y: a[1] - h / 2, width: Math.max(1, b[0] - a[0] + 0.5), height: h },
