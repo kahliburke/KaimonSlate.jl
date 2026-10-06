@@ -326,14 +326,18 @@ function Telemetry() {
   if (host.cores && host.cores.length) {   // per-core load is read on Linux only
     const step = Math.max(1, Math.ceil(s.length / 240)), cols = s.filter((_, i) => i % step === 0);
     const own = (job.cpuset && job.cpuset.length) ? job.cpuset : [...Array(nc).keys()];
-    const ends = cols.map((x, ci) => ci + 1 < cols.length ? ms(cols[ci + 1])
-                                                          : ms(x) + (ci ? ms(x) - ms(cols[ci - 1]) : 2000));
+    // Each column is centred on its sample, reaching halfway to the samples either side, so the time
+    // line of a sample runs through the middle of its column as it does through the other charts' points.
+    const t = cols.map(ms), gap = (ci) => ci > 0 ? t[ci] - t[ci - 1] : (t.length > 1 ? t[1] - t[0] : 2000);
+    const starts = t.map((v, ci) => v - gap(ci) / 2);
+    const ends = t.map((v, ci) => v + (ci + 1 < t.length ? t[ci + 1] - v : gap(ci)) / 2);
     const loads = cols.map(x => { const c = (x.host || {}).cores || []; return own.map(k => c[k] ?? 0); });
     const data = [];
-    cols.forEach((x, ci) => loads[ci].forEach((v, row) => data.push([ms(x), row, v, ends[ci]])));
+    cols.forEach((x, ci) => loads[ci].forEach((v, row) => data.push([starts[ci], row, v, ends[ci]])));
     // Dark when idle, through blue at moderate load, warming to red at full.
     const RAMP = ['#151a2b', '#1d3f7a', '#2f7fd0', '#36b3a8', '#e3c34a', '#f08a3c', '#e5484d'];
-    const colAt = (t) => { let ci = cols.length - 1; while (ci > 0 && ms(cols[ci]) > t) ci--; return ci; };
+    // The sample nearest the hovered time.
+    const colAt = (x) => { let best = 0; t.forEach((v, ci) => { if (Math.abs(v - x) < Math.abs(t[best] - x)) best = ci; }); return best; };
     // The hover follows the time line shared with the charts above, and sums the cores at that time.
     heat = { animation: false, grid: { left: 56, right: 16, top: 8, bottom: 24 }, xAxis: AXIS,
       yAxis: { type: 'category', data: own.map(String), name: own.length < nc ? 'job cores' : 'core',
