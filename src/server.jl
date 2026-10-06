@@ -2043,9 +2043,13 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
             # holds for it is given back, and the cells that waited on it wait for a run.
             if _withdrawn_while_placing(name)
                 ReportEngine._rlog("region[$name]: the request was withdrawn while it was placed — releasing it")
-                ReportEngine.region_release!(r) ||
-                    ReportEngine._rlog("region[$name]: releasing the withdrawn request failed; " *
-                                       "the scheduler may still hold it")
+                # The withdrawal usually cancelled the job already, leaving this release nothing to do.
+                if !ReportEngine.region_release!(r)
+                    left = ReportEngine.region_allocation(r)
+                    (left === nothing || left.state !== :none) &&
+                        ReportEngine._rlog("region[$name]: releasing the withdrawn request failed; " *
+                                           "the scheduler may still hold it")
+                end
                 return
             end
             if !ReportEngine._region_holds_node(r)
