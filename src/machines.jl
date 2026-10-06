@@ -156,13 +156,15 @@ end
 
 Record that `project`'s environment was loaded on `host`'s `nodetype` nodes, by a region's prepare
 (`by` = its name) or a test task. `kw` are the measurements (`load_s`, `cuda`, `report`, …). Replaces
-the earlier record for the same project and kind of node.
+the earlier record for the same project and kind of node. The record keeps the project's packages
+(`env_packages`), so a later reason can say which of them changed.
 """
 function record_env_test!(host::AbstractString, project::AbstractString, nodetype::AbstractString;
                           by::AbstractString, status::AbstractString, depot::AbstractString, kw...)
     rec = Dict{String,Any}("project" => String(project), "node_type" => String(nodetype), "by" => String(by),
         "status" => String(status), "depot" => String(depot), "tested_at" => time(),
-        "fingerprint" => _env_fingerprint(String(project), _infra_spec(); depot = String(depot)))
+        "fingerprint" => _env_fingerprint(String(project), _infra_spec(); depot = String(depot)),
+        "packages" => env_packages(project))
     for (k, v) in kw; rec[String(k)] = v; end
     lock(_HOST_FACTS_LOCK) do
         envs = tested_envs(host)
@@ -172,30 +174,106 @@ function record_env_test!(host::AbstractString, project::AbstractString, nodetyp
     return rec
 end
 
+"The direct packages of `project` and the versions its manifest resolves them to (`\"\"` unresolved)."
+function env_packages(project::AbstractString)
+    pf = project_file_in(String(project)); isempty(pf) && return Dict{String,Any}()
+    man = _manifest_for(pf)
+    mdeps = isempty(man) ? Dict{String,Any}() : get(_toml(man), "deps", Dict{String,Any}())
+    out = Dict{String,Any}()
+    for n in keys(get(_toml(pf), "deps", Dict{String,Any}()))
+        e = get(mdeps, n, nothing)
+        out[n] = (e isa Vector && !isempty(e) && e[1] isa AbstractDict) ? string(get(e[1], "version", "")) : ""
+    end
+    return out
+end
+
+_and(xs) = length(xs) <= 1 ? join(xs) : join(xs[1:end-1], ", ") * " and " * xs[end]
+_was(xs) = _and(xs) * (length(xs) == 1 ? " was" : " were")
+
 """
-    env_readiness(host, project, nodetype; depot) -> String
+    package_change(before, now) -> String
+
+What changed between two `env_packages` lists, as a clause ("CUDA was added, JSON was removed"), or
+`""` when the direct packages and their versions are the same.
+"""
+function package_change(before::AbstractDict, now::AbstractDict)
+    added = sort!([String(k) for k in keys(now) if !haskey(before, k)])
+    removed = sort!([String(k) for k in keys(before) if !haskey(now, k)])
+    updated = sort!([String(k) for k in keys(now) if haskey(before, k) &&
+                     !isempty(String(now[k])) && String(now[k]) != String(before[k])])
+    parts = String[]
+    isempty(added) || push!(parts, _was(added) * " added")
+    isempty(removed) || push!(parts, _was(removed) * " removed")
+    isempty(updated) || push!(parts, _was(updated) * " updated")
+    return join(parts, ", ")
+end
+
+# "GPU nodes", "debug CPU nodes", "the default nodes", from a `Sweep.node_type`.
+function _node_kind(nodetype)
+    w = [p in ("gpu", "cpu") ? uppercase(p) : String(p) for p in split(String(nodetype), '/') if !isempty(p)]
+    return isempty(w) ? "the default nodes" : join(w, " ") * " nodes"
+end
+
+"""
+    env_readiness(host, project, nodetype; depot, by) -> String
 
 `""` when `project`'s environment may start work on `host`'s `nodetype` nodes, with `depot` as the
-depot it would load from; otherwise why not. The machine's site changed since it was prepared; the
-project never loaded on that kind of node there, or failed to; or its packages, or the depot, changed
-since it did. With no project, only whether the machine was ever prepared.
+depot it would load from; otherwise why not, as a sentence for the Prepare dialog. The machine's site
+changed since it was prepared; the project never loaded on that kind of node there, or failed to; or
+its packages, or the depot, changed since it did. With no project, only whether the machine was ever
+prepared. `by`, a region's name, is what a project new to the machine is compared with: that region's
+last prepare on the same kind of node, which is what a notebook that now has an environment of its own
+was running before.
 """
 function env_readiness(host::AbstractString, project::AbstractString, nodetype::AbstractString;
-                       depot::AbstractString = "")
+                       depot::AbstractString = "", by::AbstractString = "")
+    envs = tested_envs(host)   # first: it moves older records into the host's facts
     hf = host_facts(host)
     stale = String(get(hf, "stale", ""))
-    isempty(stale) || return stale
-    isempty(project) && return isempty(hf) ? "not prepared" : ""
-    e = get(tested_envs(host), Sweep.env_key(project, nodetype), nothing)
+    if !isempty(stale)
+        m = match(r"^changed since prepared: (.+)$", stale)
+        m === nothing && return stale
+        what = [k == "julia" ? "the Julia version" : k == "modules" ? "the loaded modules" : String(k)
+                for k in split(m.captures[1], ", ")]
+        return "On " * host * ", " * _and(what) * " changed since the last prepare, so the packages need building again."
+    end
+    isempty(hf) && return host * " hasn't been prepared yet."
+    isempty(project) && return ""
+    e = get(envs, Sweep.env_key(project, nodetype), nothing)
     if e isa AbstractDict
-        get(e, "status", "") in ("ok", "warn") || return "its last test failed"
+        get(e, "status", "") in ("ok", "warn") || return "The last prepare of these packages failed."
         env_unchanged(e; depot) && return ""
     end
     # Another environment with the same contents that passed there answers for this one: a copied
     # notebook's own environment, or two notebooks that use the same packages.
     tested_twin(host, project, nodetype; depot) === nothing || return ""
-    e isa AbstractDict && return "packages changed since the last prepare, so the cluster's copy needs reinstalling"
-    return isempty(hf) ? "not prepared" : "packages not installed and tested on " * _node_words(nodetype) * " yet"
+    now = env_packages(project)
+    if e isa AbstractDict
+        before = get(e, "packages", nothing)
+        what = before isa AbstractDict ? package_change(before, now) : ""
+        isempty(what) || return "Since the last prepare, " * what * "."
+        String(get(e, "depot", "")) != String(depot) && return "The depot changed since the last prepare."
+        return "This notebook's package versions changed since the last prepare."
+    end
+    elsewhere = [String(get(x, "node_type", "")) for x in values(envs) if x isa AbstractDict &&
+                 String(get(x, "project", "")) == String(project) && get(x, "status", "") in ("ok", "warn")]
+    isempty(elsewhere) || return "These packages were prepared on " * _node_kind(first(elsewhere)) *
+        ", and " * _node_kind(nodetype) * " need their own build."
+    last = nothing
+    for x in values(envs)
+        (x isa AbstractDict && !isempty(by) && String(get(x, "by", "")) == by &&
+         String(get(x, "node_type", "")) == nodetype) || continue
+        (last === nothing || get(x, "tested_at", 0) > get(last, "tested_at", 0)) && (last = x)
+    end
+    before = last === nothing ? nothing : get(last, "packages", nothing)
+    # A record from before records kept their packages: that project's packages as they are now.
+    if last !== nothing && !(before isa AbstractDict)
+        before = env_packages(String(get(last, "project", "")))
+        isempty(before) && (before = nothing)
+    end
+    what = before isa AbstractDict ? package_change(before, now) : ""
+    isempty(what) || return "Since the last prepare, " * what * "."
+    return "This notebook's packages haven't been installed on " * host * " yet."
 end
 
 """
@@ -214,9 +292,6 @@ function tested_twin(host::AbstractString, project::AbstractString, nodetype::Ab
     end
     return nothing
 end
-
-_node_words(nodetype) = (p = split(nodetype, '/'; limit = 2);
-    join(filter(!isempty, [String(p[1]), length(p) > 1 ? String(p[2]) : ""]), " ") * (all(isempty, p) ? "its nodes" : " nodes"))
 
 "The tested environments that are ready now on `host`, as `Sweep.env_key`s."
 ready_envs(host::AbstractString; depot::AbstractString = "") =

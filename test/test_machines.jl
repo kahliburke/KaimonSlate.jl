@@ -196,10 +196,11 @@ const RE = KaimonSlate.ReportEngine
             d = RE.cluster_get_resolved("pmb")
             @test d["_tested"] == k
             @test S.cluster(Dict(String(a) => string(b) for (a, b) in d)).tested == k
-            @test RE.env_readiness("perlmutter", bad, "/"; depot) == "its last test failed"
+            @test RE.env_readiness("perlmutter", bad, "/"; depot) == "The last prepare of these packages failed."
             RE.host_facts_merge!("perlmutter", Dict{String,Any}("stale" => "changed since prepared: modules"))
             @test RE.cluster_get_resolved("pmb")["_tested"] == ""
-            @test RE.env_readiness("perlmutter", t.parent, "/"; depot) == "changed since prepared: modules"
+            @test RE.env_readiness("perlmutter", t.parent, "/"; depot) ==
+                  "On perlmutter, the loaded modules changed since the last prepare, so the packages need building again."
             RE.host_facts_set!("perlmutter", Dict{String,Any}())
         end
 
@@ -213,7 +214,7 @@ const RE = KaimonSlate.ReportEngine
             # The region's own view of it, and the verdict its cells are held by.
             @test only(values(RE.readiness_view(r)["envs"]))["by"] == "tm"
             @test RE.env_readiness(r.host, proj, RE.region_node_type(r); depot = RE.region_depot(r)) == ""
-            @test RE.env_readiness(r.host, proj, "cpu/") == "packages not installed and tested on cpu nodes yet"
+            @test RE.env_readiness(r.host, proj, "cpu/") == "These packages were prepared on GPU nodes, and CPU nodes need their own build."
             t = S._with(S.cluster(Dict(String(k) => string(v) for (k, v) in RE.cluster_get_resolved("tm"))); parent = proj)
             @test !S._untested(t)                                       # same project, same nodes
             @test S._untested(S.with_resources(t, (; partition = "cpu")))   # other nodes: test again
@@ -221,7 +222,7 @@ const RE = KaimonSlate.ReportEngine
             t2 = S._with(S.cluster(Dict(String(k) => string(v) for (k, v) in RE.cluster_get_resolved("tm"))); parent = proj)
             @test S._untested(t2)                                       # its environment changed since
             @test RE.env_readiness(r.host, proj, RE.region_node_type(r); depot = RE.region_depot(r)) ==
-                  "packages changed since the last prepare, so the cluster's copy needs reinstalling"
+                  "Since the last prepare, X was added."
             RE.host_facts_set!("tmhost", Dict{String,Any}())
             RE.region_delete!("tm"); RE.cluster_delete!("tm")
         end
@@ -232,9 +233,15 @@ const RE = KaimonSlate.ReportEngine
             write(joinpath(other, "Project.toml"), "[deps]\nY = \"1\"\n")
             RE.record_env_test!("twinhost", tested, "gpu/"; by = "prep", status = "ok", depot = "/d")
             @test RE.env_readiness("twinhost", copy, "gpu/"; depot = "/d") == ""
-            @test RE.env_readiness("twinhost", other, "gpu/"; depot = "/d") == "packages not installed and tested on gpu nodes yet"
-            @test RE.env_readiness("twinhost", copy, "cpu/"; depot = "/d") == "packages not installed and tested on cpu nodes yet"
-            @test RE.env_readiness("twinhost", copy, "gpu/"; depot = "/other") == "packages not installed and tested on gpu nodes yet"
+            new = "This notebook's packages haven't been installed on twinhost yet."
+            @test RE.env_readiness("twinhost", other, "gpu/"; depot = "/d") == new
+            @test RE.env_readiness("twinhost", copy, "cpu/"; depot = "/d") == new
+            @test RE.env_readiness("twinhost", copy, "gpu/"; depot = "/other") == new
+            # A project new to the machine, against what the same region last prepared there.
+            @test RE.env_readiness("twinhost", other, "gpu/"; depot = "/d", by = "prep") ==
+                  "Since the last prepare, Y was added, X was removed."
+            @test RE.package_change(Dict("A" => "1.0", "B" => "2.0"), Dict("A" => "1.1", "B" => "2.0", "C" => "", "D" => "")) ==
+                  "C and D were added, A was updated"
             RE.host_facts_set!("twinhost", Dict{String,Any}())
         end
 

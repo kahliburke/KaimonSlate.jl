@@ -474,7 +474,7 @@ end
                     write(joinpath(d, "Project.toml"), "name = \"P\"\n[deps]\nX = \"1\"\n")
                     @test why() == NS.WAIT_NEEDS_PREPARE
                     r = RE.region_get("gpu")
-                    @test NS._prepare_reason(r, d) == "packages changed since the last prepare, so the cluster's copy needs reinstalling"
+                    @test NS._prepare_reason(r, d) == "Since the last prepare, X was added."
                     @test only(values(RE.readiness_view(r)["envs"]))["changed"] === true
                     write(joinpath(d, "Project.toml"), "name = \"P\"\n")
                     @test why() == NS.WAIT_NOT_REQUESTED

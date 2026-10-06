@@ -93,34 +93,13 @@ function planned(d) {
   ];
 }
 
-// What a prepare is for, and why this one is needed, in sentences: the dialog is where a reader meets
-// the step they are being asked to take. `why` is the hub's short reason (machines.jl
-// `env_readiness`, server.jl `_prepare_reason`); one this does not know is shown as it is.
-function explainWhy(why) {
-  const m = (re) => why.match(re);
-  let x;
-  if (why === 'not prepared') return 'This region has not been prepared yet.';
-  if (why.startsWith('packages changed since the last prepare'))
-    return "This notebook's packages changed since the last prepare (a package was added, removed or updated), " +
-           'so the copy on the cluster is out of date.';
-  if ((x = m(/^packages not installed and tested on (.+?) yet$/)))
-    return "This notebook's packages have not been installed and tested on the region's " + x[1] + ' yet. That is ' +
-           'needed the first time a notebook uses the region, and again when it adds packages of its own.';
-  if (why === 'its last test failed') return "The last prepare of this notebook's packages did not succeed.";
-  if ((x = m(/^changed since prepared: (.+)$/)))
-    return 'The cluster has changed since the region was prepared (' + x[1] + '), so the packages are built ' +
-           'again against what is there now.';
-  if (why === 'sysimage not built') return "The region starts its workers from a sysimage, and it has not been built yet.";
-  if (why === 'sysimage packages changed') return "The packages chosen for the region's sysimage changed, so it is built again.";
-  return why;
-}
-function explainPrepare(d) {
+// What a prepare does, after the hub's sentence saying why this one is needed (machines.jl
+// `env_readiness`, server.jl `_prepare_reason`). `again`: the region was prepared before.
+function explainPrepare(d, again) {
   if (d.batch) return '';
   const sched = d.scheduler && d.scheduler !== 'none';
-  return "Preparing installs this notebook's packages on " + (d.host || 'the host') +
-         (sched ? ', precompiles them on one of its ' + d.scheduler + ' nodes,' : ' and precompiles them,') +
-         ' and starts a worker there to check that they load, and that CUDA works where there are GPUs. ' +
-         "The notebook's cells on " + d.region + ' then run without paying for that on their first run.';
+  return (again ? 'Preparing again' : 'Preparing') + ' installs the packages on ' + (d.host || 'the host') +
+         ', compiles them' + (sched ? ' on one of its nodes' : '') + ' and checks that they load in a worker.';
 }
 
 function RegionPrep() {
@@ -140,9 +119,6 @@ function RegionPrep() {
   return html`<div class="anbg"><div class="ancard rpcard" role="dialog" aria-modal="true">
     <div class="rphead">${d.batch ? html`Prepare ⚙ ${d.host} for sweeps` : html`Prepare 🖧 ${d.region}`}</div>
     <div class="pddim rpsub">${d.host}${d.scheduler && d.scheduler !== 'none' ? ' · ' + d.scheduler : ''}</div>
-    ${why && !running && !begun.value ? html`<div class="rpwhy rpsub">
-        <div class="rppsyswarn">${explainWhy(why)}</div>
-        ${explainPrepare(d) ? html`<div class="pddim rpexplain">${explainPrepare(d)}</div>` : null}</div>` : null}
     <div class="rpsplit">
       <div class="rppane">
         <div class="rptabs"><span class="rpstriplabel">Steps</span></div>
@@ -164,7 +140,8 @@ function RegionPrep() {
       </div>
     </div>
     <div class="rpbtns">
-      ${err.value ? html`<span class="rppsyswarn" style="margin-right:auto">${err.value}</span>` : null}
+      ${err.value ? html`<span class="rppsyswarn" style="margin-right:auto">${err.value}</span>`
+        : why && !running && !begun.value ? html`<div class="rpwhy">${why} ${explainPrepare(d, has)}</div>` : null}
       ${awaiting.value ? html`<button class="anbtn primary" disabled>Starting…</button>`
         : running ? html`<button class="anbtn" onClick=${() => dlg.value = null}>Hide</button>`
         : done ? html`<button class=${'anbtn' + (rec.ok ? '' : ' primary')} onClick=${prepare}>Prepare again</button>

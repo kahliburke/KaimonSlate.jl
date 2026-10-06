@@ -1190,13 +1190,13 @@ function _prepare_reason(r, origin_env::AbstractString)
     isempty(origin_env) && !isempty(r.readiness) &&
         isempty(get(ReportEngine.host_facts(r.host), "stale", "")) && return ""
     why = ReportEngine.env_readiness(r.host, origin_env, ReportEngine.region_node_type(r);
-                                     depot = ReportEngine.region_depot(r))
+                                     depot = ReportEngine.region_depot(r), by = r.name)
     isempty(why) || return why
     # A region that boots from a sysimage needs one built from what it lists now.
     r.sysimage || return ""
     img = get(r.readiness, "sysimage", nothing)
-    img isa AbstractDict || return "sysimage not built"
-    String(get(img, "spec", "")) == ReportEngine.sysimage_spec_key(r.sysimage_pkgs) || return "sysimage packages changed"
+    img isa AbstractDict || return "The region's sysimage hasn't been built yet."
+    String(get(img, "spec", "")) == ReportEngine.sysimage_spec_key(r.sysimage_pkgs) || return "The packages in the region's sysimage changed since it was built."
     return ""
 end
 
