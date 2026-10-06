@@ -4878,8 +4878,11 @@ and the `Allocation` behind it (`nothing` when the region needs none).
 
 A `:pending` allocation returns `("", alloc)`: the queue has not granted a node, which is a cluster
 being busy rather than a failure — the caller reports it and reconciles again later.
+
+`submit = false` only looks for the region's job, and places it when it is still running: what a
+notebook opening does, since only a person asks for a node.
 """
-function region_place!(r::Region; wait_s::Real = 120)
+function region_place!(r::Region; wait_s::Real = 120, submit::Bool = true)
     kind = region_scheduler(r)
     kind === :none && return (r.host, nothing)
     isempty(r.host) && error("region '$(r.name)' has a scheduler but no host to ask")
@@ -4888,9 +4891,10 @@ function region_place!(r::Region; wait_s::Real = 120)
     if cached !== nothing && time() - cached.checked < _PLACE_TTL
         return (cached.host, nothing)
     end
-    a = Sweep.allocation_node!(kind, r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
-                               partition = r.partition, cpus = r.cpus, mem = r.mem,
-                               gpus = r.gpus, account = r.account, options = r.options, submit = r.submit)
+    a = submit ? Sweep.allocation_node!(kind, r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
+                                        partition = r.partition, cpus = r.cpus, mem = r.mem,
+                                        gpus = r.gpus, account = r.account, options = r.options, submit = r.submit) :
+                 Sweep.find_allocation(kind, r.host, name)
     if Sweep.alive(a) && _gave_up_recently(a.id)
         _rlog("region[$(r.name)]: job $(a.id) was just given up and is still ending; not placing on it")
         a = Sweep.Allocation(a.name, "", :none, "", "")

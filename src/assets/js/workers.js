@@ -302,8 +302,8 @@ function _wpPaintStrip(ws) {
     const f = _wpFace(w);
     return '<div class="wpill-menuitem" data-side="' + _wpEsc(w.side || '') + '">' + _wpOverflowDot(w) + ' ' +
       _wpEsc(_wpLabel(w.side || '', w.host)) + (f ? ' <span class="wpmi-face">' + _wpEsc(f) + '</span>' : '') +
-      '<button class="wpmi-tel" data-tel-side="' + _wpEsc(w.side || '') + '" title="Telemetry" aria-label="Telemetry">' +
-      _WP_TEL_ICON + '</button></div>';
+      (w.state === 'none' ? '' : '<button class="wpmi-tel" data-tel-side="' + _wpEsc(w.side || '') +
+                                 '" title="Telemetry" aria-label="Telemetry">' + _WP_TEL_ICON + '</button>') + '</div>';
   }).join('');
   // Fixed single slot: the pill reserves a min-width so it doesn't jump as the top worker changes, and the
   // LABEL elides (CSS ellipsis) if a region name is long — icon/stat/caret stay put.
@@ -436,6 +436,12 @@ function _wpActions(r) {
   const q = "'" + String(side).replace(/'/g, "\\'") + "'";
   // A queued request is withdrawn rather than released, so the label follows the allocation's state.
   const verb = M.releaseVerb(r) === 'Cancel' ? '⏏ Cancel request' : '⏏ Release node';
+  // A region with no process: starting one is the action, unless one is already on its way.
+  if (side && r.state === 'none') {
+    const starting = r.status === 'connecting';
+    return (starting ? '' : b('▶ Start', 'window.wpStart(' + q + ')')) +
+           (M.isHeld(r) ? b(verb, 'window.wpRelease(' + q + ')', 'danger') : '');
+  }
   return b('⟲ Restart', 'window.wpRestart(' + q + ')') +
          (M.isHeld(r) ? b(verb, 'window.wpRelease(' + q + ')', 'danger')
                       : b('■ Shut down', 'window.wpShutdown(' + q + ')', 'danger'));
@@ -449,6 +455,9 @@ window.wpRestart = async function (side) {
   if (!await _wpConfirm('Restart ' + _wpWhich(side) + '?\nIts namespace is cleared and the cells that ' +
                         'used it re-run. Any allocation it holds is kept.', 'Restart')) return;
   try { await window.api('POST', '/api/restart', { side }); closeWorkerPop(); } catch (_) {}
+};
+window.wpStart = async function (side) {
+  try { await window.api('POST', '/api/worker-action', { side, action: 'start' }); } catch (_) {}
 };
 window.wpShutdown = async function (side) {
   if (!await _wpConfirm('Shut down ' + _wpWhich(side) + '?\nThe process is stopped and its results in ' +
@@ -542,7 +551,8 @@ function _wpDrawFacts() {
   }
   _wpSetHtml(document.getElementById('workerpop-ident'), _wpIdentChips(r));
   _wpSetHtml(document.getElementById('workerpop-acts'), _wpActions(r));
-  _wpSetHtml(document.getElementById('workerpop-stats'), _wpStatsChips(r.stats, _wpNoteText(r)));
+  // A region with no process has no figures of its own to show, whatever was last seen there.
+  _wpSetHtml(document.getElementById('workerpop-stats'), _wpStatsChips(r.state === 'none' ? null : r.stats, _wpNoteText(r)));
 }
 
 window.openWorkerPop = openWorkerPop;

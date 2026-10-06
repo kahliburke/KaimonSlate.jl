@@ -2337,7 +2337,12 @@ function _make_router(h::Hub)
         b = _body(req)
         side = strip(String(get(b, "side", "")))
         act  = strip(String(get(b, "action", "")))
-        act in ("shutdown", "release") || return _json(Dict("ok" => false, "error" => "bad_action"))
+        act in ("shutdown", "release", "start") || return _json(Dict("ok" => false, "error" => "bad_action"))
+        if act == "start"
+            ReportEngine.region_get(side) === nothing && return _json(Dict("ok" => false, "error" => "no_region"))
+            Threads.@spawn _start_region_worker!(nb, String(side))
+            return _json(Dict("ok" => true, "did" => "starting"))
+        end
         if act == "release"
             r = isempty(side) ? nothing : ReportEngine.region_get(side)
             (r === nothing || r.scheduler === :none) &&

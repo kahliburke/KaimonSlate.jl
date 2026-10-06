@@ -1469,8 +1469,7 @@ function _workers_json(nb::LiveNotebook)
                       needsprep ? "run one of its cells, or click a waiting cell's chip, to prepare the region" :
                       placing ? (sched ? "queued for a node on $host — starts by itself when the scheduler grants one"
                                        : "starting a worker on $host") :
-                      r === nothing ? "no region '$side' in the registry" :
-                      "no worker yet — a cell tagged region=$side will start one")
+                      r === nothing ? "no region '$side' in the registry" : "")
         if signedout
             # The same code a live kernel uses, so the front end renders the identical "use the
             # padlock" guidance and the pill is ranked as needing attention.

@@ -1350,11 +1350,69 @@ _in_opening_run(nbid) = lock(_OPENING_RUN_LOCK) do; String(nbid) in _OPENING_RUN
 # The run a notebook gets when it opens, whichever way it was opened.
 function _opening_drain!(nb::LiveNotebook)
     lock(_OPENING_RUN_LOCK) do; push!(_OPENING_RUN, nb.id); end
+    _find_held_regions!(nb)
     try
         _drain!(nb)
     finally
         lock(_OPENING_RUN_LOCK) do; delete!(_OPENING_RUN, nb.id); end
     end
+end
+
+# The regions this notebook's cells use whose node may still be held, looked for in the background:
+# after a hub restart the scheduler still holds the job and its worker still runs, and attaching to
+# them costs nothing more. Only a host that takes a key is asked, as an open does not ask anyone to
+# sign in, and nothing is requested: a region with no node keeps waiting for a run.
+function _find_held_regions!(nb::LiveNotebook)
+    names = lock(nb.lock) do; unique(filter(!isempty, [_cell_region(c) for c in nb.report.cells])); end
+    for name in names
+        r = ReportEngine.region_get(name)
+        (r === nothing || r.scheduler === :none || !isempty(last(ReportEngine.region_where(r)))) && continue
+        Threads.@spawn try
+            ok = ReportEngine.Sweep.connected(r.host) || (try; ReportEngine.Sweep.connect!(r.host); catch; false; end)
+            ok && _place_in_background!(name, nb; find_only = true)
+        catch e
+            ReportEngine._rlog("region[$name]: looking for its node failed — $(first(sprint(showerror, e), 160))")
+        end
+    end
+    return nothing
+end
+
+# A region can take work now (its node was granted or found, or its host signed in): the cells that
+# waited on it run, and a worker asked for from its panel starts.
+function _region_ready!(nb::LiveNotebook, name::AbstractString)
+    _restale_region_cells!(nb, String(name))
+    _ensure_runner!(nb)
+    lock(_START_LOCK) do; pop!(_START_ASKED, (nb.id, String(name)), nothing); end === nothing ||
+        Threads.@spawn _start_region_worker!(nb, String(name))
+    return nothing
+end
+
+# Region workers asked for from the worker panel's Start, until there is somewhere to start them.
+const _START_ASKED = Dict{Tuple{String,String},Float64}()
+const _START_LOCK = ReentrantLock()
+
+"""
+    _start_region_worker!(nb, name)
+
+Start this notebook's worker on region `name` without running a cell: from the worker panel. A
+region that needs a node first queues for one, as a cell's run does, and the worker starts when the
+node is granted or the host is signed in to (`_region_ready!`).
+"""
+function _start_region_worker!(nb::LiveNotebook, name::String)
+    try
+        k = _region_kernel!(nb, name)
+        try; facts_changed!(); catch; end
+        ReportEngine.prepare!(k, nb.report; explicit = true)
+    catch e
+        if e isa RegionWaiting
+            e.why in (WAIT_QUEUED, WAIT_CONNECTING) &&
+                lock(_START_LOCK) do; _START_ASKED[(nb.id, name)] = time(); end
+        else
+            ReportEngine._rlog("region[$name]: starting its worker failed — $(first(sprint(showerror, e), 160))")
+        end
+    end
+    try; facts_changed!(); catch; end
+    return nothing
 end
 
 # Cells left waiting are picked up by an explicit run of the notebook. Without this a run request
@@ -2012,7 +2070,7 @@ function _connect_in_background!(name::AbstractString, nb::Union{LiveNotebook,No
         if ok || ReportEngine.Sweep.connect_failed_recently(h)
             for (w, n) in unique(waiters)
                 w === nothing && continue
-                try; _restale_region_cells!(w, n); _ensure_runner!(w); catch; end
+                try; _region_ready!(w, n); catch; end
             end
         end
     end
@@ -2022,7 +2080,7 @@ end
 # `by_run` says that a cell run asks, rather than the supervisor. A run wants the node again even when
 # the request of the task still in flight was withdrawn, so that task keeps what it gets.
 function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Nothing} = nothing;
-                               by_run::Bool = false)
+                               by_run::Bool = false, find_only::Bool = false)
     lock(_PLACING_LOCK) do
         if String(name) in _PLACING
             by_run && _withdrawn_while_placing(name) && (_PLACING_SINCE[String(name)] = time())
@@ -2042,12 +2100,16 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
             # Anchor the acquisition trace at the queue start. The queue wait itself is otherwise
             # silent until a node lands, so without this line the worker panel would show nothing for
             # the minutes a busy cluster can take to grant one.
-            ReportEngine._rlog("region[$name]: queued for a node on $(r.host) - waiting for the scheduler to grant one")
-            if nb !== nothing
-                try; _broadcast(nb, "bringup:region '$name': queued for a node on $(r.host)…"); catch; end
-                try; facts_changed!(); catch; end   # the pill says "queued" NOW, not once it lands
+            if find_only
+                ReportEngine._rlog("region[$name]: looking for a node it still holds on $(r.host)")
+            else
+                ReportEngine._rlog("region[$name]: queued for a node on $(r.host) - waiting for the scheduler to grant one")
+                if nb !== nothing
+                    try; _broadcast(nb, "bringup:region '$name': queued for a node on $(r.host)…"); catch; end
+                    try; facts_changed!(); catch; end   # the pill says "queued" NOW, not once it lands
+                end
             end
-            _, alloc = ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
+            _, alloc = ReportEngine.region_place!(r; wait_s = _alloc_wait_s(), submit = !find_only)
             # Withdrawn while this task submitted the request or waited on it: whatever the scheduler
             # holds for it is given back, and the cells that waited on it wait for a run.
             if _withdrawn_while_placing(name)
@@ -2061,7 +2123,9 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
                 end
                 return
             end
-            if !ReportEngine._region_holds_node(r)
+            if find_only && !ReportEngine._region_holds_node(r)
+                ReportEngine._rlog("region[$name]: no node held")
+            elseif !ReportEngine._region_holds_node(r)
                 p = ReportEngine.placement_note(r, alloc)
                 ReportEngine._rlog("region[$name]: " * p.text)
                 p.state === :queued ||
@@ -2084,8 +2148,7 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
                         ReportEngine._sched_seconds(alloc.timeleft) < ReportEngine._sched_seconds(ReportEngine._alloc_walltime(r)) - 120
                 ReportEngine._rlog("region[$name]: " * (found ? "found its node still held" : "node granted") *
                                    " ($(ReportEngine.region_host(r))) — re-running the cells that were waiting")
-                _restale_region_cells!(nb, String(name))
-                _ensure_runner!(nb)
+                _region_ready!(nb, String(name))
             end
         end
     catch e

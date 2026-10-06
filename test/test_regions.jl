@@ -1250,6 +1250,20 @@ end
                 end
             end
 
+            @testset "an open looks for a held node without asking for one" begin
+                r = RE.region_set!("findonly"; host = "", scheduler = :slurm)
+                bin = fake_slurm()   # no sbatch: a submission would fail
+                try
+                    withenv("PATH" => bin * ":" * ENV["PATH"]) do
+                        host, a = RE.region_place!(r; submit = false)
+                        @test host == "" && a.state === :none
+                        @test isempty(last(RE.region_where(r)))
+                    end
+                finally
+                    RE.region_delete!("findonly")
+                end
+            end
+
             @testset "the region tools report and act on an allocation" begin
                 tools = KaimonSlate.create_tools(StubGate.GateTool)
                 tool(name) = only(t for t in tools if t.name == name).handler
