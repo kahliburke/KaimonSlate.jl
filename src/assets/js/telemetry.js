@@ -332,11 +332,19 @@ function Telemetry() {
     const data = [];
     cols.forEach((x, ci) => loads[ci].forEach((v, row) => data.push([ms(x), row, v, ends[ci]])));
     const RAMP = ['#151a2b', '#1f4f8a', '#3f8fe0', '#9fd2ff'];
-    // The hover is the time line alone, shared with the charts above; the colours are the reading.
+    const colAt = (t) => { let ci = cols.length - 1; while (ci > 0 && ms(cols[ci]) > t) ci--; return ci; };
+    // The hover follows the time line shared with the charts above, and sums the cores at that time.
     heat = { animation: false, grid: { left: 56, right: 16, top: 8, bottom: 24 }, xAxis: AXIS,
       yAxis: { type: 'category', data: own.map(String), name: own.length < nc ? 'job cores' : 'core',
                axisPointer: { show: false }, axisLabel: { interval: Math.max(0, Math.ceil(own.length / 8) - 1) } },
-      tooltip: { trigger: 'axis', axisPointer: { axis: 'x', type: 'line' }, showContent: false },
+      tooltip: { trigger: 'axis', axisPointer: { axis: 'x', type: 'line' }, formatter: (ps) => {
+        const p = Array.isArray(ps) ? ps[0] : ps, l = p ? loads[colAt(+p.axisValue)] : null;
+        if (!l || !l.length) return '';
+        let top = 0; l.forEach((v, r) => { if (v > l[top]) top = r; });
+        const total = l.reduce((a, v) => a + v, 0) / 100;
+        return new Date(+p.axisValue).toLocaleTimeString() + '<br>' + total.toFixed(1) + ' of ' + l.length +
+               ' cores<br>busiest core ' + own[top] + ' · ' + Math.round(l[top]) + '%';
+      } },
       // Drawn in one pass: a series this large is otherwise painted over several frames, which shows
       // as the map filling in on every update.
       series: [{ type: 'custom', encode: { x: [0, 3], y: 1 }, data, progressive: 0,
