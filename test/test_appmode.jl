@@ -5,7 +5,7 @@
 # server's posture and the text of what the exporter generates.
 using ReTest
 using KaimonSlate
-import JSON
+import JSON, Pkg, TOML
 const NS = KaimonSlate.NotebookServer
 
 @testset "a pending browser round-trip is answerable only by its own page" begin
@@ -396,6 +396,47 @@ end
     @test occursin("app = true", rj)                      # …and serves in app mode
     @test occursin("default_path", rj)                    # exporting checkout baked in as a DEFAULT…
     @test occursin("SLATE_KAIMONSLATE_PATH", rj)          # …with the env var still able to override
+end
+
+@testset "exports state the Julia version KaimonSlate requires" begin
+    # The launcher installs KaimonSlate, so its `[compat] julia` floor is the real minimum.
+    root = pkgdir(KaimonSlate)
+    spec = Pkg.Types.semver_spec(TOML.parsefile(joinpath(root, "Project.toml"))["compat"]["julia"])
+    minv = NS._MIN_JULIA
+    @test minv in spec
+    @test !(VersionNumber(minv.major, minv.minor - 1, 99) in spec)
+
+    v = NS._min_julia_str()
+    rj = NS._run_script("https://x/y/nb.standalone.jl"; app = true, apptitle = "Demo")
+    @test occursin("VERSION >= v\"$v\"", rj)                  # the guard setup() runs before installing
+    @test occursin("Julia $v+", NS._run_sh("Demo")) && occursin("Julia $v+", NS._run_ps1())
+
+    # Text that can't interpolate the constant: nothing export-facing may promise an older Julia.
+    for f in ("src/server_export.jl", "src/KaimonSlate.jl", "src/assets/notebook.html", "docs/src/app-mode.md")
+        @test !occursin(r"Julia\s+1\.1[01]\b", read(joinpath(root, f), String))
+    end
+end
+
+@testset "the launcher's globals don't shadow Base" begin
+    # `run.jl` is a script, so its assignments are globals of Main. One named after a Base export
+    # (`names`, `filter`, …) resolves differently across Julia versions: an error on 1.11, and on 1.13
+    # later reads see the Base function instead. Checked on the parsed script, so it holds on any
+    # version the suite runs on.
+    function toplevel_assigned(ex, acc = Set{Symbol}())
+        ex isa Expr || return acc
+        ex.head === :(=) && ex.args[1] isa Symbol && push!(acc, ex.args[1])
+        # descend only through constructs that keep global scope
+        ex.head in (:toplevel, :block, :if, :elseif, :for, :while, :(=)) &&
+            foreach(a -> toplevel_assigned(a, acc), ex.args)
+        return acc
+    end
+    for rj in (NS._run_script("https://x/y/nb.standalone.jl"; app = true, apptitle = "Demo"),
+               NS._run_script("https://x/y/nb.standalone.jl"; app = true, workbook = true),
+               NS._run_script("https://x/y/nb.standalone.jl"; agent = true))
+        shadowing = filter(s -> isdefined(Base, s) && Base.isexported(Base, s),
+                           toplevel_assigned(Meta.parseall(rj)))
+        @test isempty(shadowing)
+    end
 end
 
 @testset "a run isolates its gates from the machine's Kaimon" begin

@@ -549,6 +549,42 @@ end
     @test isempty(ReportEngine.slate_memo_entries())
 end
 
+@testset "slate_fingerprint: the chunked array path writes the same bytes" begin
+    # A numeric array is fingerprinted in chunks rather than element by element. The chunked encoding
+    # has to be INDISTINGUISHABLE from the element loop, or every memo keyed on an array silently
+    # misses once and the stored results are stranded. `Any[...]` holds the same values behind an
+    # abstract eltype, which takes the element loop — so each pair below is fast path vs element loop
+    # over identical data, and any drift in the encoding shows up here rather than as a cache miss.
+    # `Array{Any}` rather than `Any[c...]`: splatting flattens, and the header carries ndims and size,
+    # so the multidimensional case would differ for a reason that has nothing to do with the encoding.
+    fp = ReportEngine.slate_fingerprint
+    cases = Any[
+        Int8[-128, 0, 127], Int16[-3, 7], Int32[-2^30, 2^30], Int64[-2^62, 0, 2^62],
+        UInt8[0x00, 0x7f, 0xff], UInt16[0, 65535], UInt32[0, 4294967295],
+        Float64[1.5, -2.25, 0.0], Float32[1.5f0, -0.0f0], Float16[Float16(1.5)],
+        Float64[-0.0, 0.0],                                  # signed zero stays distinct
+        Float64[Inf, -Inf],
+        Int64[], Float64[],                                  # empty: no chunk to flush
+        collect(1:(8192 * 2 + 5)),                           # spans several chunks, with a partial tail
+        rand(Int32, 3, 4),                                   # multidimensional, column order
+    ]
+    mismatched = [string(eltype(c), size(c)) for c in cases if fp(c) != fp(Array{Any}(c))]
+    @test isempty(mismatched)
+
+    # NaN canonicalisation has to survive the chunked path too: any payload fingerprints alike, and
+    # an array of NaN still differs from an array of a real number.
+    nan_a = Float64[NaN, 1.0]
+    nan_b = Float64[reinterpret(Float64, 0x7ff8000000000123), 1.0]
+    @test fp(nan_a) == fp(nan_b) == fp(Array{Any}(nan_a))
+    @test fp(nan_a) != fp(Float64[1.0, 1.0])
+
+    # The element loop still owns everything else: an abstract eltype, and types the fast path skips
+    # because their encoding is not the integer one (`Bool`) or can leave Int64 range (`UInt64`).
+    @test fp(Bool[true, false]) == fp(Array{Any}(Bool[true, false]))
+    @test fp(UInt64[0x00, typemax(UInt64)]) == fp(Array{Any}(UInt64[0x00, typemax(UInt64)]))
+    @test fp([1, 2, 3]) == fp(Array{Any}([1, 2, 3]))
+end
+
 @testset "opening a new path creates the directories leading to it" begin
     # Opening a path that doesn't exist has always meant "make me this notebook". It created the
     # FILE and then failed on a missing parent — so `notebooks/x.jl` in a project with no

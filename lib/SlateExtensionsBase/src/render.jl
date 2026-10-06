@@ -214,6 +214,17 @@ function _render(x)
     return r
 end
 
+# The untyped `x` is the extension point: ANY package's type opts in by defining `slate_render`, so
+# these cannot name a type without defeating their own purpose.
+#
+# They do invalidate compiled code on load — a new `show(::IO, ::MIME, ::Any)` intersects call sites
+# Base and loaded packages have already compiled — and that is not worth trying to narrow. Measured:
+# deleting either `show` here makes the total go UP, because the blame simply moves to the other one;
+# deleting `convert(::Type{String}, ::UploadedFile)` moves it onto `convert(::Type{String}, ::Choice)`
+# instead. What invalidates those call sites is the EXISTENCE of a method of this shape, not which
+# method it is, so removing one just promotes the next. See the signature notes in controls.jl for the
+# narrowing that does pay — the one-argument `hash` and untyped mixed `==`, which have no such
+# interchangeable understudy.
 Base.showable(::SlateComponentMIME, x) = (r = _render(x); r !== nothing && !(r isa SlateHtml))
 Base.showable(::SlateHtmlMIME, x)      = _render(x) isa SlateHtml
 

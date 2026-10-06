@@ -38,13 +38,23 @@ if(a<1e-4||a>=1e15)return v.toExponential(3);
 return String(parseFloat(v.toPrecision(6)));}
 /* A datum is a scalar on a value axis, or a tuple: [x,y] for a line, [x,y,v] for a heatmap. */
 function _slateValueFormatter(v){return Array.isArray(v)?v.map(_slateNum).join(', '):_slateNum(v);}
+/* Mirror of core.js `_slateIsDark`: whether a CSS colour is dark, null when unparseable. */
+function _slateIsDark(css){var s=String(css||'').trim(),rgb,m=/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s);
+if(m){var h=m[1].length===3?m[1].replace(/./g,function(c){return c+c;}):m[1];rgb=[0,2,4].map(function(i){return parseInt(h.slice(i,i+2),16);});}
+else if((m=/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(s))){rgb=m.slice(1,4).map(Number);}
+else return null;
+return (0.299*rgb[0]+0.587*rgb[1]+0.114*rgb[2])/255<0.5;}
 function _slateExportTheme(){var cs=getComputedStyle(document.documentElement);
 var V=function(n,d){var v=cs.getPropertyValue(n).trim();return v||d;};
 var text=V('--text','#d4d8e8'),dim=V('--dim','#6a7090'),border=V('--border','#2a2e40'),bg2=V('--bg2','#141828');
 var cycle=[['--accent','#569cd6'],['--green','#56d364'],['--orange','#ce9178'],['--purple','#c586c0'],['--teal','#4ec9b0'],['--gold','#ffd700'],['--red','#e57575']].map(function(p){return V(p[0],p[1]);});
 var vir=['#440154','#472d7b','#3b528b','#2c728e','#21918c','#28ae80','#5ec962','#addc30','#fde725'];
 var ax={axisLine:{lineStyle:{color:border}},axisTick:{lineStyle:{color:border}},axisLabel:{color:dim,fontSize:14},nameTextStyle:{color:text,fontSize:15},splitLine:{lineStyle:{color:border,opacity:0.4}},splitArea:{areaStyle:{color:['transparent','transparent']}}};
-return {color:cycle,backgroundColor:'transparent',textStyle:{color:text,fontFamily:'inherit',fontSize:14},title:{left:'center',textStyle:{color:text,fontSize:19,fontWeight:'bold'},subtextStyle:{color:dim,fontSize:12}},legend:{textStyle:{color:dim,fontSize:14}},categoryAxis:ax,valueAxis:ax,logAxis:ax,timeAxis:ax,line:{symbolSize:5},graph:{color:cycle},tooltip:{backgroundColor:bg2,borderColor:border,textStyle:{color:text},valueFormatter:_slateValueFormatter},visualMap:{textStyle:{color:dim},inRange:{color:vir}},timeline:{lineStyle:{color:dim},label:{color:dim}},calendar:{splitLine:{lineStyle:{color:border}},itemStyle:{borderColor:border}}};}
+var dark=_slateIsDark(V('--bg',''));
+var t={color:cycle,backgroundColor:'transparent',textStyle:{color:text,fontFamily:'inherit',fontSize:14},title:{left:'center',textStyle:{color:text,fontSize:19,fontWeight:'bold'},subtextStyle:{color:dim,fontSize:12}},legend:{textStyle:{color:dim,fontSize:14}},categoryAxis:ax,valueAxis:ax,logAxis:ax,timeAxis:ax,line:{symbolSize:5},graph:{color:cycle},tooltip:{backgroundColor:bg2,borderColor:border,textStyle:{color:text},valueFormatter:_slateValueFormatter},visualMap:{textStyle:{color:dim},inRange:{color:vir}},timeline:{lineStyle:{color:dim},label:{color:dim}},calendar:{splitLine:{lineStyle:{color:border}},itemStyle:{borderColor:border}}};
+/* ECharts picks auto label contrast from `darkMode`, inferred from a 'transparent' background as light. */
+if(dark!==null)t.darkMode=dark;
+return t;}
 """
 
 # ── Page assets in a static export ────────────────────────────────────────────────────────────
@@ -1367,7 +1377,10 @@ Slate.asset=function(path){var a=window.__slateAssets[path];
 if(!a)return Promise.reject(new Error("Slate.asset: unknown asset "+path));
 var get;if(a.data!==undefined){var b=atob(a.data),n=b.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=b.charCodeAt(i);
 get=a.enc==="gzip"?_slateInflate(u):Promise.resolve(u.buffer);}
-else{get=fetch(a.url).then(function(r){return r.arrayBuffer();});}
+/* Status-checked for the same reason as core.js: a 404 body would otherwise decode as data. */
+else{get=fetch(a.url).then(function(r){
+if(!r.ok)throw new Error("Slate.asset: "+a.url+" — "+r.status+" "+r.statusText);
+return r.arrayBuffer();});}
 return get.then(function(buf){if(a.dtype)return _slateNdarray(a,buf);var m=a.mime||"";
 if(m.indexOf("json")>=0)return JSON.parse(new TextDecoder().decode(buf));
 if(m.indexOf("text/")===0)return new TextDecoder().decode(buf);return buf;});};
@@ -2922,7 +2935,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # Side-by-side rows (`column=N`): wrap a multi-cell run in a flex `.exp-row`. The visibility
         # predicate mirrors the per-cell skips below so the grouping matches what's actually emitted.
         rowopen, rowclose, _ = _column_row_brackets(nb.report.cells,
-            c -> !(:collapsed in c.flags) && !(:docindex in c.flags) && !(c.id in fm.skip) && !(:bibliography in c.flags))
+            c -> !(:collapsed in c.flags) && !(:docindex in c.flags) && !(c.id in fm.skip) &&
+                 !(:bibliography in c.flags) && !(:notes in c.flags))
         for c in nb.report.cells
             # A collapsed (folded ▸) cell is tucked away entirely in the notebook — omit it from
             # the export too (both code and output), for markdown and code alike.
@@ -2935,6 +2949,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             end
             c.id in fm.skip && continue              # hoisted into the title block above
             (:bibliography in c.flags) && continue   # raw BibTeX isn't shown (HTML has no CSL engine yet)
+            # Speaker notes are addressed to the presenter, not the reader. The deck skips them and the
+            # PDF gives them their own appendix; an HTML page had no such split and published them as
+            # ordinary prose. Omitted rather than hidden in CSS — `display:none` still ships the text.
+            (:notes in c.flags) && continue
             haskey(rowopen, c.id) && print(io, "<div class=\"exp-row\">")   # open a side-by-side row
             if c.kind == MARKDOWN
                 # citations/refs + hoisted H1. Dropping the H1 drops whatever interpolations sat in it,
@@ -3055,7 +3073,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             print(io, "<div id=\"exp-run-bg\"><div class=\"exp-run-modal\">",
                   "<h2>Run this notebook live</h2>",
                   "<p>Get the full interactive notebook (with the AI agent) on your machine. Needs ",
-                  "<a href=\"https://julialang.org/downloads/\" target=\"_blank\" rel=\"noopener\">Julia 1.10+</a>. ",
+                  "<a href=\"https://julialang.org/downloads/\" target=\"_blank\" rel=\"noopener\">Julia $(_min_julia_str())+</a>. ",
                   "The launch script installs Kaimon + KaimonSlate and starts the notebook (its exact environment is reconstructed from the bundle).</p>")
             if embed_bundle
                 print(io, "<p><b>macOS / Linux</b> — download <b>run.jl</b> + the <b>bundle</b> into one folder, then <code>julia run.jl</code>:</p>",
@@ -3301,6 +3319,11 @@ function _dev_checkout_path(srcdir::AbstractString)
     return root
 end
 
+# The oldest Julia an exported notebook or app can run on: KaimonSlate's own `[compat] julia` floor,
+# which the launcher installs. Every launcher, guard and README states this one value.
+const _MIN_JULIA = v"1.12"
+_min_julia_str() = "$(_MIN_JULIA.major).$(_MIN_JULIA.minor)"
+
 # The `run.jl` bootstrap. Installs Kaimon + KaimonSlate into a DEDICATED environment (never the user's
 # default — avoids clobbering their setup), fetches the notebook's reproducible bundle, and serves it —
 # the notebook's exact env reconstructs in a gate worker on open. Kaimon is REQUIRED, not optional: it
@@ -3331,7 +3354,7 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     # ── Run this Kaimon Slate notebook live on your machine ──────────────────────────────────────
     # Auto-generated. Installs Kaimon + KaimonSlate into a dedicated environment, gets this notebook's
     # reproducible bundle, and serves it — the notebook's exact environment reconstructs on open.
-    # Re-runnable (idempotent). Prerequisite: Julia 1.10+ (juliaup / https://julialang.org/downloads).
+    # Re-runnable (idempotent). Prerequisite: Julia $(_min_julia_str())+ (juliaup / https://julialang.org/downloads).
     #
     # Steps are separate functions so this is easy to extend or audit.
 
@@ -3360,7 +3383,7 @@ $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
         s = Sockets.listen(Sockets.localhost, 0); p = Int(Sockets.getsockname(s)[2]); close(s); return p
     end
     function ensure_julia()
-        VERSION >= v"1.10" || error("Julia 1.10+ required (found \$VERSION). See https://julialang.org/downloads")
+        VERSION >= v"$(_min_julia_str())" || error("Julia $(_min_julia_str())+ required (found \$VERSION). See https://julialang.org/downloads")
     end
 
     # LibGit2 (Pkg's git transport) warns about credential attributes newer git sends that its parser
@@ -3635,13 +3658,13 @@ function _run_app_bind(port::Int)
     # statement of intent, so admit this machine's own names automatically; SLATE_ALLOWED_HOSTS
     # adds any others (a DNS alias, a reverse proxy's name).
     if host != "127.0.0.1" && host != "localhost"
-        names = String[gethostname(), host]
+        allowed_hosts = String[gethostname(), host]
         for ip in try; Sockets.getipaddrs(); catch; []; end
-            push!(names, string(ip))
+            push!(allowed_hosts, string(ip))
         end
         extra = strip(get(ENV, "SLATE_ALLOWED_HOSTS", ""))
-        isempty(extra) || push!(names, String(extra))
-        ENV["KAIMONSLATE_ALLOWED_HOSTS"] = join(unique(filter(!isempty, names)), ",")
+        isempty(extra) || push!(allowed_hosts, String(extra))
+        ENV["KAIMONSLATE_ALLOWED_HOSTS"] = join(unique(filter(!isempty, allowed_hosts)), ",")
     end"""
 end
 
@@ -3690,7 +3713,7 @@ function _run_ps1()
     # ── Run this Kaimon Slate notebook live (Windows / PowerShell) ───────────────────────────────
     # Auto-generated. Runs the sibling $(_SITE_RUNJL), which installs Kaimon + KaimonSlate into a
     # dedicated environment, fetches this notebook's reproducible bundle, and serves it — the
-    # notebook's exact environment reconstructs on open. Prerequisite: Julia 1.10+ (juliaup /
+    # notebook's exact environment reconstructs on open. Prerequisite: Julia $(_min_julia_str())+ (juliaup /
     # https://julialang.org/downloads). Double-click $(_SITE_BAT), or right-click this file →
     # "Run with PowerShell".
     \$ErrorActionPreference = "Stop"
@@ -3757,7 +3780,7 @@ function _run_sh(title::AbstractString = "")
     # ── Run this Kaimon Slate app ────────────────────────────────────────────────────────────────
     # Auto-generated. Runs the sibling $(_SITE_RUNJL), which installs Kaimon + KaimonSlate into a
     # dedicated environment, reconstructs this notebook's exact packages, and serves it.
-    # Prerequisite: Julia 1.10+ (https://julialang.org/downloads or juliaup).
+    # Prerequisite: Julia $(_min_julia_str())+ (https://julialang.org/downloads or juliaup).
     #
     #   ./$(_SITE_SH)                              # run it (binds 0.0.0.0 — the whole network)
     #   ./$(_SITE_SH) --port 9000                  # a specific port
@@ -3931,7 +3954,7 @@ end
 Write a self-contained **application** for `nb` into `dir` (created if absent), and return `dir`.
 
 The folder holds the notebook's reproducible bundle plus launchers. Running `julia run.jl` inside
-it — here, or on any machine you copy it to, needing only Julia 1.10+ — installs the environment,
+it — here, or on any machine you copy it to, needing only Julia 1.12+ — installs the environment,
 reconstructs the notebook's exact packages, and serves it as an app: prose, results, figures and
 live controls, with the authoring API refused server-side. Windows users double-click `run.bat`.
 
@@ -4104,7 +4127,7 @@ function _app_readme(nb::LiveNotebook, bundle_name::AbstractString, port::Int)
 
     ## Running it
 
-    Install Julia 1.10 or newer (<https://julialang.org/downloads>), then from this folder:
+    Install Julia $(_min_julia_str()) or newer (<https://julialang.org/downloads>), then from this folder:
 
     | | |
     |---|---|
@@ -5431,6 +5454,7 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
         for c in nb.report.cells
             (:collapsed in c.flags) && continue
             c.id in fm.skip && continue
+            (:notes in c.flags) && continue    # speaker notes — presenter-only, same as the HTML export
             if :bibliography in c.flags        # rendered as the References section below, not raw BibTeX
                 continue
             end

@@ -346,6 +346,80 @@ end
 # Interim-render preview travelling with an EXPORT: externalized blob URLs must re-inline to
 # self-contained data URIs (the blob-serving server isn't there when the .jl is reopened elsewhere),
 # subject to the size caps; heavy animation manifests are dropped.
+@testset "an asset saved while interpolating markdown reaches the page" begin
+    # A markdown cell's `{{ }}` interpolations run as real captures, so a `show` method can call
+    # `save_asset` — and the interpolation wire carries the record through `_wire_to_output`. The cell
+    # JSON then hardcoded `Any[]` for a markdown cell, which dropped it at the last step: the rendered
+    # markup referenced an asset path that nothing had registered or stored. Echarts and tables from
+    # interpolations were already surfaced, so this was the one of the three that went missing.
+    RE = ReportEngine
+    rec = (; name = "probe", path = "data/probe-abc.bin",
+           mime = "application/octet-stream", bytes = UInt8[7, 8, 9])
+    io = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0,
+                       Any[], "", Any[], Any[], "", "", Any[], Any[rec])
+    c = RE.parse_report("#%% md id=m\ntext {{ p }}\n").cells[1]
+    c.interp = [io]
+    @test c.kind == RE.MARKDOWN
+
+    spec = only(NS.cell_json(c; nbid = "interpnb")["assets"])
+    @test spec["path"] == "data/probe-abc.bin"
+    @test spec["name"] == "probe"
+    @test startswith(spec["url"], "/api/interpnb/blob/")
+    # Registered AND stored — a spec whose blob was never written would 404 just the same.
+    @test NS.blob_lookup(string("interpnb/", spec["sha"]))[2] == UInt8[7, 8, 9]
+end
+
+@testset "the durable blob tier stays inside its disk budget" begin
+    # The tier is content-addressed and write-once, so it only ever grows. `_prune_preview_blobs!`
+    # bounds a notebook that is open and snapshotting; nothing bounded the blobs of every notebook
+    # closed weeks ago, which is the set that actually fills a disk.
+    saved = NS._DBLOB_DIR[]
+    dir = mktempdir()
+    NS._DBLOB_DIR[] = dir
+    try
+        withenv("KAIMONSLATE_BLOB_CACHE_MB" => "0.01") do        # 10,485-byte budget, 8,388 target
+            NS._DBLOB_SWEEP_AT[] = time()                        # no incidental sweep while writing
+            blob = i -> (string("nb/", i), fill(UInt8(i), 4000))
+            for i in 1:3
+                k, b = blob(i)
+                NS._blob_put_durable!(k, "application/octet-stream", b)
+            end
+            total = d -> sum(filesize(joinpath(d, f)) for f in readdir(d) if !endswith(f, ".meta"); init = 0)
+            @test total(dir) == 12_000                            # over budget, nothing swept yet
+            NS._sweep_dblob_dir!(force = true)
+            @test total(dir) <= (10_485 * 8) ÷ 10                 # evicted down to the 80% target
+            @test NS.blob_lookup("nb/1") === nothing              # the least recently used one went
+            @test NS.blob_lookup("nb/3") !== nothing              # the newest stayed
+        end
+    finally
+        NS._DBLOB_DIR[] = saved
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+@testset "a blob that is read survives eviction ahead of an unread newer one" begin
+    # Eviction is oldest-FIRST, which would evict a blob a long-open notebook is still serving purely
+    # for having been written early. `blob_lookup` touches what it reads so "oldest" means least
+    # recently USED; without that, reopening an old notebook would blank its figures.
+    saved = NS._DBLOB_DIR[]
+    dir = mktempdir()
+    NS._DBLOB_DIR[] = dir
+    try
+        withenv("KAIMONSLATE_BLOB_CACHE_MB" => "0.01") do         # 10,485-byte budget, 8,388 target
+            NS._DBLOB_SWEEP_AT[] = time()                         # no incidental sweep while writing
+            NS._blob_put_durable!("nb/old", "application/octet-stream", fill(0x01, 6000))
+            NS._blob_put_durable!("nb/new", "application/octet-stream", fill(0x02, 6000))
+            @test NS.blob_lookup("nb/old") !== nothing            # reading it marks it used
+            NS._sweep_dblob_dir!(force = true)                    # 12,000 > budget → one must go
+            @test NS.blob_lookup("nb/old") !== nothing            # kept: most recently used
+            @test NS.blob_lookup("nb/new") === nothing            # evicted despite being newer
+        end
+    finally
+        NS._DBLOB_DIR[] = saved
+        rm(dir; recursive = true, force = true)
+    end
+end
+
 @testset "preview blob re-inline (export travel)" begin
     nbid = "previewtest_ci"
     png = vcat(UInt8[0x89, 0x50, 0x4e, 0x47], rand(UInt8, 96))     # a small figure blob in the durable store
@@ -359,6 +433,28 @@ end
     @test occursin("data:image/png;base64,", cells[1]["output"])  # URL → self-contained data URI
     @test !occursin("/blob/", cells[1]["output"])                 # no server-dependent URL left
     @test cells[1]["animations"] == Any[]                         # heavy frame stacks dropped from the preview
+
+    # A `save_asset` spec carries its own blob URL, which is just as absent on another machine. The
+    # preview used to inline only the output HTML, so a travelling bundle drew its figures and then
+    # resolved nothing for any widget reading `Slate.asset` — which prefers an inline `data` field.
+    blob = rand(UInt8, 64); bh = string(hash(blob); base = 16)
+    NS._blob_put_durable!(string(nbid, "/", bh), "application/octet-stream", blob)
+    acells = [Dict{String,Any}("id" => "w", "output" => "<div></div>",
+                               "assets" => Any[Dict{String,Any}(
+                                   "path" => "data/x-$bh.bin", "sha" => bh, "name" => "x",
+                                   "mime" => "application/octet-stream", "bytes" => length(blob),
+                                   "url" => "/api/$nbid/blob/$bh")])]
+    NS._inline_preview_blobs!(nbid, acells)
+    a = only(acells[1]["assets"])
+    @test Base64.base64decode(a["data"]) == blob                  # the bytes travel with the preview
+    @test !haskey(a, "url")                                       # the URL could not have resolved
+
+    # The cap applies to assets too: with no budget the spec keeps its URL rather than bloating the file.
+    acells0 = [Dict{String,Any}("id" => "w", "assets" => Any[Dict{String,Any}(
+                   "sha" => bh, "path" => "data/x-$bh.bin", "url" => "/api/$nbid/blob/$bh")])]
+    NS._inline_preview_blobs!(nbid, acells0; budget = 0)
+    @test !haskey(only(acells0[1]["assets"]), "data")
+    @test only(acells0[1]["assets"])["url"] == "/api/$nbid/blob/$bh"
 
     # A total budget of 0 embeds nothing — every asset is left as a URL (recomputes on hydrate).
     cells0 = [Dict{String,Any}("id" => "z", "output" => "<img src=\"/api/$nbid/blob/$h\">")]
@@ -729,6 +825,30 @@ end
     finally
         rm(dir; recursive = true, force = true)
     end
+end
+
+@testset "speaker notes never reach a reader" begin
+    # `notes` cells are addressed to the presenter: the deck skips them, the PDF gives them their own
+    # appendix, and docs/src/slides.md promises the presenter window is "the only place notes are
+    # visible". The HTML and markdown exports are separate renderers with their own skip chains, and
+    # neither knew about the flag — so publishing a deck as a page shipped the notes as ordinary prose.
+    # Omitted, not hidden: a CSS rule would still put the text in the page source.
+    src = "#%% md id=t title\n# Talk\n\n#%% md id=body\nWhat the audience reads.\n\n" *
+          "#%% md id=sp notes\nRemember to mention the unpublished result.\n"
+    rep = _RE.parse_report(src)
+    nb = NS.LiveNotebook("notesnb", "/tmp/notesnb.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
+        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    @test :notes in rep.cells[end].flags          # the tag parsed — otherwise this proves nothing
+
+    secret, public = "unpublished result", "What the audience reads"
+    html, md = NS.export_html(nb), NS.export_markdown(nb)
+    @test occursin(public, html) && !occursin(secret, html)
+    @test occursin(public, md) && !occursin(secret, md)
+
+    # The presenter still gets them: the flag reaches the page as `notes`, which is what slides.js
+    # routes into the notes column and notebook.js turns into `.cell-notes` for the reading view.
+    cj = NS.cell_json(rep.cells[end])
+    @test get(cj, "notes", false) === true
 end
 
 @testset "_apply_ordering! sets section/order in place, leaves unmatched" begin

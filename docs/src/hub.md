@@ -50,9 +50,16 @@ then the XDG location:
 | --- | --- | --- |
 | config | `slate.json`, `secrets.json` | `~/.config/kaimonslate` |
 | data | the publishing ledger's working checkout | `~/.local/share/kaimonslate` |
-| cache | local site builds | `~/.cache/kaimonslate` |
+| cache | local site builds, rendered figure and asset blobs | `~/.cache/kaimonslate` |
 
 The cache home is safe to delete. The data home is not.
+
+Blobs under the cache home are content-addressed and written once, so a notebook mints a new one
+every time a figure changes. An open notebook's superseded blobs are dropped as it snapshots; the
+whole store is held to a disk budget (**`KAIMONSLATE_BLOB_CACHE_MB`**, default 2048) by evicting the
+least recently used, which is what bounds the blobs of notebooks you closed long ago. Raise it if you
+work with large data assets and want reopens to stay instant; deleting the directory is always safe,
+and costs only a re-render.
 
 Setting **`KAIMONSLATE_HOME`** relocates all three at once, which is how you run a second hub without
 it sharing the first one's config, secrets and publish ledger.

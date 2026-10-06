@@ -31,11 +31,25 @@ export class El {
   }
   get className() { return this.getAttribute('class') || ''; }
   set className(v) { this.setAttribute('class', v); }
+  get id() { return this.getAttribute('id') || ''; }
+  set id(v) { this.setAttribute('id', v); }
   getAttribute(n) { return Object.prototype.hasOwnProperty.call(this.attrs, n) ? this.attrs[n] : null; }
   setAttribute(n, v) { this.attrs[n] = String(v); }
   removeAttribute(n) { delete this.attrs[n]; }
   hasAttribute(n) { return Object.prototype.hasOwnProperty.call(this.attrs, n); }
   get classList() { return new ClassList(this); }
+  // `data-*` attributes under their camelCase names, reading and writing THROUGH to the attributes.
+  // A plain snapshot object would swallow `el.dataset.x = …` and let a test pass on a write that
+  // never reached the element.
+  get dataset() {
+    const el = this, at = k => 'data-' + String(k).replace(/[A-Z]/g, c => '-' + c.toLowerCase());
+    return new Proxy({}, {
+      get: (_, k) => (el.hasAttribute(at(k)) ? el.getAttribute(at(k)) : undefined),
+      set: (_, k, v) => { el.setAttribute(at(k), v); return true; },
+      has: (_, k) => el.hasAttribute(at(k)),
+      deleteProperty: (_, k) => { el.removeAttribute(at(k)); return true; },
+    });
+  }
   get textContent() { return this.text; }
   set textContent(v) { this.text = String(v); }
   // Enough of CSSOM for code that positions something — `paint()` writes left/right percentages on
@@ -48,6 +62,9 @@ export class El {
   // Dispatch to THIS element only — the replay code never relies on bubbling, and pretending to
   // support it would be a lie the tests then depend on.
   dispatch(t) { (this.listeners[t] || []).forEach(f => f.call(this, { type: t, target: this })); }
+  // The DOM spelling, for code that builds an Event object (node has a global `Event`). Delivery is
+  // still to THIS element only, for the reason above.
+  dispatchEvent(ev) { this.dispatch(ev && ev.type ? ev.type : String(ev)); return true; }
   click() { this.dispatch('click'); }
 
   // ── form-control semantics the replay code actually uses ────────────────────────────────────
@@ -101,6 +118,15 @@ export class El {
     return child;
   }
   remove() { if (this.parentElement) this.parentElement._detach(this); this.parentElement = null; }
+  contains(node) { for (let e = node; e; e = e.parentElement) if (e === this) return true; return false; }
+  // Put `node` where this element is and drop this one. `insertBefore` detaches `node` from its old
+  // parent first, so a carried node never sits in two trees — the invariant this file already keeps.
+  replaceWith(node) {
+    const p = this.parentElement;
+    if (!p) return;
+    p.insertBefore(node, this);
+    this.remove();
+  }
   get nextSibling() {
     if (!this.parentElement) return null;
     const s = this.parentElement.children;

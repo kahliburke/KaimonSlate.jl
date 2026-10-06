@@ -3086,7 +3086,7 @@ function create_tools(GateTool::Type)
         export_app(notebook, dir; theme="", pagewidth="", port="0", agent="0") -> String
 
     Write this notebook to `dir` as a self-contained **application**. Running `julia run.jl` inside
-    that folder — here, or on any machine you copy it to, needing only Julia 1.10+ — installs the
+    that folder — here, or on any machine you copy it to, needing only Julia 1.12+ — installs the
     environment, reconstructs the notebook's exact packages, and serves it as an app: prose,
     results, figures and live controls, with the authoring API refused server-side. Windows users
     double-click `run.bat`.

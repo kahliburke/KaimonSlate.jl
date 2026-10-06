@@ -432,6 +432,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     if (el) el.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} } });
     // A player owns a WebGL texture array, so an undisposed one holds GPU memory for the page's life.
     window.disposeAnimations && window.disposeAnimations(c.id);
+    // Same for a PACKAGE output holding a resource. A deleted cell is the removal path no re-run swap
+    // ever sees, so without this a returned figure's `destroy` is never called at all.
+    if (el) window.slateTeardownOutput && window.slateTeardownOutput(el);
     // Cancel any pending debounced snapshot (core.js _snapCell) — its closure holds a reference
     // to the now-disposed chart instances and would otherwise fire against a removed cell.
     if (window._cancelSnap) window._cancelSnap(c.id);
@@ -655,6 +658,11 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // A workbook cell is the reader's to write. The class is emitted in every posture so the author
     // can see which cells they've marked; only `body.app` gives it the reading-view treatment.
     + (c.workbook ? ' workbook' : '')
+    // Presentation tags, as classes so the stylesheet can reach them — `notes` is the one that
+    // MATTERS: speaker notes are presenter-only (docs/src/slides.md), and without a class the
+    // reading view had no way to keep them off a reader's screen. `slide` rides along so an
+    // explicit slide break is visible while authoring.
+    + (c.notes ? ' cell-notes' : '') + (c.slide ? ' slide-start' : '')
     + roleCls + selCls + edCls + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
@@ -736,7 +744,13 @@ class MemoCell extends Component {
     if ((p.live || {})[id] !== (next.live || {})[id]) return true;
     return false;
   }
-  render() { return html`<${Cell} ...${this.props} />`; }
+  // The `.cellslot` (`display: contents`) is the node that preact keeps in order under #nb. The live
+  // deck moves only the `.cell` inside it onto a slide, so a render that moves the slot does not
+  // take the cell off the slide (slides.js).
+  render() { return html`<div class="cellslot"><${Cell} ...${this.props} /></div>`; }
+  // A slide cell whose slot goes away (the cell was deleted, or preact mounted it again in a new
+  // slot) stays on the slide until slides.js settles it.
+  componentWillUnmount() { window._deckSettle && window._deckSettle(); }
 }
 
 function Notebook({ cells, selectedId, selSet, live, focusId, editingId, cone }) {

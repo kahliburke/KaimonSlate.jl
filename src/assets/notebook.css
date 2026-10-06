@@ -276,7 +276,7 @@ body.hyd-preview #runstale, body.hyd-preview #addcellbtn { opacity:.7; }
    here: it pushes the column right and the reservation above keeps the rail's margin clear, so the
    two coexist. Only a drawer that OVERLAYS the column takes the rail down. */
 body.zen .cellmove, body.app .cellmove,
-.cell-row > .cell:not(:first-child) .cellmove { display:none; }
+.cell-row > .cellslot:not(:first-child) .cellmove { display:none; }
 /* The Files drawer is that case — up to 80vw, straight over the column. It signals `open` on itself
    and nothing else needed to know, which is not a good enough reason to make it start announcing to
    the body. Its own rule: one invalid selector voids the whole list, so `:has` does not get to take
@@ -285,7 +285,10 @@ body:has(.filespanel.open) .cellmove { display:none; }
 /* Side-by-side cells: a `column=N` (N≥2) tag rows a cell beside its predecessor (grouping in notebook.js).
    Equal-width flex columns so paired figures (e.g. an ECharts + a Makie plot) render at the same size. */
 .cell-row { display:flex; gap:16px; align-items:flex-start; }
-.cell-row > .cell { flex:1 1 0; min-width:0; }
+/* A notebook row holds `.cellslot` wrappers (notebook.js `MemoCell`); a row on a slide holds the bare
+   cells (slides.js). The slot has no box, so the cell is the flex item in both. */
+.cellslot { display:contents; }
+.cell-row > .cell, .cell-row > .cellslot > .cell { flex:1 1 0; min-width:0; }
 /* Inter-cell insert affordance. The gap element sits in the flow between rows; its negative vertical
    margins overlap the neighbours' 14px margins so it adds NO net height when idle. Invisible until
    hovered, then a faint hairline + a small "+" fade in — kept deliberately understated. */
@@ -389,7 +392,12 @@ body.zen .cellhead, body.zen .coldrop, body.zen .cellprog, body.zen .cell .contr
    They sit BETWEEN cells rather than inside one, so the per-cell rules above never reached them. */
 body.zen .cellgap, body.zen #addcellbtn,
 /* the "⊞ … surfaced in ‘cell’" chip is authoring chrome — the live control renders in its host cell */
-body.zen .hostedph { display:none !important; }
+body.zen .hostedph,
+/* A `notes` cell is written FOR the presenter, and the presenter window is the only place it belongs
+   (docs/src/slides.md). The deck already skips it and the PDF routes it to the notes appendix; this is
+   the reading view honouring the same contract. The presenter reads its text from the cell state, not
+   from this DOM (`_notesHtml`, slides.js), so hiding it here cannot reach that window. */
+body.zen .cell.cell-notes { display:none !important; }
 /* An author in zen can hit Esc and watch the cells run; an app reader cannot, so bring-up progress is
    the ONLY signal they get that the thing is alive. Keep the banner for an app, hide it for zen. */
 body.zen:not(.app) .hydbanner { display:none !important; }
@@ -544,7 +552,7 @@ body.app.workbook .wbhint { color:var(--dim); font-size:.72rem; }
    point. Just enough room that the title cell isn't jammed against the edge, and a right margin on
    the FIRST block so a long heading can't run under the floating gear. */
 body.app #nb { margin-top:26px; }
-body.app #nb > .cell:first-child { padding-right:70px !important; }
+body.app #nb > .cellslot:first-child > .cell { padding-right:70px !important; }
 /* The bring-up banner has no bar to sit under any more; it sticks to the top of the viewport. */
 body.app .hydbanner { top:0; }
 
@@ -3083,6 +3091,14 @@ body.presenting { overflow: hidden; }
 .deck-slide .cell.selected, .deck-slide .cell.multisel, .deck-slide .cell.dep-focus { outline: none !important; }
 .deck-slide .srcedit, .deck-slide .cm-editor { display: none; }
 .deck-slide.show-code .srcedit, .deck-slide.show-code .cm-editor { display: block; }
+/* The "⊞ … surfaced in ‘cell’" chip is authoring chrome, as in zen: the live control renders in its
+   host cell. A cell with nothing to show (`.cell-blank`, set by `markBlank` in view.js; e.g. a bind
+   cell whose controls are all surfaced elsewhere) collapses, so it leaves no gap on the slide. It
+   stays while the code is shown, because its code is then its content. */
+.deck-slide .hostedph,
+.deck-slide:not(.show-code) .cell.cell-blank, .deck-slide .cell.cell-blank.codehidden { display: none !important; }
+/* A drag on a slider must not start a text selection over the slide. */
+.deck-slide .controls, .deck-slide .binds { user-select: none; }
 /* Presented code is read from a distance — bump it above the editor's default size (the slide-level
    scale still shrinks it to fit, so this sets the on-screen size, not the layout size). */
 .deck-slide.show-code .cm-editor, .deck-slide.show-code .cm-editor .cm-content,
@@ -3158,6 +3174,8 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .pp-cur .cell, .pp-next .cell { border: none !important; background: none !important; margin: 0 0 10px 0 !important; padding: 0 !important; }
 .pp-cur .cellhead, .pp-next .cellhead, .pp-cur .srcedit, .pp-next .srcedit,
 .pp-cur .cm-editor, .pp-next .cm-editor { display: none !important; }
+/* The presenter previews never show code, so the chip and every blank cell go (see `.deck-slide`). */
+.pp-cur .hostedph, .pp-next .hostedph, .pp-cur .cell.cell-blank, .pp-next .cell.cell-blank { display: none !important; }
 
 /* ── Document-metadata role cells (title / abstract / bibliography) ─────────────
    Authored as ordinary cells in natural flow; styled in place so what you see is what
@@ -3175,6 +3193,23 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .cell.role-bib .md::before { content: 'References'; display: block; font-size: .72rem;
   text-transform: uppercase; letter-spacing: .08em; font-weight: 700; color: var(--dim);
   margin-bottom: 6px; border-bottom: 1px solid var(--border); padding-bottom: 3px; }
+
+/* Speaker-notes cell (`notes`) — visible only while authoring, where you are writing it. Marked
+   rather than merely styled: the reader never sees this text, so the author needs to be able to tell
+   at a glance which cells are theirs alone. Every reading posture hides it (`body.zen` above) and
+   both exports omit it (server_export.jl). */
+.cell.cell-notes .md { margin: 2px 0 2px 14px; padding: 8px 14px; border-left: 3px dashed var(--dim);
+  background: var(--ovl); border-radius: 0 8px 8px 0; font-size: .92em; color: var(--dim); }
+.cell.cell-notes .md::before { content: 'Speaker notes'; display: block; font-size: .68rem;
+  text-transform: uppercase; letter-spacing: .09em; font-weight: 700; color: var(--dim); margin-bottom: 4px; }
+
+/* Explicit slide break (`slide` tag) — the one boundary you cannot read off the document, since the
+   rest of the segmentation follows headings you can already see. A small chip in the margin above the
+   cell, only while authoring: scoped to `#nb` so a presented cell (moved to `#deckstage`) and the
+   presenter previews never draw it, and dropped in the reading view, where there are no slides. */
+body:not(.zen) #nb .cell.slide-start::before { content: 'slide'; position: absolute; top: -8px; left: 12px;
+  padding: 0 6px; font-size: .6rem; text-transform: uppercase; letter-spacing: .1em; font-weight: 700;
+  color: var(--dim); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; }
 
 /* Figure caption cell (role-caption) — a numbered, dimmed caption that sits under its figure. */
 .cell.role-caption .md { font-size: .86em; color: var(--dim); margin: 0 0 4px 18px; line-height: 1.5; }

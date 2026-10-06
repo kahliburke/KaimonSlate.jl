@@ -76,19 +76,42 @@ _unzb64(b64::AbstractString) = String(_unzb64_bytes(b64))
 _preview_footer(cells) = _footer_block(_PREVIEW_OPEN, _PREVIEW_CLOSE,
     "v1 · frozen render shown while the live env reconstructs", _zb64(JSON.json(cells)))
 
-# Externalized rendered figures reference the blob-serving server (`/api/<nbid>/blob/<hash>`), which
-# ISN'T there when an exported `.jl` is reopened elsewhere — so the frozen preview's images would
-# 404. Re-inline them as self-contained `data:` URIs (from the durable blob store) so the preview
-# TRAVELS with the export. Capped: a single asset over `_PREVIEW_MAX_ASSET`, or one that would push
-# the running total past `budget`, is left as a URL (it recomputes on hydrate rather than bloating
-# the file); gzip-encoded blobs (animation stacks) can't be a plain data URI, so they're skipped and
-# their heavy `animations` manifests dropped from the travelling preview. Mutates + returns `cells`.
+# Externalized rendered figures AND `save_asset` specs reference the blob-serving server
+# (`/api/<nbid>/blob/<hash>`), which ISN'T there when an exported `.jl` is reopened elsewhere — so the
+# frozen preview's images would 404 and its widgets would resolve no data. Re-inline both from the
+# durable blob store so the preview TRAVELS with the export: figures as `data:` URIs in the output
+# HTML, assets as the `data` field `Slate.asset` prefers over a `url`. Capped: a single asset over
+# `_PREVIEW_MAX_ASSET`, or one that would push the running total past `budget`, is left as a URL (it
+# recomputes on hydrate rather than bloating the file); gzip-encoded blobs (animation stacks) can't be
+# a plain data URI and the live page cannot inflate an inline one, so they're skipped and their heavy
+# `animations` manifests dropped from the travelling preview. Mutates + returns `cells`.
 const _BLOBURL_RE = r"/api/[^/\"]+/blob/([A-Za-z0-9]+)"
 function _inline_preview_blobs!(nbid::AbstractString, cells; budget::Integer = _PREVIEW_MAX_TOTAL)
     total = Ref(0)
     for e in cells
         e isa AbstractDict || continue
         haskey(e, "animations") && (e["animations"] = Any[])   # frame stacks are too heavy to embed
+        # An asset spec carries its own `/api/<id>/blob/<sha>` URL, which is as absent on another
+        # machine as a figure's. `Slate.asset` prefers an inline `data` over a `url`, so hand it the
+        # bytes — otherwise a travelling preview's widgets resolve nothing and draw empty. Same caps as
+        # the figures below, and the same skip for a gzip-encoded blob: the LIVE page's `Slate.asset`
+        # (core.js) reads `data` straight, and only the static export's shim knows how to inflate it.
+        as = get(e, "assets", nothing)
+        if as isa AbstractVector
+            for a in as
+                (a isa AbstractDict && !haskey(a, "data")) || continue
+                sha = String(get(a, "sha", ""))
+                isempty(sha) && continue
+                b = blob_lookup(string(nbid, "/", sha))
+                b === nothing && continue
+                _, bytes, enc = b
+                (isempty(enc) && length(bytes) <= _PREVIEW_MAX_ASSET &&
+                 total[] + length(bytes) <= budget) || continue
+                total[] += length(bytes)
+                a["data"] = Base64.base64encode(bytes)
+                delete!(a, "url")                              # `data` wins, and the URL cannot resolve
+            end
+        end
         out = get(e, "output", nothing)
         (out isa AbstractString && occursin("/blob/", out)) || continue
         e["output"] = replace(out, _BLOBURL_RE => function (s)

@@ -109,16 +109,41 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
         @test c.value === :a && c.v === :a
         @test c.label == "Apple" && c.l == "Apple"
         @test c.index == 2 && c.i == 2
-        @test c == :a && :a == c                 # compares as its value
-        @test string(c) == "a" && "$(c)" == "a"  # prints/interpolates as its value
-        @test hash(c) == hash(:a)                 # hashes as its value
-        @test Dict(:a => 10)[c] == 10             # usable as a dict key
-        # scalar convert/index transparency
+        @test string(c) == "a" && "$(c)" == "a"  # prints/interpolates as its value, for any value type
+        @test propertynames(c) == (:value, :label, :index, :v, :l, :i)
+
+        # Comparison/convert transparency covers NUMBER, STRING and CHARACTER values.
+        cs = Choice("a", "Apple", 2)
+        @test cs == "a" && "a" == cs
+        @test hash(cs, UInt(0)) == hash("a", UInt(0))
+        @test Dict("a" => 10)[cs] == 10           # usable as a dict key
         cn = Choice(3, "three")
         @test convert(Int, cn) === 3
         @test Int(cn) === 3
         @test [10, 20, 30][cn] == 30              # to_index
-        @test propertynames(c) == (:value, :label, :index, :v, :l, :i)
+        @test convert(String, cs) === "a"
+    end
+
+    @testset "Choice: a non-scalar value is read through `.value`" begin
+        # The methods that would make a Symbol-valued Choice compare as its value are a one-argument
+        # `hash` and an untyped mixed `==`, and those invalidate about 1300 compiled method instances
+        # when this package loads — around three seconds on the first render on 1.12. So they are not
+        # defined, and `.value` is the spelling.
+        #
+        # Pinned rather than merely omitted: re-adding them is an easy and plausible "fix" for a bug
+        # report that `pick == :a` is false, and the cost would not be visible from that call site.
+        #
+        # Nothing is lost that ever worked reliably — `===` and `isequal` against a bare Symbol were
+        # false even when `==` was true, so the transparency was always partial, and `pick === :a`
+        # read correctly while silently taking the wrong branch.
+        c = Choice(:a, "Apple", 2)
+        @test c.value === :a
+        @test !(c == :a) && !(:a == c)
+        @test !isequal(c, :a)
+        @test_throws MethodError convert(Symbol, c)
+        # A Choice still compares to another Choice, whatever the value type.
+        @test c == Choice(:a, "Apple", 2) && isequal(c, Choice(:a, "different label", 9))
+        @test !(c == Choice(:b, "Berry", 1))
     end
 
     @testset "Selection" begin
@@ -248,6 +273,9 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
         @test slate_side() == "" && slate_notebook() == ""
         @test slate_emit("ch", (a = 1,)) === nothing        # no-op, no throw
         @test slate_everywhere(:op) === nothing
+        # `nothing` rather than a path, so a render falls back to inlining instead of emitting markup
+        # that points at an asset the page will never resolve.
+        @test slate_save_asset("blob", UInt8[1, 2]) === nothing
 
         # Seed a fake context (a NamedTuple, exactly as the engine builds it) and read it back.
         emitted = Tuple{Any,Any}[]
@@ -265,6 +293,9 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
             @test emitted == [("net", (loss = 0.5,))]
             slate_everywhere(:my_op, :my_rule)
             @test effects == [(:everywhere, [:my_op, :my_rule])]
+            # A context with no `save_asset` field at all — an older Slate — still answers `nothing`
+            # rather than throwing, so an extension can call the accessor unconditionally.
+            @test slate_save_asset("blob", UInt8[1]) === nothing
         finally
             delete!(task_local_storage(), :slate_ctx)
         end

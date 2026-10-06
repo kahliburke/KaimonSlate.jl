@@ -74,7 +74,8 @@ on_worker_reset, run_worker_resets,
        ext_asset_url, @ext_asset_url, pkg_key, provide_import!, package_imports
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
-       slate_emit, slate_effect, slate_everywhere, slate_on, slate_off, slate_on_cleanup
+       slate_emit, slate_effect, slate_everywhere, slate_on, slate_off, slate_on_cleanup,
+       slate_save_asset
 # Controls — for an extension that draws a `@bind` control itself
 export slate_bind_widget, slate_bind_value, slate_bind_names, slate_on_bind, slate_bind_observable
 # Rich output (Slate display MIMEs)

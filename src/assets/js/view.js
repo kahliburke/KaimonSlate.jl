@@ -34,11 +34,13 @@ function _ctrlValLabel(el, v) {
 //     wire(el, api) { /* build DOM inside el; on change, api.push(value) */ },
 //     sync(el, value, params) { /* reflect a server-pushed value (optional) */ },
 //     destroy(el) { /* free resources before el is discarded (optional) */ },
+//     update(el, props) { /* redraw a RETURNED output in place when its cell runs again (optional) */ },
 //   });
 // `api` = { push, schedule, flush, value, name, bindId, params, mirror }. `value` is the current
 // value at wire time (build from it; `sync` delivers later reactive updates). `push`/`flush` send
 // the value immediately; `schedule` is throttled/coalesced (same policy as built-ins). `destroy` is
-// called before a rebuild orphans the element, so a widget holding resources can clean up.
+// called before a rebuild orphans the element, so a widget holding resources can clean up. Without
+// `update`, a returned output is mounted fresh on every run; with it, `_swapOutput` keeps the element.
 window.slateWidgets = window.slateWidgets || {};
 window.slateRegisterWidget = function (kind, impl) {
   const im = impl || {};
@@ -63,14 +65,34 @@ window.slateRegisterWidget = function (kind, impl) {
 // rebuild). Mirrors the inline-echart dispose before an innerHTML swap — a plugin holding resources
 // (a math field, global listeners, observers) gets a `destroy(el)` call to clean up. No-op for a
 // widget with no destroy impl, or one that never wired.
-window.teardownCustomWidgets = function (root) {
+// Tear down everything under `root` that holds a browser resource, before the DOM carrying it goes.
+// Three owners: a `@bind` control widget, a `slate_render` component OUTPUT, and any element an
+// extension marked `data-slate-keep` (which hears `slate:discard`).
+//
+// The component output was the gap. The widget contract promises `destroy` "before a rebuild orphans
+// the element", but the only caller selected `.customwidget[data-bind]`, so a figure RETURNED from a
+// cell never got it. A figure that makes a WebGL context per run then exhausts the browser's limit —
+// Chrome keeps 16 per page — and the contexts it drops belong to UNRELATED figures, which go blank.
+// Slate has to be the one to say this: an extension watching the DOM cannot tell a move from a
+// removal, and garbage collection is far too late for a limit that low.
+//
+// `keep` is an optional Set of elements being carried into a new output rather than discarded.
+window.slateTeardownOutput = function (root, keep) {
   if (!root) return;
-  root.querySelectorAll('.customwidget[data-bind]').forEach(el => {
-    if (!el._customWired) return;
-    const impl = window.slateWidgets[el.dataset.widget];
+  const skip = el => !!(keep && keep.has(el));
+  root.querySelectorAll('.customwidget[data-bind], .slatecomponent').forEach(el => {
+    if (!el._customWired || skip(el)) return;
+    const kind = el.dataset.widget || el.dataset.component;
+    const impl = kind && window.slateWidgets[kind];
     if (impl && impl.destroy) { try { impl.destroy(el); } catch (e) { console.error(e); } }
   });
+  root.querySelectorAll('[data-slate-keep]').forEach(el => {
+    if (skip(el)) return;
+    try { el.dispatchEvent(new Event('slate:discard')); } catch (e) { console.error(e); }
+  });
 };
+// The control-strip rebuild keeps its own name: it tears down exactly the strip it is about to replace.
+window.teardownCustomWidgets = function (root) { window.slateTeardownOutput(root); };
 
 // Package-declared front-end scripts (`nbState.frontendScripts` = [{id, js, esm, kind}], from the worker's
 // SlateExtensionsBase manifest — `register_component!`/`register_widget!` in a module `__init__`). Inject each
@@ -1138,6 +1160,11 @@ function _bindSpec(bindId, name) {
   const c = _cellById(bindId); if (!c) return null;
   return (c.binds || []).find(b => b.name === name) || null;
 }
+// The descriptor {v, component, props} of a component placeholder, from its sibling JSON script.
+function _componentDesc(el) {
+  const scr = el.parentNode && el.parentNode.querySelector('script.slatecomponent-desc');
+  try { return scr ? JSON.parse(scr.textContent) : null; } catch (e) { return null; }
+}
 // Mount return-value component OUTPUTS: a `slate_render` descriptor {v, component, props} is emitted as a
 // `.slatecomponent` placeholder plus a sibling JSON `<script class="slatecomponent-desc">`. Look the
 // component up in the widget registry and wire it with the props + a DISPLAY ctx (call/stream, no bind
@@ -1145,9 +1172,8 @@ function _bindSpec(bindId, name) {
 // an as-yet-unregistered component just waits for `slateRegisterWidget` to re-scan (see above).
 function wireOutputComponent(el) {
   if (el._customWired) return;
-  const scr = el.parentNode && el.parentNode.querySelector('script.slatecomponent-desc');
-  if (!scr) return;
-  let desc; try { desc = JSON.parse(scr.textContent); } catch (e) { return; }
+  const desc = _componentDesc(el);
+  if (!desc) return;
   const kind = desc && desc.component;
   const reg = kind && window.slateWidgets && window.slateWidgets[kind];
   el.dataset.component = kind || '';
@@ -2103,10 +2129,12 @@ function _swapOutput(out, html, live, after) {
   const seq = (out.__slateSwapSeq = (out.__slateSwapSeq || 0) + 1);
   const commit = () => {
     if (out.__slateSwapSeq !== seq) return;
+    const applyUpdates = _carryMounted(out, stage);
     out.style.minHeight = out.offsetHeight + 'px';
     out.replaceChildren(...Array.from(stage.childNodes));
     runScripts(out);   // a <script> from parsed HTML is inert — re-create so figures boot
     mountOutputComponents(out);   // mount any `slate_render` component OUTPUTS in the freshly-swapped output
+    applyUpdates();
     const mounted = out.querySelectorAll('img');
     const release = () => { out.style.minHeight = ''; };
     if (!mounted.length) requestAnimationFrame(release);
@@ -2130,6 +2158,76 @@ function _swapOutput(out, html, live, after) {
   return true;        // committed to commit; a newer swap superseding it will mark its own payload
 }
 
+// Carry what the previous output mounted into the new one, so that a re-run UPDATES a figure in place
+// and does not draw it again into an empty element. This is the persistence an echart gets from
+// `EChartHost`. Nothing is kept unless its owner asks for it, in one of two ways:
+//   • a `slate_render` component whose kind registers `update(el, props)`. The mounted element takes
+//     the place of the new placeholder, and gets the new props once it is back in the document.
+//   • any element marked `data-slate-keep="key"`. The old element with the same key takes the place of
+//     the new one, with its children and its JS state. A script in the new output finds it in the DOM.
+// Both match by position among their peers — a component among the mounts of its own KIND, a marked
+// element among those carrying its key — so two figures in one output stay apart. A component that is
+// not kept gets its `destroy`; a marked element that is not kept gets a `slate:discard` event. What a
+// kept element contains is kept with it, and is neither swapped again nor discarded.
+// Returns a function that applies the component updates; call it after the swap.
+function _carryMounted(out, stage) {
+  const updates = [], kept = new Set();
+  const olds = Array.from(out.querySelectorAll('.slatecomponent'));
+  // Pair a new component with a mounted one of the SAME KIND, by position among that kind's peers
+  // rather than among all components. An output that returns a different MIX of kinds than last time
+  // shifts every later position, so a global index offers a figure the props of an unrelated one and
+  // the kind check then keeps nothing at all. Two components of one kind still pair by position,
+  // which is as far as a descriptor carrying no identity of its own can go.
+  const oldByKind = new Map();
+  olds.forEach(el => {
+    const k = el.dataset.component || '';
+    if (!oldByKind.has(k)) oldByKind.set(k, []);
+    oldByKind.get(k).push(el);
+  });
+  const taken = new Map();                       // kind → how many of its mounts are already paired
+  stage.querySelectorAll('.slatecomponent').forEach(nu => {
+    const desc = _componentDesc(nu);
+    const kind = desc && desc.component;
+    if (!kind) return;
+    const n = taken.get(kind) || 0;
+    taken.set(kind, n + 1);                      // consume the slot even if this one cannot be kept
+    const old = (oldByKind.get(kind) || [])[n];
+    const reg = old && old._customWired && window.slateWidgets[kind];
+    if (!reg || !reg.update) return;
+    nu.replaceWith(old);
+    kept.add(old);
+    updates.push(() => reg.update(old, desc.props || {}));
+  });
+  const byKey = root => {
+    const m = new Map();
+    root.querySelectorAll('[data-slate-keep]').forEach(el => {
+      const k = el.dataset.slateKeep;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(el);
+    });
+    return m;
+  };
+  const prev = byKey(out);
+  byKey(stage).forEach((news, k) => news.forEach((nu, i) => {
+    // A key nested inside one that was already carried has left the stage with its ancestor. Swapping
+    // it now would move the old inner element out of the old outer one and into a detached tree,
+    // punching a hole in the element we just kept.
+    if (!stage.contains(nu)) return;
+    const old = (prev.get(k) || [])[i];
+    if (!old) return;
+    nu.replaceWith(old);
+    kept.add(old);
+    // What a carried element contains is carried with it, so it is still mounted and not discarded.
+    old.querySelectorAll('[data-slate-keep]').forEach(d => kept.add(d));
+  }));
+  // One teardown pass for everything the swap did not carry: a wired component's `destroy` and a
+  // `slate:discard` for a marked element, which is exactly what `slateTeardownOutput` does on the
+  // cell-unmount path. Deferred to here, AFTER both pairing passes have recorded what they kept, so
+  // an element carried by one pass is not torn down because the other did not claim it.
+  window.slateTeardownOutput(out, kept);
+  return () => updates.forEach(f => { try { f(); } catch (e) { console.error(e); } });
+}
+
 // A <script> assigned via innerHTML is parsed but never executed. Rich output
 // (notably a WGLMakie/Bonito figure: a module bundle <script src> that defines
 // `Bonito`, then an inline module that calls `Bonito.init_session(…)`) only boots
@@ -2140,7 +2238,9 @@ function _swapOutput(out, html, live, after) {
 async function runScripts(root) {
   if (!root) return;
   for (const old of Array.from(root.querySelectorAll('script'))) {
+    if (old.__slateRan) continue;   // already run, inside an element `_carryMounted` kept
     const s = document.createElement('script');
+    s.__slateRan = true;
     for (const a of old.attributes) s.setAttribute(a.name, a.value);
     if (old.textContent) s.textContent = old.textContent;
     const loaded = s.src ? new Promise(res => { s.onload = s.onerror = res; }) : null;

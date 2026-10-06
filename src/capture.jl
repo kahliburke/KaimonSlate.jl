@@ -842,7 +842,10 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
               # This machine's named compute targets (clusters.jl's registry), referenced by name
               # from any number of job cells — so three cells on the same partition say so once,
               # and the notebook carries the name rather than the address.
-              clusters = _cluster_dict(clusters))
+              clusters = _cluster_dict(clusters),
+              # Save bytes as an asset of the cell running now, for a package render that needs to put
+              # bulk data beside its markup. See `_ctx_save_asset` for why it can answer `nothing`.
+              save_asset = _ctx_save_asset)
 end
 
 # `"<cluster>.<key>=<value>"` lines → `name => Dict(key => value)`.
@@ -871,6 +874,15 @@ function _attr_dict(attrs::AbstractVector)
     end
     return d
 end
+
+# The ctx `save_asset` capability: the saved asset's page path, or `nothing` where no asset sink is
+# open. Slate also installs the context on paths that harvest nothing — a `__slate_call` handler, the
+# reactive handler task, the in-process call path — and there `_save_asset` would take the bytes and
+# hand back a path that 404s. Answering `nothing` instead lets a package fall back to inlining, which
+# is the difference between a degraded render and a broken one.
+_ctx_save_asset(name, data; mime = "", dtype = nothing) =
+    haskey(task_local_storage(), :slate_assets) ?
+        string(_save_asset(name, data; mime = mime, dtype = dtype)) : nothing
 
 function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";
                      capture::OutputCapture = RedirectCapture(), slate_ctx = nothing)
@@ -953,9 +965,6 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     for k in (:slate_effects, :slate_stmt, :slate_stmt_srcs)
         haskey(task_local_storage(), k) && delete!(task_local_storage(), k)
     end
-    # Generated assets the cell registered (empty unless it called `save_asset`). Deduped by content path.
-    assets = _harvest_assets(get(task_local_storage(), :slate_assets, nothing))
-    delete!(task_local_storage(), :slate_assets)
     # Trace rows the cell recorded (empty unless it was `@trace`-wrapped). JSON-safe Dicts, like `tables`.
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
     tracesink === nothing || (tracesink[] = nothing)
@@ -981,6 +990,14 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     echarts = Any[]
     tables = Any[]
     animations = Any[]
+    # Generated assets the cell registered (empty unless it called `save_asset`), deduped by content
+    # path. Taken AFTER the return-value render rather than before it: a package's `show` /
+    # `slate_render` method runs inside that block, so a render saving an asset used to find the sink
+    # already gone and got back a path the page could not resolve. Both branches below take it, and the
+    # render's own `finally` is what guarantees the take even when the render throws — the sink must not
+    # outlive this eval, because the task is reused and a later handler would harvest into a cell that
+    # has already finished.
+    assets = Any[]
     if err === nothing && value !== nothing && !quiet
         # Re-establish this eval's execution context around the RETURN VALUE's rich render. The value's
         # `show` runs HERE — AFTER the eval's `finally` already cleared `:slate_ctx`/`:slate_cell` — but a
@@ -1027,7 +1044,12 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
             end
         finally
             slate_ctx === nothing || (delete!(task_local_storage(), :slate_ctx); delete!(task_local_storage(), :slate_cell))
+            assets = _harvest_assets(get(task_local_storage(), :slate_assets, nothing))
+            delete!(task_local_storage(), :slate_assets)
         end
+    else
+        assets = _harvest_assets(get(task_local_storage(), :slate_assets, nothing))
+        delete!(task_local_storage(), :slate_assets)
     end
 
     # text/plain repr — skipped when richer output exists (the renderer suppresses
@@ -1106,7 +1128,12 @@ end
 # the way a Bonito server serves a fresh session per page load. First run the extensions' page-reset hooks
 # (SEB `on_live_reset` — e.g. BonitoSlate drops its Bonito page-root so figures re-render as a fresh session
 # tree), then RE-RUN each retained cell's source in `mod` (a clean fresh figure, no accumulated screens) and
-# collect its wire. Returns `[(cid, wire), …]` (empty if nothing is live). Best-effort per cell.
+# collect its wire. Returns `[(cid, chunks, assets), …]` (empty if nothing is live). Best-effort per cell.
+#
+# `assets` rides along because a re-render is a real eval: a cell that calls `save_asset` registers its
+# bytes into this run's sink, and the markup it produces references them by path. Returning the chunks
+# alone published markup whose asset paths nothing had registered, so every `Slate.asset` in a live
+# output resolved to a 404 after a page reconnect.
 function rerender_live_outputs(mod::Module)
     try; Base.invokelatest(SlateExtensionsBase.run_live_resets); catch; end
     # A re-render must carry the SAME Slate execution context a normal cell eval gets. `run_capture` FIRES the
@@ -1119,7 +1146,7 @@ function rerender_live_outputs(mod::Module)
     # `emit`/`on`/`off`/`cleanup` from the namespace, and `__slate_call` passes empty strings for the same
     # reason.
     ctx = _build_slate_ctx(mod, "", "", String[])
-    outs = Tuple{String,Vector{Tuple{String,Vector{UInt8}}}}[]
+    outs = Tuple{String,Vector{Tuple{String,Vector{UInt8}}},Vector{Any}}[]
     for (cid, spec) in lock(() -> collect(_LIVE_OUTPUTS), _LIVE_OUTPUTS_LOCK)
         w = try
             run_capture(mod, spec.source, spec.filename; capture = DemuxCapture(), slate_ctx = ctx)
@@ -1127,7 +1154,7 @@ function rerender_live_outputs(mod::Module)
             nothing
         end
         (w !== nothing && !isempty(w.mime)) || continue
-        push!(outs, (String(cid), collect(Tuple{String,Vector{UInt8}}, w.mime)))
+        push!(outs, (String(cid), collect(Tuple{String,Vector{UInt8}}, w.mime), collect(Any, w.assets)))
     end
     return outs
 end

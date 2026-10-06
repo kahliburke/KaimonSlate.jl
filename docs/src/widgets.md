@@ -134,8 +134,22 @@ nothing to drag there.
 ### Labelled options
 
 Any option may be a bare value or a `value => label` pair. As soon as one is a pair, the bound
-variable is a `Choice`: it compares, hashes, prints and interpolates as its value, so it drops into
-arithmetic and dictionary keys unchanged, while `.value`, `.label` and `.index` reach the parts.
+variable is a `Choice`, and `.value`, `.label` and `.index` reach the parts. It prints and
+interpolates as its value, and when that value is a **number, string or character** it also compares,
+hashes and converts as its value — so it drops into arithmetic and dictionary keys unchanged.
+
+For any other value type, `Symbol` most commonly, compare `pick.value` rather than `pick`:
+
+```julia
+@bind scheme Select([:qam => "QAM", :psk => "PSK"])
+scheme.value === :qam        # ✓
+scheme == :qam               # ✗ always false
+```
+
+`Choice` deliberately defines no mixed `==` against `Symbol` and no one-argument `hash`: those
+signatures invalidate roughly a thousand already-compiled methods when the package loads, which costs
+seconds on a notebook's first render. `.value` is also the only spelling that ever worked with `===`
+or `isequal`, so it is the one to reach for regardless of value type.
 `MultiSelect` and `MultiCheckBox` bind a `Selection`, an ordered read-only map of those pairs.
 `Radio` renders markdown and `$math$` in its labels.
 

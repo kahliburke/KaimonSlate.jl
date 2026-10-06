@@ -154,6 +154,98 @@ end
     end
 end
 
+@testset "a render can save an asset" begin
+    # The sink used to be harvested before the RETURN VALUE was rendered, and a package puts its render
+    # in a `show`/`slate_render` method — which runs in that later block. So the one call site that most
+    # wants `save_asset` was the one where it silently did nothing: the bytes were dropped and the path
+    # handed back resolved to a 404.
+    rep = RE.Report("render_asset", "")
+    mod = RE.report_module(rep)
+    src = """
+    struct RenderSaver end
+    function Base.show(io::IO, ::MIME"text/html", ::RenderSaver)
+        p = SlateExtensionsBase.slate_save_asset("fromshow", UInt8[9, 9, 9])
+        print(io, "<div data-a='", p, "'>x</div>")
+    end
+    RenderSaver()
+    """
+    ctx = RE._build_slate_ctx(mod, "nb", "", String[])
+    Core.eval(mod, :(import SlateExtensionsBase))
+    w = RE.run_capture(mod, src, "cell:rs"; capture = RE.DemuxCapture(), slate_ctx = ctx)
+
+    @test length(w.assets) == 1                        # harvested from inside `show`
+    a = only(w.assets)
+    @test a.bytes == UInt8[9, 9, 9]
+    html = String(w.mime[end][2])
+    @test occursin(String(a.path), html)               # the markup names the path that was registered
+    @test !occursin("nothing", html)                   # the accessor answered a path, not its fallback
+
+    # The sink must not outlive the eval — the task is reused, and a later handler would otherwise
+    # harvest into a cell that has finished.
+    @test !haskey(task_local_storage(), :slate_assets)
+end
+
+@testset "the save_asset capability answers nothing where nothing would be harvested" begin
+    # Slate installs the context on paths that harvest no assets (a `slate_on` handler, the reactive
+    # handler task, the in-process call path). Storing bytes there would hand back a path that 404s, so
+    # the capability reports no and the caller falls back to inlining.
+    @test !haskey(task_local_storage(), :slate_assets)       # no sink on this task
+    @test RE._ctx_save_asset("x", UInt8[1]) === nothing
+    # A child task never inherits task-local storage, so a render that spawns one gets the same answer.
+    task_local_storage(:slate_assets, Any[])
+    try
+        @test RE._ctx_save_asset("x", UInt8[1]) isa String   # with a sink, a real path
+        @test fetch(@async RE._ctx_save_asset("y", UInt8[2])) === nothing
+    finally
+        delete!(task_local_storage(), :slate_assets)
+    end
+end
+
+@testset "the gate's flat asset channel regroups by cell" begin
+    # Across the gate the re-render's assets ride as one flat vector tagged with the owning cell, because
+    # a vector-per-cell is the nesting the structured return does not survive (which is why the rendered
+    # chunks go as parallel arrays). The hub has to put them back.
+    res = (; cids = ["a", "b"], mimetypes = ["text/html", "text/html"], b64s = ["", ""],
+           assets = Any[(; cell = "a", name = "x", path = "data/x.bin", mime = "m", bytes = UInt8[1]),
+                        (; cell = "b", name = "y", path = "data/y.bin", mime = "m", bytes = UInt8[2]),
+                        (; cell = "a", name = "z", path = "data/z.bin", mime = "m", bytes = UInt8[3])])
+    g = RE._regroup_rerender_assets(res)
+    @test sort(collect(keys(g))) == ["a", "b"]
+    @test [a.name for a in g["a"]] == ["x", "z"]          # both of a's, in the order sent
+    @test [a.name for a in g["b"]] == ["y"]
+
+    # An untagged record is dropped rather than landing on an arbitrary cell.
+    @test isempty(RE._regroup_rerender_assets((; assets = Any[(; name = "orphan")])))
+    # A worker on older code sends no `assets` at all — that pair must still work, not error.
+    @test isempty(RE._regroup_rerender_assets((; cids = String[], mimetypes = String[], b64s = String[])))
+end
+
+@testset "a live re-render carries the assets it saved" begin
+    # A re-render is a real eval, so a live cell calling `save_asset` registers bytes into that run's
+    # sink and the markup it returns references them by path. Returning the rendered chunks without the
+    # assets published markup whose paths nothing had registered — every `Slate.asset` in a reconnected
+    # live output then resolved to a 404, which reads as a broken figure rather than a missing asset.
+    rep = RE.Report("rerender_assets", "")
+    mod = RE.report_module(rep)
+    src = "ref = save_asset(\"blob\", UInt8[1, 2, 3]); HTML(string(\"<div data-a='\", ref, \"'></div>\"))"
+    lock(RE._LIVE_OUTPUTS_LOCK) do
+        RE._LIVE_OUTPUTS["assetcell"] = (source = src, filename = "cell:assetcell")
+    end
+    try
+        out = RE.rerender_live(RE.InProcessKernel(), rep)
+        @test length(out) == 1 && out[1][1] == "assetcell"
+        assets = out[1][2].assets
+        @test length(assets) == 1
+        a = only(assets)
+        @test a.bytes == UInt8[1, 2, 3]
+        # The path in the record is the one the markup points at, or the page asks for an asset that
+        # was registered under a different name.
+        @test occursin(String(a.path), String(out[1][2].mime[end][2]))
+    finally
+        lock(RE._LIVE_OUTPUTS_LOCK) do; delete!(RE._LIVE_OUTPUTS, "assetcell"); end
+    end
+end
+
 @testset "extension-served assets on the in-process kernel" begin
     # The hub answers `/n/<id>/served/<hash>` by asking the kernel. Only GateKernel implemented it,
     # so standalone returned `nothing` and the URL 404'd — and an extension that serves its

@@ -267,7 +267,15 @@ window.Slate.asset = function (path) {
     const b = atob(a.data), n = b.length, u = new Uint8Array(n);
     for (let i = 0; i < n; i++) u[i] = b.charCodeAt(i);
     get = Promise.resolve(u.buffer);
-  } else { get = fetch(a.url).then(r => r.arrayBuffer()); }   // served blob (live / published)
+  } else {                                          // served blob (live / published)
+    // Check the status. A blob the preview sweep has pruned answers 404 with a short text body, and
+    // `arrayBuffer()` hands that body back as data: a `dtype` asset then reinterprets the error text
+    // as a typed array and the caller plots it.
+    get = fetch(a.url).then(r => {
+      if (!r.ok) throw new Error('Slate.asset: ' + a.url + ' — ' + r.status + ' ' + r.statusText);
+      return r.arrayBuffer();
+    });
+  }
   return get.then(buf => {
     if (a.dtype) return _slateNdarray(a, buf);      // packed numeric array → ndarray-lite
     const m = a.mime || '';
@@ -666,12 +674,30 @@ function _slateNum(v) {
 // A datum is a scalar on a value axis, or a tuple: `[x, y]` for a line, `[x, y, v]` for a heatmap.
 const _slateValueFormatter = v => Array.isArray(v) ? v.map(_slateNum).join(', ') : _slateNum(v);
 
+// Whether a CSS colour (`#rgb`, `#rrggbb[aa]`, `rgb()`/`rgba()`) is dark; null when unparseable.
+// Mirrored in server_export.jl `_EXPORT_ECHARTS_THEME_JS`.
+function _slateIsDark(css) {
+  const s = String(css || '').trim();
+  let m = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s), rgb;
+  if (m) {
+    const h = m[1].length === 3 ? m[1].replace(/./g, c => c + c) : m[1];
+    rgb = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16));
+  } else if ((m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(s))) {
+    rgb = m.slice(1, 4).map(Number);
+  } else return null;
+  return (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255 < 0.5;
+}
+
 // Build the Slate ECharts theme from a var-getter `V(name, default)` — decoupled from WHERE the
 // palette comes from, so the live theme (computed styles) and an export render in an arbitrary
 // named palette (its stylesheet rule) share one builder.
 function _slateEchartsThemeFrom(V, fam) {
   const text = V('--text', '#d4d8e8'), dim = V('--dim', '#6a7090'),
         border = V('--border', '#2a2e40'), bg2 = V('--bg2', '#141828');
+  // ECharts colours any label without an explicit colour (graph/scatter/pie labels, among others)
+  // for contrast against the background it infers from `backgroundColor`, falling back to light when
+  // that is 'transparent'. Tell it which the palette actually is.
+  const dark = _slateIsDark(V('--bg', ''));
   const cycle = [['--accent', '#569cd6'], ['--green', '#56d364'], ['--orange', '#ce9178'],
     ['--purple', '#c586c0'], ['--teal', '#4ec9b0'], ['--gold', '#ffd700'], ['--red', '#e57575']]
     .map(([n, d]) => V(n, d));
@@ -693,6 +719,7 @@ function _slateEchartsThemeFrom(V, fam) {
     visualMap: { textStyle: { color: dim }, inRange: { color: _SLATE_VIRIDIS } },
     timeline: { lineStyle: { color: dim }, label: { color: dim } },
     calendar: { splitLine: { lineStyle: { color: border } }, itemStyle: { borderColor: border } },
+    ...(dark === null ? {} : { darkMode: dark }),
   };
 }
 // The live-theme ECharts theme (registered as 'slate') — reads the currently-applied CSS vars.

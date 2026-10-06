@@ -38,7 +38,7 @@ export_app(nb, "dist/band-deconvolution"; title = "band-deconvolution", port = 7
 ```
 
 The folder holds the notebook's reproducible bundle plus launchers. The recipient needs only Julia
-1.10+:
+1.12+:
 
 | | |
 |---|---|

@@ -22,6 +22,58 @@ _fp_bytes!(ctx, v::UInt8) = SHA.update!(ctx, UInt8[v])
 _fp_bytes!(ctx, bs::AbstractVector{UInt8}) = SHA.update!(ctx, bs)
 _fp_u64!(ctx, x::UInt64) = SHA.update!(ctx, reinterpret(UInt8, UInt64[x]))
 
+# ── Array elements ───────────────────────────────────────────────────────────────
+# An array is fingerprinted one element at a time, which for a numeric array costs a dynamic dispatch
+# and a 9-byte write (a tag plus the value widened to UInt64) per element — around a second and a
+# gigabyte of garbage for an 8 MB vector. That is paid by every memo check on a large array, not only
+# by `save_asset`. For the element types whose encoding is fixed and known, the same bytes are written
+# in chunks instead. The BYTES are identical, so fingerprints do not change and no memo is invalidated.
+#
+# Only the types that provably take one branch below qualify. `UInt64`/`Int128` are excluded because a
+# value above `typemax(Int64)` falls through to the structured fallback, and `Bool` because it has its
+# own tag. An abstract `eltype` (a `Vector{Any}` of numbers) takes the element loop, as it must.
+const _FP_FAST_INT = Union{Int8,Int16,Int32,Int64,UInt8,UInt16,UInt32}
+const _FP_FAST_FLOAT = Union{Float16,Float32,Float64}
+const _FP_CHUNK = 8192                     # elements per flush → a 72 kB scratch buffer
+
+# `_fp_u64!` writes the machine's native byte order, and this path exists to be indistinguishable from
+# it — so it is taken only where "native" is the little-endian layout written below.
+const _FP_FAST_ENDIAN = Base.ENDIAN_BOM == 0x04030201
+
+@inline function _fp_put_u64!(buf::Vector{UInt8}, i::Int, u::UInt64)
+    @inbounds for k in 0:7
+        buf[i + k] = UInt8((u >> (8 * k)) & 0xff)
+    end
+end
+
+function _fp_chunked!(ctx, x::AbstractArray, tag::UInt8, code::F) where {F}
+    buf = Vector{UInt8}(undef, 9 * _FP_CHUNK)
+    i, n = 1, 0
+    for v in x
+        @inbounds buf[i] = tag
+        _fp_put_u64!(buf, i + 1, code(v))
+        i += 9; n += 1
+        if n == _FP_CHUNK
+            _fp_bytes!(ctx, buf)
+            i, n = 1, 0
+        end
+    end
+    n == 0 || _fp_bytes!(ctx, buf[1:(9 * n)])
+    return nothing
+end
+
+function _fp_elements!(ctx, x::AbstractArray)
+    T = eltype(x)
+    if _FP_FAST_ENDIAN && T <: _FP_FAST_INT
+        _fp_chunked!(ctx, x, 0x04, v -> reinterpret(UInt64, Int64(v)))
+    elseif _FP_FAST_ENDIAN && T <: _FP_FAST_FLOAT
+        _fp_chunked!(ctx, x, 0x05, v -> isnan(v) ? _FP_CANON_NAN : reinterpret(UInt64, Float64(v)))
+    else
+        for v in x; _fp!(ctx, v); end
+    end
+    return nothing
+end
+
 function _fp!(ctx, x)
     if x === nothing
         _fp_bytes!(ctx, 0x00)
@@ -61,7 +113,7 @@ function _fp!(ctx, x)
     elseif x isa AbstractArray
         _fp_bytes!(ctx, 0x0e); _fp_u64!(ctx, UInt64(ndims(x)))
         for d in size(x); _fp_u64!(ctx, UInt64(d)); end
-        for v in x; _fp!(ctx, v); end
+        _fp_elements!(ctx, x)
     else
         # Structured fallback (DataFrames, Dates, user structs): canonical serialization bytes —
         # the SAME identity the memo store's content-addressed blobs use. Deterministic for data;

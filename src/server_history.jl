@@ -455,12 +455,27 @@ end
 # builds a `path → asset` registry from these so `Slate.asset(path)` resolves live. Mirrors `_animation_specs`.
 function _asset_specs(c::Cell, nbid::AbstractString = "")
     (c.output === nothing || isempty(c.output.assets) || isempty(nbid)) && return Any[]
+    return Any[_asset_spec!(a, c.id, nbid) for a in c.output.assets]
+end
+
+# One asset record → its wire spec, bytes parked in the content-addressed store. Shared so the cell
+# and interpolation paths below cannot register an asset two different ways.
+function _asset_spec!(a, cellid::AbstractString, nbid::AbstractString)
+    bytes = _asset_bytes(a); d = _asset_common(a, bytes, cellid)
+    _blob_put_durable!(string(nbid, "/", d["sha"]), d["mime"], bytes)
+    d["url"] = string("/api/", nbid, "/blob/", d["sha"])
+    return d
+end
+
+# Assets a markdown cell's `{{ }}` interpolations generated — symmetric with the echarts and tables
+# below. The interpolation wire already carries them (`_wire_to_output`), so without this an asset a
+# `show` method saves while interpolating is harvested and then dropped here, leaving markup that
+# points at a path nothing ever registered.
+function _md_interp_assets(c::Cell, nbid::AbstractString)
+    isempty(nbid) && return Any[]
     specs = Any[]
-    for a in c.output.assets
-        bytes = _asset_bytes(a); d = _asset_common(a, bytes, c.id)
-        _blob_put_durable!(string(nbid, "/", d["sha"]), d["mime"], bytes)
-        d["url"] = string("/api/", nbid, "/blob/", d["sha"])
-        push!(specs, d)
+    for o in c.interp, a in o.assets
+        push!(specs, _asset_spec!(a, c.id, nbid))
     end
     return specs
 end
@@ -603,6 +618,60 @@ function _blob_put_durable!(key::AbstractString, mime::AbstractString, bytes::Ve
         end
     catch
     end
+    _sweep_dblob_dir!()
+    return nothing
+end
+
+# ── Bounding the durable tier ────────────────────────────────────────────────
+# The tier is content-addressed and write-once, so nothing in it is ever overwritten: it only grows.
+# `_prune_preview_blobs!` bounds a notebook that is OPEN and still snapshotting, and leaves the blobs
+# it is using — correctly, since a reopen shows that frozen render without re-running. What nothing
+# bounds is the rest: every notebook closed last month still owns every raster and asset it ever
+# minted, on a machine that may open hundreds.
+#
+# So: a disk budget with oldest-first eviction, as a backstop rather than a policy. `blob_lookup`
+# touches what it reads, which makes "oldest" mean least-recently-USED rather than least-recently
+# written — a long-open notebook's blobs are not evicted out from under it just for being old.
+#
+# Budget is `KAIMONSLATE_BLOB_CACHE_MB` (default 2 GiB). Swept from the write path, at most once every
+# `_DBLOB_SWEEP_S`: a full directory listing is far too expensive to do per blob.
+_dblob_budget() = round(Int, 2^20 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_CACHE_MB", "")), 2048.0))
+const _DBLOB_SWEEP_S = 600.0
+const _DBLOB_SWEEP_AT = Ref(0.0)
+const _DBLOB_SWEEP_LOCK = ReentrantLock()
+
+function _sweep_dblob_dir!(; force::Bool = false)
+    due = lock(_DBLOB_SWEEP_LOCK) do
+        t = time()
+        (force || t - _DBLOB_SWEEP_AT[] > _DBLOB_SWEEP_S) ? (_DBLOB_SWEEP_AT[] = t; true) : false
+    end
+    due || return nothing
+    try
+        dir = _dblob_dir()
+        budget = _dblob_budget()
+        files = Tuple{String,Int,Float64}[]            # (path, bytes, mtime)
+        total = 0
+        for fn in readdir(dir)
+            endswith(fn, ".meta") && continue
+            p = joinpath(dir, fn)
+            st = try; stat(p); catch; continue; end
+            isfile(st) || continue
+            total += Int(st.size)
+            push!(files, (p, Int(st.size), st.mtime))
+        end
+        total <= budget && return nothing
+        sort!(files; by = f -> f[3])                   # least recently used first
+        # Evict to 80% rather than exactly to the budget, so the next write does not immediately
+        # trigger another full listing.
+        target = (budget * 8) ÷ 10
+        for (p, sz, _) in files
+            total <= target && break
+            rm(p; force = true); rm(p * ".meta"; force = true)
+            total -= sz
+        end
+    catch e
+        @debug "KaimonSlate: durable blob sweep failed" exception = (e, catch_backtrace())
+    end
     return nothing
 end
 
@@ -613,6 +682,9 @@ function blob_lookup(key::AbstractString)
     f = _dblob_file(key)
     isfile(f) || return nothing
     meta = isfile(f * ".meta") ? split(read(f * ".meta", String), "\n") : ["application/octet-stream", ""]
+    # Mark it used, so the sweep's oldest-first eviction is least-recently-USED. Blobs are served
+    # immutable, so a page fetches one once and this costs nothing per render.
+    try; touch(f); catch; end
     return (String(meta[1]), read(f), length(meta) >= 2 ? String(meta[2]) : "")
 end
 
@@ -951,7 +1023,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
-        "assets" => c.kind == MARKDOWN ? Any[] : _asset_specs(c, nbid),
+        "assets" => c.kind == MARKDOWN ? _md_interp_assets(c, nbid) : _asset_specs(c, nbid),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
         # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor. A name the
@@ -1511,7 +1583,18 @@ end
 # The cells payload for a NON-live state (inactive/hydrating): the embedded frozen render if present
 # (already `cell_json`-shaped), else the parsed cells rendered un-run.
 function _static_cells(nb::LiveNotebook)
-    haskey(nb.report.meta, "preview") && return nb.report.meta["preview"]
+    if haskey(nb.report.meta, "preview")
+        # A stored render keeps the `rev` values of the process that saved it. This process counts
+        # from zero, and the browser ignores a payload whose `rev` is not above the last one it drew
+        # (`revIsNew` in view.js). A stored rev of 18 thus blocks the live outputs of this run up to
+        # rev 18, and the page keeps the stored output. Give each stored cell a rev below every live
+        # rev, so any live payload replaces it and a late stored payload does not replace a live one.
+        cells = nb.report.meta["preview"]
+        for e in cells
+            e isa AbstractDict && (e["rev"] = -1)
+        end
+        return cells
+    end
     bindref, hostednames = _bind_index(nb.report)
     return [cell_json(c, bindref, hostednames) for c in nb.report.cells]
 end

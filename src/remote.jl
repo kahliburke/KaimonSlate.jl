@@ -869,7 +869,8 @@ function _env_fingerprint(envdir::AbstractString, infra::AbstractString; depot::
         for f in sort!(filter(Sweep._is_env_file, readdir(envdir)))
             add(f); add(read(joinpath(envdir, f), String))
         end
-        for (name, lpath) in Sweep.dev_deps(joinpath(envdir, "Manifest.toml"), envdir)
+        mf = parent_manifest(envdir)   # a workspace member's deps live in its root's manifest
+        for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? envdir : dirname(abspath(mf)))
             p = joinpath(lpath, "Project.toml")
             isfile(p) && (add(name); add(read(p, String)))
         end
@@ -1678,7 +1679,8 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = n
     # Read the SAME env whose Manifest provisioning replicated (origin_env, else the parent) to find the
     # dev'd packages; skip the project itself and any vanished source.
     env = isempty(t.origin_env) ? parent_project : t.origin_env
-    for (name, lpath) in Sweep.dev_deps(joinpath(env, "Manifest.toml"), env)
+    mf = parent_manifest(env)   # the workspace root's manifest for a member, as in `_rsync_dev_deps!`
+    for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? env : dirname(abspath(mf)))
         rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
         isdir(lpath) || continue
         push!(pairs, (String(lpath), "$_REMOTE_DEVSRC/$name", [".git", "*.cov"]))

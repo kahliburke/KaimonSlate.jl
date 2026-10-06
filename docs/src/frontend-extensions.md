@@ -240,6 +240,32 @@ numeric array comes back as a decoded typed array with its shape, or resolves a 
 `Slate.assetUrl("webassets/foo.js")`. Both work live and in a static export, where the bytes ride
 along inside the page. See [Live Updates](live-updates.md#Writing-files-out).
 
+#### From a package's own render — `slate_save_asset`
+
+`save_asset` is a notebook-namespace helper, so a **package** reaches the same store through
+SlateExtensionsBase:
+
+```julia
+function SlateExtensionsBase.slate_render(p::MyPlot)
+    path = SlateExtensionsBase.slate_save_asset("xy", Float32.(vcat(p.x, p.y)))
+    path === nothing && return my_inline_fallback(p)       # no asset store here — inline instead
+    html_fragment("""
+      <div id="plot"></div>
+      <script type="module">
+        const a = await Slate.asset("$(path)");            // one cached fetch, not JSON in /state
+        drawInto(document.getElementById("plot"), a.data);
+      </script>""")
+end
+```
+
+This is the difference between a figure's coordinates travelling as bytes beside the markup and as a
+literal inside it. The bytes are content-addressed, so re-running with unchanged data refetches
+nothing; they ride the cell's memo, survive a reload, and are inlined into a static export.
+
+It returns `nothing` where Slate keeps no assets for the caller — outside a cell eval, in a
+`slate_on` handler, or in a task your render spawned. Branch on that and inline instead: a path is
+never returned unless it will resolve. Requires SlateExtensionsBase 0.11.
+
 ## Extending the UI
 
 ### Custom `@bind` widgets — `slateRegisterWidget`
@@ -284,6 +310,63 @@ Register the widget at notebook load (in a `WebPage` or an `@asset`ed script). A
 whose `kind` matches picks it up, and reading `answer` in another cell recomputes it when the widget
 pushes a new value.
 
+### Keep a returned output mounted across runs
+
+When a cell runs again, Slate replaces its output. A figure that a script draws then starts again
+from an empty element, so it blinks and loses its zoom and any state in the page. An output can
+ask Slate to keep its element and update it in place instead. There are three ways to ask:
+
+- **A widget kind from `slateRegisterWidget`.** Add `update(el, props)` to the registration. When a
+  cell returns the same kind at the same position, Slate keeps the mounted element and calls
+  `update` with the new props. Without `update`, Slate mounts a new element and calls `destroy` on
+  the old one.
+- **A Preact component from `registerComponent`.** Add `export const keepMounted = true` to the
+  module. Slate then renders the component again with the new `params`, and Preact keeps its DOM
+  and its state. A component that reads `params` only when it mounts shows old values, so this is
+  an opt-in.
+- **Any element in HTML output.** Mark it `data-slate-keep="key"`. On the next run, the old element
+  with the same key takes the place of the new one, with its children and the properties that
+  scripts set on it. A script in the new output finds it in the DOM and updates it. When a run no
+  longer outputs the key, Slate sends a `slate:discard` event to the old element before it removes
+  it, so a script can remove its listeners.
+
+```html
+<div data-slate-keep="counter"></div>
+<script>
+{ // a block: a top-level `const` in a classic script stays declared after the first run
+  const box = document.currentScript.previousElementSibling;
+  box.runs = (box.runs ?? 0) + 1;          // kept across runs of the cell
+  box.textContent = `run ${box.runs}`;
+}
+</script>
+```
+
+Keys match by position when an output has more than one element with the same key, so two figures
+in one output stay apart. A component matches by position among the mounts of its own kind, so
+returning a different mix of kinds than last time still keeps each one. What a kept element contains
+is kept with it, and gets no `slate:discard`. A script inside a kept element does not run again.
+
+### When Slate tears an output down
+
+Define `destroy(el)` for anything holding a resource the page does not reclaim on its own: a WebGL
+context, a `requestAnimationFrame` loop, a Web Worker, a global listener, a media element. Slate
+calls it before the element is discarded: when a control strip is rebuilt, when a cell re-runs and
+the swap does not keep the element (above), and when a cell is deleted or the notebook replaced.
+
+This matters most for WebGL. A browser keeps only a small number of live contexts per page (around
+sixteen in Chrome), and when it runs out it drops the **oldest** ones — so a figure that leaks a
+context on every re-run eventually blanks unrelated figures elsewhere in the notebook. Releasing in
+`destroy` is what keeps the live count proportional to what is on screen rather than to how many
+times a slider moved.
+
+This applies to a **returned** output as much as a `@bind` control: a value whose `slate_render`
+mounts a component gets `destroy` on every one of those paths.
+
+For an HTML fragment with no widget kind to hang a hook on, `slateOnFragmentDispose(node, fn)` calls
+`fn` once after `node` has been attached and then removed, and returns a cancel function. It polls on
+a timer (1 s by default, rather than `requestAnimationFrame`, which a hidden tab suspends), so it
+fires up to a period late — prefer `destroy` wherever you have a registered kind.
+
 ### Cell toolbar buttons — `slateRegisterCellAction`
 
 ```js
@@ -321,6 +404,20 @@ editors reconfigure immediately.
 Every editor is consulted, a web cell's HTML, CSS and JS panes included. `ctx.lang` is how you tell
 them apart: it names the pane's language and is undefined for a Julia cell editor, so the check above
 is what "Julia source only" looks like. A pane carries no cell id.
+
+### Styling around a cell
+
+If you ship CSS that reaches outside your own output, two bits of the notebook's structure are worth
+knowing, because both are deliberate and neither is likely to change.
+
+Each cell is wrapped in a `.cellslot`, so `#nb > .cell` does **not** match — use `#nb .cell`, or
+`.cellslot > .cell` when you specifically mean a cell in the document flow. The slot is
+`display: contents`, so it draws no box and a `column=N` cell stays the flex item of its `.cell-row`.
+It exists because present mode moves the real `.cell` node onto the slide: the slot is what stays
+behind in document order, so a re-render cannot drag a presented cell back off the stage.
+
+Prefer descendant selectors generally. They survive a wrapper being introduced between `#nb` and a
+cell, which has now happened once.
 
 ## See also
 

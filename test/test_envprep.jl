@@ -342,4 +342,16 @@ end
         end
     end
 
+    @testset "the memo deps digest follows a version bump in the root's manifest" begin
+        # The memo key folds in this digest. For a member it must read the shared manifest at the
+        # workspace root; a lookup beside the member's Project.toml finds none, and the digest then
+        # stays constant however the deps move, so a restored entry can be from an old version.
+        root = workspace_fixture()
+        pf = joinpath(root, "papers", "Project.toml")
+        man = joinpath(root, _manifest_vname())
+        d0 = ReportEngine.deps_digest(pf)
+        write(man, replace(read(man, String), "version = \"0.1.0\"" => "version = \"0.2.0\""))
+        @test ReportEngine.deps_digest(pf) != d0
+    end
+
 end

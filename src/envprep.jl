@@ -121,6 +121,31 @@ function _manifest_for(projectfile::AbstractString)
     return ""
 end
 
+"""
+    deps_digest(projectfile, exclude = ()) -> UInt
+
+Hash of the direct deps of `projectfile` (its `[deps]` minus the names in `exclude`), each paired
+with the version and `git-tree-sha1` that its resolving manifest (`_manifest_for`) records. A
+workspace member thus reads the shared manifest at the workspace root. `UInt(0)` when there is no
+manifest or a file does not parse.
+"""
+function deps_digest(projectfile::AbstractString, exclude = ())
+    try
+        man = _manifest_for(projectfile); isempty(man) && return UInt(0)
+        pdeps = sort!([d for d in keys(get(Pkg.TOML.parsefile(projectfile), "deps", Dict{String,Any}()))
+                       if !(d in exclude)])
+        mdeps = get(Pkg.TOML.parsefile(man), "deps", Dict{String,Any}())   # format 2: "deps" → name → [entry]
+        h = UInt(0x4d616e00)
+        for dn in pdeps
+            e = get(mdeps, dn, nothing)
+            ver = (e isa Vector && !isempty(e) && e[1] isa AbstractDict) ?
+                  string(get(e[1], "version", ""), get(e[1], "git-tree-sha1", "")) : ""
+            h = hash((dn, ver), h)
+        end
+        return h
+    catch; return UInt(0); end
+end
+
 # `[sources]` with every relative `path` rewritten absolute (anchored on `base`), so a parent's
 # dev/path dep still resolves once its env is copied into a scratch fork dir.
 function _abs_sources(sources, base::AbstractString)
