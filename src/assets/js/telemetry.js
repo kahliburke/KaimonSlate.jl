@@ -14,7 +14,7 @@ const view = signal(null);        // {side, host, port, label} while open
 const samples = signal([]);       // full samples, oldest first
 const runs = signal([]);          // completed cell runs the hub recorded: {id, t0, t1, memo, err}
 const range = signal(300);        // seconds shown; 0 = everything the hub holds
-const gpuPick = signal('all');    // the GPU the GPU charts show: 'all', or its index
+const gpuPick = signal('all');    // the GPU charts: 'all' combined, 'each' one line per GPU, or one GPU's index
 const failed = signal('');
 // The page's model changed (model.js): what the header and the caller's bar show comes from it.
 const modelTick = signal(0);
@@ -440,29 +440,43 @@ function Telemetry() {
   // Two charts, each with an axis either side: busy and memory, and power and temperature. Across
   // every GPU, busy and bandwidth are means, the peak the highest, memory and power totals, and the
   // temperature the hottest; a selector narrows them all to one GPU.
-  const sel = gpus.length > 1 && gpuPick.value !== 'all' && gpus.some(g => String(g.i) === gpuPick.value)
-    ? +gpuPick.value : null;
+  const each = gpus.length > 1 && gpuPick.value === 'each';
+  const sel = gpus.length > 1 && gpus.some(g => String(g.i) === gpuPick.value) ? +gpuPick.value : null;
   const mine = gpus.filter(g => sel == null || g.i === sel);
   const sum = (a) => a.reduce((t, v) => t + v, 0), mean = (a) => sum(a) / a.length, top = (a) => Math.max(...a);
   const gv = (f, agg) => (x) => { const v = (x.gpus || []).filter(g => sel == null || g.i === sel).map(f)
                                      .filter(v => v != null && v >= 0); return v.length ? agg(v) : -1; };
-  const memCap = sum(mine.map(g => g.mem_total || 0)) || null, powCap = sum(mine.map(g => g.power_limit_w || 0)) || null;
+  const cap = (f) => (each ? Math.max(0, ...gpus.map(g => g[f] || 0)) : sum(mine.map(g => g[f] || 0))) || null;
+  const memCap = cap('mem_total'), powCap = cap('power_limit_w');
   const W = (v) => Math.round(v) + ' W', C = (v) => Math.round(v) + '°C', Pc = (v) => Math.round(v) + '%';
   const right = { splitLine: { show: false } }, grid2 = Object.assign({}, GRID, { right: 56 });
+  // `each`: every GPU on its own lines, one colour per GPU, the second-axis figure dashed.
+  const HUE = ['#569cd6', '#56d364', '#e3c34a', '#e5636e', '#9d8fd6', '#36b3a8', '#f08a3c', '#c586c0'];
+  const one = (g, f) => (x) => { const v = (((x.gpus || [])[g.i] || {})[f]); return v == null ? -1 : v; };
+  const perGpu = (f, f2, fmt2) => gpus.flatMap(g => {
+    const c = { lineStyle: { width: 2, color: HUE[g.i % HUE.length] }, itemStyle: { color: HUE[g.i % HUE.length] } };
+    return [line('gpu' + g.i + ' ' + f.label, series(s, one(g, f.key)), c),
+            line('gpu' + g.i + ' ' + f2.label, series(s, one(g, f2.key)),
+                 { yAxisIndex: 1, tooltip: { valueFormatter: fmt2 }, itemStyle: c.itemStyle,
+                   lineStyle: { width: 1.5, type: 'dashed', color: HUE[g.i % HUE.length] } })];
+  });
   const gpuBusy = base('', Pc, { grid: grid2,
     yAxis: [{ type: 'value', min: 0, max: 100, axisLabel: { formatter: Pc }, splitLine: { lineStyle: { opacity: 0.25 } } },
             Object.assign({ type: 'value', min: 0, max: memCap, axisLabel: { formatter: B } }, right)],
-    series: [line('busy', series(s, gv(g => g.util, mean)), { areaStyle: { opacity: 0.12 } }),
-             line('peak', series(s, gv(g => g.util_max, top)), { raw: true, lineStyle: { width: 1, type: 'dotted', opacity: 0.7 } }),
-             line('bandwidth', series(s, gv(g => g.mem_util, mean))),
-             line('memory', series(s, gv(g => g.mem_used, sum)), { yAxisIndex: 1, tooltip: { valueFormatter: B } })] });
+    series: each ? perGpu({ key: 'util', label: 'busy' }, { key: 'mem_used', label: 'memory' }, B)
+      : [line('busy', series(s, gv(g => g.util, mean)), { areaStyle: { opacity: 0.12 } }),
+         line('peak', series(s, gv(g => g.util_max, top)), { raw: true, lineStyle: { width: 1, type: 'dotted', opacity: 0.7 } }),
+         line('bandwidth', series(s, gv(g => g.mem_util, mean))),
+         line('memory', series(s, gv(g => g.mem_used, sum)), { yAxisIndex: 1, tooltip: { valueFormatter: B } })] });
   const gpuHeat = base('', W, { grid: grid2,
     yAxis: [{ type: 'value', min: 0, max: powCap, axisLabel: { formatter: W }, splitLine: { lineStyle: { opacity: 0.25 } } },
             Object.assign({ type: 'value', min: 0, axisLabel: { formatter: C } }, right)],
-    series: [line('power', series(s, gv(g => g.power_w, sum))),
-             line('temperature', series(s, gv(g => g.temp, top)), { yAxisIndex: 1, tooltip: { valueFormatter: C } })] });
-  const gpuSel = gpus.length > 1 ? html`<span class="tm-seg">${[['all', 'all'], ...gpus.map(g => [String(g.i), 'gpu' + g.i])]
-      .map(([k, l]) => html`<button class=${'tm-segb' + ((sel == null ? 'all' : String(sel)) === k ? ' on' : '')}
+    series: each ? perGpu({ key: 'power_w', label: 'power' }, { key: 'temp', label: 'temperature' }, C)
+      : [line('power', series(s, gv(g => g.power_w, sum))),
+         line('temperature', series(s, gv(g => g.temp, top)), { yAxisIndex: 1, tooltip: { valueFormatter: C } })] });
+  const picked = each ? 'each' : sel == null ? 'all' : String(sel);
+  const gpuSel = gpus.length > 1 ? html`<span class="tm-seg">${[['all', 'all'], ['each', 'each'], ...gpus.map(g => [String(g.i), 'gpu' + g.i])]
+      .map(([k, l]) => html`<button class=${'tm-segb' + (picked === k ? ' on' : '')}
                                     onClick=${() => { gpuPick.value = k; }}>${l}</button>`)}</span>` : null;
   const gpuSec = gpus.length ? html`<${Section} title="GPU" aside=${gpuSel}>
       <div class="tm-gpus">${mine.map(g => html`<div class="tm-gpu">
