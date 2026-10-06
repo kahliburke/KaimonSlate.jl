@@ -198,15 +198,26 @@ function compact(option) {
 }
 
 function Chart({ option, height = 140 }) {
-  const el = useRef(null), inst = useRef(null);
+  const el = useRef(null), inst = useRef(null), hover = useRef(null);
   useEffect(() => {
     const c = initChart(el.current);
     c.group = GROUP; window.echarts.connect(GROUP);
     inst.current = c;
+    // Where the pointer is over this chart, so an update can put its tooltip back (below).
+    c.getZr().on('mousemove', (e) => { hover.current = [e.offsetX, e.offsetY]; });
+    c.getZr().on('globalout', () => { hover.current = null; });
     const ro = new ResizeObserver(() => c.resize()); ro.observe(el.current);
     return () => { ro.disconnect(); c.dispose(); };
   }, []);
-  useEffect(() => { inst.current && inst.current.setOption(compact(option), { notMerge: true }); });
+  // Replaced whole, since the series a chart has change with the sample, and a replace drops the
+  // tooltip. New samples arrive every couple of seconds, so a tooltip being read is put back where
+  // the pointer is, and the charts connected to this one follow it.
+  useEffect(() => {
+    const c = inst.current; if (!c) return;
+    c.setOption(compact(option), { notMerge: true });
+    const h = hover.current;
+    if (h) c.dispatchAction({ type: 'showTip', x: h[0], y: h[1] });
+  });
   return html`<div class="tm-chart" ref=${el} style=${'height:' + height + 'px'}></div>`;
 }
 
@@ -308,22 +319,42 @@ function Telemetry() {
                host.mem_avail >= 0 ? line('host used', series(s, x => ((x.host || {}).mem_avail >= 0 ? x.sys_mem_total - x.host.mem_avail : -1))) : null]
             .filter(Boolean) });
 
-  // Every core over time, as a heatmap; columns thinned to at most 240 so a long window stays light.
-  // On a shared node only the job's own cores are this worker's business; the rest are other jobs'.
+  // Every core over time, as cells on the same time axis as the other charts, so the hover line runs
+  // through it with them (ECharts draws a heatmap on category axes only, which the other charts'
+  // hover cannot follow). Columns are thinned to at most 240 so a long window stays light. On a shared
+  // node only the job's own cores are this worker's business; the rest are other jobs'.
   let heat = null;
   if (host.cores && host.cores.length) {   // per-core load is read on Linux only
     const step = Math.max(1, Math.ceil(s.length / 240)), cols = s.filter((_, i) => i % step === 0);
     const own = (job.cpuset && job.cpuset.length) ? job.cpuset : [...Array(nc).keys()];
+    const ends = cols.map((x, ci) => ci + 1 < cols.length ? ms(cols[ci + 1])
+                                                          : ms(x) + (ci ? ms(x) - ms(cols[ci - 1]) : 2000));
+    const loads = cols.map(x => { const c = (x.host || {}).cores || []; return own.map(k => c[k] ?? 0); });
     const data = [];
-    cols.forEach((x, ci) => { const c = (x.host || {}).cores || []; own.forEach((k, row) => data.push([ci, row, c[k] ?? 0])); });
-    heat = { animation: false, grid: { left: 56, right: 16, top: 8, bottom: 24 },
-      xAxis: { type: 'category', data: cols.map(x => new Date(ms(x)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })),
-               axisLabel: { hideOverlap: true, interval: Math.max(0, Math.ceil(cols.length / 4) - 1) }, splitArea: { show: false } },
+    cols.forEach((x, ci) => loads[ci].forEach((v, row) => data.push([ms(x), row, v, ends[ci]])));
+    const RAMP = ['#151a2b', '#1f4f8a', '#3f8fe0', '#9fd2ff'];
+    const at = (t) => { let ci = cols.length - 1; while (ci > 0 && ms(cols[ci]) > t) ci--; return ci; };
+    heat = { animation: false, grid: { left: 56, right: 16, top: 8, bottom: 24 }, xAxis: AXIS,
       yAxis: { type: 'category', data: own.map(String), name: own.length < nc ? 'job cores' : 'core',
                axisLabel: { interval: Math.max(0, Math.ceil(own.length / 8) - 1) } },
-      visualMap: { min: 0, max: 100, show: false, inRange: { color: ['#151a2b', '#1f4f8a', '#3f8fe0', '#9fd2ff'] } },
-      tooltip: { formatter: (p) => 'core ' + own[p.value[1]] + ' · ' + Math.round(p.value[2]) + '%' },
-      series: [{ type: 'heatmap', data, progressive: 0 }] };
+      tooltip: { trigger: 'axis', axisPointer: { type: 'line' }, formatter: (ps) => {
+        const p = Array.isArray(ps) ? ps[0] : ps; if (!p) return '';
+        const l = loads[at(+p.axisValue)] || []; if (!l.length) return '';
+        let top = 0; l.forEach((v, r) => { if (v > l[top]) top = r; });
+        const mean = l.reduce((a, v) => a + v, 0) / l.length;
+        return new Date(+p.axisValue).toLocaleTimeString() + '<br>mean ' + Math.round(mean) + '% · busiest core ' +
+               own[top] + ' ' + Math.round(l[top]) + '%';
+      } },
+      series: [{ type: 'custom', encode: { x: [0, 3], y: 1 }, data,
+        renderItem: (params, api) => {
+          const row = api.value(1), a = api.coord([api.value(0), row]), b = api.coord([api.value(3), row]);
+          const h = api.size([0, 1])[1], cs = params.coordSys;
+          const r = window.echarts.graphic.clipRectByRect(
+            { x: a[0], y: a[1] - h / 2, width: Math.max(1, b[0] - a[0] + 0.5), height: h },
+            { x: cs.x, y: cs.y, width: cs.width, height: cs.height });
+          return r && { type: 'rect', shape: r,
+                        style: { fill: window.echarts.color.lerp(Math.min(1, Math.max(0, api.value(2) / 100)), RAMP) } };
+        } }] };
   }
 
   const hasIO = s.some(x => (x.proc || {}).io_read >= 0 || (x.host || {}).net_rx >= 0);
