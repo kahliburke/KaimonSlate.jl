@@ -182,9 +182,10 @@ mutable struct Session
 end
 Session(ep, fd, ptr, req, owner, prompter, alive, err, fwds) =
     Session(ep, fd, ptr, req, owner, prompter, alive, err, fwds, ReentrantLock(), ReentrantLock(), Cint(0), "",
-            Base.Semaphore(_MAX_CHANNELS), Threads.Atomic{Int}(0), Channel{Any}(32))
+            Base.Semaphore(_max_channels()), Threads.Atomic{Int}(0), Channel{Any}(32))
 
-const _MAX_CHANNELS = something(tryparse(Int, get(ENV, "KAIMONSLATE_SSH_MAX_CHANNELS", "")), 8)
+# Read when a session opens, not when this file is compiled into an image.
+_max_channels() = something(tryparse(Int, get(ENV, "KAIMONSLATE_SSH_MAX_CHANNELS", "")), 8)
 
 const _SESSIONS = Dict{String,Session}()
 const _REG_LOCK = ReentrantLock()
@@ -885,7 +886,7 @@ function _open!(s::Session, ask)
     # request alone counts as activity for the server's idle clock and the NAT, and an idle session's
     # owner never reads the socket - so asking for a reply would only buffer answers nobody drains. A
     # peer that has actually gone still surfaces, at the next channel open (`_channel_dead!`).
-    ccall((:libssh2_keepalive_config, LIB), Cvoid, (Ptr{Cvoid}, Cint, Cuint), s.ptr, 0, _KEEPALIVE_S)
+    ccall((:libssh2_keepalive_config, LIB), Cvoid, (Ptr{Cvoid}, Cint, Cuint), s.ptr, 0, _keepalive_s())
     return s
 end
 
@@ -1007,7 +1008,7 @@ end
 # node's `ClientAliveInterval`, and the ~1-5 minute idle drop of a home or campus NAT - so a quiet
 # session is refreshed several times before either could fire. Overridable for a host that wants it
 # tighter or looser.
-const _KEEPALIVE_S = Cuint(something(tryparse(Int, get(ENV, "KAIMONSLATE_SSH_KEEPALIVE_S", "")), 30))
+_keepalive_s() = Cuint(something(tryparse(Int, get(ENV, "KAIMONSLATE_SSH_KEEPALIVE_S", "")), 30))
 
 # Send a keepalive if one is due (libssh2 tracks the interval set by `keepalive_config`). Non-blocking:
 # an EAGAIN or any other return is left for the next sweep rather than waited on, so this never parks
@@ -1024,7 +1025,7 @@ end
 # the others. Started once, lazily, when the first session opens.
 const _KEEPALIVE_STARTED = Ref(false)
 function _keepalive_sweep()
-    gap = max(3, Int(_KEEPALIVE_S) ÷ 3)     # ping often enough that each session is refreshed on time
+    gap = max(3, Int(_keepalive_s()) ÷ 3)     # ping often enough that each session is refreshed on time
     while true
         try
             sleep(gap)

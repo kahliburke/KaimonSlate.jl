@@ -1,14 +1,10 @@
-# Per-notebook gate worker payload (Phase 2). Loaded *standalone* into a worker
-# Julia process pinned to the notebook's project (`julia --project=<nb project>`,
-# with KaimonGate on LOAD_PATH). It runs KaimonGate as a TCP gate exposing capture
-# tools; the KaimonSlate extension drives it over the gate via `:tool_call`.
+# The body of the `SlateWorker` package (src/SlateWorker), the per-notebook gate worker. It runs in a
+# worker Julia process pinned to the notebook's project and serves capture tools over a KaimonGate TCP
+# gate; the KaimonSlate extension drives it over the gate via `:tool_call`.
 #
-# This is NOT part of `using KaimonSlate` — the extension server never loads it,
-# and KaimonSlate gains no KaimonGate dependency. Only the worker process loads it,
-# via `include(".../worker.jl")` in its boot script. It shares `capture.jl` with
-# the engine, so there is exactly one capture implementation.
-
-module SlateWorker
+# This is NOT part of `using KaimonSlate`: the extension server never loads it, and KaimonSlate gains
+# no KaimonGate dependency. It shares `capture.jl` and the other engine files with the hub, so there is
+# exactly one capture implementation.
 
 import KaimonGate
 import Pkg                                   # project dep listing for eager docs auto-index
@@ -17,11 +13,10 @@ import Base64                                # …then base64 so an arbitrary Ju
 import Logging, Dates                        # timestamped worker log (legible after a slow bring-up / eval)
 import Sockets                               # TCP reachability probe for peer-route resolution
 
-# Cold-boot phase timing: a module-load timer so the payload's heavy blocks (memo layer, ExpressionExplorer)
-# and start()'s socket bring-up self-report into the worker log — same `[slate-boot]` prefix the boot script
-# uses. Cheap prints; this timer starts ~0.5s into the include, so add that to correlate with boot markers.
-const _BOOT_T0 = time()
-_blog(m) = try; println("[slate-boot] payload +" * string(round(time() - _BOOT_T0; digits = 1)) * "s " * m); flush(stdout); catch; end
+# Cold-boot phase timing: start()'s socket bring-up self-reports into the worker log with the same
+# `[slate-boot]` prefix the boot script uses, timed from `__init__`.
+const _BOOT_T0 = Ref(time())
+_blog(m) = try; println("[slate-boot] payload +" * string(round(time() - _BOOT_T0[]; digits = 1)) * "s " * m); flush(stdout); catch; end
 
 # The enclosing/parent project dir stacked behind this notebook env on LOAD_PATH (set by
 # the boot script; "" when the notebook is detached). Used to attribute package provenance
@@ -104,8 +99,7 @@ include(joinpath(@__DIR__, "prepare.jl"))   # PrepareTracker — classify precom
 # namespaces are identical; only `slate_refresh` differs — here it PUBs on the gate
 # stream (a cell's async task calls `slate_refresh(:data)`; the KaimonSlate server,
 # subscribed, recomputes those vars' readers and pushes a live update).
-function _new_ns()
-    m = Module(:NB)
+function _new_ns(m::Module = Module(:NB))
     _populate_notebook_ns!(m;
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query,
@@ -178,8 +172,9 @@ end
 # Prefer a vendored, version-pinned OpenSSL (SHA-NI) for CAS content hashing when it's in the worker
 # env; otherwise MemoStore falls back to the system libcrypto, then SHA.jl. Best-effort and isolated
 # from the memo load above — a missing OpenSSL_jll must never disable memoization. `@eval` runs the
-# import + path read in one latest-world step (no world-age on the fresh binding).
-_MEMO_OK && try
+# import + path read in one latest-world step (no world-age on the fresh binding). Called from
+# `__init__`: the path is the running host's, never one baked into a precompiled image.
+_load_libcrypto!() = _MEMO_OK && try
     p = @eval begin
         import OpenSSL_jll
         if isdefined(OpenSSL_jll, :libcrypto_path)      # JLLWrappers const path
@@ -192,7 +187,6 @@ _MEMO_OK && try
     MemoStore.set_libcrypto!(p)
 catch
 end
-_blog("memo layer loaded (ok=$(_MEMO_OK))")   # memostore + codecs + blobchannel compiled
 
 # The batch fabric: `@sweep` and friends, injected into every notebook namespace by
 # `_populate_notebook_ns!`. It goes AFTER the memo block deliberately — its own guards would
@@ -200,17 +194,28 @@ _blog("memo layer loaded (ok=$(_MEMO_OK))")   # memostore + codecs + blobchannel
 # its shards into is the same one memoization uses. Behind `_MEMO_OK` for the same reason: without a
 # store there is nowhere for a shard result to live, and a namespace missing `@sweep` reports itself
 # far more clearly than one whose sweeps silently lose their results.
+const _SWEEP_ERR = Ref{Any}(nothing)
 const _SWEEP_OK = _MEMO_OK && try
     include(joinpath(@__DIR__, "sweep.jl"))
     true
 catch e
-    _blog("batch fabric unavailable: $(sprint(showerror, e))")
+    _SWEEP_ERR[] = e
     false
 end
-_blog("batch fabric loaded (ok=$(_SWEEP_OK))")
 
-# Every contributor to the notebook namespace is now loaded, so the first one can be built.
-_NS[] = _new_ns()
+# Process-time state, set when the package is loaded rather than when its image is built. The first
+# namespace is built here because every contributor to it is loaded by now.
+# The built-in widget kinds are registered here too: widgets.jl registers them when included, but a
+# precompiled image would drop that write into a dict owned by SlateExtensionsBase (see
+# KaimonSlate.__init__ for the same fix). Idempotent.
+function __init__()
+    _register_builtin_kinds!()
+    _BOOT_T0[] = time()
+    _LAST_HUB_REQ[] = time()
+    _LAST_EVAL_AT[] = time_ns()
+    _load_libcrypto!()
+    _NS[] = _new_ns()
+end
 const _MEMO_DIR = Ref{String}("")
 # On-disk ceiling for the durable memo store (LRU-evicted). Configurable — big-data notebooks
 # legitimately cache multi-GB artifacts: `KAIMONSLATE_MEMO_CAP_GB` (forwarded into the worker's env
@@ -1813,18 +1818,8 @@ function __slate_module_help(name::String)
     return module_help(m, name)
 end
 
-# ExpressionExplorer for macro-aware analysis, delivered by the slate-owned `worker_infra` env on
-# LOAD_PATH (after the notebook project — a notebook's own EE wins). Guarded like Serialization:
-# absent (env build failure, offline first-instantiate) → no macro recovery, the server keeps its
-# conservative analysis; never a boot failure.
-const _EE_OK = try
-    @eval import ExpressionExplorer
-    true
-catch e
-    @warn "slate: ExpressionExplorer unavailable — macro-aware dependency recovery disabled" error = sprint(showerror, e)
-    false
-end
-_blog("ExpressionExplorer loaded (ok=$(_EE_OK))")
+# ExpressionExplorer for macro-aware analysis.
+import ExpressionExplorer
 
 "Macro-expand cell sources in the live notebook namespace (recursive, NO evaluation) and ANALYZE
 them right here, where the macros live — returns id → {reads, writes} name lists. A cell whose
@@ -1834,7 +1829,6 @@ NOTE: `cells` must be a KEYWORD arg — a single positional `::Dict` param trigg
 dispatcher's raw-Dict fast path, which hands the handler the WHOLE arguments dict instead."
 function __slate_macroexpand(; cells::Dict = Dict{String,Any}())
     out = Dict{String,Any}()
-    _EE_OK || return out
     nb = _NS[]
     for (id, src) in cells
         src isa AbstractString || continue
@@ -3231,9 +3225,10 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # A memo-off worker used to be SILENT (every store/restore just returned early) — the single
     # hardest-to-spot degradation, since cells still run fine and only recompute. Say it once, loudly.
     _MEMO_OK || @warn "slate worker: durable memo DISABLED — cache tags and restores are no-ops" exception = _MEMO_ERR[]
-    # Prewarm the eval path: the FIRST run through `_eval_one`/`run_capture` pays ~4s of JIT
-    # (measured — eval/capture/demux/repr machinery all compiling), which otherwise lands under
-    # the user's first cell. Compile it NOW, in the background: the port is already serving, so
+    (_MEMO_OK && !_SWEEP_OK) && @warn "slate worker: batch fabric unavailable — @sweep is not defined" exception = _SWEEP_ERR[]
+    # Prewarm the eval path: the package image holds most of what the first run through
+    # `_eval_one`/`run_capture` compiles (see the workload at the end of this file); this pays for
+    # what it does not, which otherwise lands under the user's first cell. Compile it NOW, in the background: the port is already serving, so
     # a real eval arriving mid-prewarm just serializes with it harmlessly (same total, never
     # worse) — while an idle-spawned worker (warm pool, detach target) has it fully paid before
     # anyone attaches. "1 + 1" exercises exactly the measured slow path; it writes no globals.
@@ -3301,12 +3296,17 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
 end
 
 
-# The built-in widget kinds' value lifecycle, re-registered at RUNTIME. widgets.jl already calls
-# this when it's included, which is enough while this module is loaded from source — but that call
-# happens at PRECOMPILE time for anyone who packages this module, and it mutates a dict owned by
-# SlateExtensionsBase, so the registrations would silently not survive (see KaimonSlate.__init__ for
-# the same fix and what it looked like when it broke). Idempotent; belongs here so packaging the
-# worker can never quietly regress the widget value lifecycle.
-__init__() = _register_builtin_kinds!()
+# Precompile workload: run cells through the eval path while this module is being compiled into a
+# package image, so a worker's first cell does not pay to compile it. Cells go into `_WarmNS` because
+# precompilation can only evaluate into the module being compiled; `__init__` replaces it.
+module _WarmNS end
+if ccall(:jl_generating_output, Cint, ()) == 1
+    try
+        _NS[] = _new_ns(_WarmNS)
+        __slate_eval("1 + 1"; filename = "cell:__prewarm__")
+        __slate_eval("x = sum(rand(10)); x"; filename = "cell:__prewarm__")
+    catch e
+        @warn "SlateWorker precompile workload failed" exception = (e, catch_backtrace())
+    end
+end
 
-end # module SlateWorker

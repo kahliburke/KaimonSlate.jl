@@ -512,6 +512,12 @@ const RE = KaimonSlate.ReportEngine
                 # Every file it names exists, so a worker never boots short of one.
                 @test all(f -> isfile(joinpath(pkgdir(KaimonSlate), "src", f)), files)
                 @test RE._payload_sha() != RE._src_sha()          # hub-only edits leave workers current
+                # It arrives as the SlateWorker package, which the worker env develops and the boot loads.
+                @test all(in(files), RE._WORKER_PKG_FILES)
+                @test occursin(RE._REMOTE_WORKER_PKG, RE._WORKER_DEVELOP)
+                s = RE._remote_worker_script(RE.RemoteTarget("h"; transport = :tunnel), 9100, 9101, "/p", "PUB")
+                @test occursin("using SlateWorker", s) && !occursin("include(", s)
+                @test findfirst("using SlateWorker", s)[1] < findfirst("using Revise", s)[1]
             end
 
             @testset "a reap is one command that kills the worker and not itself" begin
@@ -1668,67 +1674,18 @@ const RE = KaimonSlate.ReportEngine
         end
     end
 
-    @testset "the worker payload imports only stdlibs" begin
-        # A worker loads these files in the NOTEBOOK's project, where the only packages guaranteed
-        # present are stdlibs. An `import` of a KaimonSlate dependency here takes EVERY worker down
-        # at boot — and the rest of this suite cannot see it, because tests run in KaimonSlate's own
-        # project, where that package resolves perfectly well. So check it by reading the source.
+    @testset "both worker paths provision the worker package" begin
+        # What the worker may import is SlateWorker's `[deps]` (test_shared_includes.jl holds them to
+        # its imports). Each path has to provision the package itself: `src/worker_infra` for a local
+        # worker, `_WORKER_DEVELOP` for a remote one. Provisioned in only one, every worker on the
+        # other path dies at boot.
         src = dirname(pathof(KaimonSlate))
-        # Stdlibs, plus the packages the boot script provisions into the worker's own
-        # `worker_infra` env — those are Slate's to guarantee, unlike a dependency of the hub. A
-        # name may only be added here once BOTH paths provision it: `src/worker_infra/Project.toml`
-        # for a local worker and `_env_instantiate_script` for a remote one. Provisioned in only one
-        # of them is the failure this guard exists to catch, and it shows up as every worker on the
-        # other path dying at boot.
-        allowed = Set(readdir(Sys.STDLIB)) ∪ Set(["Base", "Core", "Main", "KaimonGate",
-                                                  "SlateExtensionsBase"])
-        # `ripgrep_jll` is deliberately NOT in that list. The payload resolves it softly at load
-        # (`BatchLauncher._resolve_rg`) precisely so a host that cannot see it loses log SEARCH
-        # rather than the whole batch fabric — an `import` of it here would undo that. It is still
-        # provisioned both ways, so the good case gets the artifact rather than a PATH `rg`.
-        # KaimonGate is not among them either: it rides its own scratchspace, inserted ahead of the
-        # notebook project rather than into this env.
-        for pkg in ("SlateExtensionsBase", "ripgrep_jll")
-            @test occursin(pkg, read(joinpath(src, "worker_infra", "Project.toml"), String))
-            @test occursin(pkg, read(joinpath(src, "remote.jl"), String))
-        end
-        # PARSE rather than grep: `using CairoMakie` in a docstring and `using MyPkg` in a `@sweep`
-        # example are not imports, and an import inside a `try` is guarded on purpose.
-        function toplevel_imports(ex, out = String[])
-            ex isa Expr || return out
-            if ex.head in (:import, :using)
-                for a in ex.args
-                    a isa Expr || continue
-                    # `import A`, `using A: x`, `import ..A` — the first symbol is the package.
-                    parts = a.head === :(:) ? a.args[1].args : a.args
-                    isempty(parts) && continue
-                    parts[1] isa Symbol && push!(out, String(parts[1]))
-                end
-            elseif ex.head in (:toplevel, :block, :module)
-                for a in ex.args; toplevel_imports(a, out); end
-            end
-            return out
-        end
-        seen, queue, offenders = Set{String}(), ["worker.jl"], String[]
-        while !isempty(queue)
-            f = popfirst!(queue)
-            (f in seen || !isfile(joinpath(src, f))) && continue
-            push!(seen, f)
-            text = read(joinpath(src, f), String)
-            for m in eachmatch(r"include\(\s*(?:@__MODULE__\s*,\s*)?joinpath\(@__DIR__,\s*\"([^\"]+\.jl)\"", text)
-                push!(queue, String(m.captures[1]))
-            end
-            parsed = try; Meta.parseall(text); catch; nothing; end
-            parsed === nothing && continue
-            for pkg in toplevel_imports(parsed)
-                pkg in allowed && continue
-                push!(offenders, "$f imports $pkg")
-            end
-        end
-        @test length(seen) > 10                          # the walk actually found the payload
-        @test "remotestore.jl" in seen                   # …including the transport layer
-        isempty(offenders) || @info "worker payload non-stdlib imports" offenders
-        @test isempty(offenders)
+        infra = read(joinpath(src, "worker_infra", "Project.toml"), String)
+        @test occursin("SlateWorker", infra) && occursin("SlateExtensionsBase", infra)
+        @test occursin(RE._REMOTE_WORKER_PKG, RE._WORKER_DEVELOP) && occursin(RE._REMOTE_SEB, RE._WORKER_DEVELOP)
+        # `ripgrep_jll` is resolved softly at load (`BatchLauncher._resolve_rg`), so a host that cannot
+        # see it loses log search rather than the batch fabric. It is still provisioned both ways.
+        @test occursin("ripgrep_jll", infra) && occursin("ripgrep_jll", RE._infra_spec())
     end
 
     @testset "every cache path resolves through SlateHome" begin

@@ -203,9 +203,14 @@ const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
 # it into the worker env — the remote counterpart of the local `src/worker_infra` LOAD_PATH stack.
 const _REMOTE_SEB = "$_REMOTE_ROOT/devsrc/SlateExtensionsBase"
 const _LOCAL_SEB  = normpath(joinpath(@__DIR__, "..", "lib", "SlateExtensionsBase"))
-# The worker cannot load without it, so a failure here fails the provision (which resets the env and
+# The SDK and the worker package (sent with the payload) are dev'd into the worker env together. The
+# worker cannot load without them, so a failure here fails the provision (which resets the env and
 # retries once) rather than starting a worker that dies on its first `using`.
-const _SEB_DEVELOP = "try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\")); preserve=Pkg.PRESERVE_ALL); catch; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\"))); end"
+const _REMOTE_WORKER_PKG = "$_REMOTE_WORKER/SlateWorker"
+const _WORKER_DEVELOP = let specs = "[Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\")), " *
+                                    "Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_WORKER_PKG\"))]"
+    "try; Pkg.develop($specs; preserve=Pkg.PRESERVE_ALL); catch; Pkg.develop($specs); end"
+end
 
 # ── Remote timing knobs ───────────────────────────────────────────────────────────────────────
 # Every value below shipped as a hardcoded literal; each is now overridable per host/deployment
@@ -818,13 +823,15 @@ function _narrate_transfer(localdir::AbstractString, region::AbstractString, exc
 end
 
 # ── provisioning ──────────────────────────────────────────────────────────────
-# Slate's worker payload = worker.jl + every src/*.jl it (transitively) includes. Found from the
+# Slate's worker payload = the SlateWorker package (its Project.toml and entry file) + worker.jl + every
+# src/*.jl it (transitively) includes. Found from the
 # sources rather than kept as a list, so a new include joins it without anyone remembering to: every
 # file whose name appears quoted (`"name.jl"`) in a payload file is in the payload, which covers a
 # literal `include` and the name lists the shared files include in a loop. A quoted name that is not
 # an include only adds a file. Hub-only code stays home, which is most of `src/`: the link to a
 # cluster is slow, and sending the hub's code to every host cost seconds per provision.
 const _PAYLOAD_FILES = Ref{Tuple{Float64,Vector{String}}}((-1.0, String[]))
+const _WORKER_PKG_FILES = ["SlateWorker/Project.toml", "SlateWorker/src/SlateWorker.jl"]
 function _payload_files()
     srcdir = @__DIR__
     have = Set(String[f for f in readdir(srcdir) if endswith(f, ".jl") && isfile(joinpath(srcdir, f))])
@@ -839,7 +846,7 @@ function _payload_files()
             push!(todo, m.captures[1])
         end
     end
-    files = sort!(collect(out))
+    files = vcat(_WORKER_PKG_FILES, sort!(collect(out)))
     _PAYLOAD_FILES[] = (mt, files)
     return copy(files)
 end
@@ -891,11 +898,12 @@ end
 function _env_fingerprint(envdir::AbstractString, infra::AbstractString; depot::AbstractString = "")
     ctx = _SHA.SHA1_CTX()
     add(s) = _SHA.update!(ctx, codeunits(String(s)))
-    add("julia $VERSION\n"); add(infra); add(_SEB_DEVELOP)
+    add("julia $VERSION\n"); add(infra); add(_WORKER_DEVELOP)
     # Where it is installed: a different depot holds none of it.
     isempty(depot) || add("depot $depot\n")
-    seb = joinpath(_LOCAL_SEB, "Project.toml")
-    isfile(seb) && add(read(seb, String))
+    for p in (joinpath(_LOCAL_SEB, "Project.toml"), joinpath(@__DIR__, "SlateWorker", "Project.toml"))
+        isfile(p) && add(read(p, String))
+    end
     if !isempty(envdir) && isdir(envdir)
         for f in sort!(filter(Sweep._is_env_file, readdir(envdir)))
             add(f); add(read(joinpath(envdir, f), String))
@@ -1050,6 +1058,7 @@ function _provision_runtime!(host; seen = nothing, setup::AbstractString = "")
         tmp = mktempdir()
         try
             for f in _payload_files()
+                mkpath(dirname(joinpath(tmp, f)))
                 cp(joinpath(srcdir, f), joinpath(tmp, f))
             end
             had = get(st, "payload", "")
@@ -1148,14 +1157,14 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             # still shows live progress + the current package instead of going dark.
             build = Sweep.devpaths_script(rel, rewrites) *
                 "\nimport Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
-                "Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _SEB_DEVELOP * "; Pkg.instantiate()\n" *
+                "Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _WORKER_DEVELOP * "; Pkg.instantiate()\n" *
                 _RG_RECORD_SNIPPET * _PREP_DONE_SNIPPET * "\n"
             first(_ssh_julia!(host, build, "instantiate parent project on $host"; setup = t.setup,
                               stream = true, online = _bringup_note)) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
             first(_ssh_julia!(host, "import Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
-                              "Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _SEB_DEVELOP * "; Pkg.instantiate()\n" *
+                              "Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _WORKER_DEVELOP * "; Pkg.instantiate()\n" *
                               _RG_RECORD_SNIPPET,
                               "bare worker env on $host"; setup = t.setup)) || error("provision: could not build the worker env on $host")
         end
@@ -1228,15 +1237,15 @@ _sysimage_enabled() = get(ENV, "KAIMONSLATE_SYSIMAGE", "1") != "0"
 _sysimage_minfree_gb() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_SYSIMAGE_MINFREE_GB", "")), 5.0)
 
 
-# The precompile execution file (run with the worker env active): include the payload and drive the
+# The precompile execution file (run with the worker env active): load the worker and drive the
 # eval/capture path so its hot specializations bake in. Best-effort throughout — a trace error just means
 # fewer baked methods, never a failed build.
 _sysimage_exec_contents() = """
 # Auto-generated by KaimonSlate — trace-compile the worker payload's eval/capture path into the sysimage.
 try
-    include(joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl"))
+    @eval using SlateWorker
     for src in ("1 + 1", "[i^2 for i in 1:4]", "sum(rand(8))")
-        try; SlateWorker.__slate_eval(src; filename = "cell:__sysimg_precompile__"); catch; end
+        try; Base.invokelatest(SlateWorker.__slate_eval, src; filename = "cell:__sysimg_precompile__"); catch; end
     end
 catch
 end
@@ -1662,7 +1671,7 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     # invalidate the notebook's (very expensive, e.g. Makie) precompile cache — that doubles the build.
     # Fall back to a normal add only if the infra genuinely can't be satisfied against those pins.
     println(io, "try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end")
-    println(io, _SEB_DEVELOP)   # the unregistered extension SDK, dev'd from its shipped source
+    println(io, _WORKER_DEVELOP)   # the extension SDK and the worker package, dev'd from their shipped sources
     # The Manifest is resolved (shipped), so count what still needs precompiling BEFORE instantiate's
     # auto-precompile → the banner reads a real "Precompiling k/N · <pkg>", same as a local cold open.
     print(io, _PREP_TOTAL_SNIPPET)
@@ -1943,15 +1952,14 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     cr = isempty(t.cache_root) ? "" : "ENV[\"KAIMONSLATE_CACHE_HOME\"] = expanduser(raw\"$(t.cache_root)\")\n    "
     return """
     _t0 = time(); _bt(m) = try; println("[slate-boot] +" * string(round(time() - _t0; digits = 1)) * "s " * m); flush(stdout); catch; end
-    $(dd)$(cr)_wk = joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl")
-    _bt("script start (unix=" * string(round(Int, time())) * ")")   # correlate with the hub's launch time
+    $(dd)$(cr)    _bt("script start (unix=" * string(round(Int, time())) * ")")   # correlate with the hub's launch time
     _bt("image=" * try; basename(unsafe_string(Base.JLOptions().image_file)); catch; "?"; end)   # confirm plain vs `-J` sysimage boot
     import KaimonGate
     _bt("KaimonGate loaded")
+    using SlateWorker   # before Revise, which tracks only packages loaded after it
+    _bt("SlateWorker loaded")
     try; @eval using Revise; catch; end
     _bt("Revise loaded")
-    include(_wk)
-    _bt("worker payload loaded")
     SlateWorker.PARENT_PROJECT[] = expanduser(raw"$parent")   # `~/.cache/…` → absolute, so @asset/@sfile/datadir don't emit un-expandable tilde paths
     SlateWorker.PAYLOAD_SHA[] = raw"$(_payload_sha())"
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,

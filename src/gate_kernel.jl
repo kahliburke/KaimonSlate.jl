@@ -61,7 +61,6 @@ function _worker_tag(label::AbstractString, region::AbstractString, port::Intege
     return "slate:" * replace(ident, r"[^\w.@=+-]" => "_") * ":" * string(port)
 end
 
-const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
 # Julia's default load path, spelled with the OS path-list separator (`;` on Windows). A worker is
 # handed this EXPLICITLY rather than inheriting one. When the hub runs as a Kaimon extension, Kaimon
 # launches it with `JULIA_LOAD_PATH=@:<kaimon project>:@v#.#:@stdlib` so the extension can import
@@ -183,18 +182,28 @@ function _infra_env()::String
     # resolves once the Project.toml is copied into the scratchspace.
     seb = normpath(joinpath(_INFRA_ENV, "..", "..", "lib", "SlateExtensionsBase"))
     sebproj = joinpath(seb, "Project.toml")
-    # Key by BOTH Project.tomls (a new dep/compat here or in SEB) + the SEB path + Julia — a source edit
-    # inside SEB needs no rebuild (path-dev tracks it live), mirroring `_kgate_env()`.
-    key = string(hash((ptoml, isfile(sebproj) ? read(sebproj, String) : "", seb, string(VERSION))); base = 16)
+    sw = normpath(joinpath(_INFRA_ENV, "..", "SlateWorker"))
+    swproj = joinpath(sw, "Project.toml")
+    # KaimonGate from the same checkout `_kgate_env()` develops, so the worker's image is built against
+    # the copy the worker loads.
+    kgate = joinpath(Base.pkgdir(_kaimon()), "lib", "KaimonGate")
+    kgproj = joinpath(kgate, "Project.toml")
+    rd(f) = isfile(f) ? read(f, String) : ""
+    # Key by every Project.toml (a new dep/compat here, in SEB, SlateWorker or KaimonGate) + the source
+    # paths + Julia. A source edit needs no rebuild (path-dev tracks it live), mirroring `_kgate_env()`.
+    key = string(hash((ptoml, rd(sebproj), seb, rd(swproj), sw, rd(kgproj), kgate, string(VERSION))); base = 16)
     dir = joinpath(_INFRA_ENV_ROOT, key)
     lock(_INFRA_ENV_LOCK) do
         isfile(joinpath(dir, ".ready")) && return dir
-        @info "slate: preparing the worker's infra environment (Revise + ExpressionExplorer + SlateExtensionsBase; once per Julia version)…" dir
+        @info "slate: preparing the worker's infra environment (SlateWorker + Revise + ExpressionExplorer + SlateExtensionsBase; once per Julia version)…" dir
         buildlog = joinpath(dir, "build.log")
         try
             mkpath(dir)
-            write(joinpath(dir, "Project.toml"),
-                  replace(ptoml, "../../lib/SlateExtensionsBase" => _toml_escape(seb)))
+            toml = replace(ptoml, "../../lib/SlateExtensionsBase" => _toml_escape(seb),
+                           "\"../SlateWorker\"" => "\"" * _toml_escape(sw) * "\"")
+            isfile(kgproj) && (toml = replace(toml, "[sources]\n" =>
+                "[sources]\nKaimonGate = {path = \"" * _toml_escape(kgate) * "\"}\n"))
+            write(joinpath(dir, "Project.toml"), toml)
             code = "using Pkg; Pkg.instantiate()"   # no Manifest ⇒ resolve for THIS Julia, then install
             open(buildlog, "w") do io
                 run(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$dir -e $code`;
@@ -215,7 +224,7 @@ function _infra_env()::String
             # anywhere else guarantees a worker that dies blaming SlateExtensionsBase.
             _env_instantiated(_INFRA_ENV) || error(
                 "could not prepare the worker's infra environment " *
-                "(Revise + ExpressionExplorer + SlateExtensionsBase).\n" *
+                "(SlateWorker + Revise + ExpressionExplorer + SlateExtensionsBase).\n" *
                 "  reason:    $reason\n" *
                 "  build log: $buildlog\n" *
                 "  env:       $dir" * note)
@@ -864,8 +873,8 @@ worker_owner_tag() =
                                         get(ENV, "KAIMONSLATE_CONFIG_HOME", ""), '|',
                                         get(ENV, "KAIMONSLATE_PORT", ""))); base = 16)
 
-# Worker boot: put KaimonGate on LOAD_PATH (via the slate-owned env), load the SlateWorker
-# capture payload, and serve its tools over TCP. Pinned to the notebook's project.
+# Worker boot: put KaimonGate and the slate-owned infra env on LOAD_PATH, load the SlateWorker
+# package, and serve its tools over TCP. Pinned to the notebook's project.
 function _worker_script(port::Int, stream_port::Int, parent::AbstractString = "",
                         nbdir::AbstractString = "")
     # Put ONLY KaimonGate (the ZMQ bridge) on the worker's LOAD_PATH — from its own
@@ -883,12 +892,14 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     return """
     # $(worker_owner_tag())
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
-    insert!(LOAD_PATH, 3, $(repr(infra_dir)))   # slate-owned infra (Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
+    insert!(LOAD_PATH, 3, $(repr(infra_dir)))   # slate-owned infra (SlateWorker + Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
     import KaimonGate
-    # Load Revise BEFORE the notebook loads packages so it tracks the parent project's /src.
+    # SlateWorker before Revise, which tracks only packages loaded after it: a live worker keeps the
+    # code it booted with.
+    using SlateWorker
+    # Revise BEFORE the notebook loads packages so it tracks the parent project's /src.
     # KaimonGate.serve auto-starts a watcher that PUBs `files_changed` on Revise.revision_event.
     try; @eval using Revise; catch e; @warn "slate: Revise unavailable in worker (hot-reload off)" exception=e; end
-    include($(repr(_WORKER_JL)))
     SlateWorker.PARENT_PROJECT[] = $(repr(String(parent)))
     SlateWorker.NOTEBOOK_DIR[] = $(repr(String(nbdir)))
     SlateWorker.start(; host = "127.0.0.1", port = $port, stream_port = $stream_port)

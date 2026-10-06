@@ -180,8 +180,8 @@ function _rich_scan!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
     return false
 end
 
-# `with_render_memo` needs SlateExtensionsBase 0.9.1. Treat it as OPTIONAL, the way `_EE_OK` treats
-# ExpressionExplorer: a notebook project that declares an older SEB shadows the slate-owned infra env,
+# `with_render_memo` needs SlateExtensionsBase 0.9.1. Treat it as OPTIONAL: a notebook project that
+# declares an older SEB shadows the slate-owned infra env,
 # because it comes first on LOAD_PATH. Calling a missing function here raises `UndefVarError` inside
 # the caller's `catch`, which drops EVERY rich output to its text repr with nothing logged.
 const _RENDER_MEMO_OK = isdefined(SlateExtensionsBase, :with_render_memo)

@@ -78,3 +78,43 @@ _includes(path) = Set(m.captures[1] for m in
     # has Observables in its manifest without naming it.
     @test occursin("510215fc-4207-5dde-b226-833fc4488ee2", read(w, String))
 end
+
+# The worker is a package, and a package can only import what its Project.toml declares: an import
+# missing from `[deps]` fails the image build, and a host whose env lacks it never boots a worker.
+# Imports evaluated into `Main` are excluded, since they resolve from the notebook's env.
+@testset "the worker package declares exactly what the worker imports" begin
+    import TOML
+    function own_imports(path)
+        out = Set{Symbol}()
+        walk(x) = x isa Expr && begin
+            # `@eval Main using X` / `@eval(Main, import X)` load into Main, not the worker
+            x.head === :macrocall && x.args[1] === Symbol("@eval") && any(==(:Main), x.args) && return
+            if x.head in (:import, :using)
+                for a in x.args
+                    b = a isa Expr && a.head === :(:) ? a.args[1] : a
+                    b isa Expr && b.head === :. && !isempty(b.args) && b.args[1] isa Symbol &&
+                        b.args[1] !== :. && push!(out, b.args[1])
+                end
+            end
+            foreach(walk, x.args)
+        end
+        walk(Meta.parseall(read(path, String)))
+        return out
+    end
+    have = Set(filter(f -> endswith(f, ".jl"), readdir(_SRC)))
+    seen, todo = Set{String}(), ["worker.jl"]
+    while !isempty(todo)
+        f = pop!(todo)
+        (f in seen || !(f in have)) && continue
+        push!(seen, f)
+        for m in eachmatch(r"\"([A-Za-z0-9_]+\.jl)\"", read(joinpath(_SRC, f), String))
+            push!(todo, m.captures[1])
+        end
+    end
+    imports = setdiff(reduce(union, (own_imports(joinpath(_SRC, f)) for f in seen)), [:Base, :Core])
+    pkg = joinpath(_SRC, "SlateWorker")
+    deps = Set(Symbol.(keys(TOML.parsefile(joinpath(pkg, "Project.toml"))["deps"])))
+    @test setdiff(imports, deps) == Set{Symbol}()   # imported, not declared: the image build fails
+    @test setdiff(deps, imports) == Set{Symbol}()   # declared, not imported: a resolve for nothing
+    @test occursin("worker.jl", read(joinpath(pkg, "src", "SlateWorker.jl"), String))
+end
