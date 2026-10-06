@@ -295,7 +295,9 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
         if r.scheduler !== :none && !isempty(ref[1])
             step("Download $(basename(ref[1]))'s packages") do
                 t = _region_target(r; origin_env = ref[1], at = (String(host), ""))
-                provision_remote!(t, ref[2]; precompile = false)
+                # Rebuilt every prepare: the stamp says what was built, not that the depot still holds it.
+                provision_remote!(t, ref[2]; precompile = false, rebuild = true)
+                measured["downloaded"] = true
                 ("ok", "")
             end
         end
@@ -528,7 +530,10 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
             measured["runtime_load_s"] = secs
             ("ok", "$(secs)s")
         end
-        _prepare_env!(r, step, measured, ref, node, pro; worker, rebuild_sysimage)
+        # A node that sees the login node's home finds the environment just downloaded there, so it
+        # only has to compile it; one that does not installs its own.
+        installed = get(facts, "home_shared", false) === true && get(measured, "downloaded", false) === true
+        _prepare_env!(r, step, measured, ref, node, pro; worker, rebuild_sysimage, rebuild = !installed)
     finally
         if keep_node
             step(() -> ("ok", region_host(r) * (haskey(measured, "worker_start_s") ? " · its worker is up" : "")),
@@ -567,22 +572,30 @@ end
 # Install the reference project's environment where its workers will run, load every package in it
 # with timing, and check CUDA when it is among them. On a scheduler region `host` is the granted node;
 # elsewhere it is the host itself. The environment stays installed, stamped, for the project's start.
-function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothing, rebuild_sysimage::Bool = false)
+function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothing, rebuild_sysimage::Bool = false,
+                       rebuild::Bool = true)
     isempty(ref[1]) && return nothing
     name = basename(ref[1])
     t = _region_target(r; origin_env = ref[1])
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
+    # Installed without compiling: the step below compiles it, once, where the workers run.
     got = step("Install $name") do
-        provision_remote!(t, ref[2]; rebuild = true)
-        ("ok", "")
+        provision_remote!(t, ref[2]; rebuild, precompile = false)
+        ("ok", rebuild ? "" : "downloaded on the login node, which shares its home")
     end
     got == "fail" && return nothing
     # Compiled here, where the workers run, and timed apart from loading: the load time below is what
     # every start pays, which is what the liveness grace is made from; this is paid once.
     step("Precompile $name") do
-        ok, out = _ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.precompile()",
+        ok, out = _ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.precompile(); " *
+                                    "println(\"@@JULIA julia version \", VERSION)",
                               "precompile $name on $host"; stream = true, setup = t.setup)
-        ok ? ("ok", "") : ("fail", first(strip(out), 400))   # the step shows its own time
+        ok || return ("fail", first(strip(out), 400))   # the step shows its own time
+        # Compiled now, so a start finds the environment complete and builds nothing.
+        m = match(r"@@JULIA (julia version \S+)", out)
+        m === nothing || stamp_env_precompiled!(t, ref[2], m.captures[1]) ||
+            _rlog("prepare[$(r.name)]: could not record the environment as compiled on $host")
+        ("ok", "")
     end
     # A region that boots its workers from a sysimage gets it built here, on the node type its workers
     # run on and in their shell, before the worker below starts, so that start is the one it speeds up.

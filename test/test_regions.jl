@@ -474,6 +474,70 @@ const RE = KaimonSlate.ReportEngine
                 @test d.sent == RE._sync_files(srcdir, ex)
             end
 
+            @testset "the sync holds back what the transfer rules hold back" begin
+                # A project with no `src/` syncs its top-level files, the notebook among them. The rules
+                # a provision applies keep it off the host, and the sync honours them too, rather than
+                # sending it for the next provision to remove.
+                srcdir, dest = mktempdir(), mktempdir()
+                write(joinpath(srcdir, "nb.jl"), "1"); write(joinpath(srcdir, "code.jl"), "c")
+                write(joinpath(srcdir, ".slateignore"), "nb.jl\n")
+                cp(joinpath(srcdir, "code.jl"), joinpath(dest, "code.jl"))
+                ex = [".git", "*.cov"]
+                s = RE.SyncSource(srcdir)
+                d = RE.SyncDest("", dest, ex, "", RE._sync_files(srcdir, ex), Dict{String,Any}(), false)
+                write(joinpath(srcdir, "nb.jl"), "2")
+                @test RE._sync_dest!(s, d, RE._sync_files(srcdir, ex))
+                @test !isfile(joinpath(dest, "nb.jl"))
+                @test d.sent == RE._sync_files(srcdir, ex)          # seen, so not judged again until it changes
+                write(joinpath(srcdir, "code.jl"), "c2")
+                @test RE._sync_dest!(s, d, RE._sync_files(srcdir, ex))
+                @test read(joinpath(dest, "code.jl"), String) == "c2"
+
+                # A provision removes from the host what the rules hold back, and says so only when
+                # something was there.
+                write(joinpath(dest, "nb.jl"), "stale")
+                RE._prune_remote!("", srcdir, dest, "", ex)
+                @test !isfile(joinpath(dest, "nb.jl")) && isfile(joinpath(dest, "code.jl"))
+                RE._prune_remote!("", srcdir, dest, "", ex)            # nothing there: nothing to do
+                @test isfile(joinpath(dest, "code.jl"))
+            end
+
+            @testset "a reap is one command that kills the worker and not itself" begin
+                # On a compute node every command is a hop from the login node, so the reap asks once.
+                # `pkill -f` reads whole command lines, and the reap's own names the worker it kills.
+                mktempdir() do home
+                    cd(home) do
+                        d = joinpath(home, RE._REMOTE_WORKER); mkpath(d)
+                        port = 59871
+                        for x in ("jl", "log", "json", "state", "stats")
+                            write(joinpath(d, "worker-$port.$x"), "x")
+                        end
+                        # A compound command, so the shell stays (a lone `sleep` replaces it, and the
+                        # process would no longer carry the worker's name).
+                        proc = run(`sh -c "sleep 60; true" worker-$port.jl`; wait = false)
+                        @test RE.reap_remote_worker("", port)
+                        @test timedwait(() -> !process_running(proc), 5.0; pollint = 0.05) === :ok
+                        @test !any(isfile(joinpath(d, "worker-$port.$x")) for x in ("jl", "log", "json", "state", "stats"))
+                        @test !RE.reap_remote_worker("", port)        # nothing left: says so
+                    end
+                end
+            end
+
+            @testset "a prepare's compile is recorded in the environment's stamp" begin
+                proj, home = mktempdir(), mktempdir()
+                write(joinpath(proj, "Project.toml"), "name = \"P\"\n")
+                t = RE.RemoteTarget(""; project = joinpath(home, "env"), origin_env = proj)
+                jv = "julia version 1.12.7"
+                @test RE.stamp_env_precompiled!(t, proj, jv)
+                got = read(RE._env_stamp_path(t), String)
+                @test got == RE._env_stamp_for(t, proj, jv; precompiled = true)
+                # A start (which wants it compiled) finds nothing to build.
+                @test RE._env_stamp_serves(got, RE._env_stamp_for(t, proj, jv; precompiled = true))
+                # Only fetched, it serves a fetch and not a start.
+                fetched = RE._env_stamp_for(t, proj, jv; precompiled = false)
+                @test !RE._env_stamp_serves(fetched, RE._env_stamp_for(t, proj, jv; precompiled = true))
+            end
+
             @testset "a save reaches the copy without anything asking for it" begin
                 proj, dest = mktempdir(), mktempdir()
                 mkpath(joinpath(proj, "src")); write(joinpath(proj, "src", "P.jl"), "p")

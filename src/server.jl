@@ -4075,7 +4075,7 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
         ReportEngine._rlog("region: '$(r)' → $(_side_label(nb, dst_side)) " *
             (t.bytes == 0 ? "(deduped — already in the destination CAS via $(t.mode), 0 bytes moved) " :
                             "($(t.bytes) bytes over the wire in $(secs)s, $(t.codec), $(t.mode)) ") *
-            "for cell $(cell.id)")
+            "for cell $(cell.id) [$(t.phases)]")
         t.bytes > 0 && _stats_xfer!(nb, cell.id,
             "'$(r)' $(round(t.bytes / 2^20; digits = 1)) MB $(t.codec) in $(secs)s $arrow $whost", t.bytes)
         lock(_REGION_LOCK) do

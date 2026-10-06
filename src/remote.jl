@@ -496,14 +496,14 @@ const _JULIA_SCRIPT_TIMEOUT = 4 * 3600.0   # a Pkg resolve + precompile on a slo
 # `setup` is the shell to start Julia in: a target's machine setup (depot, module fixes, prologue).
 function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::Bool = false, online = nothing,
                      setup::AbstractString = "")
-    _ssh_ok(host, `mkdir -p $_REMOTE_ROOT`) || return (false, "")
-    tmp = tempname()
-    write(tmp, code)
-    remote = "$_REMOTE_ROOT/$(basename(tmp)).jl"
-    up_ok = _put_file(host, Vector{UInt8}(codeunits(code)), remote)
-    rm(tmp; force = true)
-    up_ok || (_rlog("FAILED: sending provisioning script → $host ($what)"); return (false, ""))
-    script = setup * _julia_sh("julia --startup-file=no $remote")
+    # The script travels through the login session (`put_file` makes its directory), and is removed by
+    # the same command that runs it, even when Julia fails: on a compute node every separate command
+    # is another hop from the login node.
+    remote = "$_REMOTE_ROOT/$(basename(tempname())).jl"
+    _put_file(host, Vector{UInt8}(codeunits(code)), remote) ||
+        (_rlog("FAILED: sending provisioning script → $host ($what)"); return (false, ""))
+    script = "trap " * Sweep.shq("rm -f " * Sweep.shq(remote)) * " EXIT; " * setup *
+             _julia_sh("julia --startup-file=no $remote")
     # Pkg work runs for minutes, so it gets its own deadline rather than the default command's. With
     # `stream`, each line is logged as it arrives (tagged to the region whose bring-up asked, which the
     # session's task cannot know by itself) and handed to `online` for the banner.
@@ -515,7 +515,6 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
     end
     ok, out = _run_on(String(host), script; timeout = _JULIA_SCRIPT_TIMEOUT, online = tap)
     ok || _rlog("FAILED: $what\n    out: $(first(strip(out), 1200))")
-    _run_on(String(host), "rm -f " * remote)
     return (ok, out)
 end
 
@@ -722,11 +721,14 @@ function _prune_remote!(host, localdir::AbstractString, remotedir::AbstractStrin
             any_sent || push!(stale, name)
         end
         isempty(stale) && return nothing
+        # Through the login session, which shares a node's files, and only what is there to remove:
+        # the names held back are the same on every provision, and most of the time none are present.
         base = Sweep.shq_path(String(remotedir))
-        script = "cd " * base * " 2>/dev/null || exit 0; rm -rf " *
-                 join((Sweep.shq(n) for n in stale), " ")
-        Sweep.run_io(host, script, nothing)
-        _rlog("transfer: removed $(join(stale, ", ")) from $host:$remotedir (held by the rules)")
+        script = "cd " * base * " 2>/dev/null || exit 0; for n in " * join((Sweep.shq(n) for n in stale), " ") *
+                 "; do [ -e \"\$n\" ] && rm -rf -- \"\$n\" && echo \"\$n\"; done; true"
+        ok, out = Sweep.run_there(_host_for_files(String(host)), script)
+        gone = ok ? filter(!isempty, strip.(split(out, '\n'))) : String[]
+        isempty(gone) || _rlog("transfer: removed $(join(gone, ", ")) from $host:$remotedir (held by the rules)")
     catch e
         @debug "slate: could not prune a remote project" exception = (e, catch_backtrace())
     end
@@ -885,6 +887,26 @@ const _ENV_STAMP = ".slate-env"   # beside the remote env's Project.toml, when t
 _env_stamp_path(t) = isempty(t.depot) ? _projrel(t.project) * "/" * _ENV_STAMP :
                                         rstrip(t.depot, '/') * "/slate/envs/" * basename(_projrel(t.project))
 _projrel(p::AbstractString) = startswith(p, "~/") ? String(p[3:end]) : String(p)
+
+# The local environment a target's worker env is built from: the origin env, else the parent project.
+_env_source_dir(t, parent_project::AbstractString) =
+    !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml")) ? String(t.origin_env) :
+    (!isempty(parent_project) && isdir(parent_project) ? String(parent_project) : "")
+
+# The stamp an environment built for `t` carries, on a host whose `julia --version` says `julia`.
+_env_stamp_for(t, parent_project::AbstractString, julia::AbstractString; precompiled::Bool) =
+    _env_stamp(_env_fingerprint(_env_source_dir(t, parent_project), _infra_spec(); depot = t.depot),
+               julia, precompiled)
+
+"""
+    stamp_env_precompiled!(t, parent_project, julia) -> Bool
+
+Record that `t`'s environment, already installed, has now been precompiled where its workers run, so
+the next start finds nothing to build. `julia` is the host's `julia --version`.
+"""
+stamp_env_precompiled!(t, parent_project::AbstractString, julia::AbstractString) =
+    _put_file(t.ssh_host, Vector{UInt8}(codeunits(_env_stamp_for(t, parent_project, julia; precompiled = true))),
+              _env_stamp_path(t))
 
 # What a host records of an environment it built: the fingerprint of its inputs, the host's own Julia
 # (`julia --version` there, which the hub's version does not determine), and whether its packages
@@ -1096,13 +1118,14 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             build = Sweep.devpaths_script(rel, rewrites) *
                 "\nimport Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
                 "Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _SEB_DEVELOP * "; Pkg.instantiate()\n" *
-                _PREP_DONE_SNIPPET * "\n"
+                _RG_RECORD_SNIPPET * _PREP_DONE_SNIPPET * "\n"
             first(_ssh_julia!(host, build, "instantiate parent project on $host"; setup = t.setup,
                               stream = true, online = _bringup_note)) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
             first(_ssh_julia!(host, "import Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
-                              "Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _SEB_DEVELOP * "; Pkg.instantiate()",
+                              "Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _SEB_DEVELOP * "; Pkg.instantiate()\n" *
+                              _RG_RECORD_SNIPPET,
                               "bare worker env on $host"; setup = t.setup)) || error("provision: could not build the worker env on $host")
         end
     end
@@ -1111,11 +1134,11 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # the sources travel. The environment files stay as they are, since the ones there were rewritten
     # for the host's own paths. `rebuild` builds regardless, for a prepare: a stamp says what was built,
     # not that the depot still holds it.
-    envdir = !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml")) ? t.origin_env :
-             (!isempty(parent_project) && isdir(parent_project) ? String(parent_project) : "")
-    stamp = _env_stamp(_env_fingerprint(envdir, infra; depot = t.depot), get(st, "julia", ""), precompile)
+    envdir = _env_source_dir(t, parent_project)
+    stamp = _env_stamp_for(t, parent_project, get(st, "julia", ""); precompiled = precompile)
     had = strip(get(st, "env", ""))
     built = rebuild || !_env_stamp_serves(had, stamp)
+    scripted = false   # whether a build script ran, which also records ripgrep's path
     # The environment's sources without its resolved files, which hold the host's own paths.
     send_sources! = function ()
         isempty(envdir) && return
@@ -1134,7 +1157,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
               " — building")
         _prep_stage("Building package environment on $host")
         try
-            _adopt_twin_env!(t, stamp) ? send_sources!() : build_env!()
+            _adopt_twin_env!(t, stamp) ? send_sources!() : (scripted = true; build_env!())
         catch e
             # A build failure usually means the env dir carries broken resolve state — a dev-dep whose path
             # vanished, a half-written manifest, a stale entry left by an earlier provision. Reset the env's
@@ -1144,6 +1167,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             _rlog("provision [3/3] env build failed on $host — resetting env + one retry: " * first(sprint(showerror, e), 140))
             _ssh_ok(host, `rm -f $rel/Project.toml $rel/Manifest.toml`)
             _run_on(host, "rm -f " * Sweep.shq_path(_env_stamp_path(t)))
+            scripted = true
             build_env!()
         end
         _put_file(host, Vector{UInt8}(codeunits(stamp)), _env_stamp_path(t)) ||
@@ -1154,7 +1178,9 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # on a host that has it, the log search falls through to `grep -E`, and POSIX ERE cannot parse
     # the patterns it is handed. That failure was silent: the counts beside a remote log all read
     # zero while the records they counted were on screen.
-    (built || get(st, "rg", "") != "1") && _record_rg_path!(host, rel; setup = t.setup)
+    # A build writes it from its own script; an environment left as it was needs its own run only
+    # when the path went missing.
+    (!scripted && get(st, "rg", "") != "1") && _record_rg_path!(host, rel; setup = t.setup)
     _rlog("provision DONE host=$host")
     return nothing
 end
@@ -1553,11 +1579,26 @@ const _PREP_DONE_SNIPPET = "try; println(stderr, \"@@SLATE_PREP done\"); flush(s
 # noisier but not wrong.
 _RG_PATH_FILE = "$_REMOTE_ROOT/rg-path"
 
+# The Julia that writes it, run in the environment that holds `ripgrep_jll`. The binary is found from
+# the package's artifact record, without loading the package: an environment fetched on a login node
+# is compiled later on a compute node, and loading the package here would compile it for the wrong CPU.
+const _RG_RECORD_SNIPPET = """
+try
+    import Artifacts
+    _rg_src = Base.locate_package(Base.PkgId(Base.UUID("e10fc14b-37cd-5cbc-b289-ad01b12ebaad"), "ripgrep_jll"))
+    _rg_meta = Artifacts.artifact_meta("ripgrep", joinpath(dirname(dirname(_rg_src)), "Artifacts.toml"))
+    _rg = joinpath(Artifacts.artifact_path(Base.SHA1(_rg_meta["git-tree-sha1"])), "bin", "rg")
+    if isfile(_rg)
+        mkpath(joinpath(homedir(), raw"$_REMOTE_ROOT"))
+        write(joinpath(homedir(), raw"$_RG_PATH_FILE"), _rg)
+    end
+catch
+end
+"""
+
+# For an environment that was not just built, which is when the build's own script wrote it.
 function _record_rg_path!(host::AbstractString, projrel::AbstractString; setup::AbstractString = "")
-    code = "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$projrel\")); " *
-           "p = try; (@eval using ripgrep_jll); string(ripgrep_jll.rg_path); catch; \"\"; end; " *
-           "isempty(p) || (mkpath(joinpath(homedir(), raw\"$_REMOTE_ROOT\")); " *
-           "write(joinpath(homedir(), raw\"$_RG_PATH_FILE\"), p))"
+    code = "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$projrel\"))\n" * _RG_RECORD_SNIPPET
     try; _ssh_julia!(host, code, "record ripgrep path on $host"; setup); catch; end
     return nothing
 end
@@ -1595,6 +1636,7 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     # auto-precompile → the banner reads a real "Precompiling k/N · <pkg>", same as a local cold open.
     print(io, _PREP_TOTAL_SNIPPET)
     println(io, "Pkg.instantiate()")
+    print(io, _RG_RECORD_SNIPPET)
     println(io, _PREP_DONE_SNIPPET)
     return String(take!(io))
 end
@@ -1706,6 +1748,12 @@ function _sync_dest!(src::SyncSource, d::SyncDest, now::Dict{String,Tuple{Int,Fl
     changed = String[rel for (rel, v) in now if get(d.sent, rel, nothing) != v]
     gone = String[rel for rel in keys(d.sent) if !haskey(now, rel)]
     (isempty(changed) && isempty(gone)) && return true
+    # The transfer rules hold back what a provision holds back (the notebook beside a project with no
+    # `src/`, data, outputs). Asked only when something changed, since asking reads git. What they hold
+    # back is recorded as seen, so it is judged again only when it changes again.
+    keep = Sweep.transfer_keep(src.dir; region = d.region, excludes = d.excludes)
+    filter!(keep, changed); filter!(keep, gone)
+    (isempty(changed) && isempty(gone)) && (d.sent = now; return true)
     ok = try
         if length(changed) > _SYNC_FILEWISE_MAX
             _send_dir!(d.host, src.dir, d.remotedir; excludes = d.excludes, region = d.region, filter = true)
@@ -2137,6 +2185,29 @@ function _dial_worker(t::RemoteTarget, port, stream_port; deadline::Float64, ser
             end
         end
     end
+    # The local end of a forward accepts whether or not the worker listens yet, so a dial at a booting
+    # worker waits out the gate's whole handshake before it can try again. The session answers the
+    # real question in one round trip: whether the worker's port accepts a connection over there.
+    if tunnel !== nothing
+        v = via(host)
+        sh, target = v === nothing ? (host, "127.0.0.1") : (v.host, host == v.host ? "127.0.0.1" : host)
+        if Sweep.connected(sh)
+            w0 = time(); up = false
+            while time() - w0 < deadline && !(up = Sweep.reachable(sh, target, port))
+                sleep(0.25)
+            end
+            if !up
+                # Nothing listens there, which the session knows for certain: a dial would only wait
+                # out its own deadline as well.
+                quiet || _rlog("connect: worker port $port on $host never accepted in $(round(Int, deadline))s")
+                close_tunnel(tunnel)
+                return (conn = nothing, tunnel = nothing, err = "worker port $port on $host is not accepting",
+                        server_key = server_key, remote_ip = ip)
+            end
+            quiet || _rlog("connect: worker port $port on $host accepting after $(round(time() - w0; digits = 1))s")
+            deadline = max(5.0, deadline - (time() - w0))   # the dial gets what is left, not a second deadline
+        end
+    end
     quiet || _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
     quiet || _prep_stage("Connecting to worker on $host — remote Julia boot + handshake…")
     # A FORWARDED transport (:tunnel) sets up its `ssh -L` ASYNC (open_tunnel spawns it), so the local
@@ -2226,6 +2297,10 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     dial(port, stream_port; kw...) = _dial_worker(t, port, stream_port; label = k.label, kw...)
 
     t0 = time()
+    # Where a start's time goes, phase by phase, for the line that reports it connected.
+    laps = Pair{String,Float64}[]; lap_at = Ref(t0)
+    lap(name) = (push!(laps, name => time() - lap_at[]); lap_at[] = time(); nothing)
+    laps_text() = join(("$n $(round(s; digits = 1))s" for (n, s) in laps), " · ")
     # After a successful (re)attach, everything that isn't the dial moves OFF the hot path: the
     # state-sidecar write is an ssh exec that changes nothing about the live session, so it runs in
     # the background while the notebook is already usable. The attachment record
@@ -2237,8 +2312,16 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     # changed nothing, short enough that one which built an environment reads the host again.
     fresh(sv) = sv !== nothing && time() - sv.at < 60
     function fresh_spawn()
+        # Reached without one when a reattached worker turned out stale: one command answers both the
+        # provision's questions and the port pick's, where each would otherwise ask on its own.
+        if !fresh(survey)
+            survey = _start_survey(host, _projrel(t.project); stamp = _env_stamp_path(t))
+            lap("survey")
+        end
         provision_remote!(t, parent_project; seen = fresh(survey) ? survey.state : nothing)
+        lap("provision")
         start_sync!(t, parent_project; kernel = k, sent = true)
+        lap("sync")
         # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them;
         # else auto from _next_ports (9100+), floored above the roster.
         # The listening ports and the roster: the start's survey when it is recent, else one command.
@@ -2264,10 +2347,13 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         local r, port, stream_port
         for attempt in 1:_SPAWN_TRIES
             port, stream_port = pick_ports(attempt)
+            lap("ports")
             k.port = port; k.stream_port = stream_port
             _prep_stage("Starting worker process on $host")
             _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, extra_flags = k.extra_flags, region = t.region)
+            lap("launch")
             r = dial(port, stream_port; deadline = _dial_deadline_cold())   # covers remote Julia boot + KaimonGate load (~90s)
+            lap("dial")
             r.conn === nothing || break      # connected: done
             # The worker never answered. Retry only for the one cause retrying can fix: anything
             # else would just be a slower way to fail, with the real reason three attempts back.
@@ -2280,7 +2366,8 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
         _attach_record!(host, k.label; port = port, stream_port = stream_port,
                         transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip, job = t.job)
-        _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host")
+        _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host " *
+              "in $(round(time() - t0; digits = 1))s ($(laps_text()))")
         return (r.conn, r.tunnel)
     end
 
@@ -2290,10 +2377,13 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         # live worker never re-includes its code, and `tools()` is fixed at boot, so a newly added
         # gate tool can't appear on it. If its boot stamp is behind, reap it and cold-spawn fresh.
         if !_payload_current(k)
-            try; reap_remote_worker(host, k.port); catch; end
+            # Disconnected while the worker can still answer, then reaped. The other way round, the
+            # close waits out its timeouts on a process that is already gone.
             try; K.disconnect!(r.conn); catch; end
             r.tunnel === nothing || (try; close_tunnel(r.tunnel); catch; end)
+            try; reap_remote_worker(host, k.port); catch; end
             k.conn = nothing; k.tunnel = nothing
+            lap("stale reattach")
             return fresh_spawn()
         end
         _attach_record!(host, k.label; port = k.port, stream_port = k.stream_port,
@@ -2366,10 +2456,13 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     #    dial and falls through to a fresh spawn on new ports (the stale one stays visible in
     #    the roster for manual reap).
     # From here on every path asks the host the same few things, so they are asked once.
+    lap("records")
     survey = _start_survey(host, _projrel(t.project); stamp = _env_stamp_path(t))
+    lap("survey")
     roster = survey === nothing ? nothing : survey.roster
     reattach = nothing
     try; reattach = _find_live_worker(host, k.label, k.parent; workers = roster); catch; end
+    lap("probe")
     if reattach !== nothing
         k.port = reattach.port; k.stream_port = reattach.stream_port
         _rlog("reconnect: probe found live worker-$(k.port) on $host (notebook=$(k.label)) — skipping spawn + provision")
@@ -2444,6 +2537,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     end
 
     # No reusable worker (or every reattach fell through) — spawn a fresh one on new ports.
+    lap("adopt check")
     return fresh_spawn()
 end
 
@@ -3829,7 +3923,11 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     # `cellkey` (the producing cell's memo key) lets the source memo-RESTORE the value if its live global
     # is gone (a swapped worker) instead of failing "no global named" — the source persists the memo store
     # across the swap even though its namespace was reset. Empty ⇒ no fallback (caller can't name the cell).
+    # Where the time goes, phase by phase, for the line that reports the move.
+    p0 = time(); phases = Pair{String,Float64}[]
+    phase(n) = (push!(phases, n => time() - p0); p0 = time(); nothing)
     meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name), "cellkey" => String(cellkey)); timeout = _blob_xfer_timeout())
+    phase("describe")
     err = try; getproperty(meta, :error); catch; nothing; end
     err === nothing || error("transfer '$name': $err")
     h = String(meta.hash); codec = String(meta.codec)
@@ -3849,6 +3947,7 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     fellback = false                                        # a peer attempt was tried and failed → we're rescuing via relay
     if mode === :direct || mode === :auto
         route = _resolve_peer_route(src_k, dst_k)           # probe B→A: :direct / :ssh (bridge) / :relay
+        phase("route")
         if route.kind === :direct || route.kind === :ssh
             try
                 _t0 = time()
@@ -3897,11 +3996,14 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
         end
     end
 
+    phase("move")
     r = _tool(dst_k, "__slate_bind_blob", Dict{String,Any}(
         "name" => String(name), "hash" => h, "codec" => codec, "zc" => zc); timeout = _blob_xfer_timeout())
     rerr = try; getproperty(r, :error); catch; nothing; end
     rerr === nothing || error("transfer '$name' (bind): $rerr")
-    return (; bytes = moved, codec = codec, mode = used)
+    phase("bind")
+    return (; bytes = moved, codec = codec, mode = used,
+              phases = join(("$n $(round(x; digits = 2))s" for (n, x) in phases), " · "))
 end
 
 # Boot-window memo carry — "your session follows you", automatically. Called from `prepare!`
@@ -4865,7 +4967,7 @@ _worker_env_fits(w, project::AbstractString, transport::AbstractString) =
 function _claim_region_worker!(name::AbstractString, host; project::AbstractString = "", transport::AbstractString = "",
                                workers = nothing)
     isempty(String(name)) && return nothing
-    for w in something(workers, list_remote_workers(host))
+    for w in (workers === nothing ? list_remote_workers(host) : workers)   # `something` would list them regardless
         _region_warm_worker(w, name) || continue
         _worker_env_fits(w, project, transport) || continue
         sp = tryparse(Int, _manifest_get(w["manifest"], "stream_port")); sp === nothing && continue
@@ -5391,7 +5493,7 @@ end
 # unambiguous, alive, same-hub match reattaches; anything else spawns fresh.
 function _find_live_worker(host, label, parent; workers = nothing)
     matches = Tuple{Int,Int}[]
-    for w in something(workers, list_remote_workers(host))
+    for w in (workers === nothing ? list_remote_workers(host) : workers)   # `something` would list them regardless
         w["alive"] === true || continue
         mf = w["manifest"]
         (_manifest_get(mf, "notebook") == String(label) &&
@@ -5443,9 +5545,6 @@ assume it.
 """
 function reap_remote_worker(host, port::Int)
     _rlog("reap: killing worker-$port on $host (manual)")
-    # Did the host have this worker at all? Answered BEFORE the kill, so "nothing to reap" and "the
-    # host is unreachable" are distinguishable from a kill that landed.
-    existed = try; _ssh_test(host, `test -f $("$_REMOTE_WORKER/worker-$port.jl")`); catch; false; end
     try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
     try; _evict_worker_conn!(host, port); catch; end          # …and any non-parked hub wire (warm/reconnect) — else a respawn on this port hits "Already connected"
     try; _peer_route_forget!(host); catch; end                # …and any cached peer-route verdict touching this host (topology changed)
@@ -5457,14 +5556,24 @@ function reap_remote_worker(host, port::Int)
     try; _blob_dport_forget!(host, port); catch; end          # …and drop its discovered-port cache (topology changed)
     try; _attach_clear_port!(host, port); catch; end          # …and its notebook's attach record, so the next open skips a ~9s dial into the corpse
     try; _release_region_claim!(host, port); catch; end       # release the in-flight adoption claim for this port
-    # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a
-    # supersede-reap targets — never processes SIGTERM (a stopped process queues it; a signal-ignoring one
-    # drops it), so the SIGKILL escalation is what actually frees its LISTEN port and RAM. Synchronous, so
-    # by the time a cold spawn reuses this port the old holder is gone (no "address already in use").
-    let pat = "worker-$(port).jl"
-        try; _ssh_test(host, `sh -c $("pkill -TERM -f '$pat'; sleep 1; pkill -KILL -f '$pat'; true")`); catch; end
-    end
-    try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state") $("$_REMOTE_WORKER/worker-$port.stats")`); catch; end
+    # One command, since on a compute node each is a hop from the login node. Whether the worker existed
+    # is read BEFORE the kill, so "nothing to reap" and "the host is unreachable" are distinguishable from
+    # a kill that landed. SIGTERM (graceful), then SIGKILL once a short grace runs out: a FROZEN or wedged
+    # worker, exactly the kind a supersede-reap targets, never processes SIGTERM (a stopped process queues
+    # it; a signal-ignoring one drops it), so the SIGKILL is what actually frees its LISTEN port and RAM.
+    # The grace ends as soon as the process does. Synchronous, so by the time a cold spawn reuses this
+    # port the old holder is gone (no "address already in use").
+    # The worker's name is assembled from variables and matched as `[w]orker-…`: `pkill -f` reads whole
+    # command lines, and this shell's own must not contain the name it kills, or it kills itself.
+    script = "d=$(Sweep.shq(_REMOTE_WORKER)); p=$port; pat=\"[w]orker-\$p\\.jl\"; " *
+             "e=0; [ -f \"\$d/worker-\$p.jl\" ] && e=1; " *
+             "pkill -TERM -f \"\$pat\"; i=0; " *
+             "while [ \$i -lt 10 ] && pgrep -f \"\$pat\" >/dev/null 2>&1; do sleep 0.1; i=\$((i+1)); done; " *
+             "pkill -KILL -f \"\$pat\"; " *
+             "for x in jl log json state stats; do rm -f \"\$d/worker-\$p.\$x\"; done; " *
+             "echo \"existed=\$e\""
+    ok, out = try; _run_on(String(host), script); catch; (false, ""); end
+    existed = ok && occursin("existed=1", out)
     existed || _rlog("reap: no worker-$port script on $host — nothing was killed")
     return existed
 end

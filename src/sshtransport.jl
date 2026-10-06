@@ -634,6 +634,19 @@ _open_tcpip(s::Session, host::AbstractString, port::Integer) = lock(s.openlk) do
                               s.ptr, host, Cint(port), "127.0.0.1", Cint(22)); timeout = 15.0)
 end
 
+# Whether the far side accepts a connection to `host:port` now: a channel opened and closed at once.
+# A port nobody listens on fails the open straight away, so this answers in one round trip and tells
+# a booting worker from a ready one, which the local end of a forward cannot (it always accepts).
+function _reach(s::Session, host::AbstractString, port::Integer)
+    ch = _again_ptr(s, () -> ccall((:libssh2_channel_direct_tcpip_ex, LIB), Ptr{Cvoid},
+                                   (Ptr{Cvoid}, Cstring, Cint, Cstring, Cint),
+                                   s.ptr, host, Cint(port), "127.0.0.1", Cint(22)); timeout = 5.0)
+    ch == C_NULL && return (false, s.openmsg)
+    _again(s, () -> ccall((:libssh2_channel_close, LIB), Cint, (Ptr{Cvoid},), ch); timeout = 5.0)
+    lock(() -> ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch), s.lk)
+    return (true, "")
+end
+
 function _close_conn!(c::Conn)
     c.closed = true
     try; close(c.tosock); catch; end
@@ -934,7 +947,7 @@ function _serve(s::Session, ask)
             kind === :close && break
             continue
         end
-        if kind === :exec || kind === :io
+        if kind === :exec || kind === :io || kind === :reach
             # Each command on a task of its own: it holds the session only for each libssh2 call, so a
             # command that runs long, or never ends, keeps the others waiting only for a free slot.
             Threads.atomic_add!(s.busy, 1)
@@ -942,6 +955,7 @@ function _serve(s::Session, ask)
                 put!(reply, try
                     Base.acquire(s.slots) do
                         kind === :io ? _exec_io(s, arg[1], arg[2]) :
+                        kind === :reach ? _reach(s, arg[1], arg[2]) :
                         arg isa AbstractString ? _exec(s, arg) : _exec(s, arg.cmd; timeout = arg.timeout, online = arg.online)
                     end
                 catch e
@@ -1125,6 +1139,16 @@ without a second connection to authenticate.
 """
 forward!(host::AbstractString, localport::Integer, target::AbstractString, targetport::Integer; ask) =
     _request(String(host), :forward, (Int(localport), String(target), Int(targetport)),
+             (false, "session for $host is gone"); ask = ask)
+
+"""
+    reachable(host, target, port; ask) -> (ok, message)
+
+Whether `target:port`, as `host` sees it, accepts a connection now: one channel opened and closed on
+the session, with no command run.
+"""
+reachable(host::AbstractString, target::AbstractString, port::Integer; ask) =
+    _request(String(host), :reach, (String(target), Int(port)),
              (false, "session for $host is gone"); ask = ask)
 
 "Stop carrying `localport`; its live connections are closed."

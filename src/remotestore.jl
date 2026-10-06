@@ -818,6 +818,16 @@ forward!(host::AbstractString, localport::Integer, target::AbstractString, targe
             (false, _offline(host))
     end
 
+"""
+    reachable(host, target, port) -> Bool
+
+Whether `target:port`, as `host` sees it, accepts a connection now, asked over the open session with
+no command run. False when there is no session to ask over, as from a worker, which has none.
+"""
+reachable(host::AbstractString, target::AbstractString, port::Integer) =
+    !has_delegate() && connected(host) &&
+        first(SshTransport.reachable(String(host), String(target), Int(port); ask = _noask))
+
 "Stop carrying `localport`."
 unforward!(host::AbstractString, localport::Integer) =
     _via(() -> SshTransport.unforward!(String(host), localport), :unforward,

@@ -951,6 +951,7 @@ function __slate_eval(source::String; filename::String = "string",
                      ctx_regions::Vector{String} = String[],
                      ctx_attrs::Vector{String} = String[],
                      ctx_clusters::Vector{String} = String[])
+    filename == "cell:__prewarm__" || (_HUB_SEEN[] = true)   # an eval is the hub attached, too
     # Register this eval's task under its cell id so __slate_cancel can interrupt it (the server runs
     # parallel cells as concurrent __slate_eval calls; a stop throws InterruptException into them).
     cid = replace(filename, r"^cell:" => "")
@@ -1263,8 +1264,15 @@ telemetry/output PUB port (hub-assigned today); `blob` is the data-channel port,
 picks as a VERIFIED-FREE port (never `gate+2`) so a co-tenant holding `gate+2` on a shared host can't stall
 it. `blob = 0` until the (boot-deferred) blob server has bound. Never throws."
 function __slate_ports()
+    _HUB_SEEN[] = true   # the hub asks this as soon as it has attached
     return (; stream = _STREAM_PORT[], blob = _BLOB_DATA_PORT[])
 end
+
+# Set when the hub first asks for the ports, which it does as soon as its handshake is through. The
+# heavy compiles of a worker's start wait for it, so the handshake never competes with them; a worker
+# nothing attaches to (a warm one) starts them after a while all the same.
+const _HUB_SEEN = Threads.Atomic{Bool}(false)
+_after_hub_attached(timeout::Real = 15.0) = timedwait(() -> _HUB_SEEN[], timeout; pollint = 0.1)
 
 "Authorise `pubkey` (a peer worker's Z85 client public key) on THIS worker's BLOB-channel allow-list so
 it may connect to this worker's blob server — blob-pull rights ONLY, never the control gate (the blob
@@ -3142,18 +3150,12 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # key — proper mutual auth. Local + :ssh_tunnel workers leave them off (loopback / SSH-encrypted).
     # A cluster prompt raised in here has to reach the hub's dialog; nothing in this process has one.
     try; _install_sshop_delegate!(); catch e; @warn "slate: cluster delegate install failed" exception = e; end
-    _blog("start(): entering KaimonGate.serve")
-    KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
-                     tools = tools(), force = true, allow_mirror = false,
-                     allow_restart = false, spawned_by = "slate",
-                     curve = curve, allowed_clients = allowed_clients)
-    _blog("start(): gate SERVING — port reachable (hub can dial now)")
     # DEFERRED (~5s): Revise/src-watcher setup is heavy compilation; running it now would contend for
     # the codegen lock with the hub's CURVE handshake in the first seconds after the port opens (the
     # handshake path is precompiled but still needs the lock free to run fast). Let the attach win the
     # quiet CPU first, then set up hot-reload.
     Threads.@spawn begin
-        sleep(5)
+        _after_hub_attached()
         try; _start_src_watcher(); catch e; @warn "slate worker: src-watcher start failed" exception = e; end
     end
     # The blob data channel (port+2): bulk memo transfer that never queues ahead of cell results.
@@ -3215,6 +3217,16 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
             @warn "slate worker: ssh-forward reaper died" exception = e
         end
     end
+    # The gate opens LAST. A hub dials as soon as the port accepts (it asks over its ssh session), and
+    # the handshake that follows needs compiled code; while this function was still compiling the
+    # tasks above, that handshake waited behind it and the hub's dial sat out its whole ping timeout.
+    # Opened here, the port accepts only when the worker can answer at once.
+    _blog("start(): entering KaimonGate.serve")
+    KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
+                     tools = tools(), force = true, allow_mirror = false,
+                     allow_restart = false, spawned_by = "slate",
+                     curve = curve, allowed_clients = allowed_clients)
+    _blog("start(): gate SERVING — port reachable (hub can dial now)")
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
     # A memo-off worker used to be SILENT (every store/restore just returned early) — the single
     # hardest-to-spot degradation, since cells still run fine and only recompute. Say it once, loudly.
@@ -3226,7 +3238,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # worse) — while an idle-spawned worker (warm pool, detach target) has it fully paid before
     # anyone attaches. "1 + 1" exercises exactly the measured slow path; it writes no globals.
     Threads.@spawn try
-        sleep(5)   # DEFERRED: this is the biggest boot compile — let the hub attach on a clear CPU first
+        _after_hub_attached()   # DEFERRED: this is the biggest boot compile — let the hub attach on a clear CPU first
         t0 = time()
         # Through the TOOL entry point (not _eval_one) so the wrapper + cancel-registry +
         # kwarg path compile too — the layers a real first request would otherwise JIT.
