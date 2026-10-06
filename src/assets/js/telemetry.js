@@ -147,12 +147,17 @@ function cellSpans(s, done) {
 }
 const SPAN_COLOR = { ran: '#569cd6', running: '#56d364', restored: '#9d8fd6', err: '#e5636e' };
 
-// GC time as a share of wall time between samples, from the cumulative `gc_ms`.
-const gcPct = (s) => s.map((x, i) => {
+// A cumulative milliseconds counter (GC time, compile time) as a share of wall time between samples.
+const msShare = (s, get) => s.map((x, i) => {
   if (!i) return [ms(x), null];
-  const p = s[i - 1], dt = x.t - p.t;
-  return [ms(x), dt > 0 ? Math.max(0, Math.min(100, (x.gc_ms - p.gc_ms) / 10 / dt)) : null];
+  const p = s[i - 1], dt = x.t - p.t, a = get(p), b = get(x);
+  return [ms(x), dt > 0 && a >= 0 && b >= 0 ? Math.max(0, Math.min(100, (b - a) / 10 / dt)) : null];
 });
+const gcPct = (s) => msShare(s, x => x.gc_ms);
+const compilePct = (s) => msShare(s, x => (x.proc || {}).compile_ms ?? -1);
+// How much a cumulative count grew over the window shown, or 0 when the samples cannot say.
+const grew = (s, get) => { if (s.length < 2) return 0; const a = get(s[0]), b = get(s[s.length - 1]);
+                           return a >= 0 && b >= a ? b - a : 0; };
 
 // ── charts ──────────────────────────────────────────────────────────────────────────────────────
 // The tooltip's heading is the axis pointer's label: the time of day, the window being minutes long.
@@ -271,22 +276,39 @@ function Telemetry() {
   xWindow = [ms(s[0]), ms(last)];
   const nc = r.hostCores, spans = cellSpans(s, runs.value);
   const ids = [...new Set(spans.map(x => x.id))];
-  const gcNow = gcPct(s.slice(-2)).pop()[1];
+  const gcNow = gcPct(s.slice(-2)).pop()[1], compileNow = compilePct(s.slice(-2)).pop()[1];
+  const P = (x) => x.proc || {}, J = (x) => x.job || {};
+  const pauses = grew(s, x => P(x).gc_pauses ?? -1), fulls = grew(s, x => P(x).gc_full ?? -1);
+  const compiled = grew(s, x => P(x).compile_ms ?? -1) / 1000;
+  const throttled = grew(s, x => J(x).nr_throttled ?? -1);
+  const limitHits = grew(s, x => J(x).mem_limit_hits ?? -1), oomKills = grew(s, x => J(x).oom_kills ?? -1);
+  const disks = last.disks || [];
+  const dot = (...xs) => xs.filter(Boolean).join(' · ') || null;
 
   const tiles = html`<div class="tm-tiles">
-    <${Tile} label="CPU" value=${r.cpuText}
-             sub=${r.hostCpu != null ? 'host ' + pct(r.hostCpu) + (nc ? ' of ' + nc + ' cores' : '') : null}/>
+    <${Tile} label="CPU" value=${r.cpuText} tone=${throttled > 0 ? 'warn' : ''}
+             sub=${dot(r.hostCpu != null ? 'host ' + pct(r.hostCpu) + (nc ? ' of ' + nc + ' cores' : '') : '',
+                       last.load1 >= 0 ? 'load ' + last.load1 : '', throttled > 0 ? 'throttled ' + throttled + '×' : '')}/>
     <${Tile} label=${r.mem && r.mem.of === 'host' ? 'Memory · host' : 'Memory'}
              value=${r.mem ? B(r.mem.used) + ' / ' + B(r.mem.limit) : B(last.rss)}
              frac=${r.memFrac}
-             tone=${r.memFrac > 0.85 ? 'warn' : ''}
-             sub=${r.mem ? 'this worker ' + B(last.rss) : null}/>
+             tone=${r.memFrac > 0.85 || limitHits > 0 || oomKills > 0 ? 'warn' : ''}
+             sub=${dot(r.mem ? 'this worker ' + B(last.rss) : '', host.swap_used > 0 ? 'swap ' + B(host.swap_used) : '',
+                       limitHits > 0 ? 'at limit ' + limitHits + '×' : '', oomKills > 0 ? oomKills + ' OOM kill' + (oomKills > 1 ? 's' : '') : '')}/>
     ${r.gpus.length ? html`<${Tile} label=${r.gpus.length > 1 ? 'GPUs · ' + r.gpus.length : 'GPU'} value=${r.gpuAvg == null ? '—' : pct(r.gpuAvg)}
              frac=${r.gpuAvg == null ? null : r.gpuAvg / 100}
              sub=${r.gpus.map(g => B(g.memUsed) + ' / ' + B(g.memTotal)).join(' · ')}/>` : null}
     <${Tile} label="Garbage collection" value=${gcNow == null ? '—' : gcNow.toFixed(1) + '%'}
-             sub=${proc.alloc_rate >= 0 ? 'allocating ' + B(proc.alloc_rate) + '/s' : null}
+             sub=${dot(proc.alloc_rate >= 0 ? 'allocating ' + B(proc.alloc_rate) + '/s' : '',
+                       pauses > 0 ? pauses + ' pauses' : '', fulls > 0 ? fulls + ' full' : '')}
              tone=${gcNow > 30 ? 'warn' : ''}/>
+    ${proc.compile_ms >= 0 ? html`<${Tile} label="Compilation" value=${compileNow == null ? '—' : compileNow.toFixed(1) + '%'}
+             sub=${compiled > 0 ? compiled.toFixed(1) + ' s in window' : null}/>` : null}
+    ${proc.threads > 0 ? html`<${Tile} label="Process" value=${proc.threads + ' threads'}
+             sub=${proc.fds >= 0 ? proc.fds + ' open files' : null}/>` : null}
+    ${disks.map(d => html`<${Tile} label=${'Disk · ' + d.label} value=${B(d.free) + ' free'}
+             frac=${d.total > 0 ? 1 - d.free / d.total : null} tone=${d.total > 0 && d.free / d.total < 0.1 ? 'warn' : ''}
+             sub=${d.path}/>`)}
   </div>`;
 
   const spanKey = html`<span class="tm-key">${Object.entries({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })
@@ -334,6 +356,7 @@ function Telemetry() {
     yAxis: { type: 'value', max: memLimit > 0 ? memLimit : null, axisLabel: { formatter: B },
              splitLine: { lineStyle: { opacity: 0.25 } } },
     series: [line('this worker', series(s, x => x.rss), { areaStyle: { opacity: 0.12 } }),
+             proc.heap >= 0 ? line('Julia heap', series(s, x => (x.proc || {}).heap ?? -1)) : null,
              job.mem_max > 0 ? line('job', series(s, x => (x.job || {}).mem_cur)) :
                host.mem_avail >= 0 ? line('host used', series(s, x => ((x.host || {}).mem_avail >= 0 ? x.sys_mem_total - x.host.mem_avail : -1))) : null]
             .filter(Boolean) });
@@ -394,7 +417,11 @@ function Telemetry() {
     series: [line('cpu', series(s, x => (x.host || {}).psi_cpu)), line('memory', series(s, x => (x.host || {}).psi_mem)),
              line('io', series(s, x => (x.host || {}).psi_io))] }) : null;
   const julia = base('', pctTick, { yAxis: pctAxis,
-    series: [line('gc time', gcPct(s), { areaStyle: { opacity: 0.12 } })] });
+    series: [line('gc time', gcPct(s), { areaStyle: { opacity: 0.12 } }),
+             proc.compile_ms >= 0 ? line('compile', compilePct(s)) : null].filter(Boolean) });
+  const memoStore = s.some(x => (x.memo_bytes ?? x.memo) >= 0)
+    ? base('', B, { series: [line('memo store', series(s, x => x.memo_bytes ?? x.memo ?? -1), { areaStyle: { opacity: 0.12 } })] })
+    : null;
   const alloc = base('per second', B, { series: [line('allocation', series(s, x => (x.proc || {}).alloc_rate))] });
 
   const gpuSec = gpus.length ? html`<${Section} title="GPU">
@@ -419,6 +446,13 @@ function Telemetry() {
             yAxis: { type: 'value', max: Math.max(0, ...gpus.map(g => g.mem_total || 0)) || null,
                      axisLabel: { formatter: B }, splitLine: { lineStyle: { opacity: 0.25 } } },
             series: gpus.map(g => line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).mem_used))) })}/>
+        ${gpus.some(g => g.power_w >= 0) ? html`<${Chart} option=${base('W', (v) => Math.round(v) + ' W', {
+            yAxis: { type: 'value', name: 'W', nameTextStyle: { align: 'left' }, min: 0,
+                     max: Math.max(0, ...gpus.map(g => g.power_limit_w || 0)) || null,
+                     axisLabel: { formatter: (v) => Math.round(v) + ' W' }, splitLine: { lineStyle: { opacity: 0.25 } } },
+            series: gpus.map(g => line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).power_w ?? -1))) })}/>` : null}
+        ${gpus.some(g => g.temp >= 0) ? html`<${Chart} option=${base('°C', (v) => Math.round(v) + '°C', {
+            series: gpus.map(g => line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).temp ?? -1))) })}/>` : null}
       </div></${Section}>` : null;
 
   return html`<div class="tm-bg" onMouseDown=${e => e.target.classList.contains('tm-bg') && close()}>
@@ -432,7 +466,8 @@ function Telemetry() {
         ${gpuSec}
         ${io || psi ? html`<${Section} title=${io && psi ? 'I/O and pressure' : io ? 'I/O' : 'Pressure'}><div class="tm-grid">
           ${io ? html`<${Chart} option=${io}/>` : null}${psi ? html`<${Chart} option=${psi}/>` : null}</div></${Section}>` : null}
-        <${Section} title="Julia runtime"><div class="tm-grid"><${Chart} option=${julia}/><${Chart} option=${alloc}/></div></${Section}>
+        <${Section} title="Julia runtime"><div class="tm-grid"><${Chart} option=${julia}/><${Chart} option=${alloc}/>
+          ${memoStore ? html`<${Chart} option=${memoStore}/>` : null}</div></${Section}>
       </div></div></div>`;
 }
 

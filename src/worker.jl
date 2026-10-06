@@ -3007,7 +3007,25 @@ function _telemetry_loop!(stats_path::String)
     else
         (-1, -1)
     end
-    lastc = cputime(); lastw = time(); memo = -1; tick = 0; spin = 0
+    # The data root and the memo store's filesystem: what a long run fills. One entry per filesystem.
+    disks() = try
+        seen = Set{Tuple{Int,Int}}(); out = String[]
+        root = strip(get(ENV, "KAIMONSLATE_DATADIR", ""))
+        base = isempty(PARENT_PROJECT[]) ? "" : joinpath(PARENT_PROJECT[], "data")
+        for (label, p) in (("data", isempty(root) ? base : String(root)), ("memo", dirname(_memo_dir())))
+            (isempty(p) || !isdir(p)) && continue
+            d = Base.diskstat(p)
+            (d.total, d.available) in seen && continue
+            push!(seen, (d.total, d.available))
+            push!(out, "{\"label\":\"$label\",\"path\":\"" * replace(p, "\\" => "\\\\", "\"" => "\\\"") *
+                       "\",\"free\":$(d.available),\"total\":$(d.total)}")
+        end
+        "[" * join(out, ",") * "]"
+    catch
+        "[]"
+    end
+    try; Base.cumulative_compile_timing(true); catch; end   # counted, so a cell's own @time leaves it on
+    lastc = cputime(); lastw = time(); memo = -1; tick = 0; spin = 0; disk = "[]"
     g0 = Base.gc_num(); last_ttsp = g0.total_time_to_safepoint; last_gct = g0.total_time
     sys = try; SysSampler(); catch; nothing; end
     lastsb, lastst = sysstat()
@@ -3030,7 +3048,7 @@ function _telemetry_loop!(stats_path::String)
         last_ttsp = g.total_time_to_safepoint; last_gct = g.total_time
         cpu = (c >= 0 && lastc >= 0 && w > lastw) ? round(100 * (c - lastc) / (w - lastw); digits = 1) : -1.0
         lastc = c; lastw = w
-        (memo < 0 || tick % 15 == 0) && (memo = _dir_bytes(joinpath(_memo_dir(), "blobs")))
+        (memo < 0 || tick % 15 == 0) && (memo = _dir_bytes(joinpath(_memo_dir(), "blobs")); disk = disks())
         # The LIVE running-cell ids — the per-eval heartbeat the hub reconciles against (a cell the hub
         # thinks is running but that's absent here is orphaned). Cheap: just the keys under the lock.
         runids = lock(_CANCEL_LOCK) do; collect(keys(_RUNNING_TASKS)); end
@@ -3072,7 +3090,7 @@ function _telemetry_loop!(stats_path::String)
         line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
                "\"running\":$running,\"warm\":\"$warm\",\"memo_bytes\":$memo," *
                "\"sys_cpu\":$syscpu,\"load1\":$load1,\"sys_mem_total\":$smt,\"sys_mem_free\":$smf," *
-               "\"last_eval_mono\":$(_LAST_EVAL_AT[]),\"gpus\":$gpus$hpj$stall," *
+               "\"last_eval_mono\":$(_LAST_EVAL_AT[]),\"gpus\":$gpus,\"disks\":$disk$hpj$stall," *
                "\"ts\":$(round(Int, time()))}"
         try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
         isempty(stats_path) || try                          # roster sidecar — remote workers only

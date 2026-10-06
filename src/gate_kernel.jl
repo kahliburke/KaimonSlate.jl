@@ -608,6 +608,8 @@ function _parse_telemetry(raw::AbstractString)
          host    = _dict_of(get(d, "host", nothing)),
          proc    = _dict_of(get(d, "proc", nothing)),
          job     = _dict_of(get(d, "job", nothing)),
+         # Free space where the worker's data and memo store live, one entry per filesystem.
+         disks   = [_dict_of(x) for x in something(get(d, "disks", nothing), Any[]) if x isa AbstractDict],
          ts      = Float64(get(d, "ts", 0.0)),
          rcv     = time(),
          # "worker" when the worker sent it; "host" when the hub read it from outside the process.

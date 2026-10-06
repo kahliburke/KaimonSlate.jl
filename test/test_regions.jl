@@ -946,6 +946,22 @@ end
                 Base.invokelatest(S.sys_sample!, smp); sleep(0.2)
                 x = Base.invokelatest(S.sys_sample!, smp)
                 @test x.proc["threads"] >= 1 && haskey(x.proc, "alloc_rate") && x.host["ncpu"] >= 1   # on any OS
+                @test haskey(x.proc, "compile_ms") && haskey(x.proc, "gc_pauses") && haskey(x.proc, "gc_full")
+                # The job's throttling and memory events, read from its cgroup's own records.
+                if Sys.islinux()
+                    cg = mktempdir()
+                    write(joinpath(cg, "memory.max"), "100\n"); write(joinpath(cg, "memory.current"), "40\n")
+                    write(joinpath(cg, "cpu.stat"), "usage_usec 9\nnr_periods 5\nnr_throttled 3\nthrottled_usec 7000\n")
+                    write(joinpath(cg, "memory.events"), "low 0\nhigh 0\nmax 2\noom 1\noom_kill 1\n")
+                    smc = Base.invokelatest(S.SysSampler); smc.cg = cg
+                    jx = Base.invokelatest(S.sys_sample!, smc).job
+                    @test jx["nr_throttled"] == 3 && jx["throttled_ms"] == 7
+                    @test jx["mem_limit_hits"] == 2 && jx["oom_kills"] == 1
+                end
+                # Free space rides through the hub's parse to the page.
+                sd = RE._parse_telemetry("{\"cpu\":1.0,\"disks\":[{\"label\":\"data\",\"path\":\"/d\",\"free\":5,\"total\":10}],\"ts\":1}")
+                @test sd.disks[1]["free"] == 5 && sd.disks[1]["label"] == "data"
+                @test isempty(RE._parse_telemetry("{\"cpu\":1.0,\"ts\":1}").disks)
                 Sys.islinux() || @test !haskey(x.host, "cores")                  # Linux-only figures are absent
                 line = "{\"cpu\":1.0,\"running\":[\"c1\"],\"host\":{\"cores\":[10.0,90.0,60.0],\"mem_avail\":5}," *
                        "\"proc\":" * Base.invokelatest(S.sys_json, x.proc) * ",\"job\":{\"mem_max\":100,\"mem_cur\":40},\"ts\":1}"

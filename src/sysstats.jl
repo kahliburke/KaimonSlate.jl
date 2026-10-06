@@ -99,6 +99,11 @@ function sys_sample!(s::SysSampler)
     a = _alloc_bytes()
     proc["alloc_rate"] = rate(a, s.alloc); s.alloc = a
     proc["heap"] = try; Int(Base.gc_live_bytes()); catch; -1; end
+    # Cumulative, so the view takes the share of each interval itself, as it does for GC time. Compile
+    # time counts only while compile timing is on, which the telemetry loop turns on.
+    proc["compile_ms"] = try; round(Int, Base.cumulative_compile_time_ns()[1] / 1e6); catch; -1; end
+    g = try; Base.gc_num(); catch; nothing; end
+    g === nothing || (proc["gc_pauses"] = Int(g.pause); proc["gc_full"] = Int(g.full_sweep))
     Sys.isapple() && (host["mem_avail"] = try; _macos_mem_avail(); catch; -1; end)
     if Sys.islinux()
         cores = Tuple{Int,Int}[]
@@ -138,6 +143,18 @@ function sys_sample!(s::SysSampler)
         if !isempty(s.cg)
             job["mem_max"] = _num(_rd(joinpath(s.cg, "memory.max")))
             job["mem_cur"] = _num(_rd(joinpath(s.cg, "memory.current")))
+            # How often the scheduler held the job's CPU back, and how often it reached its memory
+            # limit or had a process killed for it: cumulative counts, from the cgroup's own records.
+            for l in eachline(IOBuffer(_rd(joinpath(s.cg, "cpu.stat"))))
+                f = split(l); length(f) == 2 || continue
+                f[1] == "nr_throttled" && (job["nr_throttled"] = _num(f[2]))
+                f[1] == "throttled_usec" && (job["throttled_ms"] = _num(f[2]) ÷ 1000)
+            end
+            for l in eachline(IOBuffer(_rd(joinpath(s.cg, "memory.events"))))
+                f = split(l); length(f) == 2 || continue
+                f[1] == "max" && (job["mem_limit_hits"] = _num(f[2]))
+                f[1] == "oom_kill" && (job["oom_kills"] = _num(f[2]))
+            end
             cm = split(_rd(joinpath(s.cg, "cpu.max")))
             (length(cm) == 2 && cm[1] != "max") && (job["cpus"] = round(parse(Int, cm[1]) / parse(Int, cm[2]); digits = 1))
             # A scheduler limits CPUs by a cpuset (which cores), not a quota: the count, and the cores
