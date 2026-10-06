@@ -194,7 +194,7 @@ function env_readiness(host::AbstractString, project::AbstractString, nodetype::
     # Another environment with the same contents that passed there answers for this one: a copied
     # notebook's own environment, or two notebooks that use the same packages.
     tested_twin(host, project, nodetype; depot) === nothing || return ""
-    e isa AbstractDict && return "packages changed since tested"
+    e isa AbstractDict && return "packages changed since the last prepare, so the cluster's copy needs reinstalling"
     return isempty(hf) ? "not prepared" : "not tested on " * _node_words(nodetype)
 end
 

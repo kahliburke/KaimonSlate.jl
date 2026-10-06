@@ -221,7 +221,7 @@ const RE = KaimonSlate.ReportEngine
             t2 = S._with(S.cluster(Dict(String(k) => string(v) for (k, v) in RE.cluster_get_resolved("tm"))); parent = proj)
             @test S._untested(t2)                                       # its environment changed since
             @test RE.env_readiness(r.host, proj, RE.region_node_type(r); depot = RE.region_depot(r)) ==
-                  "packages changed since tested"
+                  "packages changed since the last prepare, so the cluster's copy needs reinstalling"
             RE.host_facts_set!("tmhost", Dict{String,Any}())
             RE.region_delete!("tm"); RE.cluster_delete!("tm")
         end
