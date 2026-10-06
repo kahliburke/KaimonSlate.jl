@@ -366,6 +366,10 @@ function _cellRegionSet() {
 const BLOCKED_TEXT = { queued: 'queued', not_signed_in: 'not signed in', connecting: 'connecting',
                        not_requested: 'run to request a node', needs_prepare: 'prepare the region',
                        preparing: 'preparing', locked: 'locked' };
+// The waits something is working through. The rest wait for a person (a run, a prepare, a sign-in),
+// and a clock on those reads as if they would end by themselves.
+const BLOCKED_TICKS = new Set(['queued', 'connecting', 'preparing']);
+const _blockedAtOf = (c) => (c && BLOCKED_TICKS.has(c.blocked) && +c.blockedAt) || 0;
 function blockedText(c) {
   const code = (c && c.blocked) || '';
   return BLOCKED_TEXT[code] || code.replace(/_/g, ' ');
@@ -390,12 +394,12 @@ function cellRegionChip(c) {
   // name. Where it runs and whether it is running are one fact about one cell; splitting them into
   // two pills at opposite ends of the header made the reader hunt for the half that matters.
   if (blocked) {
-    const w = _blockedWaited(c);
+    const w = _blockedWaited({ blockedAt: _blockedAtOf(c) });
     // `data-bkey` is what the header patch compares against, so a chip that is already correct is
     // left ALONE. Replacing it needlessly destroys the node between mousedown and mouseup, which
     // swallows the click — the chip is also a button.
     return `<span class="cregion blocked" data-bkey="${_esc(_blockedKey(c))}"` +
-      ` data-at="${+(c.blockedAt) || 0}" data-reg="${_esc(loc.name || '')}"` +
+      (_blockedAtOf(c) ? ` data-at="${_blockedAtOf(c)}"` : '') + ` data-reg="${_esc(loc.name || '')}"` +
       ` onmouseenter="window.blockInfo(this,'${c.id}')" onmouseleave="window.blockInfoHide()"` +
       ((c.blocked === 'needs_prepare' || c.blocked === 'preparing')
         ? ` onmousedown="window.openPrepare && window.openPrepare('${_esc(loc.name || '')}', event)">`
@@ -822,7 +826,7 @@ function _blkRegHost(reg) {
 // Only what the chip has not already said. The chip reads "🖧 pbsnode · queued 2m", so repeating the
 // status and the region name at the top of the panel spends the first line saying nothing.
 function _blkRender(c, reg, load) {
-  const at = +(c.blockedAt) || 0;
+  const at = _blockedAtOf(c);
   const when = at ? new Date(at * 1000).toLocaleTimeString() : '';
   // `ask` and `eta` ride the same round trip as the capacity, so they appear when it does.
   const rows = [], host = _blkRegHost(reg);
