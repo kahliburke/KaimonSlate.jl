@@ -14,6 +14,7 @@ const view = signal(null);        // {side, host, port, label} while open
 const samples = signal([]);       // full samples, oldest first
 const runs = signal([]);          // completed cell runs the hub recorded: {id, t0, t1, memo, err}
 const range = signal(300);        // seconds shown; 0 = everything the hub holds
+const gpuPick = signal('all');    // the GPU the GPU charts show: 'all', or its index
 const failed = signal('');
 // The page's model changed (model.js): what the header and the caller's bar show comes from it.
 const modelTick = signal(0);
@@ -203,8 +204,10 @@ function compact(option, active = false) {
   const o = Object.assign({ backgroundColor: 'transparent' }, option);
   if (o.tooltip) {
     const tt = o.tooltip, vf = tt.valueFormatter || ((v) => v);
+    // A series on a second axis carries its own units (`tooltip.valueFormatter` on the series).
+    const vfOf = (p) => ((((o.series || [])[p.seriesIndex] || {}).tooltip || {}).valueFormatter) || vf;
     const body = tt.formatter || ((ps) => ps.filter(p => p.value && p.value[1] != null).map(p =>
-      p.marker + p.seriesName + '<span style="float:right;margin-left:14px;font-weight:600">' + vf(p.value[1]) + '</span>').join('<br>'));
+      p.marker + p.seriesName + '<span style="float:right;margin-left:14px;font-weight:600">' + vfOf(p)(p.value[1]) + '</span>').join('<br>'));
     const fmt = tt.trigger !== 'axis' ? tt.formatter : (ps) => {
       const list = Array.isArray(ps) ? ps : [ps], rows = body(list);
       const head = active && list[0] ? new Date(+list[0].axisValue).toLocaleTimeString() : '';
@@ -434,8 +437,35 @@ function Telemetry() {
     : null;
   const alloc = base('per second', B, { series: [line('allocation', series(s, x => (x.proc || {}).alloc_rate))] });
 
-  const gpuSec = gpus.length ? html`<${Section} title="GPU">
-      <div class="tm-gpus">${gpus.map(g => html`<div class="tm-gpu">
+  // Two charts, each with an axis either side: busy and memory, and power and temperature. Across
+  // every GPU, busy and bandwidth are means, the peak the highest, memory and power totals, and the
+  // temperature the hottest; a selector narrows them all to one GPU.
+  const sel = gpus.length > 1 && gpuPick.value !== 'all' && gpus.some(g => String(g.i) === gpuPick.value)
+    ? +gpuPick.value : null;
+  const mine = gpus.filter(g => sel == null || g.i === sel);
+  const sum = (a) => a.reduce((t, v) => t + v, 0), mean = (a) => sum(a) / a.length, top = (a) => Math.max(...a);
+  const gv = (f, agg) => (x) => { const v = (x.gpus || []).filter(g => sel == null || g.i === sel).map(f)
+                                     .filter(v => v != null && v >= 0); return v.length ? agg(v) : -1; };
+  const memCap = sum(mine.map(g => g.mem_total || 0)) || null, powCap = sum(mine.map(g => g.power_limit_w || 0)) || null;
+  const W = (v) => Math.round(v) + ' W', C = (v) => Math.round(v) + '°C', Pc = (v) => Math.round(v) + '%';
+  const right = { splitLine: { show: false } }, grid2 = Object.assign({}, GRID, { right: 56 });
+  const gpuBusy = base('', Pc, { grid: grid2,
+    yAxis: [{ type: 'value', min: 0, max: 100, axisLabel: { formatter: Pc }, splitLine: { lineStyle: { opacity: 0.25 } } },
+            Object.assign({ type: 'value', min: 0, max: memCap, axisLabel: { formatter: B } }, right)],
+    series: [line('busy', series(s, gv(g => g.util, mean)), { areaStyle: { opacity: 0.12 } }),
+             line('peak', series(s, gv(g => g.util_max, top)), { raw: true, lineStyle: { width: 1, type: 'dotted', opacity: 0.7 } }),
+             line('bandwidth', series(s, gv(g => g.mem_util, mean))),
+             line('memory', series(s, gv(g => g.mem_used, sum)), { yAxisIndex: 1, tooltip: { valueFormatter: B } })] });
+  const gpuHeat = base('', W, { grid: grid2,
+    yAxis: [{ type: 'value', min: 0, max: powCap, axisLabel: { formatter: W }, splitLine: { lineStyle: { opacity: 0.25 } } },
+            Object.assign({ type: 'value', min: 0, axisLabel: { formatter: C } }, right)],
+    series: [line('power', series(s, gv(g => g.power_w, sum))),
+             line('temperature', series(s, gv(g => g.temp, top)), { yAxisIndex: 1, tooltip: { valueFormatter: C } })] });
+  const gpuSel = gpus.length > 1 ? html`<span class="tm-seg">${[['all', 'all'], ...gpus.map(g => [String(g.i), 'gpu' + g.i])]
+      .map(([k, l]) => html`<button class=${'tm-segb' + ((sel == null ? 'all' : String(sel)) === k ? ' on' : '')}
+                                    onClick=${() => { gpuPick.value = k; }}>${l}</button>`)}</span>` : null;
+  const gpuSec = gpus.length ? html`<${Section} title="GPU" aside=${gpuSel}>
+      <div class="tm-gpus">${mine.map(g => html`<div class="tm-gpu">
         <div class="tm-gname">gpu${g.i} · ${g.name}</div>
         <div class="tm-gstats">
           <span>${pct(g.util)} busy</span><span>${pct(g.mem_util)} memory bandwidth</span>
@@ -446,24 +476,7 @@ function Telemetry() {
           ${g.proc_mem > 0 ? html`<span>this worker ${B(g.proc_mem)}</span>` : null}
           ${(g.throttle || []).length ? html`<span class="tm-throttle">held back: ${g.throttle.join(', ')}</span>` : null}
         </div></div>`)}</div>
-      <div class="tm-grid">
-        <${Chart} option=${base('%', (v) => Math.round(v) + '%', { yAxis: { type: 'value', max: 100, axisLabel: { formatter: (v) => v + '%' }, splitLine: { lineStyle: { opacity: 0.25 } } },
-          // The average over each interval, and its busiest moment, faint behind it.
-          series: gpus.flatMap(g => [line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).util)),
-            line('gpu' + g.i + ' peak', series(s, x => { const v = ((x.gpus || [])[g.i] || {}).util_max; return v == null ? -1 : v; }),
-                 { raw: true, lineStyle: { width: 1, type: 'dotted', opacity: 0.7 } })]) })}/>
-        <${Chart} option=${base('', B, {
-            yAxis: { type: 'value', max: Math.max(0, ...gpus.map(g => g.mem_total || 0)) || null,
-                     axisLabel: { formatter: B }, splitLine: { lineStyle: { opacity: 0.25 } } },
-            series: gpus.map(g => line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).mem_used))) })}/>
-        ${gpus.some(g => g.power_w >= 0) ? html`<${Chart} option=${base('W', (v) => Math.round(v) + ' W', {
-            yAxis: { type: 'value', name: 'W', nameTextStyle: { align: 'left' }, min: 0,
-                     max: Math.max(0, ...gpus.map(g => g.power_limit_w || 0)) || null,
-                     axisLabel: { formatter: (v) => Math.round(v) + ' W' }, splitLine: { lineStyle: { opacity: 0.25 } } },
-            series: gpus.map(g => line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).power_w ?? -1))) })}/>` : null}
-        ${gpus.some(g => g.temp >= 0) ? html`<${Chart} option=${base('°C', (v) => Math.round(v) + '°C', {
-            series: gpus.map(g => line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).temp ?? -1))) })}/>` : null}
-      </div></${Section}>` : null;
+      <div class="tm-grid"><${Chart} option=${gpuBusy}/><${Chart} option=${gpuHeat}/></div></${Section}>` : null;
 
   return html`<div class="tm-bg" onMouseDown=${e => e.target.classList.contains('tm-bg') && close()}>
     <div class="tm-card" role="dialog" aria-modal="true">

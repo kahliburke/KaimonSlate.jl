@@ -158,6 +158,12 @@
 .tm-sechead { display:flex; align-items:baseline; gap:10px; margin-bottom:4px; }
 .tm-sechead h3 { margin:0; font-size:.82rem; font-weight:600; color:var(--text, #d4d8e8); }
 .tm-key { display:flex; gap:12px; font-size:.72rem; color:var(--dim, #6a7090); }
+.tm-seg { display:inline-flex; gap:2px; margin-left:auto; }
+.tm-segb { font:inherit; font-size:.72rem; padding:1px 8px; border:1px solid var(--border, #2a3045); border-radius:5px;
+  background:none; color:var(--dim, #6a7090); cursor:pointer; }
+.tm-segb:hover { color:var(--text, #d4d8e8); }
+.tm-segb.on { color:var(--text, #d4d8e8); background:color-mix(in srgb, var(--accent, #569cd6) 22%, transparent);
+  border-color:color-mix(in srgb, var(--accent, #569cd6) 55%, transparent); }
 .tm-key i { display:inline-block; width:10px; height:6px; border-radius:2px; margin-right:5px; vertical-align:1px; }
 .tm-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(420px, 1fr)); gap:8px; }
 .tm-chart { width:100%; background:var(--bg2, #141828); border:1px solid var(--border, #2a2e40); border-radius:10px; }
