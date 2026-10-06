@@ -505,3 +505,35 @@ end
         end
     end
 end
+
+@testset "archives cross the link gzipped" begin
+    # The hub carries the codec, so it is loaded wherever the hub's code runs.
+    @test SW._zlib() !== nothing
+    src = Vector{UInt8}(codeunits(repeat("function f(x) x + 1 end\n", 2000)))
+    gz = SW._gzip_bytes(src)
+    @test gz[1:2] == [0x1f, 0x8b] && length(gz) < length(src) ÷ 10
+    @test SW._gunzip_if(gz) == src
+    @test SW._gunzip_if(src) === src                     # not gzip: left alone
+    mktempdir() do d
+        p = joinpath(d, "a.tar"); write(p, src)
+        gp = SW._gzip_file(p)
+        @test SW._gunzip_if(read(gp)) == src
+    end
+
+    # The archive arrives gzipped and the far side inflates it with the `gzip` program.
+    mktempdir() do d
+        proj = joinpath(d, "proj"); mkpath(joinpath(proj, "src"))
+        write(joinpath(proj, "src", "A.jl"), "a"); write(joinpath(proj, "B.jl"), "b")
+        tar = SW._archive(proj, _ -> true)
+        dest = joinpath(d, "dest")
+        prefix = "mkdir -p " * SW.shq_path(dest) * " && cd " * SW.shq_path(dest) * " && "
+        @test SW._send_archive("", prefix, tar, SW._gzip_bytes(tar))
+        @test read(joinpath(dest, "src", "A.jl"), String) == "a" && read(joinpath(dest, "B.jl"), String) == "b"
+
+        # A far side that cannot unpack the gzipped copy is sent the plain one.
+        dest2 = joinpath(d, "dest2")
+        prefix2 = "mkdir -p " * SW.shq_path(dest2) * " && cd " * SW.shq_path(dest2) * " && "
+        @test SW._send_archive("", prefix2, tar, UInt8[0x1f, 0x8b, 0x00])   # corrupt: the unpack fails
+        @test read(joinpath(dest2, "B.jl"), String) == "b"
+    end
+end

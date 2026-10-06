@@ -750,6 +750,63 @@ function _unarchive(data::Vector{UInt8}, dest::AbstractString; skip = _ -> false
     end
 end
 
+# ── Compressing what crosses the link ──────────────────────────────────────────────────────────
+# The link to a cluster is often the slowest part of a transfer: a home uplink moves well under a
+# megabyte a second, and source and metadata archives shrink three to five times under gzip. The
+# codec is CodecZlib, which the hub carries. This file also runs inside workers, which may not have
+# it, and from there archives travel as they are. The far side needs only the `gzip` program.
+const _ZLIB_ID = Base.PkgId(Base.UUID("944b1d66-785c-5afd-91f1-9de20f533193"), "CodecZlib")
+_zlib() = get(Base.loaded_modules, _ZLIB_ID, nothing)
+
+# The bytes gzipped, or `nothing` without a codec.
+function _gzip_bytes(data::Vector{UInt8})
+    z = _zlib(); z === nothing && return nothing
+    return Base.invokelatest(transcode, z.GzipCompressor, data)
+end
+
+# `path` gzipped into a new file beside it, or `nothing` without a codec. Streamed, so an archive of
+# any size never has to fit in memory.
+function _gzip_file(path::AbstractString)
+    z = _zlib(); z === nothing && return nothing
+    out = string(path, ".gz")
+    Base.invokelatest() do
+        open(path, "r") do src
+            dst = z.GzipCompressorStream(open(out, "w"))
+            try
+                buf = Vector{UInt8}(undef, 1 << 20)
+                while !eof(src)
+                    n = readbytes!(src, buf)
+                    write(dst, view(buf, 1:n))
+                end
+            finally
+                close(dst)                  # flushes the trailer and closes the file
+            end
+        end
+    end
+    return out
+end
+
+# What came back, inflated when it is gzip (the far side compressed it) and left alone otherwise.
+function _gunzip_if(data::Vector{UInt8})
+    (length(data) >= 2 && data[1] == 0x1f && data[2] == 0x8b) || return data
+    z = _zlib(); z === nothing && return data
+    return Base.invokelatest(transcode, z.GzipDecompressor, data)
+end
+
+# Send an archive into `dir` on the host, gzipped when this side can make it. `prefix` runs first.
+# A far side whose unpack fails on the gzipped copy (no `gzip` there) is sent the plain one.
+function _send_archive(host::AbstractString, prefix::AbstractString, plain::Union{Vector{UInt8},AbstractString},
+                       gz::Union{Vector{UInt8},AbstractString,Nothing})
+    send(input, unpack) = input isa AbstractString ?
+        open(io -> first(run_io(host, prefix * unpack, io)), input, "r") :
+        first(run_io(host, prefix * unpack, input))
+    # Inflated to a file first: in a pipe, `tar` reads nothing when `gzip` fails, some `tar`s call that
+    # success, and `sh` has no `pipefail` to say otherwise.
+    gz === nothing || send(gz, "t=\$(mktemp) && gzip -dc > \"\$t\" && tar xf \"\$t\"; r=\$?; rm -f \"\$t\"; exit \$r") &&
+        return true
+    return send(plain, "tar xf -")
+end
+
 "Copy a local directory's contents to `dest` on the host."
 function put_dir(host::AbstractString, localdir::AbstractString, dest::AbstractString;
                  delete::Bool = false, excludes::Vector{String} = String[],
@@ -772,13 +829,18 @@ function put_dir(host::AbstractString, localdir::AbstractString, dest::AbstractS
             delete && rm(String(dest); force = true, recursive = true)
             return _unarchive(read(tarpath), dest)
         end
-        script = (delete ? "rm -rf " * shq_path(String(dest)) * "; " : "") *
-                 "mkdir -p " * shq_path(String(dest)) * " && cd " * shq_path(String(dest)) * " && tar xf -"
+        prefix = (delete ? "rm -rf " * shq_path(String(dest)) * "; " : "") *
+                 "mkdir -p " * shq_path(String(dest)) * " && cd " * shq_path(String(dest)) * " && "
         # A DELEGATED call hands the input to another process, so it has to be bytes; that path is a
         # worker asking the hub, where the bytes were always going to cross a process boundary. The
         # direct path — the hub provisioning a host, which is where the large ones are — streams.
-        return has_delegate() ? first(run_io(host, script, read(tarpath))) :
-               open(tarpath, "r") do io; first(run_io(host, script, io)); end
+        has_delegate() && return first(run_io(host, prefix * "tar xf -", read(tarpath)))
+        gz = _gzip_file(tarpath)
+        try
+            return _send_archive(host, prefix, tarpath, gz)
+        finally
+            gz === nothing || rm(gz; force = true)
+        end
     finally
         rm(tarpath; force = true)
     end
@@ -797,8 +859,8 @@ function put_files(host::AbstractString, files, dest::AbstractString)
         return false
     end
     isempty(host) && return _unarchive(data, dest)
-    script = "mkdir -p " * shq_path(String(dest)) * " && cd " * shq_path(String(dest)) * " && tar xf -"
-    return first(run_io(host, script, data))
+    prefix = "mkdir -p " * shq_path(String(dest)) * " && cd " * shq_path(String(dest)) * " && "
+    return _send_archive(host, prefix, data, _gzip_bytes(data))
 end
 
 """
@@ -1020,17 +1082,20 @@ function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     # has been wiped while the stamp survived would otherwise ask for "what changed" and be told
     # nothing, leaving it empty for good.
     full = any(d -> (p = joinpath(s.mirror, String(d)); !isdir(p) || isempty(readdir(p))), dirs)
-    script = "cd " * shq_path(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; " *
-             "touch .pullstamp.new; " *
-             (full ? "tar cf - " * names * "; " :
+    tarpart = full ? "tar cf - " * names * "; " :
               "if [ -f .pullstamp ]; then " *
                   "find " * names * " -type f -newer .pullstamp > .pulllist 2>/dev/null || true; " *
                   "if [ -s .pulllist ]; then tar cf - -T .pulllist; fi; rm -f .pulllist; " *
-              "else tar cf - " * names * "; fi; ") *
-             "mv .pullstamp.new .pullstamp"
+              "else tar cf - " * names * "; fi; "
+    # Compressed over there when this side can inflate it, and when the far side has `gzip`.
+    _zlib() === nothing ||
+        (tarpart = "{ " * tarpart * "} | if command -v gzip >/dev/null 2>&1; then gzip -c; else cat; fi; ")
+    script = "cd " * shq_path(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; " *
+             "touch .pullstamp.new; " * tarpart * "mv .pullstamp.new .pullstamp"
     with_store_lock(s.mirror) do
         ok, data = run_io(String(s.host), script, nothing)
         ok || return false
+        data = _gunzip_if(data)
         # Merged, never replaced. `_unarchive` copies over the top, so what the store has wins
         # per file and what only exists here survives to be pushed.
         #
@@ -1076,12 +1141,11 @@ function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     script = (isempty(s.umask) ? "" : "umask " * s.umask * "; ") *
              "mkdir -p " * shq_path(s.root) *
              (isempty(wipe) ? "" : "; rm -f " * join(wipe, " ")) *
-             "; cd " * shq_path(s.root) * " && tar xf -"
-    ok, out = run_io(String(s.host), script, data)
+             "; cd " * shq_path(s.root) * " && "
+    ok = _send_archive(String(s.host), script, data, _gzip_bytes(data))
     # Say what the far side said. Callers get a Bool, and a push that fails silently here surfaces
     # much later as a job that cannot find its own descriptors.
-    ok || @warn "slate: could not push to $(s.host):$(s.root)" dirs = present output =
-        first(String(copy(out)), 400)
+    ok || @warn "slate: could not push to $(s.host):$(s.root)" dirs = present
     return ok
 end
 

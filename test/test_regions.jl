@@ -502,6 +502,18 @@ const RE = KaimonSlate.ReportEngine
                 @test isfile(joinpath(dest, "code.jl"))
             end
 
+            @testset "a worker host is sent the worker's code, not the hub's" begin
+                files = RE._payload_files()
+                # What worker.jl includes, directly, transitively, and through the name lists the
+                # shared files include in a loop.
+                @test all(in(files), ("worker.jl", "sweep.jl", "remotestore.jl", "sshtransport.jl",
+                                      "sshauth.jl", "slate_home.jl", "memostore.jl", "capture.jl"))
+                @test !any(in(files), ("server.jl", "server_export.jl", "KaimonSlate.jl", "remote.jl"))
+                # Every file it names exists, so a worker never boots short of one.
+                @test all(f -> isfile(joinpath(pkgdir(KaimonSlate), "src", f)), files)
+                @test RE._payload_sha() != RE._src_sha()          # hub-only edits leave workers current
+            end
+
             @testset "a reap is one command that kills the worker and not itself" begin
                 # On a compute node every command is a hop from the login node, so the reap asks once.
                 # `pkill -f` reads whole command lines, and the reap's own names the worker it kills.

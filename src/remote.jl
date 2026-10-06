@@ -818,34 +818,63 @@ function _narrate_transfer(localdir::AbstractString, region::AbstractString, exc
 end
 
 # ── provisioning ──────────────────────────────────────────────────────────────
-# Slate's worker payload = worker.jl + every src/*.jl it (transitively) include()s. We ship ALL
-# top-level src `.jl` files rather than a curated list — a curated list silently breaks the moment
-# worker.jl gains an include. Hub-only files ride along unused (the worker never include()s them).
-
-# A content SHA over that payload (every top-level `src/*.jl`) — the version of the code a worker is
-# RUNNING. It's baked into the boot script so a worker reports the exact payload it loaded (a running
-# worker never re-includes its payload — see `attached!`; and `tools()` is fixed at boot, so a newly
-# added gate tool can't appear on a live worker). The hub recomputes this on every reattach and reaps
-# + cold-spawns any worker whose stamp is behind — so editing `worker.jl` reprovisions the remote
-# instead of silently running stale code. Cached by the newest payload mtime (one stat sweep per
-# check, not a re-hash). Reprovision-on-drift is ON; `KAIMONSLATE_SKIP_PAYLOAD_CHECK=1` turns it off —
-# see `_payload_current`.
-const _PAYLOAD_SHA_CACHE = Ref{Tuple{Float64,String}}((-1.0, ""))
-function _payload_sha()
+# Slate's worker payload = worker.jl + every src/*.jl it (transitively) includes. Found from the
+# sources rather than kept as a list, so a new include joins it without anyone remembering to: every
+# file whose name appears quoted (`"name.jl"`) in a payload file is in the payload, which covers a
+# literal `include` and the name lists the shared files include in a loop. A quoted name that is not
+# an include only adds a file. Hub-only code stays home, which is most of `src/`: the link to a
+# cluster is slow, and sending the hub's code to every host cost seconds per provision.
+const _PAYLOAD_FILES = Ref{Tuple{Float64,Vector{String}}}((-1.0, String[]))
+function _payload_files()
     srcdir = @__DIR__
-    files = sort!(String[joinpath(srcdir, f) for f in readdir(srcdir)
-                         if endswith(f, ".jl") && isfile(joinpath(srcdir, f))])
+    have = Set(String[f for f in readdir(srcdir) if endswith(f, ".jl") && isfile(joinpath(srcdir, f))])
+    mt = try; maximum((mtime(joinpath(srcdir, f)) for f in have); init = 0.0); catch; 0.0; end
+    _PAYLOAD_FILES[][1] == mt && return copy(_PAYLOAD_FILES[][2])   # read again only after an edit
+    out = Set{String}(); todo = ["worker.jl"]
+    while !isempty(todo)
+        f = pop!(todo)
+        (f in out || !(f in have)) && continue
+        push!(out, f)
+        for m in eachmatch(r"\"([A-Za-z0-9_]+\.jl)\"", read(joinpath(srcdir, f), String))
+            push!(todo, m.captures[1])
+        end
+    end
+    files = sort!(collect(out))
+    _PAYLOAD_FILES[] = (mt, files)
+    return copy(files)
+end
+
+# A content SHA over a set of `src/` files, cached by their newest mtime (one stat sweep per check,
+# not a re-hash).
+const _SHA_CACHE = Dict{Symbol,Tuple{Float64,String}}()
+function _files_sha(key::Symbol, names::Vector{String})
+    files = String[joinpath(@__DIR__, f) for f in names]
     mt = try; maximum(mtime, files; init = 0.0); catch; 0.0; end
-    (_PAYLOAD_SHA_CACHE[][1] == mt && !isempty(_PAYLOAD_SHA_CACHE[][2])) && return _PAYLOAD_SHA_CACHE[][2]
+    c = get(_SHA_CACHE, key, (-1.0, ""))
+    (c[1] == mt && !isempty(c[2])) && return c[2]
     ctx = _SHA.SHA1_CTX()
     for f in files
         _SHA.update!(ctx, codeunits(basename(f)))
         _SHA.update!(ctx, read(f))
     end
     sha = bytes2hex(_SHA.digest!(ctx))[1:16]
-    _PAYLOAD_SHA_CACHE[] = (mt, sha)
+    _SHA_CACHE[key] = (mt, sha)
     return sha
 end
+
+# The version of the code a worker is RUNNING: a SHA over the payload. It's baked into the boot
+# script so a worker reports the exact payload it loaded (a running worker never re-includes its
+# payload — see `attached!`; and `tools()` is fixed at boot, so a newly added gate tool can't appear
+# on a live worker). The hub recomputes this on every reattach and reaps + cold-spawns any worker
+# whose stamp is behind — so editing `worker.jl` reprovisions the remote instead of silently running
+# stale code, and editing hub-only code leaves it alone. `KAIMONSLATE_SKIP_PAYLOAD_CHECK=1` turns the
+# check off — see `_payload_current`.
+_payload_sha() = _files_sha(:payload, _payload_files())
+
+# A SHA over all of `src/`: the code the hub itself runs, for telling when it changed under a running
+# hub.
+_src_sha() = _files_sha(:src, sort!(String[f for f in readdir(@__DIR__) if endswith(f, ".jl") &&
+                                                                         isfile(joinpath(@__DIR__, f))]))
 
 # The worker packages a provision adds beside the notebook's own, as the `Pkg.add` argument it splices
 # in. One definition, because the environment fingerprint has to hash exactly what is installed.
@@ -1020,10 +1049,12 @@ function _provision_runtime!(host; seen = nothing, setup::AbstractString = "")
         srcdir = @__DIR__
         tmp = mktempdir()
         try
-            for f in readdir(srcdir)
-                (endswith(f, ".jl") && isfile(joinpath(srcdir, f))) && cp(joinpath(srcdir, f), joinpath(tmp, f))
+            for f in _payload_files()
+                cp(joinpath(srcdir, f), joinpath(tmp, f))
             end
-            _rlog("provision [1/3] send worker payload → $host:$_REMOTE_WORKER")
+            had = get(st, "payload", "")
+            _rlog("provision [1/3] send worker payload → $host:$_REMOTE_WORKER " *
+                  "(host has $(isempty(had) ? "none" : had), sending $sha)")
             _prep_stage("Syncing worker files → $host")
             _send_dir!(host, tmp, _REMOTE_WORKER) || error("provision: could not send the worker payload → $host")
         finally

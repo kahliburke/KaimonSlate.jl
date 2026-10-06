@@ -4002,7 +4002,7 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     workbook && !app && throw(ArgumentError("start_hub: workbook=true requires app=true"))
     # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live
     # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
-    _HUB_START_SHA[] = try; ReportEngine._payload_sha(); catch; ""; end
+    _HUB_START_SHA[] = try; ReportEngine._src_sha(); catch; ""; end
     # Function-body edits land without a restart when Revise is reachable and this is a checkout.
     # No-op otherwise (an app, a depot install, no Revise) — see `_start_revise!`.
     app || (try; _start_revise!(); catch e; @debug "Revise setup failed" exception = e; end)

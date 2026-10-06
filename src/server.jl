@@ -3678,7 +3678,7 @@ end
 # we surface a passive "restart to apply" hint rather than trying to hot-reload the live server.
 const _HUB_START_SHA = Ref("")
 _hub_src_stale() = !isempty(_HUB_START_SHA[]) &&
-    (try; ReportEngine._payload_sha() != _HUB_START_SHA[]; catch; false; end)
+    (try; ReportEngine._src_sha() != _HUB_START_SHA[]; catch; false; end)
 
 # ── Revise in the hub ────────────────────────────────────────────────────────────────────────────
 #
@@ -3706,7 +3706,7 @@ const _REVISE_ERR_AT = Ref(0.0)
 _hub_is_dev_checkout() = (p = pkgdir(@__MODULE__);
     p !== nothing && !occursin(joinpath("julia", "packages"), abspath(p)))
 
-# Newest mtime across the hub's own sources — the same set `_payload_sha` hashes, and the cheap half
+# Newest mtime across the hub's own sources — the same set `_src_sha` hashes, and the cheap half
 # of it (a stat per file, no reads).
 function _src_mtime()
     d = dirname(@__FILE__)
