@@ -284,20 +284,20 @@ function Telemetry() {
         data: spans.map(x => ({ value: [ids.indexOf(x.id), x.a, x.b, x.id, x.kind], itemStyle: { color: SPAN_COLOR[x.kind] } })) }] }}/>` : html`<div class="tm-none">no cell ran in this window</div>`;
 
   // Scaled to what the worker may use, so the headroom shows: the job's allowance on a scheduler
-  // node, the host's cores elsewhere. At least one core tall, so an idle worker does not stretch
-  // noise across the chart. On a shared node the rest of the host is other jobs' load, so the second
+  // node, whose top is then the limit and needs no line of its own, and the host's cores elsewhere.
+  // At least one core tall, so an idle worker does not stretch noise across the chart. On a shared node the rest of the host is other jobs' load, so the second
   // line is the load on the job's own cores rather than the host's, which would set the scale.
   const allow = job.cpus > 0 ? job.cpus : 0;
   const own = (job.cpuset && job.cpuset.length) ? job.cpuset : null;
   const cpuMax = allow || nc || 0;
   const ownLoad = (x) => { const c = (x.host || {}).cores; return c && c.length ? own.reduce((t, k) => t + (c[k] ?? 0), 0) / 100 : -1; };
   const cpu = base('cores', (v) => (+v).toFixed(2), {
-    yAxis: { type: 'value', name: 'cores', min: 0, max: (v) => Math.max(1, cpuMax > 0 ? Math.ceil(cpuMax * 1.05) : Math.ceil(v.max)),
+    yAxis: { type: 'value', name: allow ? 'of ' + allow + ' cores' : 'cores', min: 0,
+             max: (v) => Math.max(1, allow || (cpuMax > 0 ? Math.ceil(cpuMax * 1.05) : Math.ceil(v.max))),
              axisLabel: { formatter: coreTick }, splitLine: { lineStyle: { opacity: 0.25 } } },
     series: [line('this worker', series(s, x => x.cpu / 100), { areaStyle: { opacity: 0.12 } }),
              !allow ? (nc ? line('host', series(s, x => x.sys_cpu >= 0 ? x.sys_cpu / 100 * ncores(x) : -1)) : null)
-                    : (own && host.cores && host.cores.length ? line('job cores', series(s, ownLoad)) : null),
-             allow ? line('allowed', [], { markLine: limit('job allows ' + allow, allow) }) : null].filter(Boolean) });
+                    : (own && host.cores && host.cores.length ? line('job cores', series(s, ownLoad)) : null)].filter(Boolean) });
 
   const mem = base('', B, {
     yAxis: { type: 'value', max: memLimit > 0 ? memLimit * 1.05 : null, axisLabel: { formatter: B },
