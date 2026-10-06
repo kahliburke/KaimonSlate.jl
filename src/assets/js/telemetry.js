@@ -150,7 +150,9 @@ const gcPct = (s) => s.map((x, i) => {
 });
 
 // ── charts ──────────────────────────────────────────────────────────────────────────────────────
-const AXIS = { type: 'time', splitNumber: 3, axisLabel: { hideOverlap: true }, splitLine: { show: false } };
+// The tooltip's heading is the axis pointer's label: the time of day, the window being minutes long.
+const AXIS = { type: 'time', splitNumber: 3, axisLabel: { hideOverlap: true }, splitLine: { show: false },
+               axisPointer: { label: { formatter: (p) => new Date(+p.value).toLocaleTimeString() } } };
 const GRID = { left: 56, right: 16, top: 30, bottom: 22 };
 function base(yname, yfmt, extra = {}) {
   return Object.assign({
