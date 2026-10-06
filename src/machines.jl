@@ -268,8 +268,8 @@ function env_readiness(host::AbstractString, project::AbstractString, nodetype::
     before = last === nothing ? nothing : get(last, "packages", nothing)
     # A record from before records kept their packages: that project's packages as they are now.
     if last !== nothing && !(before isa AbstractDict)
-        before = env_packages(String(get(last, "project", "")))
-        isempty(before) && (before = nothing)
+        lp = String(get(last, "project", ""))
+        before = isempty(project_file_in(lp)) ? nothing : env_packages(lp)
     end
     what = before isa AbstractDict ? package_change(before, now) : ""
     isempty(what) || return "Since the last prepare, " * what * "."

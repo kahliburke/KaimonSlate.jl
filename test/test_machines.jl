@@ -240,6 +240,12 @@ const RE = KaimonSlate.ReportEngine
             # A project new to the machine, against what the same region last prepared there.
             @test RE.env_readiness("twinhost", other, "gpu/"; depot = "/d", by = "prep") ==
                   "Since the last prepare, Y was added, X was removed."
+            # A record without its packages: that project's packages as they are now, none included.
+            bare = mktempdir(); write(joinpath(bare, "Project.toml"), "")
+            RE.record_env_test!("twinhost", bare, "cpu/"; by = "old", status = "ok", depot = "/d")
+            fx = RE.host_facts("twinhost"); delete!(fx["envs"][RE.Sweep.env_key(bare, "cpu/")], "packages")
+            RE.host_facts_merge!("twinhost", Dict{String,Any}("envs" => fx["envs"]))
+            @test RE.env_readiness("twinhost", other, "cpu/"; depot = "/d", by = "old") == "Since the last prepare, Y was added."
             @test RE.package_change(Dict("A" => "1.0", "B" => "2.0"), Dict("A" => "1.1", "B" => "2.0", "C" => "", "D" => "")) ==
                   "C and D were added, A was updated"
             RE.host_facts_set!("twinhost", Dict{String,Any}())
