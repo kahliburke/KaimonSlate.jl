@@ -589,6 +589,20 @@ end
                 @test d.sent == RE._sync_files(srcdir, ex)
             end
 
+            @testset "a file removed in a git project is removed from its host copy" begin
+                # git's verdict is read off the files that exist, so a deleted one must not be judged by it.
+                srcdir, dest = mktempdir(), mktempdir()
+                mkpath(joinpath(srcdir, "src"))
+                write(joinpath(srcdir, "src", "A.jl"), "a"); write(joinpath(srcdir, "src", "B.jl"), "b")
+                run(pipeline(`git -C $srcdir init -q`; stdout = devnull, stderr = devnull))
+                cp(srcdir, dest; force = true)
+                s = RE.SyncSource(srcdir)
+                d = RE.SyncDest("", dest, [".git"], "", RE._sync_files(srcdir, [".git"]), Dict{String,Any}(), false)
+                rm(joinpath(srcdir, "src", "B.jl"))
+                @test RE._sync_dest!(s, d, RE._sync_files(srcdir, [".git"]))
+                @test (isfile(joinpath(dest, "src", "A.jl")), isfile(joinpath(dest, "src", "B.jl"))) == (true, false)
+            end
+
             @testset "the sync holds back what the transfer rules hold back" begin
                 # A project with no `src/` syncs its top-level files, the notebook among them. The rules
                 # a provision applies keep it off the host, and the sync honours them too, rather than

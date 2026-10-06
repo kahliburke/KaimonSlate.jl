@@ -1799,8 +1799,11 @@ function _sync_dest!(src::SyncSource, d::SyncDest, now::Dict{String,Tuple{Int,Fl
     # The transfer rules hold back what a provision holds back (the notebook beside a project with no
     # `src/`, data, outputs). Asked only when something changed, since asking reads git. What they hold
     # back is recorded as seen, so it is judged again only when it changes again.
+    # A removal is not judged by them: git's verdict is read off the files that exist, so a file just
+    # deleted would read as held back and stay on the host. Removing one that was never sent removes
+    # nothing.
     keep = Sweep.transfer_keep(src.dir; region = d.region, excludes = d.excludes)
-    filter!(keep, changed); filter!(keep, gone)
+    filter!(keep, changed)
     (isempty(changed) && isempty(gone)) && (d.sent = now; return true)
     ok = try
         if length(changed) > _SYNC_FILEWISE_MAX
