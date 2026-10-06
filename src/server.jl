@@ -3347,7 +3347,8 @@ function _release_idle_regions!(nbs_of, busy)
         nbs = get(nbs_of, r.name, LiveNotebook[])
         # Ask before the deadline, by the region's own lead, so the answer can still change the
         # outcome. Once per idle stretch; any cell on the region clears it.
-        if r.idle_warn > 0 && idle + _SUPERVISOR_TICK_S >= r.idle_release - r.idle_warn
+        # Past the deadline there is nothing left to ask: the release below says what happened.
+        if r.idle_warn > 0 && idle < r.idle_release && idle + _SUPERVISOR_TICK_S >= r.idle_release - r.idle_warn
             warned = lock(_REGION_USE_LOCK) do; get(_REGION_RELEASE_WARNED, r.name, 0.0); end
             if warned == 0.0
                 lock(_REGION_USE_LOCK) do; _REGION_RELEASE_WARNED[r.name] = time(); end

@@ -4966,10 +4966,17 @@ function _reap_region_workers!(r::Region)
     (isempty(h) || !_region_holds_node(r)) && return 0      # nothing placed — no node, so nothing on it
     n = 0
     try
-        for w in list_remote_workers(h)
-            w["alive"] === true || continue
-            _manifest_get(w["manifest"], "region") == r.name || continue
-            _manifest_ours(w["manifest"]) || continue
+        t0 = time()
+        ok, ws = _list_remote_workers(h)
+        took = round(time() - t0; digits = 1)
+        mine = [w for w in ws if w["alive"] === true && _manifest_get(w["manifest"], "region") == r.name &&
+                                 _manifest_ours(w["manifest"])]
+        # Said every time: a host that could not be asked, one that listed nothing to reap, and one
+        # whose workers were reaped all end in a release, and only this line tells them apart.
+        _rlog("region[$(r.name)]: " * (ok ? "listed $(length(ws)) worker(s) on $h in $(took)s, " *
+                                            "$(length(mine)) of this region's to reap" :
+                                            "could not list the workers on $h after $(took)s; releasing without reaping"))
+        for w in mine
             try; reap_remote_worker(h, w["port"]); n += 1; catch; end
         end
     catch e
@@ -5448,12 +5455,16 @@ Enumerate the workers Slate has spawned on `host`, each: `port`, `alive` (proces
 (the worker's latest 2s telemetry sample: cpu/rss/gc_ms/evals/memo_bytes/ts as raw JSON; "" for a
 pre-telemetry worker). Reads the on-host manifests over one ssh call. `[]` if unreachable/none.
 """
-function list_remote_workers(host)
+list_remote_workers(host) = last(_list_remote_workers(host))
+
+# The roster with whether the host answered: a host that could not be asked and one with no workers
+# both give an empty list, and only a caller that acts on the roster needs to tell them apart.
+function _list_remote_workers(host)
     ok, out = _ssh_capture(host, `$(_workers_probe_sh())`)   # one token → the remote login shell runs the script verbatim
-    ok || return Any[]
+    ok || return (false, Any[])
     ws = _parse_workers(out)
     try; _watch_roster!(host, ws); catch; end
-    return ws
+    return (true, ws)
 end
 
 _workers_probe_sh() = replace(_WORKERS_PROBE_SH, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)

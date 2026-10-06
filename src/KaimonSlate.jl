@@ -2387,6 +2387,9 @@ function create_tools(GateTool::Type)
         s = "running as job $(p.job) on $(p.host), $left"
         haskey(f, "idleFor") &&
             (s *= ", idle for $(SW.hms(f["idleFor"])) of the $(SW.format_duration(f["idleRelease"])) idle release")
+        # The idle release waits for the cells that queued for a node to reach it.
+        (haskey(f, "idleFor") && NotebookServer._granted_within(r, NotebookServer._GRANT_GRACE_S)) &&
+            (s *= " (not released within $(SW.format_duration(NotebookServer._GRANT_GRACE_S)) of the grant)")
         return s
     end
 
