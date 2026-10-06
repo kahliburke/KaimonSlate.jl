@@ -720,7 +720,8 @@ function cellHeaderInner(c) {
       // Julia top level to walk.
       ((isCode && c.kind === 'code') ? (() => {
         const on = window.slateDebugActive && window.slateDebugActive(c.id);
-        return `<button class="dbgcell${on ? ' on' : ''}" onclick="window.slateDebugCell && window.slateDebugCell('${c.id}')" title="${on ? 'stop stepping this cell' : 'step this cell line by line'}">🐞</button>`;
+        return `<button class="dbgcell${on ? ' on' : ''}" onclick="window.slateDebugCell && window.slateDebugCell('${c.id}')" title="${on ? 'stop stepping this cell' : 'step this cell line by line'}">🐞</button>` +
+          `<button class="profcell" onclick="window.slateProfileCell && window.slateProfileCell('${c.id}')" title="profile this cell">🔥</button>`;
       })() : '') +
       (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
       // A sweep's SPEC — where it runs and under what limits — is configuration, not code. It gets

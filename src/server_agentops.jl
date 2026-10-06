@@ -846,6 +846,31 @@ function agent_rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::Abst
     return "renamed $oldid → $(replace(strip(String(newid)), r"[^A-Za-z0-9_]+" => "_"))"
 end
 
+"""
+    _force_cell!(nb, id) -> Bool
+
+Mark cell `id` to run as its ▶ does, under `nb.lock`: it runs whatever the memo holds, and its
+dependents restale and run after it. Already running, it is left alone (the run in flight is the
+answer) and this returns `false`.
+"""
+function _force_cell!(nb::LiveNotebook, id::AbstractString)
+    i = findfirst(c -> c.id == id, nb.report.cells)
+    (i === nothing || nb.report.cells[i].state == RUNNING) && return false
+    frc = get!(Set{String}, _FORCE_RUN, nb.id)
+    for did in dependents_of(nb.report, Set([String(id)]))   # closure includes `id` itself
+        j = findfirst(c -> c.id == did, nb.report.cells)
+        j === nothing && continue
+        c = nb.report.cells[j]
+        # A locked dependent stays frozen against this cascade too — only its OWN
+        # ▶ (did == id) may re-run it, so the played cell itself bypasses the guard.
+        # One with nothing frozen yet is re-run unforced, so it only restores.
+        ok = did == id ? (c.state = STALE; true) : ReportEngine.restale!(c)
+        ok || continue
+        (did == id || !(:locked in c.flags)) && push!(frc, String(did))
+    end
+    return true
+end
+
 "Run one cell (or recompute all stale if `id` empty); return the result(s)."
 function agent_run!(nb::LiveNotebook, id::AbstractString = "";
                     caller::AbstractString = "", expected_version::Int = -1,
@@ -862,23 +887,7 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
         # (dataflow AND manual `needs=` edges) restale and force too — a memo restore
         # against unchanged upstream sources would resurrect pre-re-run results.
         if !isempty(id)
-            i = findfirst(c -> c.id == id, nb.report.cells)
-            # Already running: the run in flight is the answer, so this waits for it rather than
-            # queuing an identical run behind it.
-            if i !== nothing && nb.report.cells[i].state != RUNNING
-                frc = get!(Set{String}, _FORCE_RUN, nb.id)
-                for did in dependents_of(nb.report, Set([id]))   # closure includes `id` itself
-                    j = findfirst(c -> c.id == did, nb.report.cells)
-                    j === nothing && continue
-                    c = nb.report.cells[j]
-                    # A locked dependent stays frozen against this cascade too — only its OWN
-                    # ▶ (did == id) may re-run it, so the played cell itself bypasses the guard.
-                    # One with nothing frozen yet is re-run unforced, so it only restores.
-                    ok = did == id ? (c.state = STALE; true) : ReportEngine.restale!(c)
-                    ok || continue
-                    (did == id || !(:locked in c.flags)) && push!(frc, String(did))
-                end
-            end
+            _force_cell!(nb, id)
         else
             _restale_blocked!(nb)   # a run of the notebook takes up the cells left waiting
         end

@@ -3377,6 +3377,8 @@ function _make_router(h::Hub)
     _register_publish_routes!(router, h)
     # Cell debugger: start/step/frame/eval/stop, routed to the cell's own kernel (see server_debug.jl).
     _register_debug_routes!(router, h)
+    # Cell profiler: prepare, run, last result and source, on the cell's own kernel (server_profile.jl).
+    _register_profile_routes!(router, h)
     return router
 end
 

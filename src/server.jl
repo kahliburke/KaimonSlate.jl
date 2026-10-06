@@ -5407,6 +5407,7 @@ include("server_keymap.jl")    # the user's keyboard shortcuts, in their own con
 include("server_publish.jl")   # Publishing manager service layer (ledger view, targets, secrets, SSE publish)
 include("server_specialists.jl") # narrow agents summoned into a notebook: roles, briefs, the ask channel
 include("server_debug.jl")     # cell debugger: route the stepping verbs to the kernel the cell runs on
+include("server_profile.jl")   # cell profiler: prepare and profile a cell on the kernel it runs on
 include("server_findings.jl")  # a specialist's conclusion as a record: claim, cell, verdict, disposition
 include("server_checker.jl")   # the checker: a specialist nobody summons — triggered, unsupervised, read-only
 include("server_format.jl")    # a notebook in an older file format: updated, with a copy kept, before it opens

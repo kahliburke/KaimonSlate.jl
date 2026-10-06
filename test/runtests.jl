@@ -59,6 +59,7 @@ module Tables;    include("test_tables.jl");    end
 module Trace;     include("test_trace.jl");     end
 module Complete;  include("test_complete.jl");  end
 module Debugger;  include("test_debugger.jl");  end
+module Profiler;  include("test_profile.jl");   end
 module Specialist;include("test_specialist.jl");end
 module Findings;  include("test_findings.jl");  end
 module ToolDocs;  include("test_tool_docs.jl"); end
@@ -93,7 +94,7 @@ const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memos
                    Blobchannel, RemotePool, Regions, Machines, SlateDiagT, Parallel, Animation, Echarts, SlateLook,
                    Engine, Eval, Deps, Envprep, Gateauth, SshTransportT, Tools, Registry, Toolcell, Web,
                    Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi,
-                   Agentops, Repro, Slides, Debugger, Specialist, Findings, ToolDocs, AppRender,
+                   Agentops, Repro, Slides, Debugger, Profiler, Specialist, Findings, ToolDocs, AppRender,
                    Frontmatter, Export, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, WsOrder, BindObs, RecordDisplay)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.

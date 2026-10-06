@@ -967,6 +967,65 @@
   //
   // `firstLine` offsets the gutter: the text is one method, not the file, so its numbers have to
   // read as the file's — the whole point is to be able to say "src/ridge.jl:14" and see line 14.
+  // ── Profile heat (profiler.js) ───────────────────────────────────────────────
+  // Rows `{line, incl, self, d, g, c}` in DOCUMENT lines: `incl`/`self` are shares of the samples,
+  // `d`/`g`/`c` the samples under runtime dispatch, GC and compilation. A margin shows the share and
+  // the marks; the line itself is tinted by it. `hot` outlines lines the flame graph points at.
+  const setHeat = StateEffect.define(), setHot = StateEffect.define();
+  const heatField = StateField.define({
+    create: () => ({ rows: [], hot: [] }),
+    update(v, tr) {
+      for (const e of tr.effects) {
+        if (e.is(setHeat)) v = { rows: e.value || [], hot: v.hot };
+        if (e.is(setHot)) v = { rows: v.rows, hot: e.value || [] };
+      }
+      return v;
+    },
+  });
+  const _heatDeco = (state, v) => {
+    const rs = [], n = state.doc.lines, hot = new Set(v.hot);
+    const byLine = new Map(v.rows.map(r => [r.line, r]));
+    for (const ln of [...new Set([...byLine.keys(), ...hot])].sort((a, b) => a - b)) {
+      if (ln < 1 || ln > n) continue;
+      const r = byLine.get(ln), x = r ? Math.min(1, Math.pow(r.incl, 0.6)) : 0;
+      rs.push(Decoration.line({ class: 'cm-heat' + (hot.has(ln) ? ' cm-heathot' : ''),
+                                attributes: { style: '--heat:' + x.toFixed(3) } }).range(state.doc.line(ln).from));
+    }
+    return Decoration.set(rs);
+  };
+  const heatDecoField = StateField.define({
+    create: () => Decoration.none,
+    update(d, tr) {
+      return tr.effects.some(e => e.is(setHeat) || e.is(setHot)) || tr.docChanged
+        ? _heatDeco(tr.state, tr.state.field(heatField)) : d;
+    },
+    provide: f => EditorView.decorations.from(f),
+  });
+  const _pct = (x) => x >= 0.995 ? '100%' : x >= 0.1 ? Math.round(x * 100) + '%' : x >= 0.001 ? (x * 100).toFixed(1) + '%' : '';
+  const _heatMarker = cmView && class extends cmView.GutterMarker {
+    constructor(r) { super(); this.r = r; }
+    eq(o) { return o.r === this.r; }
+    toDOM() {
+      const r = this.r, s = document.createElement('span');
+      s.className = 'cm-heatm';
+      const marks = (r.d > 0 ? '<i class="pfm d" title="runtime dispatch">⤳</i>' : '') +
+                    (r.c > 0 ? '<i class="pfm c" title="compilation">⚙</i>' : '') +
+                    (r.g > 0 ? '<i class="pfm g" title="garbage collection">♻</i>' : '');
+      s.innerHTML = '<b style="width:' + Math.round(Math.min(1, r.incl) * 100) + '%"></b><em>' + _pct(r.incl) + '</em>' + marks;
+      return s;
+    }
+  };
+  const _heatGutter = () => cmView ? [cmView.gutter({
+    class: 'cm-heatgutter',
+    markers: (v) => {
+      const rows = v.state.field(heatField).rows, rs = [], n = v.state.doc.lines;
+      for (const r of [...rows].sort((a, b) => a.line - b.line))
+        if (r.line >= 1 && r.line <= n) rs.push(new _heatMarker(r).range(v.state.doc.line(r.line).from));
+      return Decoration.set(rs, true);
+    },
+    initialSpacer: () => new _heatMarker({ incl: 1, d: 1, c: 1, g: 1 }),
+  })] : [];
+
   window.slateSourceViewer = (parent, opts) => {
     opts = opts || {};
     const cur = curSyntaxTheme();
@@ -991,12 +1050,32 @@
         },
       },
     })] : [];
+    // Hovering and clicking a line report it as a FILE line, for the profiler's two-way link.
+    let _hoverLine = null;
+    const lineEvents = (opts.onLineHover || opts.onLineClick) ? [EditorView.domEventHandlers({
+      mousemove(ev, v) {
+        if (!opts.onLineHover) return false;
+        const pos = v.posAtCoords({ x: ev.clientX, y: ev.clientY });
+        const ln = pos == null ? null : v.state.doc.lineAt(pos).number + offset - 1;
+        if (ln !== _hoverLine) { _hoverLine = ln; opts.onLineHover(ln); }
+        return false;
+      },
+      mouseleave() { if (opts.onLineHover && _hoverLine !== null) { _hoverLine = null; opts.onLineHover(null); } return false; },
+      click(ev, v) {
+        if (!opts.onLineClick) return false;
+        const pos = v.posAtCoords({ x: ev.clientX, y: ev.clientY });
+        if (pos != null) opts.onLineClick(v.state.doc.lineAt(pos).number + offset - 1);
+        return false;
+      },
+    })] : [];
+    const heat = opts.heat ? [heatField, heatDecoField, ..._heatGutter()] : [];
     const view = new EditorView({
       parent,
       doc: '',
       extensions: [
         EditorView.editable.of(false), EditorState.readOnly.of(true),
-        bpField, ...bpGutter, lnComp.of(_ln()), dbgField, julia(),
+        bpField, ...bpGutter, ...heat, lnComp.of(_ln()), dbgField, julia(), ...lineEvents,
+
         chromeComp.of(chromeFor(cur)), themeComp.of(styleFor(cur)),
         EditorView.lineWrapping,
       ],
@@ -1026,9 +1105,19 @@
         if (!_validLine(view, n)) return view.dispatch({ effects: setDbg.of(null) });
         view.dispatch({ effects: [setDbg.of(n), EditorView.scrollIntoView(view.state.doc.line(n).from, { y: 'center' })] });
       },
+      // Profile heat, in FILE lines (see `setHeat` above); `[]` clears it.
+      setHeat(rows) {
+        if (!opts.heat) return;
+        view.dispatch({ effects: setHeat.of((rows || []).map(r => Object.assign({}, r, { line: r.line - offset + 1 }))) });
+      },
+      setHot(absLines) {
+        if (!opts.heat) return;
+        view.dispatch({ effects: setHot.of((absLines || []).map(n => n - offset + 1)) });
+      },
       destroy() { _views.delete(view); view.destroy(); },
     };
   };
+
 
   // ── clean accessors the rest of the UI uses ───────────────────────────────────
   // Force a deferred editor to mount NOW (lazy hydration — see notebook.js <Editor>), returning the

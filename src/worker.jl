@@ -56,6 +56,15 @@ include(joinpath(@__DIR__, "trace.jl"))     # @trace / SlateTrace inline value t
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
 include(joinpath(@__DIR__, "worker_debug.jl")) # step a cell line by line (shared with the engine)
+include(joinpath(@__DIR__, "profile.jl"))      # profile a cell where it runs (shared with the engine)
+
+# Gate-tool wrappers for the profiler, in this worker's namespace.
+__slate_profile_prepare(; cell::String = "", source::String = "", reads::Vector{String} = String[]) =
+    profile_prepare!(_NS[]; cell = cell, source = source, reads = reads)
+__slate_profile_arm(; cell::String = "", mode::String = "cpu") = profile_arm!(cell, mode)
+__slate_profile_disarm(; cell::String = "") = profile_disarm!(cell)
+__slate_profile_result(; cell::String = "") = something(profile_result(cell), Dict{String,Any}())
+__slate_profile_source(; file::String = "") = profile_source(file)
 
 # Gate-tool wrappers: the stepper is namespace-agnostic, the worker supplies its own.
 __slate_debug_start(; cell::String = "", source::String = "",
@@ -2730,6 +2739,11 @@ function tools()
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),
         KaimonGate.GateTool("__slate_running", __slate_running),
         KaimonGate.GateTool("__slate_gc", __slate_gc),
+        KaimonGate.GateTool("__slate_profile_prepare", __slate_profile_prepare),
+        KaimonGate.GateTool("__slate_profile_arm", __slate_profile_arm),
+        KaimonGate.GateTool("__slate_profile_disarm", __slate_profile_disarm),
+        KaimonGate.GateTool("__slate_profile_result", __slate_profile_result),
+        KaimonGate.GateTool("__slate_profile_source", __slate_profile_source),
         KaimonGate.GateTool("__slate_cancel", __slate_cancel),
         KaimonGate.GateTool("__slate_cancel_cells", __slate_cancel_cells),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),

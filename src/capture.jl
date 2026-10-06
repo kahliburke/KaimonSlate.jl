@@ -111,13 +111,19 @@ function _eval_cell_source(mod::Module, source::AbstractString, filename::Abstra
         return Core.eval(mod, REPL.softscope(ast))   # a single-expr / non-toplevel parse: no per-statement marking
     srcs = String[]
     marked = Any[]
+    # A profiled run compiles each statement instead of interpreting it: an interpreted statement
+    # leaves no frame in the samples, so the profile could not say which line of the cell the time
+    # went to. Definitions are left to the interpreter, which is where they belong.
+    compiled = get(task_local_storage(), :slate_profiling, false) === true
+    lnn = nothing
     for a in ast.args
         if a isa LineNumberNode
-            push!(marked, a)
+            push!(marked, a); lnn = a
         else
             push!(srcs, string(a))                                   # deparsed statement source (replay unit)
             push!(marked, Expr(:call, _slate_mark_stmt, length(srcs)))   # mark before running it
-            push!(marked, a)
+            push!(marked, (compiled && !_toplevel_only(a)) ?
+                          Expr(:block, something(lnn, LineNumberNode(0)), Expr(:meta, :force_compile), a) : a)
         end
     end
     task_local_storage(:slate_stmt_srcs, srcs)
@@ -948,7 +954,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         # spans. Wrapped so ProgressLogging `@progress` records drive the cell meter instead of printing.
         _logger = _CellLogger(Logging.ConsoleLogger(_logio(capture)), _progress_sink(mod))
         Logging.with_logger(_logger) do
-            value = _eval_cell_source(mod, source, filename)
+            value = _profiled(() -> _eval_cell_source(mod, source, filename), cid)   # profile.jl: when armed
         end
     catch e
         err = e

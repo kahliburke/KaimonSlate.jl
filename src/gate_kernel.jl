@@ -1851,6 +1851,26 @@ debug_stop!(k::GateKernel, ::Report) =
         (stopped = false, steps = 0)
     end
 
+# The cell profiler, in the worker the cell runs on (profile.jl). Prepare compiles there, so it can
+# take as long as compiling the cell's packages does.
+function profile_prepare!(k::GateKernel, report::Report; cell::AbstractString, source::AbstractString,
+                          reads::Vector{String} = String[])
+    prepare!(k, report)
+    return _tool(k, "__slate_profile_prepare",
+                 Dict{String,Any}("cell" => String(cell), "source" => String(source), "reads" => reads);
+                 timeout = 1800.0)
+end
+profile_arm!(k::GateKernel, ::Report; cell::AbstractString, mode::AbstractString = "cpu") =
+    _tool(k, "__slate_profile_arm", Dict{String,Any}("cell" => String(cell), "mode" => String(mode)); timeout = 30.0)
+profile_disarm!(k::GateKernel, ::Report; cell::AbstractString) =
+    _tool(k, "__slate_profile_disarm", Dict{String,Any}("cell" => String(cell)); timeout = 30.0)
+function profile_result(k::GateKernel, ::Report; cell::AbstractString)
+    r = _tool(k, "__slate_profile_result", Dict{String,Any}("cell" => String(cell)); timeout = 120.0)
+    return (r isa AbstractDict && !isempty(r)) ? r : nothing
+end
+profile_source(k::GateKernel, ::Report; file::AbstractString) =
+    _tool(k, "__slate_profile_source", Dict{String,Any}("file" => String(file)); timeout = 60.0)
+
 # Capture markdown interpolation expressions in the worker (rich, one each).
 function interpolate(k::GateKernel, report::Report, exprs::Vector{String})
     prepare!(k, report)

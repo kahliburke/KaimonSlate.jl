@@ -12,4 +12,5 @@ import './telemetry.js';  // Telemetry view — one worker's resource use over t
 import './workerbar.js';  // …with the worker's facts and restart/reap above the charts
 import './extensions.js'; // Extensions gallery — browse + install from the curated registry
 import './debugger.js';  // Cell debugger — the step controls under a cell, and the focus view
+import './profiler.js';  // Cell profiler — compile, run and read a cell's profile against its code
 import './keymap-ui.js';  // Settings → Keyboard — rebind any shortcut, switch keymap presets

@@ -692,6 +692,36 @@ debug_eval_expr(::InProcessKernel, ::Report; expr::AbstractString = "") =
 "Abandon the session and restore the interpreter's scope."
 debug_stop!(::InProcessKernel, ::Report) = debug_stop!()
 
+# ── cell profiler ─────────────────────────────────────────────────────────────
+# The kernel side lives in profile.jl, included by the engine and the worker, so these reach it in
+# this process or, on a gate kernel, through `__slate_profile_*` in the worker the cell runs on.
+
+"""
+    profile_prepare!(kernel, report; cell, source, reads) -> Dict
+
+Compile the cell's code where it runs, without running it (see `profile_prepare!(::Module)`).
+"""
+profile_prepare!(::InProcessKernel, report::Report; cell::AbstractString, source::AbstractString,
+                 reads::Vector{String} = String[]) =
+    profile_prepare!(report_module(report); cell = cell, source = source, reads = reads)
+
+"Profile the next run of `cell` on this kernel."
+profile_arm!(::InProcessKernel, ::Report; cell::AbstractString, mode::AbstractString = "cpu") =
+    profile_arm!(cell, mode)
+profile_disarm!(::InProcessKernel, ::Report; cell::AbstractString) = profile_disarm!(cell)
+
+"The last profile of `cell` taken on this kernel, or `nothing`."
+profile_result(::InProcessKernel, ::Report; cell::AbstractString) = profile_result(cell)
+
+"A source file as this kernel's machine has it, for the profile's code pane."
+profile_source(::InProcessKernel, ::Report; file::AbstractString) = profile_source(file)
+
+profile_prepare!(k::PendingKernel, report::Report; kw...) = profile_prepare!(_await_real(k), report; kw...)
+profile_arm!(k::PendingKernel, report::Report; kw...) = profile_arm!(_await_real(k), report; kw...)
+profile_disarm!(k::PendingKernel, report::Report; kw...) = profile_disarm!(_await_real(k), report; kw...)
+profile_result(k::PendingKernel, report::Report; kw...) = profile_result(_await_real(k), report; kw...)
+profile_source(k::PendingKernel, report::Report; kw...) = profile_source(_await_real(k), report; kw...)
+
 """
     harvest_docs(kernel, report, mod_names) -> Vector{Dict}
 

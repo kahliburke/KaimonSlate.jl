@@ -536,6 +536,7 @@ function connectLive() {
     if (e.data.startsWith('cellprog:')) { try { const p = JSON.parse(e.data.slice(9)); window.onCellProgress && window.onCellProgress(p); } catch (_) {} return; }   // {frac,msg,id,done} — one bar per id
     if (e.data.startsWith('cellout:')) { try { const p = JSON.parse(e.data.slice(8)); window.onCellOutput && window.onCellOutput(p); } catch (_) {} return; }   // {cid,out,err} — a RUNNING cell's output so far (cooked text)
     if (e.data.startsWith('cellstream:')) { try { const p = JSON.parse(e.data.slice(11)); window.onCellStream && window.onCellStream(p.channel, p.data); } catch (_) {} return; }   // slate_emit(channel,data) → a cell's custom JS renderer
+    if (e.data.startsWith('profile:')) { try { window.onProfilePush && window.onProfilePush(JSON.parse(e.data.slice(8))); } catch (_) {} return; }
     if (e.data.startsWith('debug:')) { try { window.onDebugPush && window.onDebugPush(JSON.parse(e.data.slice(6))); } catch (_) {} return; }   // the debug session moved — by anyone's hand, including an agent's
     // Any specialist: asked, arrived, signed off (carries `role`). Fanned out to every subscriber
     // rather than one handler: a blocked question can belong to the debugger's pane or to the chat,
