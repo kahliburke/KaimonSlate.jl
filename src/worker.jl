@@ -861,11 +861,23 @@ function _eval_one(source::String, filename::String, memo_key::String,
         # replayed here so any downstream cell that later re-runs sees the right scope + theme. A
         # replay failure (env changed under us) distrusts the entry → fall through to a full
         # recompute rather than serve a half-scoped restore.
-        if w !== nothing && _replay_scaffold!(_NS[], source)
-            @info "slate memo: restored (no recompute)" cell = cid
-            tr["action"] = "restored"
-            _trace_commit!(cid, tr)
-            return merge(w, (memo = "restored",))   # tell the server this run came from the durable cache
+        # The stored wire's `binds` hold each control's value at STORE time, but the `@bind` replay
+        # reconciles the value against the live registry. The hub copies the reported values and keys
+        # the memo entries of the readers with them, so report the values the replay gave. Otherwise
+        # the hub shows the stored value while the namespace holds another one, and a reader that runs
+        # stores its output under the key of the wrong value.
+        if w !== nothing
+            sink = task_local_storage(_BIND_SINK_KEY, NamedTuple[])
+            replayed = try; _replay_scaffold!(_NS[], source)
+                       finally; delete!(task_local_storage(), _BIND_SINK_KEY); end
+            if replayed
+                @info "slate memo: restored (no recompute)" cell = cid
+                tr["action"] = "restored"
+                _trace_commit!(cid, tr)
+                live = Dict(b.name => b for b in sink)
+                binds = [get(live, b.name, b) for b in w.binds]
+                return merge(w, (binds = binds, memo = "restored"))   # tell the server this run came from the durable cache
+            end
         end
     elseif !isempty(memo_key) && memo_force
         tr["miss"] = "explicit ▶ run (memo_force) — restore skipped, fresh result re-stores"

@@ -86,6 +86,116 @@ end
 # The reader can ask for Julia's own text instead of the grid. Both forms ship inside the record
 # chunk, because the text repr beside the cell is dropped wherever richer output exists
 # (`_cell_view`) — a preference built on that one would work live and blank a static export.
+@testset "a collection field shows its contents, not its type" begin
+    # `show(::MIME"text/plain", ::Vector)` is a HEADER line followed by the elements, and the field
+    # summary takes the first line — which reduced a collection to `8-element Vector{Tuple{Int64,
+    # Int64}}:`, the type and none of the data. Dicts and sets print the same way.
+    val(h, i = 1) = collect(eachmatch(r"<span class=\"srec-v[^\"]*\">([^<]*)", h))[i].captures[1]
+
+    h = RE.record_html((; by_nfp = [(i, 3i) for i in 1:8]))
+    @test occursin("(1, 3)", val(h))                  # the data is there …
+    @test !occursin("element Vector", val(h))         # … and the type signature is not
+    @test occursin("8 total", val(h))                 # with the count kept, not cut by the cap
+
+    # Short enough to show whole → shown whole, keeping the container's own delimiters rather than a
+    # Vector's brackets. A single row is a collection, not a stack, so it comes down this path too.
+    @test occursin("helicity = 0", val(RE.record_html((; by_helicity = [(helicity = 0, count = 4)]))))
+    @test startswith(val(RE.record_html((; d = Dict(:a => 1)))), "Dict")
+    @test startswith(val(RE.record_html((; s = Set([7]))))  , "Set")
+
+    @testset "and bounded by the head, not by truncating the whole" begin
+        # The cap at the end of the summary cannot undo the cost of building the string, so a long
+        # vector must never be rendered in full first. Timed rather than asserted structurally: a
+        # million elements through `show` takes seconds, six take microseconds.
+        big = collect(1:1_000_000)
+        RE.record_html((; warm = [1, 2, 3]))                      # compile first
+        t = @elapsed hb = RE.record_html((; big = big))
+        @test t < 1.0
+        @test occursin("1000000 total", val(hb))
+        @test length(val(hb)) <= 141
+    end
+end
+
+# Rows of the same shape render as a stack of cards the page can fan out, rather than as the line of
+# text that spells the data's shape out. The decision is made from the ELEMENT TYPE, so it must be
+# `fieldnames` and not `isconcretetype`: a column whose values are an Int in one row and a Float in
+# the next still has fixed keys, and that is the whole question.
+@testset "rows of the same shape become a card stack" begin
+    rows(n) = [(nfp = i, count = 3i) for i in 1:n]
+    cards(h) = count("class=\"srec-card\"", h)
+    val(h, i = 1) = collect(eachmatch(r"<span class=\"srec-v[^\"]*\">([^<]*)", h))[i].captures[1]
+
+    @testset "which vectors qualify" begin
+        yes(v) = RE._rec_rowlike(v)
+        @test yes(rows(2)) && yes(rows(500))
+        @test yes([(a = 1, b = 2), (a = 1.5, b = 2)])         # same keys, abstract eltype: still rows
+        @test !yes([(a = 1, b = 2), (a = 3, c = 4)])          # keys differ: no table to draw
+        @test !yes(rows(1))                                   # one row is a record, not a stack
+        @test !yes([1, 2, 3]) && !yes((a = 1,)) && !yes(Any[])
+        # A row wider than the cap keeps its text form rather than a card nothing can read.
+        cols(n) = [NamedTuple{ntuple(i -> Symbol(:c, i), n)}(ntuple(identity, n)) for _ in 1:3]
+        @test !yes(cols(RE._REC_ROWS_COLS + 1)) && yes(cols(RE._REC_ROWS_COLS))
+    end
+
+    @testset "the stack, and what it is capped at" begin
+        h = RE.record_html((; by_nfp = rows(3)))
+        @test occursin("srec-rows srec-rows-open", h)
+        @test cards(h) == 3
+        @test occursin("<span class=\"srec-ci\">1</span>", h)   # each card carries its own index
+        @test occursin("<span class=\"srec-ci\">3</span>", h)
+        # The cards travel over the websocket and into the memo store on every render, so a long
+        # vector ships the head and the header says how many there are.
+        big = RE.record_html((; by_nfp = rows(400)))
+        @test cards(big) == RE._REC_FAN_CARDS
+        @test occursin("400× nfp::Int64, count::Int64", big)
+    end
+
+    # `.srec-k` is the click target that asks the hub which expression a FIELD came from. A card's key
+    # is a different question, so it must not carry that class: sharing it made every click on a card
+    # flash the cell's source.
+    @testset "a card's key is not the field click target" begin
+        h = RE.record_html((; by_nfp = rows(2)))
+        @test count("class=\"srec-k\"", h) == 1                 # the field name, and nothing else
+        @test occursin("class=\"srec-ck\">nfp<", h) && occursin("class=\"srec-cv\">", h)
+        @test count("data-field=", h) == 1
+    end
+
+    @testset "the header says how many and of what" begin
+        @test RE._rec_rowtype(@NamedTuple{i::Int64, sq::Int64}) == "i::Int64, sq::Int64"
+        # Values of varying type have no per-field type to name, so the keys stand alone. The element
+        # type of such a vector is `NamedTuple{(:a, :b)}`, whose `fieldtypes` is `Any` for every
+        # column — informative-looking and worth nothing.
+        @test RE._rec_rowtype(eltype([(a = 1, b = 2), (a = 1.5, b = 2)])) == "a, b"
+        @test RE._rec_rowtype(NamedTuple{(:a, :b)}) == "a, b"
+        @test length(RE._rec_rowtype(NamedTuple{ntuple(i -> Symbol(:longfield, i), 8),
+                                                NTuple{8,Float64}})) <= 48
+        # The full type stays reachable even when the badge is cut.
+        h = RE.record_html((; by_nfp = rows(2)))
+        @test occursin("title=\"@NamedTuple{nfp::Int64, count::Int64}\"", h)
+    end
+
+    # A value inside a card is one line, rounded and short: a card is a fixed-width face, not a place
+    # to print a nested structure.
+    @testset "a card's values are one short line" begin
+        h = RE.record_html((; r = [(name = "x"^80, t = 1.23456789, inner = (p = 1, q = 2)) for _ in 1:2]))
+        # Scoped to the card values: the record's `srec-plain` alternative carries the long string in
+        # full, so the cap has to be read off the cards themselves.
+        cv = [m.captures[1] for m in eachmatch(r"class=\"srec-cv\">([^<]*)", h)]
+        @test length(cv) == 6                                      # 2 rows × 3 columns
+        @test all(c -> length(c) <= 40 && !occursin('\n', c), cv)
+        @test endswith(cv[1], "…") && cv[2] == "1.2346"
+        # A nested tuple is its one-line text, not a sub-grid: a card is a fixed-width face.
+        @test cv[3] == "(p = 1, q = 2)"
+    end
+
+    # Anything the stack declines still shows its CONTENTS: declining must not fall back to the
+    # type signature the bounded summary replaced.
+    @testset "what the stack declines falls back to the summary" begin
+        v = val(RE.record_html((; r = [(a = 1, b = 2), (a = 3, c = 4)])))
+        @test occursin("a = 1", v) && !occursin("element Vector", v)
+    end
+end
+
 @testset "a record carries its plain text too" begin
     h = RE.record_html((; f0 = 1006.63, label = "run 7"))
     @test occursin("srec-grid", h)                       # the grid…

@@ -3716,6 +3716,102 @@ body.slate-dragging .logv-body *, body.slate-dragging .swcfg-body * { pointer-ev
 /* A matrix field: thumbnail with its shape UNDER it. A thumbnail is roughly square and the fields
    wrap along a row, so stacking keeps each one narrow and the row packs; setting the shape beside
    it doubles every field's width for one short string. Type and value range go in the title. */
+/* A record's ROWS field: a vector of same-shaped NamedTuples, drawn as a STACK OF CARDS with the
+   first row face-up. Clicking fans them out to the right and clicking again gathers them back.
+
+   The cards are absolutely positioned, so fanning changes nothing in the layout: a record is a grid
+   whose row is as tall as its tallest cell, and anything that grows in flow makes every sibling card
+   in that row grow with it. The fan happens over the page in the field's own place instead. */
+.srec-rows { position:relative; display:inline-block; cursor:pointer; vertical-align:top; }
+.srec-card { position:absolute; left:0; top:0; display:inline-flex; align-items:baseline; gap:11px;
+  background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:2px 9px;
+  white-space:nowrap;
+  transition:transform .3s cubic-bezier(.2,.85,.25,1), opacity .22s ease, box-shadow .22s ease; }
+/* The face-up card holds the box open: the others are out of flow, so without one in flow the field
+   would have no height at all. */
+.srec-card:first-child { position:relative; }
+/* Paint order. A stack's TOP card is the FIRST in the DOM, but positioned siblings paint in DOM
+   order — so without this the second card draws over the first and both rows of values are visible
+   at a 3px offset, which reads as a smear rather than a pile. Descending z-index puts the first card
+   on top, where its opaque background hides the ones behind it and leaves only their edges. */
+.srec-card:nth-child(1) { z-index:6; }
+.srec-card:nth-child(2) { z-index:5; }
+.srec-card:nth-child(3) { z-index:4; }
+.srec-card:nth-child(4) { z-index:3; }
+.srec-card:nth-child(5) { z-index:2; }
+.srec-card:nth-child(6) { z-index:1; }
+/* Gathered: each card a few pixels down-right of the one above. Only two edges are drawn — a sixth
+   card at 15px would be a smudge, not depth — and the hidden ones sit under the third so they have
+   somewhere to fan from. */
+.srec-card:nth-child(2) { transform:translate(3px, 3px); }
+.srec-card:nth-child(n+3) { transform:translate(6px, 6px); }
+.srec-card:nth-child(n+4) { opacity:0; }
+/* Fanned, every card is in the open, so the stack's paint order stops mattering. */
+.srec-rows.fan .srec-card { z-index:auto; }
+/* While the fan is up the originals are hidden — the clones on the overlay stand in for them, and
+   two piles in the same place would read as a ghost. `visibility` not `display`: the field must keep
+   its size, or the grid row would resize as you open and close it. */
+.srec-rows.fan > .srec-card { visibility:hidden; }
+
+/* The fan's own layer. A light blur and a barely-there wash rather than a dimmed modal: this is a
+   glance at a few rows, so the page should recede, not go away. */
+.srec-fanovl { position:fixed; inset:0; z-index:8000; opacity:0; overflow:visible;
+  backdrop-filter:blur(2.5px); -webkit-backdrop-filter:blur(2.5px);
+  background:rgba(0,0,0,.12); transition:opacity .2s ease; }
+.srec-fanovl.on { opacity:1; }
+/* The panel holding the bar and whichever view is showing. Fixed, so it is bounded by the viewport
+   rather than by the field it came from. */
+/* Positioned by core.js at the pile, in DOCUMENT coordinates — absolute, not fixed, so it travels
+   with the notebook when the page scrolls instead of hanging in the viewport away from its field.
+   No `max-height`: a tall table is reached by scrolling the page, which is the point. */
+.srec-fanpanel { position:absolute; z-index:8001; }
+.srec-fanbar { display:flex; align-items:center; gap:12px; padding:0 16px 4px 0; }
+.srec-fanname { font-family:'Cascadia Code',monospace; font-size:.74rem; color:var(--dim); }
+.srec-fantoggle { font:inherit; font-size:.68rem; color:var(--dim); background:var(--bg3);
+  border:1px solid var(--border); border-radius:5px; padding:1px 8px; cursor:pointer; }
+.srec-fantoggle:hover { color:var(--text); border-color:var(--accent); }
+/* The strip the cards land in: a real flex row, which is what lets a trackpad swipe scroll it when
+   there are more rows than fit. */
+.srec-fanstrip { display:flex; gap:10px; align-items:flex-start;
+  overflow-x:auto; overflow-y:hidden; padding:4px 14px 14px 0; scrollbar-width:thin;
+  overscroll-behavior-x:contain; }
+/* The table view: the same rows read down a column instead of along a strip. */
+.srec-fanpanel .srec-tbl { margin:0 14px 14px 0; width:max-content; max-width:100%; background:var(--bg2); border:1px solid var(--border);
+  border-radius:8px; border-collapse:collapse; overflow:hidden; box-shadow:0 8px 22px rgba(0,0,0,.5); }
+/* The header is a BAND, not just bolder text: it reads as the thing the columns hang from. Sticky, so
+   the names stay with the numbers while the panel scrolls. Shown as the tuple spells them — upper-
+   casing here would say something the code does not. */
+.srec-tbl th { position:sticky; top:0; z-index:1; text-align:left; font-weight:600; color:var(--text);
+  font-size:.72rem; padding:6px 14px; background:var(--bg3); white-space:nowrap;
+  border-bottom:2px solid var(--accent); }
+.srec-tbl td { padding:4px 14px; font-family:'Cascadia Code',monospace; font-size:.8rem;
+  color:var(--val); white-space:nowrap; font-variant-numeric:tabular-nums; }
+.srec-tbl tbody tr:nth-child(even) { background:var(--rowstripe); }
+/* The index column is a label on the row, not one of its values. */
+.srec-tbl-i { color:var(--dim) !important; opacity:.75; text-align:right; font-size:.7rem;
+  border-right:1px solid var(--border); }
+.srec-fancard { flex:0 0 auto; opacity:1 !important; box-shadow:0 8px 22px rgba(0,0,0,.5);
+  transition:transform .32s cubic-bezier(.2,.85,.25,1); }
+/* A card's key/value carry their OWN classes rather than the field's: `.srec-k` is what the source
+   lookup listens on, so a card built from it flashed the cell source on every click. */
+/* The row index, set apart from the values by a hairline so it reads as a label on the card rather
+   than as another field of the row. */
+.srec-ci { font-family:'Cascadia Code',monospace; font-size:.62rem; color:var(--dim); opacity:.75;
+  padding-right:8px; margin-right:3px; border-right:1px solid var(--border); align-self:stretch;
+  display:flex; align-items:center; }
+.srec-rc { display:inline-flex; align-items:baseline; gap:5px; }
+/* No `text-transform`: these are the tuple's own field names, and upper-casing them shows something
+   the code does not say. The field NAME above may be styled; a key inside a row is data. */
+.srec-ck { font-size:.68rem; color:var(--dim); letter-spacing:.02em; }
+.srec-cv { font-family:'Cascadia Code',monospace; font-size:.82rem; color:var(--val);
+  font-variant-numeric:tabular-nums; }
+/* The field box sizes to the gathered stack, not to a fanned card that has left the flow. */
+.srec-f > .srec-rows { margin:5px 10px 6px; }
+/* The row count, in the field's NAME line — a caption under the card would cost the whole grid row
+   a second line. The caret marks it openable without spending a word on it. */
+.srec-n { font-family:'Cascadia Code',monospace; font-size:.66rem; color:var(--dim); margin-left:6px; }
+.srec-n::after { content:' \25b8'; opacity:.7; display:inline-block; transition:transform .2s ease; }
+.srec-f:has(.srec-rows.fan) .srec-n::after { transform:rotate(90deg); }
 .srec-mat { display:flex; flex-direction:column; align-items:center; gap:3px; cursor:pointer; }
 .srec-mat-svg { display:block; border-radius:2px; border:1px solid var(--border); }
 .srec-mat-cap { font-family:'Cascadia Code',monospace; font-size:.68rem; color:var(--dim); white-space:nowrap; }

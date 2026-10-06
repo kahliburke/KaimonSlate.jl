@@ -27,10 +27,111 @@ function _rec_number(x::Real)
     isfinite(f) || return string(f)
     return string(round(f; sigdigits = 5))
 end
+# A container's `text/plain` form is a HEADER line followed by its elements, so the first-line cut
+# below reduced it to the type and none of the data — a field holding eight rows read as
+# `8-element Vector{@NamedTuple{nfp::Int64, count::Int64}}:`. The two-argument `show` puts the
+# elements inline instead.
+#
+# Taken from the first few elements rather than from the whole container, because the cap at the end
+# of `_rec_text` cannot undo the cost of building the string: a million-element vector would be
+# rendered in full and then thrown away. A container small enough to show whole is shown whole, which
+# also keeps its own delimiters (`Dict(…)`, `Set(…)`) instead of a Vector's brackets.
+# `_REC_SEQ_MAX` is under `_rec_text`'s own 140-char cap on purpose: the "… N total]" tail is the most
+# useful part of a summary, and letting the cap fall through the middle of it loses the count and
+# leaves a mangled bracket. Fit fewer elements instead.
+const _REC_SEQ_HEAD = 6
+const _REC_SEQ_MAX = 110
+function _rec_seq_text(v)
+    n = length(v)
+    show1(x) = sprint((io, y) -> show(IOContext(io, :compact => true, :limit => true), y), x)
+    if n <= _REC_SEQ_HEAD
+        whole = show1(v)
+        length(whole) <= _REC_SEQ_MAX && return whole
+    end
+    k, used = 0, 0
+    for x in Iterators.take(v, _REC_SEQ_HEAD)
+        used += length(show1(x)) + 2                      # ", " between elements
+        used > _REC_SEQ_MAX && break
+        k += 1
+    end
+    head = collect(Iterators.take(v, max(k, 1)))
+    body = chop(show1(head))                              # drop the closing bracket to extend it
+    return length(head) < n ? string(body, ", … ", n, " total]") : string(body, "]")
+end
+
+# ── Rows of the same shape ───────────────────────────────────────────────────
+# A vector of NamedTuples sharing their keys is a TABLE, and it arrived here as a line of text —
+# `[(nfp = 1, count = 3), (nfp = 2, count = 6), …]` — which is the shape of the data spelled out
+# rather than shown. It renders as a stack instead: the FIRST row face-up with its own values, the
+# rest suggested behind it, and the whole table in a `<template>` that a click swaps in.
+#
+# The expanded form rides along rather than being fetched, as the matrix thumbnail's does: opening
+# costs no round-trip and the table cannot disagree with the face-up row. Both are capped, because
+# this markup crosses a websocket and lands in the memo store on every render.
+# More than fits beside the field, because the fan scrolls — but still bounded: this markup crosses
+# a websocket and lands in the memo store on every render, so the rest stay a count.
+const _REC_FAN_CARDS = 12
+const _REC_ROWS_COLS = 8          # columns per card; a wider row keeps its text form
+# Whether the rows share a shape is answered by the ELEMENT TYPE, in constant time — nothing here
+# walks the vector. `fieldnames` is the test itself: it returns the keys when they are fixed by the
+# type and throws when they are not, so `[(a=1,b=2), (a=3,c=4)]` is declined while
+# `[(a=1,b=2), (a=1.5,b=2)]` — same keys, different value types, so NOT a concrete eltype — is
+# accepted. Asking `isconcretetype` instead turned that second case away for no reason.
+function _rec_rowlike(v)
+    (v isa AbstractVector && length(v) > 1 && eltype(v) <: NamedTuple) || return false
+    ks = try; fieldnames(eltype(v)); catch; return false; end
+    return length(ks) in 1:_REC_ROWS_COLS
+end
+
+# `i::Int64, sq::Int64` for a concrete row type, or just the names when the values' types vary.
+# Capped: this sits in a one-line header, and the whole thing is on the element's `title` anyway.
+function _rec_rowtype(T)
+    ks = fieldnames(T)
+    ts = try; fieldtypes(T); catch; (); end
+    # A vector of rows whose VALUE types vary has no value types in its element type, and `fieldtypes`
+    # answers `Any` for every column rather than declining. `a::Any, b::Any` says less than `a, b`.
+    named = length(ts) == length(ks) && !all(==(Any), ts)
+    s = named ? join((string(k, "::", t) for (k, t) in zip(ks, ts)), ", ") : join(ks, ", ")
+    return length(s) > 48 ? first(s, 47) * "…" : s
+end
+
+_rec_cell_text(x) = (s = x isa Real ? something(_rec_number(x), string(x)) :
+                         x isa AbstractString ? String(x) : _rec_text(x);
+                     length(s) > 40 ? first(s, 39) * "…" : s)
+
+function _rec_card(io::IO, r, ks, i::Int)
+    # The row's own index. Gathered you see only the top card's, so it reads as "this is the first";
+    # fanned it is how you keep your place along the strip.
+    print(io, "<span class=\"srec-card\"><span class=\"srec-ci\">", i, "</span>")
+    for k in ks
+        # `srec-ck`/`srec-cv`, NOT the field classes: `.srec-k` is the click target that asks the hub
+        # where a field came from, and a card's key is a different question. Reusing the class made
+        # every click on a card flash the cell source.
+        print(io, "<span class=\"srec-rc\"><span class=\"srec-ck\">", _rec_esc(String(k)),
+                  "</span><span class=\"srec-cv\">", _rec_esc(_rec_cell_text(getfield(r, k))), "</span></span>")
+    end
+    print(io, "</span>")
+end
+
+function _rec_rows_html(io::IO, v::AbstractVector, field::AbstractString)
+    ks = fieldnames(eltype(v))
+    print(io, "<span class=\"srec-rows srec-rows-open\" data-rowsfield=\"", _rec_esc(field),
+              "\" title=\"click to fan out\">")
+    for (i, r) in enumerate(Iterators.take(v, _REC_FAN_CARDS))
+        _rec_card(io, r, ks, i)
+    end
+    print(io, "</span>")
+    return true
+end
+
 # The compact one-line text of a value, rounded and capped.
 function _rec_text(v)
     s = try
-        sprint((io, x) -> show(IOContext(io, :compact => true, :limit => true), MIME"text/plain"(), x), v)
+        if v isa Union{AbstractArray,AbstractSet,AbstractDict} && !isempty(v)
+            _rec_seq_text(v)
+        else
+            sprint((io, x) -> show(IOContext(io, :compact => true, :limit => true), MIME"text/plain"(), x), v)
+        end
     catch
         try; repr(v); catch; string(typeof(v)); end
     end
@@ -248,6 +349,16 @@ function _rec_value_html(io::IO, v, depth::Int, field::AbstractString)
         _record_fields(io, v, depth + 1, field)
         return
     end
+    # Rows of the same shape are a table, so they are shown as one rather than as a line of text.
+    # Built into a buffer first: `_rec_rows_html` writes as it goes, so a throw partway through would
+    # leave half a stack behind AND then fall through to print the text form underneath it.
+    if _rec_rowlike(v)
+        buf = IOBuffer()
+        if (try _rec_rows_html(buf, v, field) catch; false end)
+            print(io, String(take!(buf)))
+            return
+        end
+    end
     # A matrix shows its shape AS a shape, not as `4×3 Matrix{Float64}`. Complex goes through too:
     # `_matrix_grid` takes `real` itself, the same view its ECharts heatmap gives.
     if v isa AbstractMatrix && eltype(v) <: Number && !isempty(v)
@@ -304,7 +415,19 @@ function _record_fields(io::IO, nt::NamedTuple, depth::Int, path::AbstractString
         # it came from (`fit.coeffs`) when it asks for the full rendering.
         sub = isempty(path) ? string(k) : string(path, '.', k)
         print(io, "<div class=\"srec-f", nested ? " srec-nest" : "", "\" data-field=\"", _rec_esc(sub),
-                  "\"><span class=\"srec-k\">", _rec_esc(string(k)), "</span>")
+                  "\"><span class=\"srec-k\">", _rec_esc(string(k)))
+        # Count AND element type, so the header says how many and of what — a stack of cards shows
+        # the keys but not what is holding them, which is the difference between rows of NamedTuples
+        # and rows of some struct once this covers more than NamedTuples.
+        #
+        # Inside the name span, not beside it: `.srec-f` is a column flex, so a sibling would take a
+        # line of its own — and a record grid stretches every field in a row to the tallest, so one
+        # extra line is paid for by every sibling card in that row.
+        if _rec_rowlike(v)
+            print(io, "<span class=\"srec-n\" title=\"", _rec_esc(string(eltype(v))), "\">",
+                      length(v), "\u00d7 ", _rec_esc(_rec_rowtype(eltype(v))), "</span>")
+        end
+        print(io, "</span>")
         _rec_value_html(io, v, depth, sub)
         print(io, "</div>")
     end

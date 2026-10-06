@@ -1711,6 +1711,173 @@ document.addEventListener('click', e => {
     .catch(() => {});
 });
 
+// ── A record's rows field, fanned out ──────────────────────────────────────────────────────────
+// A vector of same-shaped NamedTuples renders as a stack of cards (record_display.jl). Clicking deals
+// them into a strip you can swipe through, or into a table — the two answer different questions, so
+// the choice is the reader's and is remembered. Escape or a click on the backdrop gathers them.
+//
+// The strip is on a FIXED layer, not in the field. A field is a cell in a record grid: laid out there
+// the cards are clipped by it and bounded by its width, and anything growing in flow makes every
+// sibling card in the row grow too. Lifting them off also makes the strip scrollable.
+//
+// The table is built HERE, from the cards, rather than shipped beside them: every value is already in
+// the markup, and sending it twice would double what crosses the websocket and lands in the memo on
+// every render for a view that may never be opened.
+//
+// Delegated from the document so it survives Preact re-renders; no round-trip.
+const _SREC_VIEW_KEY = 'slate.recRowsView';
+function _srecRowsTable(cards) {
+  const keys = [...cards[0].querySelectorAll('.srec-ck')].map(k => k.textContent);
+  const t = document.createElement('table');
+  t.className = 'srec-tbl';
+  t.innerHTML = '<thead><tr><th class="srec-tbl-i"></th>' +
+    keys.map(k => '<th></th>').join('') + '</tr></thead><tbody></tbody>';
+  [...t.querySelectorAll('thead th')].slice(1).forEach((th, i) => { th.textContent = keys[i]; });
+  const body = t.querySelector('tbody');
+  cards.forEach(c => {
+    const tr = document.createElement('tr');
+    const idx = document.createElement('td');
+    idx.className = 'srec-tbl-i';
+    idx.textContent = (c.querySelector('.srec-ci') || {}).textContent || '';
+    tr.appendChild(idx);
+    c.querySelectorAll('.srec-cv').forEach(v => {
+      const td = document.createElement('td'); td.textContent = v.textContent; tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  return t;
+}
+document.addEventListener('click', e => {
+  const host = e.target.closest && e.target.closest('.srec-rows-open');
+  if (!host || host.classList.contains('fan')) return;
+  const cards = [...host.querySelectorAll('.srec-card')];
+  if (cards.length < 2) return;
+  e.preventDefault(); e.stopPropagation();
+
+  // One fan at a time, and a hard sweep rather than a check: this also clears a panel left behind by
+  // a page whose output was replaced while it was open, which otherwise sits over the notebook with
+  // its own backdrop swallowing every click.
+  document.querySelectorAll('.srec-fanovl, .srec-fanpanel').forEach(n => n.remove());
+  document.querySelectorAll('.srec-rows-open.fan').forEach(n => n.classList.remove('fan'));
+
+  const from = cards.map(c => c.getBoundingClientRect());
+  const ovl = document.createElement('div');
+  ovl.className = 'srec-fanovl';
+  const panel = document.createElement('div');
+  panel.className = 'srec-fanpanel';
+  // Anchored where the pile is, not full-bleed: the expansion belongs to the field you clicked, and a
+  // table that opens at the left edge of the window makes you re-find which field it came from. Left
+  // edge at the pile, right edge at the window, so the strip still has room to scroll — and pulled
+  // back only if the pile sits too near the right to leave any.
+  // DOCUMENT coordinates, not viewport: the panel is absolutely positioned so it scrolls with the
+  // page. Fixed, it stayed pinned while the notebook moved underneath — the table drifted away from
+  // the field it belongs to, and anything taller than the window could not be scrolled into view.
+  const _MIN_W = 340;
+  const vw = document.documentElement.clientWidth;
+  const left = Math.max(8, Math.min(from[0].left - 14, vw - _MIN_W));
+  panel.style.top = (from[0].top + window.scrollY - 34) + 'px';
+  panel.style.left = (left + window.scrollX) + 'px';
+  panel.style.width = (vw - left - 8) + 'px';
+
+  const bar = document.createElement('div');
+  bar.className = 'srec-fanbar';
+  const name = document.createElement('span');
+  name.className = 'srec-fanname';
+  const fcard = host.closest('.srec-f');
+  name.textContent = (host.getAttribute('data-rowsfield') || '') +
+    (fcard && fcard.querySelector('.srec-n') ? '  ' + fcard.querySelector('.srec-n').textContent : '');
+  const toggle = document.createElement('button');
+  toggle.className = 'srec-fantoggle';
+  bar.appendChild(name); bar.appendChild(toggle);
+  panel.appendChild(bar);
+
+  const strip = document.createElement('div');
+  strip.className = 'srec-fanstrip';
+  cards.forEach(c => {
+    const d = c.cloneNode(true);
+    d.className = 'srec-card srec-fancard';
+    d.style.position = 'static';
+    strip.appendChild(d);
+  });
+  panel.appendChild(strip);
+  // SIBLINGS, not nested: an absolutely positioned child of a fixed element is placed against that
+  // element, so a panel inside the backdrop would still hang in the viewport. On `body` it is placed
+  // against the document and travels with the page.
+  document.body.appendChild(ovl);
+  document.body.appendChild(panel);
+  host.classList.add('fan');
+
+  const clones = [...strip.children];
+  let table = null;
+  const setView = v => {
+    localStorage.setItem(_SREC_VIEW_KEY, v);
+    toggle.textContent = v === 'table' ? '▤ table' : '▦ cards';
+    if (v === 'table') {
+      if (!table) { table = _srecRowsTable(clones); panel.appendChild(table); }
+      table.style.display = ''; strip.style.display = 'none';
+    } else {
+      if (table) table.style.display = 'none';
+      strip.style.display = '';
+    }
+  };
+  const start = localStorage.getItem(_SREC_VIEW_KEY) === 'table' ? 'table' : 'cards';
+  toggle.addEventListener('click', ev => {
+    ev.stopPropagation();
+    setView(localStorage.getItem(_SREC_VIEW_KEY) === 'table' ? 'cards' : 'table');
+  });
+
+  // FLIP, cards view only: put them where flex does, measure, invert onto the pile, release. The
+  // layout stays the real one — which is what lets it scroll — while the flight starts at the pile.
+  if (start === 'cards') {
+    const to = clones.map(d => d.getBoundingClientRect());
+    clones.forEach((d, i) => {
+      const f = from[Math.min(i, from.length - 1)];
+      d.style.transition = 'none';
+      d.style.transform = 'translate(' + (f.left - to[i].left) + 'px, ' + (f.top - to[i].top) + 'px)';
+    });
+    requestAnimationFrame(() => {
+      ovl.classList.add('on');
+      clones.forEach((d, i) => { d.style.transition = ''; d.style.transitionDelay = (i * 35) + 'ms'; d.style.transform = ''; });
+    });
+  } else {
+    requestAnimationFrame(() => ovl.classList.add('on'));
+  }
+  setView(start);
+
+  const drop = () => { ovl.remove(); panel.remove(); host.classList.remove('fan'); };
+  const unbind = () => { document.removeEventListener('keydown', onKey); gone.disconnect(); };
+  const closeNow = () => { unbind(); drop(); };
+  const close = () => {
+    unbind();
+    ovl.classList.remove('on');
+    if (strip.style.display !== 'none') {
+      const now = clones.map(d => d.getBoundingClientRect());
+      clones.forEach((d, i) => {
+        const f = from[Math.min(i, from.length - 1)];
+        d.style.transitionDelay = ((clones.length - 1 - i) * 25) + 'ms';
+        d.style.transform = 'translate(' + (f.left - now[i].left) + 'px, ' + (f.top - now[i].top) + 'px)';
+      });
+    }
+    setTimeout(drop, 440);
+  };
+  // A re-run replaces the output, so the pile these cards flew out of stops existing. Take the panel
+  // down with it, and without the return flight: there is no longer a rectangle to fly back to.
+  // Watched on `.cellslot` rather than `.cell`, because a re-render swaps the whole `.cell` out and an
+  // observer attached to it would be watching a detached node.
+  const gone = new MutationObserver(() => { if (!host.isConnected) closeNow(); });
+  gone.observe(host.closest('.cellslot') || document.body, { childList: true, subtree: true });
+
+  const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } };
+  // Anything that is not the content itself dismisses — the backdrop, and the panel's own empty space
+  // beside and below the table, which reaches to the window edge so the strip has room to scroll.
+  const maybeClose = ev => {
+    if (!ev.target.closest('.srec-tbl, .srec-fancard, .srec-fanbar')) close();
+  };
+  ovl.addEventListener('click', maybeClose);
+  panel.addEventListener('click', maybeClose);
+  document.addEventListener('keydown', onKey);
+});
+
 // ── A record's matrix field, expanded ──────────────────────────────────────────────────────────
 // The field carries a small heat strip and, in a <template>, a larger one (record_display.jl).
 // Clicking lifts the larger SVG into an overlay. Delegated from the document so it keeps working

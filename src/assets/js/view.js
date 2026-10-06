@@ -2131,12 +2131,15 @@ function _swapOutput(out, html, live, after) {
     if (out.__slateSwapSeq !== seq) return;
     const applyUpdates = _carryMounted(out, stage);
     out.style.minHeight = out.offsetHeight + 'px';
+    out.__slateHoldSeq = seq;   // the hold belongs to the swap that committed last
     out.replaceChildren(...Array.from(stage.childNodes));
     runScripts(out);   // a <script> from parsed HTML is inert — re-create so figures boot
     mountOutputComponents(out);   // mount any `slate_render` component OUTPUTS in the freshly-swapped output
     applyUpdates();
     const mounted = out.querySelectorAll('img');
-    const release = () => { out.style.minHeight = ''; };
+    // The images of an older swap can finish loading after a newer swap has committed. Their release
+    // must not clear the hold of the newer swap.
+    const release = () => { if (out.__slateHoldSeq === seq) out.style.minHeight = ''; };
     if (!mounted.length) requestAnimationFrame(release);
     else {
       let n = mounted.length;
