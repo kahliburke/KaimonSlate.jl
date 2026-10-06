@@ -2476,6 +2476,11 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
   font-size:.8rem; color:var(--text); white-space:nowrap; cursor:pointer; }
 .wpill-menuitem:hover { background:color-mix(in srgb, var(--accent) 20%, transparent); }
 .wpmi-face { color:var(--dim); font-size:.72rem; margin-left:auto; padding-left:12px; font-variant-numeric:tabular-nums; }
+.wpmi-tel { display:inline-flex; align-items:center; justify-content:center; width:22px; height:20px; margin-left:auto; padding:0;
+  border:1px solid transparent; border-radius:5px; background:none; color:var(--dim); cursor:pointer; flex:none; }
+.wpmi-face + .wpmi-tel { margin-left:6px; }
+.wpmi-tel:hover { color:var(--text); border-color:color-mix(in srgb, var(--accent) 45%, transparent);
+  background:color-mix(in srgb, var(--accent) 18%, transparent); }
 /* Worker / region status + live-log popup. */
 .workerpop { width:min(760px, 92vw); max-height:80vh; display:flex; flex-direction:column; padding:0; overflow:hidden; }
 /* As a NON-covering side panel: docked top-right, below the topbar, so it coexists with the (top-left)

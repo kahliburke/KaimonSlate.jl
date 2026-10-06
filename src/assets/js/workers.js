@@ -11,6 +11,10 @@ let _wpSide = null;
 const _wpProv = {};               // side → {origin, spawned} from the log route, for the open panel
 let _wpRaw = [];                  // chronological raw log lines for the OPEN popup (snapshot + streamed), re-parsed on each change
 let _wpWorkers = [];              // the model's workers for this notebook, as last painted
+// A small line chart, drawn in the text colour.
+const _WP_TEL_ICON = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M1.5 13.5h13" ' +
+  'stroke="currentColor" stroke-width="1.2" fill="none" opacity=".5"/><path d="M2 11l3.5-4 3 2.5L14 3.5" stroke="currentColor" ' +
+  'stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 // The record the open panel draws: the worker's facts, and what the log route added about it.
 const _wpCurrent = () => _wpSide === null ? null
   : Object.assign({ side: _wpSide }, _wpProv[_wpSide] || {}, window.slateModel.getWorker(_wpSide) || {});
@@ -76,13 +80,17 @@ window.wpOpenLog = function () {
 // Host and port come from the live worker list: the popup's snapshot is the log route's answer, which
 // for a region worker names neither.
 window.wpOpenTelemetry = function () {
-  const shown = _wpCurrent(); if (!shown || !(window.openWorkerTelemetry || window.openTelemetry)) return;
-  const side = _wpSide;
-  const r = Object.assign({}, shown, (_wpWorkers || []).find(w => (w.side || '') === side) || {});
-  // The worker's bar (facts, restart, reap) rides along, as it does from the home page.
-  (window.openWorkerTelemetry || window.openTelemetry)({ nb: (window.__slateState || {}).id, side,
-    host: r.host && r.host !== 'local' ? r.host : '', port: r.port, label: _wpLabel(side, r.host) });
+  const shown = _wpCurrent(); if (!shown) return;
+  _wpTelemetryFor(_wpSide, shown);
 };
+// The telemetry view for the worker on `side`, with its bar (facts, restart, reap), as from the home
+// page. `base` is what the caller already knows of it.
+function _wpTelemetryFor(side, base) {
+  const open = window.openWorkerTelemetry || window.openTelemetry; if (!open) return;
+  const r = Object.assign({}, base || {}, (_wpWorkers || []).find(w => (w.side || '') === side) || {});
+  open({ nb: (window.__slateState || {}).id, side,
+    host: r.host && r.host !== 'local' ? r.host : '', port: r.port, label: _wpLabel(side, r.host) });
+}
 
 // ── Worker-log prettifier ─────────────────────────────────────────────────────────────────────────────
 // The worker's timestamp ConsoleLogger renders each record across MULTIPLE physical lines with box-drawing
@@ -294,7 +302,9 @@ function _wpPaintStrip(ws) {
   const rows = ranked.map(w => {
     const f = _wpFace(w);
     return '<div class="wpill-menuitem" data-side="' + _wpEsc(w.side || '') + '">' + _wpOverflowDot(w) + ' ' +
-      _wpEsc(_wpLabel(w.side || '', w.host)) + (f ? ' <span class="wpmi-face">' + _wpEsc(f) + '</span>' : '') + '</div>';
+      _wpEsc(_wpLabel(w.side || '', w.host)) + (f ? ' <span class="wpmi-face">' + _wpEsc(f) + '</span>' : '') +
+      '<button class="wpmi-tel" data-tel-side="' + _wpEsc(w.side || '') + '" title="Telemetry" aria-label="Telemetry">' +
+      _WP_TEL_ICON + '</button></div>';
   }).join('');
   const caret = ranked.length > 1 ? '<span class="wpill-caret">▾</span>' : '';
   // Fixed single slot: the pill reserves a min-width so it doesn't jump as the top worker changes, and the
@@ -610,6 +620,11 @@ document.addEventListener('click', e => {
     e.stopPropagation(); return;
   }
   _wpCloseTabMenu();
+  const tel = e.target.closest('#workerpills .wpmi-tel[data-tel-side]');
+  if (tel) {                                                    // a row's chart button → its telemetry, not its panel
+    _wpCloseMenu(); closeWorkerPop(); _wpTelemetryFor(tel.getAttribute('data-tel-side'));
+    e.stopPropagation(); return;
+  }
   const row = e.target.closest('#workerpills .wpill-menuitem[data-side]');
   if (row) { _wpCloseMenu(); _wpShowPanel(row.getAttribute('data-side'), true); return; }   // click a row → PIN it
   const top = e.target.closest('#workerpills .wpill-top');

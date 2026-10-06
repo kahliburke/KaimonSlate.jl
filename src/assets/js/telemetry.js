@@ -244,9 +244,9 @@ function Telemetry() {
   const gcNow = gcPct(s.slice(-2)).pop()[1];
 
   const tiles = html`<div class="tm-tiles">
-    <${Tile} label="CPU · this worker" value=${r.cpuText}
+    <${Tile} label="CPU" value=${r.cpuText}
              sub=${r.hostCpu != null ? 'host ' + pct(r.hostCpu) + (nc ? ' of ' + nc + ' cores' : '') : null}/>
-    <${Tile} label=${!r.mem ? 'Memory · this worker' : r.mem.of === 'job' ? 'Memory · job limit' : 'Memory · host'}
+    <${Tile} label=${r.mem && r.mem.of === 'host' ? 'Memory · host' : 'Memory'}
              value=${r.mem ? B(r.mem.used) + ' / ' + B(r.mem.limit) : B(last.rss)}
              frac=${r.memFrac}
              tone=${r.memFrac > 0.85 ? 'warn' : ''}
@@ -298,7 +298,7 @@ function Telemetry() {
 
   // Each chart ends at the limit that bounds it, and the section header says what that limit is.
   const limitKey = (t) => t ? html`<span class="tm-key">${t}</span>` : null;
-  const cpuLimit = limitKey(cpuMax ? cpuMax + ' cores' : '');
+  const cpuLimit = limitKey(allow && nc && allow < nc ? allow + '/' + nc + ' cores' : cpuMax ? cpuMax + ' cores' : '');
   const memLimitText = limitKey(memLimit > 0 ? B(memLimit) + ' available' : '');
   const mem = base('', B, {
     yAxis: { type: 'value', max: memLimit > 0 ? memLimit : null, axisLabel: { formatter: B },
