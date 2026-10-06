@@ -192,8 +192,12 @@ const line = (name, data, extra = {}) => {
 // Every time axis spans the same window, set by the view as it renders, so the charts line up with
 // each other and with the run timeline, whose spans can start before the first sample.
 let xWindow = null;
-function compact(option) {
+// `active`: the pointer is over this chart. Only that chart shows its tooltip; the charts connected to
+// it show the time line alone.
+function compact(option, active = false) {
   const o = Object.assign({ backgroundColor: 'transparent' }, option);
+  if (o.tooltip) o.tooltip = Object.assign({}, o.tooltip, { showContent: active && o.tooltip.showContent !== false,
+                                                            padding: [4, 8], textStyle: { fontSize: 11 } });
   if (xWindow && o.xAxis && !Array.isArray(o.xAxis) && o.xAxis.type === 'time')
     o.xAxis = Object.assign({}, o.xAxis, { min: xWindow[0], max: xWindow[1] });
   const small = (x) => Object.assign({ fontSize: 11 }, x || {});
@@ -207,18 +211,23 @@ function compact(option) {
 }
 
 function Chart({ option, height = 140 }) {
-  const el = useRef(null), inst = useRef(null);
+  const el = useRef(null), inst = useRef(null), active = useRef(false), opt = useRef(option);
+  opt.current = option;
   useEffect(() => {
     const c = initChart(el.current);
     c.group = GROUP; window.echarts.connect(GROUP);
     inst.current = c;
+    const mark = (on) => { if (active.current === on) return; active.current = on;
+                           c.setOption(compact(opt.current, on), { replaceMerge: ['series'] }); };
+    c.getZr().on('mousemove', () => mark(true));
+    c.getZr().on('globalout', () => mark(false));
     const ro = new ResizeObserver(() => c.resize()); ro.observe(el.current);
     return () => { ro.disconnect(); c.dispose(); };
   }, []);
   // Merged into the chart rather than replacing it, which would rebuild it and drop the tooltip being
   // read, with the connected charts' pointers, every couple of seconds. The series are replaced
   // whole, because which ones a chart has changes with the sample.
-  useEffect(() => { inst.current && inst.current.setOption(compact(option), { replaceMerge: ['series'] }); });
+  useEffect(() => { inst.current && inst.current.setOption(compact(option, active.current), { replaceMerge: ['series'] }); });
   return html`<div class="tm-chart" ref=${el} style=${'height:' + height + 'px'}></div>`;
 }
 
