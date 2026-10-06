@@ -11,6 +11,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { loadSlateBytes } from './_bytes_src.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const jsdir = join(here, '..', '..', 'src', 'assets', 'js');
@@ -46,11 +47,7 @@ for (const shell of ['index.html', 'notebook.html']) {
 }
 
 // ── 3. The value decides the unit and the precision ──────────────────────────────
-const m = platform.match(/window\.slateBytes\s*=\s*(function[\s\S]*?\n};)/);
-if (!m) { console.error('bytes_fmt: could not slice slateBytes'); process.exit(2); }
-const UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-const fmt = new Function('_SLATE_BYTE_UNITS',
-  'const window = {};' + m[1].replace(/^function\s+slateBytes/, 'return function slateBytes'))(UNITS);
+const fmt = loadSlateBytes();
 
 const cases = [
   [0, '0 B'], [512, '512 B'], [1023, '1023 B'],
