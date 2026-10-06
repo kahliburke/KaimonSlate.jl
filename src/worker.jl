@@ -3110,6 +3110,124 @@ worker process's main loop). `warm_deps=true` (pool workers) background-imports 
 dep of the active project so package-load time is paid while idle; `stats_path` (remote
 workers) turns on the 2s telemetry sampler writing that sidecar + PUBbing `slate_telemetry`.
 """
+# The bodies of the tasks `start` spawns, as named functions so the package image can hold them
+# compiled (see `_precompile_start`). A body left as a closure compiled when its task started, which is
+# the moment the gate opens and the hub's handshake needs the compiler.
+function _deferred_src_watcher()
+    _after_hub_attached()
+    try; _start_src_watcher(); catch e; @warn "slate worker: src-watcher start failed" exception = e; end
+end
+
+function _blob_channel(host::String, blob_bind::String, blob_free_port::Bool, data_port::Int, blob_curve::Bool)
+    sleep(5)   # DEFERRED: another CURVE-server setup; keep it out of the hub's handshake window
+    # The blob server binds `blob_bind` when given (remote workers → 0.0.0.0 so same-subnet PEERS can
+    # reach it for direct pulls) else the gate's `host` (local → loopback). CURVE-protected regardless
+    # (a peer must hold the server key to even handshake), so exposing it on a firewalled cloud subnet
+    # is safe; peer allow-listing over :tunnel is the follow-on hardening.
+    #
+    # PORT SELECTION. A `:tunnel` worker's blob channel has no firewall/peer-dial constraint (the hub
+    # discovers the port via `__slate_ports` and bridges it over ssh), so it binds a VERIFIED-FREE port
+    # up front (`blob_free_port`) rather than the hub-assigned `gate+2` — a co-tenant holding `gate+2` on
+    # a shared host then can't stall it (the old bug: same-port retries never cleared sustained
+    # contention, so the worker ran blob-LESS for life and every pull FROM it relayed / an ssh-bridge
+    # stalled). A `:direct` worker MUST bind the pinned `gate+2` (firewall-opened + dialed directly by
+    # peers), so it keeps that port; a warm respawn / reap-replace can briefly RACE the predecessor's
+    # not-yet-released socket there, so retry the SAME port a few times, then give up loudly.
+    # `_blob_server!` only returns on shutdown, so reaching past it means a clean stop, not a bind failure.
+    bind_host = isempty(blob_bind) ? host : blob_bind
+    port_try = blob_free_port ? _free_local_port() : data_port
+    for attempt in 1:12
+        try
+            _blob_server!(bind_host, port_try; curve = blob_curve)
+            break
+        catch e
+            if !occursin("Address already in use", sprint(showerror, e))
+                @warn "slate worker: blob channel died" port = port_try exception = e
+                break
+            end
+            if blob_free_port
+                port_try = _free_local_port()   # a just-probed-free port lost a rare race — pick another
+                @info "slate worker: blob port raced, re-picking a free port" port = port_try attempt = attempt
+                sleep(0.2)
+            elseif attempt < 12
+                @info "slate worker: blob port busy (pinned), retrying" port = port_try attempt = attempt
+                sleep(1.5)
+            else
+                @warn "slate worker: blob channel gave up — pinned port stayed busy" port = port_try
+            end
+        end
+    end
+end
+
+_xfer_executor_task() = try; _xfer_executor!(); catch e
+    @warn "slate worker: transfer executor died" exception = e
+end
+
+_ssh_fwd_reaper() = try
+    while true; sleep(30); _ssh_fwd_reap_idle!(); end
+catch e
+    @warn "slate worker: ssh-forward reaper died" exception = e
+end
+
+# Prewarm the eval path: the package image holds most of what the first run through
+# `_eval_one`/`run_capture` compiles; this pays for what it does not, which otherwise lands under the
+# user's first cell. Deferred until the hub has attached. A real eval arriving mid-prewarm serializes
+# with it harmlessly, and an idle-spawned worker (warm pool, detach target) has it paid before anyone
+# attaches. "1 + 1" writes no globals.
+function _prewarm_eval()
+    try
+        _after_hub_attached()
+        t0 = time()
+        # Through the TOOL entry point (not _eval_one) so the wrapper + cancel-registry +
+        # kwarg path compile too — the layers a real first request would otherwise JIT.
+        __slate_eval("1 + 1"; filename = "cell:__prewarm__")
+        @info "slate worker: eval pipeline prewarmed" ms = round(Int, (time() - t0) * 1000)
+    catch e
+        @warn "slate worker: prewarm failed (harmless — first cell just pays the JIT)" exception = e
+    end
+end
+
+# Pool warmth: pay package-load time NOW, while idle — import every direct dep of the active project
+# (which provisioning populated from the preload env). A failing dep is logged, not fatal: the
+# adopting notebook's own `using` cell will surface the real error with context.
+function _warm_deps()
+    try
+        t0 = time(); n = 0
+        names = [nm for nm in sort!(collect(keys(Pkg.project().dependencies)))
+                 if !(nm in _INFRA_DEPS)]
+        total = length(names)
+        for name in names
+            _WARM_STATUS[] = "warming $(n)/$(total) · $(name)"   # live status → telemetry → the pool UI
+            try
+                Base.require(Main, Symbol(name)); n += 1          # loads + precompiles if needed
+            catch e
+                @warn "slate worker: warm-deps import failed" pkg = name exception = e
+            end
+        end
+        _WARM_STATUS[] = "ready · $(n) pkgs · $(round(Int, (time() - t0) * 1000))ms"
+        @info "slate worker: warm deps loaded" pkgs = n ms = round(Int, (time() - t0) * 1000)
+    catch e
+        _WARM_STATUS[] = "warm failed"
+        @warn "slate worker: warm-deps pass died" exception = e
+    end
+end
+
+_prepare_env_task() = try; _prepare_env!(); catch e
+    @warn "slate worker: prepare pass died" exception = e
+end
+
+_telemetry_task(stats_path::String) = try; _telemetry_loop!(stats_path); catch e
+    @warn "slate worker: telemetry sampler died" exception = e
+end
+
+# The worker log's logger: timestamps every record (the default logger emits none), on the stream
+# `start` hands it.
+_worker_logger(io::IO) = Logging.ConsoleLogger(io, Logging.Info;
+    meta_formatter = (lvl, m, g, id, f, l) -> begin
+        c, pre, suf = Logging.default_metafmt(lvl, m, g, id, f, l)
+        (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)
+    end)
+
 function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                curve::Bool = false, allowed_clients::Vector{String} = String[],
                data_port::Int = 0, warm_deps::Bool = false, stats_path::String = "",
@@ -3133,11 +3251,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         # inside type inference, in a fixed world, and a logger type defined by a package loaded after
         # that world has no method there. A cell's own logger (capture.jl) is task-local, and is where
         # a cell's "Replacing docs" warnings are dropped.
-        Base.global_logger(Logging.ConsoleLogger(_LogTee(stderr), Logging.Info;
-            meta_formatter = (lvl, m, g, id, f, l) -> begin
-                c, pre, suf = Logging.default_metafmt(lvl, m, g, id, f, l)
-                (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)
-            end))
+        Base.global_logger(_worker_logger(_LogTee(stderr)))
     catch e; @warn "slate: timestamp logger install failed" exception = e; end
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
@@ -3148,68 +3262,21 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # the codegen lock with the hub's CURVE handshake in the first seconds after the port opens (the
     # handshake path is precompiled but still needs the lock free to run fast). Let the attach win the
     # quiet CPU first, then set up hot-reload.
-    Threads.@spawn begin
-        _after_hub_attached()
-        try; _start_src_watcher(); catch e; @warn "slate worker: src-watcher start failed" exception = e; end
-    end
+    Threads.@spawn _deferred_src_watcher()
     # The blob data channel (port+2): bulk memo transfer that never queues ahead of cell results.
     # ALWAYS CURVE (decoupled from hub transport): allow-listed on :direct (its OWN Slate-side ZAP
     # handler + allow-file, not the gate's), encryption-only behind SSH on :tunnel. No plaintext blob
     # path on any worker. Needs the memo/CAS layer (MemoStore + codecs) — memo-off means no store to serve.
-    data_port > 0 && _MEMO_OK && Threads.@spawn begin
-        sleep(5)   # DEFERRED: another CURVE-server setup; keep it out of the hub's handshake window
-        # The blob server binds `blob_bind` when given (remote workers → 0.0.0.0 so same-subnet PEERS can
-        # reach it for direct pulls) else the gate's `host` (local → loopback). CURVE-protected regardless
-        # (a peer must hold the server key to even handshake), so exposing it on a firewalled cloud subnet
-        # is safe; peer allow-listing over :tunnel is the follow-on hardening.
-        #
-        # PORT SELECTION. A `:tunnel` worker's blob channel has no firewall/peer-dial constraint (the hub
-        # discovers the port via `__slate_ports` and bridges it over ssh), so it binds a VERIFIED-FREE port
-        # up front (`blob_free_port`) rather than the hub-assigned `gate+2` — a co-tenant holding `gate+2` on
-        # a shared host then can't stall it (the old bug: same-port retries never cleared sustained
-        # contention, so the worker ran blob-LESS for life and every pull FROM it relayed / an ssh-bridge
-        # stalled). A `:direct` worker MUST bind the pinned `gate+2` (firewall-opened + dialed directly by
-        # peers), so it keeps that port; a warm respawn / reap-replace can briefly RACE the predecessor's
-        # not-yet-released socket there, so retry the SAME port a few times, then give up loudly.
-        # `_blob_server!` only returns on shutdown, so reaching past it means a clean stop, not a bind failure.
-        bind_host = isempty(blob_bind) ? host : blob_bind
-        port_try = blob_free_port ? _free_local_port() : data_port
-        for attempt in 1:12
-            try
-                _blob_server!(bind_host, port_try; curve = blob_curve)
-                break
-            catch e
-                if !occursin("Address already in use", sprint(showerror, e))
-                    @warn "slate worker: blob channel died" port = port_try exception = e
-                    break
-                end
-                if blob_free_port
-                    port_try = _free_local_port()   # a just-probed-free port lost a rare race — pick another
-                    @info "slate worker: blob port raced, re-picking a free port" port = port_try attempt = attempt
-                    sleep(0.2)
-                elseif attempt < 12
-                    @info "slate worker: blob port busy (pinned), retrying" port = port_try attempt = attempt
-                    sleep(1.5)
-                else
-                    @warn "slate worker: blob channel gave up — pinned port stayed busy" port = port_try
-                end
-            end
-        end
-    end
+    data_port > 0 && _MEMO_OK &&
+        Threads.@spawn _blob_channel(host, blob_bind, blob_free_port, data_port, blob_curve)
     # Dedicated transfer executor — pumps queued peer pulls (verb `X`) on a default-pool thread, off the
     # gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
-    data_port > 0 && _MEMO_OK && Threads.@spawn try; _xfer_executor!(); catch e
-        @warn "slate worker: transfer executor died" exception = e
-    end
+    data_port > 0 && _MEMO_OK && Threads.@spawn _xfer_executor_task()
     # Reap idle/dead pooled ssh forwards so a peer pair that stops transferring releases its held SSH
     # connection; kill them all on shutdown so exit never orphans the standing ssh children.
     if data_port > 0 && _MEMO_OK
         atexit(_ssh_fwd_killall!)
-        Threads.@spawn try
-            while true; sleep(30); _ssh_fwd_reap_idle!(); end
-        catch e
-            @warn "slate worker: ssh-forward reaper died" exception = e
-        end
+        Threads.@spawn _ssh_fwd_reaper()
     end
     # The gate opens LAST. A hub dials as soon as the port accepts (it asks over its ssh session), and
     # the handshake that follows needs compiled code; while this function was still compiling the
@@ -3226,64 +3293,20 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # hardest-to-spot degradation, since cells still run fine and only recompute. Say it once, loudly.
     _MEMO_OK || @warn "slate worker: durable memo DISABLED — cache tags and restores are no-ops" exception = _MEMO_ERR[]
     (_MEMO_OK && !_SWEEP_OK) && @warn "slate worker: batch fabric unavailable — @sweep is not defined" exception = _SWEEP_ERR[]
-    # Prewarm the eval path: the package image holds most of what the first run through
-    # `_eval_one`/`run_capture` compiles (see the workload at the end of this file); this pays for
-    # what it does not, which otherwise lands under the user's first cell. Compile it NOW, in the
-    # background: the port is already serving, so a real eval arriving mid-prewarm just serializes
-    # with it harmlessly (same total, never worse) — while an idle-spawned worker (warm pool,
-    # detach target) has it fully paid before anyone attaches. "1 + 1" exercises exactly the measured slow path; it writes no globals.
-    Threads.@spawn try
-        _after_hub_attached()   # DEFERRED: this is the biggest boot compile — let the hub attach on a clear CPU first
-        t0 = time()
-        # Through the TOOL entry point (not _eval_one) so the wrapper + cancel-registry +
-        # kwarg path compile too — the layers a real first request would otherwise JIT.
-        __slate_eval("1 + 1"; filename = "cell:__prewarm__")
-        @info "slate worker: eval pipeline prewarmed" ms = round(Int, (time() - t0) * 1000)
-    catch e
-        @warn "slate worker: prewarm failed (harmless — first cell just pays the JIT)" exception = e
-    end
-    # Pool warmth: pay package-load time NOW, while idle — import every direct dep of the active
-    # project (which provisioning populated from the preload env). A failing dep is logged, not
-    # fatal: the adopting notebook's own `using` cell will surface the real error with context.
-    warm_deps && Threads.@spawn try
-        t0 = time(); n = 0
-        names = [nm for nm in sort!(collect(keys(Pkg.project().dependencies)))
-                 if !(nm in _INFRA_DEPS)]
-        total = length(names)
-        for name in names
-            _WARM_STATUS[] = "warming $(n)/$(total) · $(name)"   # live status → telemetry → the pool UI
-            try
-                Base.require(Main, Symbol(name)); n += 1          # loads + precompiles if needed
-            catch e
-                @warn "slate worker: warm-deps import failed" pkg = name exception = e
-            end
-        end
-        _WARM_STATUS[] = "ready · $(n) pkgs · $(round(Int, (time() - t0) * 1000))ms"
-        @info "slate worker: warm deps loaded" pkgs = n ms = round(Int, (time() - t0) * 1000)
-    catch e
-        _WARM_STATUS[] = "warm failed"
-        @warn "slate worker: warm-deps pass died" exception = e
-    end
+    Threads.@spawn _prewarm_eval()
+    warm_deps && Threads.@spawn _warm_deps()
     # Cold-env narration (attached workers; pool workers already warm via `warm_deps` above). If this
     # notebook's project isn't precompiled — the classic slow Makie open — precompile it in the background
     # NOW and stream structured progress, so a cold open reads as "Preparing packages · precompiling k/N"
     # instead of a frozen "Running 0/N". Non-blocking; a warm env is a near-instant no-op.
-    warm_deps || Threads.@spawn try
-        _prepare_env!()
-    catch e
-        @warn "slate worker: prepare pass died" exception = e
-    end
+    warm_deps || Threads.@spawn _prepare_env_task()
     # Sample every worker — local kernels too. The `.stats` sidecar is still remote-only (empty
     # stats_path skips it), but the `slate_telemetry` PUB now flows from every worker process, so the
     # hub's watchdog can see cpu/rss/gc on a local kernel and not just remote regions.
     # On an interactive thread: Julia never preempts a task, so a sampler in the default pool waits
     # behind cells that keep every default thread busy (BLAS calls, tight loops), and a worker that is
     # working hard would look silent.
-    Threads.@spawn :interactive try
-        _telemetry_loop!(stats_path)
-    catch e
-        @warn "slate worker: telemetry sampler died" exception = e
-    end
+    Threads.@spawn :interactive _telemetry_task(stats_path)
     # `serve` runs the message loop on a spawned thread and returns — but this is
     # a non-interactive `-e` process, so we must block to keep it alive until a
     # remote `:shutdown` (which calls `exit(0)` from the gate task). Flush each
@@ -3360,7 +3383,29 @@ function _gate_workload()
     end
 end
 
+# `start` and the bodies of the tasks it spawns. Only compiled, never run: they serve, bind ports and
+# loop forever. The logger calls are Base's, specialized for the worker's logger.
+function _precompile_start()
+    precompile(Core.kwcall, (NamedTuple{(:host, :port, :stream_port, :curve, :allowed_clients, :data_port,
+                                         :warm_deps, :stats_path, :blob_curve, :blob_bind, :blob_free_port),
+                                        Tuple{String, Int, Int, Bool, Vector{String}, Int, Bool, String, Bool,
+                                              String, Bool}}, typeof(start)))
+    precompile(_deferred_src_watcher, ())
+    precompile(_blob_channel, (String, String, Bool, Int, Bool))
+    precompile(_xfer_executor_task, ())
+    precompile(_ssh_fwd_reaper, ())
+    precompile(_prewarm_eval, ())
+    precompile(_warm_deps, ())
+    precompile(_prepare_env_task, ())
+    precompile(_telemetry_task, (String,))
+    precompile(_worker_logger, (_LogTee,))
+    precompile(Tuple{typeof(Base.CoreLogging.shouldlog), Logging.ConsoleLogger, Logging.LogLevel, Module, Symbol, Symbol})
+    precompile(Tuple{typeof(Base.CoreLogging.handle_message), Logging.ConsoleLogger, Logging.LogLevel, Vararg{Any, 6}})
+    precompile(Base.unsafe_write, (_LogTee, Ptr{UInt8}, UInt))
+end
+
 if ccall(:jl_generating_output, Cint, ()) == 1
+    _precompile_start()
     try
         _NS[] = _new_ns(_WarmNS)
         __slate_eval("1 + 1"; filename = "cell:__prewarm__")
