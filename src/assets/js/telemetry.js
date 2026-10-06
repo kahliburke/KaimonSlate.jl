@@ -372,7 +372,10 @@ function Telemetry() {
   };
   const gcAll = gcSpans(s), gcEach = gcAll.some(g => g.one);
   const gcs = gcShow.value === 'full' ? gcAll.filter(g => g.full) : gcAll;
-  const lanes = gcs.length ? [...ids, 'GC'] : ids;
+  // The GC lane is there whenever the worker reports collections, so the chart keeps its height
+  // whether or not one happened in the window.
+  const gcLane = s.some(x => Array.isArray(x.gc) || (x.proc || {}).gc_pauses >= 0);
+  const lanes = gcLane ? [...ids, 'GC'] : ids;
   // One bar drawer for runs and collections, kept inside the plot: nothing draws over the lane names
   // or past the last sample.
   const bar = (params, api) => {
