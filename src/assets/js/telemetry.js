@@ -24,6 +24,11 @@ const RANGES = [[60, '1m'], [300, '5m'], [900, '15m'], [0, 'All']];
 const GROUP = 'slate-telemetry';
 const B = (v) => window.slateBytes(v, { compact: true });
 const pct = (v) => (v == null || v < 0) ? '—' : Math.round(v) + '%';
+// A percent axis tick: one decimal below 10%, where whole percents would label every tick "0%".
+const pctTick = (v) => (Math.abs(v) < 10 && v % 1 ? (+v).toFixed(1) : Math.round(v)) + '%';
+// A percent axis at least 1% tall, so a share that sits near zero does not stretch noise across it.
+const pctAxis = { type: 'value', min: 0, max: (v) => Math.max(1, v.max), axisLabel: { formatter: pctTick },
+                  splitLine: { lineStyle: { opacity: 0.25 } } };
 
 /** Open the view for a worker: `host` as the popup knows it ("" for this machine), `port` its gate.
  *  A caller that knows more about the worker passes `actions`, a function returning markup for a bar
@@ -200,26 +205,18 @@ function compact(option) {
 }
 
 function Chart({ option, height = 140 }) {
-  const el = useRef(null), inst = useRef(null), hover = useRef(null);
+  const el = useRef(null), inst = useRef(null);
   useEffect(() => {
     const c = initChart(el.current);
     c.group = GROUP; window.echarts.connect(GROUP);
     inst.current = c;
-    // Where the pointer is over this chart, so an update can put its tooltip back (below).
-    c.getZr().on('mousemove', (e) => { hover.current = [e.offsetX, e.offsetY]; });
-    c.getZr().on('globalout', () => { hover.current = null; });
     const ro = new ResizeObserver(() => c.resize()); ro.observe(el.current);
     return () => { ro.disconnect(); c.dispose(); };
   }, []);
-  // Replaced whole, since the series a chart has change with the sample, and a replace drops the
-  // tooltip. New samples arrive every couple of seconds, so a tooltip being read is put back where
-  // the pointer is, and the charts connected to this one follow it.
-  useEffect(() => {
-    const c = inst.current; if (!c) return;
-    c.setOption(compact(option), { notMerge: true });
-    const h = hover.current;
-    if (h) c.dispatchAction({ type: 'showTip', x: h[0], y: h[1] });
-  });
+  // Merged into the chart rather than replacing it, which would rebuild it and drop the tooltip being
+  // read, with the connected charts' pointers, every couple of seconds. The series are replaced
+  // whole, because which ones a chart has changes with the sample.
+  useEffect(() => { inst.current && inst.current.setOption(compact(option), { replaceMerge: ['series'] }); });
   return html`<div class="tm-chart" ref=${el} style=${'height:' + height + 'px'}></div>`;
 }
 
@@ -335,19 +332,14 @@ function Telemetry() {
     const data = [];
     cols.forEach((x, ci) => loads[ci].forEach((v, row) => data.push([ms(x), row, v, ends[ci]])));
     const RAMP = ['#151a2b', '#1f4f8a', '#3f8fe0', '#9fd2ff'];
-    const at = (t) => { let ci = cols.length - 1; while (ci > 0 && ms(cols[ci]) > t) ci--; return ci; };
+    // The hover is the time line alone, shared with the charts above; the colours are the reading.
     heat = { animation: false, grid: { left: 56, right: 16, top: 8, bottom: 24 }, xAxis: AXIS,
       yAxis: { type: 'category', data: own.map(String), name: own.length < nc ? 'job cores' : 'core',
-               axisLabel: { interval: Math.max(0, Math.ceil(own.length / 8) - 1) } },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'line' }, formatter: (ps) => {
-        const p = Array.isArray(ps) ? ps[0] : ps; if (!p) return '';
-        const l = loads[at(+p.axisValue)] || []; if (!l.length) return '';
-        let top = 0; l.forEach((v, r) => { if (v > l[top]) top = r; });
-        const mean = l.reduce((a, v) => a + v, 0) / l.length;
-        return new Date(+p.axisValue).toLocaleTimeString() + '<br>mean ' + Math.round(mean) + '% · busiest core ' +
-               own[top] + ' ' + Math.round(l[top]) + '%';
-      } },
-      series: [{ type: 'custom', encode: { x: [0, 3], y: 1 }, data,
+               axisPointer: { show: false }, axisLabel: { interval: Math.max(0, Math.ceil(own.length / 8) - 1) } },
+      tooltip: { trigger: 'axis', axisPointer: { axis: 'x', type: 'line' }, showContent: false },
+      // Drawn in one pass: a series this large is otherwise painted over several frames, which shows
+      // as the map filling in on every update.
+      series: [{ type: 'custom', encode: { x: [0, 3], y: 1 }, data, progressive: 0,
         renderItem: (params, api) => {
           const row = api.value(1), a = api.coord([api.value(0), row]), b = api.coord([api.value(3), row]);
           const h = api.size([0, 1])[1], cs = params.coordSys;
@@ -364,10 +356,10 @@ function Telemetry() {
     series: [line('read', series(s, x => (x.proc || {}).io_read)), line('write', series(s, x => (x.proc || {}).io_write)),
              host.net_rx != null ? line('net in', series(s, x => (x.host || {}).net_rx)) : null,
              host.net_tx != null ? line('net out', series(s, x => (x.host || {}).net_tx)) : null].filter(Boolean) });
-  const psi = host.psi_cpu >= 0 ? base('% of time', (v) => Math.round(v) + '%', {
+  const psi = host.psi_cpu >= 0 ? base('% of time', pctTick, { yAxis: Object.assign({ name: '% of time', nameTextStyle: { align: 'left' } }, pctAxis),
     series: [line('cpu', series(s, x => (x.host || {}).psi_cpu)), line('memory', series(s, x => (x.host || {}).psi_mem)),
              line('io', series(s, x => (x.host || {}).psi_io))] }) : null;
-  const julia = base('', (v) => Math.round(v) + '%', {
+  const julia = base('', pctTick, { yAxis: pctAxis,
     series: [line('gc time', gcPct(s), { areaStyle: { opacity: 0.12 } })] });
   const alloc = base('per second', B, { series: [line('allocation', series(s, x => (x.proc || {}).alloc_rate))] });
 
