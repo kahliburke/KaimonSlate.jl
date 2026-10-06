@@ -178,8 +178,6 @@ const line = (name, data, extra = {}) => {
   return Object.assign({ name, type: 'line', data: raw ? data : ease(data), smooth: 0.3, showSymbol: false,
                          connectNulls: false, lineStyle: { width: 2 } }, rest);
 };
-const limit = (name, y) => ({ silent: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1.5, color: '#e5636e' },
-                              label: { formatter: name, position: 'insideEndBottom', color: '#e5636e', fontSize: 11 }, data: [{ yAxis: y }] });
 
 // Text sized for small charts: the notebook theme sizes it for full-width figures, which here pushes
 // axis names out of the top margin. Applied to whatever axes and legend an option has; anything an
@@ -284,28 +282,30 @@ function Telemetry() {
         data: spans.map(x => ({ value: [ids.indexOf(x.id), x.a, x.b, x.id, x.kind], itemStyle: { color: SPAN_COLOR[x.kind] } })) }] }}/>` : html`<div class="tm-none">no cell ran in this window</div>`;
 
   // Scaled to what the worker may use, so the headroom shows: the job's allowance on a scheduler
-  // node, whose top is then the limit and needs no line of its own, and the host's cores elsewhere.
-  // At least one core tall, so an idle worker does not stretch noise across the chart. On a shared node the rest of the host is other jobs' load, so the second
+  // node, the host's cores elsewhere. The top of the axis is the limit, which the section header
+  // states. At least one core tall, so an idle worker does not stretch noise across the chart. On a shared node the rest of the host is other jobs' load, so the second
   // line is the load on the job's own cores rather than the host's, which would set the scale.
   const allow = job.cpus > 0 ? job.cpus : 0;
   const own = (job.cpuset && job.cpuset.length) ? job.cpuset : null;
   const cpuMax = allow || nc || 0;
   const ownLoad = (x) => { const c = (x.host || {}).cores; return c && c.length ? own.reduce((t, k) => t + (c[k] ?? 0), 0) / 100 : -1; };
   const cpu = base('cores', (v) => (+v).toFixed(2), {
-    yAxis: { type: 'value', name: allow ? 'of ' + allow + ' cores' : 'cores', min: 0,
-             max: (v) => Math.max(1, allow || (cpuMax > 0 ? Math.ceil(cpuMax * 1.05) : Math.ceil(v.max))),
+    yAxis: { type: 'value', name: 'cores', min: 0, max: (v) => Math.max(1, cpuMax || Math.ceil(v.max)),
              axisLabel: { formatter: coreTick }, splitLine: { lineStyle: { opacity: 0.25 } } },
     series: [line('this worker', series(s, x => x.cpu / 100), { areaStyle: { opacity: 0.12 } }),
              !allow ? (nc ? line('host', series(s, x => x.sys_cpu >= 0 ? x.sys_cpu / 100 * ncores(x) : -1)) : null)
                     : (own && host.cores && host.cores.length ? line('job cores', series(s, ownLoad)) : null)].filter(Boolean) });
 
+  // Each chart ends at the limit that bounds it, and the section header says what that limit is.
+  const limitKey = (t) => t ? html`<span class="tm-key">${t}</span>` : null;
+  const cpuLimit = limitKey(allow ? 'job allows ' + allow + (nc ? ' of ' + nc : '') + ' cores' : nc ? nc + ' cores' : '');
+  const memLimitText = limitKey(memLimit > 0 ? (job.mem_max > 0 ? 'job limit ' : 'host ') + B(memLimit) : '');
   const mem = base('', B, {
-    yAxis: { type: 'value', max: memLimit > 0 ? memLimit * 1.05 : null, axisLabel: { formatter: B },
+    yAxis: { type: 'value', max: memLimit > 0 ? memLimit : null, axisLabel: { formatter: B },
              splitLine: { lineStyle: { opacity: 0.25 } } },
     series: [line('this worker', series(s, x => x.rss), { areaStyle: { opacity: 0.12 } }),
              job.mem_max > 0 ? line('job', series(s, x => (x.job || {}).mem_cur)) :
-               host.mem_avail >= 0 ? line('host used', series(s, x => ((x.host || {}).mem_avail >= 0 ? x.sys_mem_total - x.host.mem_avail : -1))) : null,
-             memLimit > 0 ? line('limit', [], { markLine: limit((job.mem_max > 0 ? 'job limit ' : 'host ') + B(memLimit), memLimit) }) : null]
+               host.mem_avail >= 0 ? line('host used', series(s, x => ((x.host || {}).mem_avail >= 0 ? x.sys_mem_total - x.host.mem_avail : -1))) : null]
             .filter(Boolean) });
 
   // Every core over time, as a heatmap; columns thinned to at most 240 so a long window stays light.
@@ -346,6 +346,7 @@ function Telemetry() {
           <span>${g.temp >= 0 ? g.temp + '°C' : '—'}</span>
           <span>${g.power_w >= 0 ? Math.round(g.power_w) + (g.power_limit_w > 0 ? ' / ' + Math.round(g.power_limit_w) : '') + ' W' : '—'}</span>
           <span>${g.sm_mhz >= 0 ? g.sm_mhz + (g.sm_max_mhz > 0 ? ' / ' + g.sm_max_mhz : '') + ' MHz' : ''}</span>
+          ${g.mem_total > 0 ? html`<span>${B(g.mem_total)} memory</span>` : null}
           ${g.proc_mem > 0 ? html`<span>this worker ${B(g.proc_mem)}</span>` : null}
           ${(g.throttle || []).length ? html`<span class="tm-throttle">held back: ${g.throttle.join(', ')}</span>` : null}
         </div></div>`)}</div>
@@ -355,8 +356,10 @@ function Telemetry() {
           series: gpus.flatMap(g => [line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).util)),
             line('gpu' + g.i + ' peak', series(s, x => { const v = ((x.gpus || [])[g.i] || {}).util_max; return v == null ? -1 : v; }),
                  { raw: true, lineStyle: { width: 1, type: 'dotted', opacity: 0.7 } })]) })}/>
-        <${Chart} option=${base('', B, { series: gpus.map(g => line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).mem_used),
-            g.i === 0 ? { markLine: limit('total ' + B(g.mem_total), g.mem_total) } : {})) })}/>
+        <${Chart} option=${base('', B, {
+            yAxis: { type: 'value', max: Math.max(0, ...gpus.map(g => g.mem_total || 0)) || null,
+                     axisLabel: { formatter: B }, splitLine: { lineStyle: { opacity: 0.25 } } },
+            series: gpus.map(g => line('gpu' + g.i, series(s, x => ((x.gpus || [])[g.i] || {}).mem_used))) })}/>
       </div></${Section}>` : null;
 
   return html`<div class="tm-bg" onMouseDown=${e => e.target.classList.contains('tm-bg') && close()}>
@@ -365,8 +368,8 @@ function Telemetry() {
       <div class="tm-body">
         ${tiles}
         <${Section} title="Cells running" aside=${spanKey}>${running}</${Section}>
-        <${Section} title="CPU"><div class="tm-grid"><${Chart} option=${cpu}/>${heat ? html`<${Chart} option=${heat}/>` : null}</div></${Section}>
-        <${Section} title="Memory"><${Chart} option=${mem}/></${Section}>
+        <${Section} title="CPU" aside=${cpuLimit}><div class="tm-grid"><${Chart} option=${cpu}/>${heat ? html`<${Chart} option=${heat}/>` : null}</div></${Section}>
+        <${Section} title="Memory" aside=${memLimitText}><${Chart} option=${mem}/></${Section}>
         ${gpuSec}
         ${io || psi ? html`<${Section} title=${io && psi ? 'I/O and pressure' : io ? 'I/O' : 'Pressure'}><div class="tm-grid">
           ${io ? html`<${Chart} option=${io}/>` : null}${psi ? html`<${Chart} option=${psi}/>` : null}</div></${Section}>` : null}
