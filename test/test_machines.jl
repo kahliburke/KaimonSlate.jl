@@ -213,7 +213,7 @@ const RE = KaimonSlate.ReportEngine
             # The region's own view of it, and the verdict its cells are held by.
             @test only(values(RE.readiness_view(r)["envs"]))["by"] == "tm"
             @test RE.env_readiness(r.host, proj, RE.region_node_type(r); depot = RE.region_depot(r)) == ""
-            @test RE.env_readiness(r.host, proj, "cpu/") == "not tested on cpu nodes"
+            @test RE.env_readiness(r.host, proj, "cpu/") == "packages not installed and tested on cpu nodes yet"
             t = S._with(S.cluster(Dict(String(k) => string(v) for (k, v) in RE.cluster_get_resolved("tm"))); parent = proj)
             @test !S._untested(t)                                       # same project, same nodes
             @test S._untested(S.with_resources(t, (; partition = "cpu")))   # other nodes: test again
@@ -232,9 +232,9 @@ const RE = KaimonSlate.ReportEngine
             write(joinpath(other, "Project.toml"), "[deps]\nY = \"1\"\n")
             RE.record_env_test!("twinhost", tested, "gpu/"; by = "prep", status = "ok", depot = "/d")
             @test RE.env_readiness("twinhost", copy, "gpu/"; depot = "/d") == ""
-            @test RE.env_readiness("twinhost", other, "gpu/"; depot = "/d") == "not tested on gpu nodes"
-            @test RE.env_readiness("twinhost", copy, "cpu/"; depot = "/d") == "not tested on cpu nodes"
-            @test RE.env_readiness("twinhost", copy, "gpu/"; depot = "/other") == "not tested on gpu nodes"
+            @test RE.env_readiness("twinhost", other, "gpu/"; depot = "/d") == "packages not installed and tested on gpu nodes yet"
+            @test RE.env_readiness("twinhost", copy, "cpu/"; depot = "/d") == "packages not installed and tested on cpu nodes yet"
+            @test RE.env_readiness("twinhost", copy, "gpu/"; depot = "/other") == "packages not installed and tested on gpu nodes yet"
             RE.host_facts_set!("twinhost", Dict{String,Any}())
         end
 
