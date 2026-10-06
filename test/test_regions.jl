@@ -254,6 +254,37 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            @testset "a region whose job the cluster took back is placed again" begin
+                # The scheduler is asked only after a worker failed to start. A placement that names a
+                # job it no longer holds is forgotten, so the next run asks for a node; one it still
+                # holds, or a scheduler nobody could ask, is left alone.
+                RE.region_set!("lost"; host = "", scheduler = :slurm, walltime = "00:30:00")
+                bin = mktempdir()
+                squeue(body) = (p = joinpath(bin, "squeue"); write(p, "#!/bin/sh\n" * body * "\n"); chmod(p, 0o755))
+                place!() = lock(RE._REGION_PLACE_LOCK) do
+                    RE._REGION_PLACE["lost"] = (host = "c9", job = "77", ts = time(),
+                                                checked = time(), until = time() + 600)
+                end
+                held() = lock(RE._REGION_PLACE_LOCK) do; haskey(RE._REGION_PLACE, "lost"); end
+                try
+                    withenv("PATH" => bin * ":" * ENV["PATH"]) do
+                        squeue("echo '77|RUNNING|c9|20:00|N/A|None|32'")
+                        place!()
+                        @test !NS._allocation_gone!("lost") && held()
+                        squeue("exit 1")                                     # nobody answered
+                        @test !NS._allocation_gone!("lost") && held()
+                        squeue("echo '78|RUNNING|c4|30:00|N/A|None|32'")     # a different job
+                        @test NS._allocation_gone!("lost") && !held()
+                        place!(); squeue("exit 0")                           # nothing at all
+                        @test NS._allocation_gone!("lost") && !held()
+                        @test !NS._allocation_gone!("lost")                  # nothing placed to forget
+                    end
+                finally
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "lost"); end
+                    RE.region_delete!("lost")
+                end
+            end
+
             @testset "a new allocation on the same node rebuilds the region kernel" begin
                 rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
                 nb = NS.LiveNotebook("alloc", joinpath(mktempdir(), "alloc.jl"), rep, RE.InProcessKernel(), 1,

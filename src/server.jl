@@ -4125,6 +4125,24 @@ function _narrate_region_bringup!(nb::LiveNotebook, kernel, side::AbstractString
     end
 end
 
+# Whether the allocation this hub has placed region `side` on is gone, asked of the scheduler. A
+# worker that cannot start on a scheduler region is most often a node the cluster took back (a
+# cancelled job, a walltime that ran out), and the placement goes on naming it until something asks:
+# every run would be sent to the same dead node. When it is gone the placement is forgotten, so the
+# next one requests a node. An unreachable scheduler answers nothing and changes nothing.
+function _allocation_gone!(side::AbstractString)
+    r = ReportEngine.region_get(String(side))
+    (r === nothing || r.scheduler === :none) && return false
+    _, job = ReportEngine.region_where(r)
+    isempty(job) && return false
+    a = ReportEngine.region_allocation(r)
+    (a === nothing || a.state === :unreachable) && return false
+    (a.state === :running && a.id == job) && return false
+    ReportEngine.region_forget_placement!(r)
+    ReportEngine._rlog("region[$(r.name)]: job $job is no longer held — dropped its placement")
+    return true
+end
+
 function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::AbstractString)
     isempty(side) && return true
     # Reconnect-hold policy (manual mode). A cell EXPLICITLY run (▶ force marker) reconnects a region that
@@ -4186,6 +4204,18 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
         stop_narrating()
         ReportEngine._rlog("region: prime before $(cell.id) on $host failed: " *
                            first(sprint(showerror, e), 160))
+        # The node went with its allocation: the cell waits for a new one instead of failing, and is
+        # re-run when it is granted.
+        if !isempty(side) && _allocation_gone!(side)
+            r = ReportEngine.region_get(String(side))
+            lock(nb.lock) do
+                ReportEngine.mark_blocked!(cell, WAIT_QUEUED, r.host, r.name)
+                _broadcast_progress(nb, cell)
+            end
+            _place_in_background!(String(side), nb)
+            try; facts_changed!(); catch; end
+            return false
+        end
         # The region worker couldn't come up — surface it AS the cell's error and STOP. Running on the
         # dead kernel just errors anyway, but leaving the cell unresolved let the runner re-arm and churn.
         lock(nb.lock) do
