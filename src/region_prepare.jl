@@ -476,10 +476,27 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
     held_before = _region_holds_node(r)
     got = step("Get a node from $(r.scheduler)") do
         deadline = time() + 30 * 60
-        t0 = time(); shown = ""
+        t0 = time(); shown = ""; gave_back = 0.0
+        # The prepare installs, precompiles and starts a worker, which can take many minutes, so an
+        # allocation found under the region's name near the end of its walltime would end part way
+        # through. One it found is given back for a fresh one; one already in use stays its user's.
+        need = min(15 * 60.0, 0.5 * _sched_seconds(_alloc_walltime(r)))
         while time() < deadline
             nodehost, a = region_place!(r; wait_s = 30)
             if !isempty(nodehost)
+                p0 = _placement(r)
+                left = p0 === nothing ? Inf : p0.until - time()
+                if left < need
+                    if held_before
+                        note("the node in use has only $(Sweep.format_duration(left)) of walltime left, " *
+                             "which the prepare may outlast")
+                    else
+                        note("job $(p0.job) has only $(Sweep.format_duration(left)) of walltime left; " *
+                             "giving it back for a fresh node")
+                        region_release!(r); gave_back = time()
+                        continue
+                    end
+                end
                 # A node the region already held comes back without its allocation; its route has the job.
                 if a === nothing
                     v = via(nodehost); job = v === nothing ? "" : v.job
@@ -489,6 +506,10 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
                 return (p.grown ? "warn" : "ok", p.text)
             end
             p = placement_note(r, a; waited = time() - t0)
+            # Just after a give-back the scheduler can still list the job it is ending; ask again.
+            if p.state !== :queued && time() - gave_back < 60
+                sleep(5); continue
+            end
             p.state === :queued || return ("fail", p.text)
             p.text == shown || note(p.text)   # a line when something changed, not one per poll
             shown = p.text
