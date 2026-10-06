@@ -2491,6 +2491,8 @@ end
 # records that reading in their place, marked `src = "host"`: the charts keep moving, and liveness can
 # tell a worker that is computing from one that is gone. A remote worker's process is out of reach.
 const _HOST_STALE_S = 5.0          # no sample from the worker for this long: read it from outside
+const _HOST_SAMPLE_S = 2.0         # how often the hub looks, the workers' own sampling rate
+const _HOST_SAMPLER = Ref{Any}(nothing)
 const _HOST_BUSY_CPU = 5.0         # % of a core, as read from outside, that counts as working
 const _HOST_LAST = WeakKeyDict{Any,Tuple{Float64,Float64}}()   # kernel → (wall time, cpu seconds) at the last look
 
@@ -2532,17 +2534,15 @@ function _host_sample!(k)
     cn = String(k.conn.name)
     st = ReportEngine.kernel_stats(cn)
     st === nothing && return nothing
-    w = _last_worker_sample(st)
-    if w === nothing || time() - w.rcv < _HOST_STALE_S
-        delete!(_HOST_LAST, k)
-        return nothing
-    end
     r = _proc_cpu_rss(getpid(p))
     r === nothing && return nothing
+    # The baseline is kept current on every look, so the first look after the worker falls silent
+    # already has a rate to report.
     now = time()
     prev = get(_HOST_LAST, k, nothing)
     _HOST_LAST[k] = (now, r[1])
-    prev === nothing && return nothing                         # a rate needs two looks
+    w = _last_worker_sample(st)
+    (w === nothing || now - w.rcv < _HOST_STALE_S || prev === nothing) && return nothing
     cpu = round(100 * (r[1] - prev[2]) / max(now - prev[1], 1e-3); digits = 1)
     ReportEngine.record_sample!(cn, merge(st.latest, (cpu = cpu, rss = r[2], ts = now, rcv = now, src = "host")))
     return nothing
@@ -3509,12 +3509,6 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
     try; _sweep_idle_regions!(h)              # hub-wide too: a region is not a notebook's to release
     catch e; ReportEngine._rlog("supervisor: region sweep error: " * first(sprint(showerror, e), 120))
     end
-    try
-        for nb in lock(h.lock) do; collect(values(h.notebooks)); end, k in _nb_kernels(nb)
-            _host_sample!(k)
-        end
-    catch e; ReportEngine._rlog("supervisor: outside sample error: " * first(sprint(showerror, e), 120))
-    end
     try; _sweep_stale_conn_state!(h)          # drop the series of workers that are gone
     catch e; ReportEngine._rlog("supervisor: conn-state sweep error: " * first(sprint(showerror, e), 120))
     end
@@ -3876,6 +3870,17 @@ function _ensure_run_supervisor!(h)   # NOTE: `Hub` defined later (server_hub.jl
     _RUN_SUPERVISOR[] = Timer(_SUPERVISOR_TICK_S; interval = _SUPERVISOR_TICK_S) do _
         try; _supervise_runs!(h); catch; end
     end
+    # Its own timer, at the workers' sampling rate: a supervisor tick waits on each worker's liveness
+    # reply, so on the tick it would see a silent worker only every so often.
+    _HOST_SAMPLER[] = Timer(_HOST_SAMPLE_S; interval = _HOST_SAMPLE_S) do _
+        try
+            for nb in lock(h.lock) do; collect(values(h.notebooks)); end, k in _nb_kernels(nb)
+                _host_sample!(k)
+            end
+        catch e
+            ReportEngine._rlog("outside sample error: " * first(sprint(showerror, e), 120))
+        end
+    end
     return nothing
 end
 
@@ -3885,6 +3890,9 @@ end
 function _stop_run_supervisor!()
     t = _RUN_SUPERVISOR[]
     _RUN_SUPERVISOR[] = nothing
+    t === nothing || (try; close(t); catch; end)
+    t = _HOST_SAMPLER[]
+    _HOST_SAMPLER[] = nothing
     t === nothing || (try; close(t); catch; end)
     return nothing
 end
