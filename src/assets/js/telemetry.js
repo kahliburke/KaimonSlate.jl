@@ -224,9 +224,9 @@ function compact(option, active = false) {
   return o;
 }
 
-function Chart({ option, height = 140 }) {
-  const el = useRef(null), inst = useRef(null), active = useRef(false), opt = useRef(option);
-  opt.current = option;
+function Chart({ option, height = 140, onClick = null }) {
+  const el = useRef(null), inst = useRef(null), active = useRef(false), opt = useRef(option), click = useRef(onClick);
+  opt.current = option; click.current = onClick;
   useEffect(() => {
     const c = initChart(el.current);
     c.group = GROUP; window.echarts.connect(GROUP);
@@ -235,6 +235,7 @@ function Chart({ option, height = 140 }) {
                            c.setOption(compact(opt.current, on), { replaceMerge: ['series'] }); };
     c.getZr().on('mousemove', () => mark(true));
     c.getZr().on('globalout', () => mark(false));
+    c.on('click', (p) => click.current && click.current(p));
     const ro = new ResizeObserver(() => c.resize()); ro.observe(el.current);
     return () => { ro.disconnect(); c.dispose(); };
   }, []);
@@ -313,7 +314,16 @@ function Telemetry() {
 
   const spanKey = html`<span class="tm-key">${Object.entries({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })
     .map(([k, l]) => html`<span><i style=${'background:' + SPAN_COLOR[k]}></i>${l}</span>`)}</span>`;
-  const running = ids.length ? html`<${Chart} height=${Math.min(120, 30 + 16 * ids.length)} option=${{
+  // A run clicked here brings its cell into view in the notebook behind, so it is there on closing.
+  const reveal = (id) => {
+    const el = document.getElementById('cell-' + id);
+    if (!el || v.nb !== (window.__slateState || {}).id) return;
+    if (typeof window.selectCell === 'function') window.selectCell(id, false);
+    el.scrollIntoView({ block: el.getBoundingClientRect().height >= window.innerHeight * 0.9 ? 'start' : 'center',
+                        behavior: 'smooth' });
+  };
+  const running = ids.length ? html`<${Chart} height=${Math.min(120, 30 + 16 * ids.length)}
+      onClick=${(p) => p && p.data && p.data.value && reveal(p.data.value[3])} option=${{
       animation: false, grid: { left: 90, right: 16, top: 6, bottom: 20 }, xAxis: AXIS,
       yAxis: { type: 'category', data: ids, axisLabel: { width: 80, overflow: 'truncate' } },
       tooltip: { formatter: (p) => {
@@ -321,7 +331,7 @@ function Telemetry() {
         return id + ' · ' + window.slateDuration(d) +
                ' · ' + ({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })[kind];
       } },
-      series: [{ type: 'custom', encode: { x: [1, 2], y: 0 },
+      series: [{ type: 'custom', encode: { x: [1, 2], y: 0 }, cursor: 'pointer',
         renderItem: (params, api) => {
           const y = api.value(0), a = api.coord([api.value(1), y]), b = api.coord([api.value(2), y]);
           const h = api.size([0, 1])[1] * 0.6, cs = params.coordSys;
