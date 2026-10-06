@@ -299,7 +299,7 @@ function Telemetry() {
   // Each chart ends at the limit that bounds it, and the section header says what that limit is.
   const limitKey = (t) => t ? html`<span class="tm-key">${t}</span>` : null;
   const cpuLimit = limitKey(cpuMax ? cpuMax + ' cores' : '');
-  const memLimitText = limitKey(memLimit > 0 ? B(memLimit) : '');
+  const memLimitText = limitKey(memLimit > 0 ? B(memLimit) + ' available' : '');
   const mem = base('', B, {
     yAxis: { type: 'value', max: memLimit > 0 ? memLimit : null, axisLabel: { formatter: B },
              splitLine: { lineStyle: { opacity: 0.25 } } },
