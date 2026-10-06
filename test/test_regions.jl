@@ -10,6 +10,27 @@ using KaimonSlate
 const NS = KaimonSlate.NotebookServer
 const RE = KaimonSlate.ReportEngine
 
+# A Slurm on this machine, for a region whose `host` is "": `squeue` prints the file `queue`, and
+# `scancel` appends its arguments to `cancelled` and empties the queue. A file `down` makes `squeue`
+# fail, and a file `stuck` makes `scancel` fail.
+function fake_slurm()
+    bin = mktempdir()
+    write(joinpath(bin, "squeue"), """
+        #!/bin/sh
+        [ -f '$bin/down' ] && exit 1
+        cat '$bin/queue'
+        """)
+    write(joinpath(bin, "scancel"), """
+        #!/bin/sh
+        echo "\$*" >> '$bin/cancelled'
+        [ -f '$bin/stuck' ] && exit 1
+        : > '$bin/queue'
+        """)
+    foreach(f -> chmod(joinpath(bin, f), 0o755), ("squeue", "scancel"))
+    touch(joinpath(bin, "queue"))
+    return bin
+end
+
 @testset "region data-root wiring" begin
 
     @testset "RemoteTarget.datadir/region: field defaults + kwarg round-trip" begin
@@ -1083,6 +1104,74 @@ const RE = KaimonSlate.ReportEngine
                     NS._forget_region_kernel!(nb, "gpu")
                     lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
                     RE.route!("c9", "")
+                end
+            end
+
+            @testset "a withdrawn request is not asked for again" begin
+                rep = RE.parse_report("#%% code id=w region=queue\n1\n#%% code id=o region=other\n2\n")
+                nb = NS.LiveNotebook("withdraw", joinpath(mktempdir(), "withdraw.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                hub = (lock = ReentrantLock(), notebooks = Dict("withdraw" => nb))
+                r = RE.region_set!("queue"; host = "", scheduler = :slurm)
+                w, o = rep.cells
+                waiting() = (RE.mark_blocked!(w, NS.WAIT_QUEUED, "", "queue");
+                             RE.mark_blocked!(o, NS.WAIT_QUEUED, "", "other"))
+                # The pages are told from a spawned task, which moves the waiting cells and then sets
+                # the withdrawal stamp again. `release!` waits for that task.
+                function release!()
+                    res = NS._release_region!(hub, r)
+                    return res, (res.told === nothing || timedwait(() -> istaskdone(res.told), 10.0) === :ok)
+                end
+                bin = fake_slurm()
+                try
+                    withenv("PATH" => bin * ":" * ENV["PATH"]) do
+                        waiting()
+                        write(joinpath(bin, "queue"), "124|PENDING||\n")
+                        res, told = release!()
+                        @test res.ok && told
+                        @test readlines(joinpath(bin, "cancelled")) == ["-n slate-queue"]
+                        # The cell waits for a run, which the supervisor leaves alone. The cell waiting
+                        # on another region still waits in its queue.
+                        @test w.state == RE.BLOCKED && w.blocked == NS.WAIT_NOT_REQUESTED && w.blocked_region == "queue"
+                        @test o.state == RE.BLOCKED && o.blocked == NS.WAIT_QUEUED && o.blocked_region == "other"
+                        @test NS._cell_result_text(w) == "(run it to request a node)"
+
+                        # A request that has not reached the scheduler yet is withdrawn too. Its
+                        # placement task finds the stamp and releases whatever it submits.
+                        waiting()
+                        lock(NS._PLACING_LOCK) do
+                            push!(NS._PLACING, "queue"); NS._PLACING_SINCE["queue"] = time()
+                        end
+                        @test NS._region_queued("queue")
+                        res, told = release!()
+                        @test !res.ok && res.left.state === :none && told
+                        @test NS._withdrawn_while_placing("queue") && !NS._region_queued("queue")
+                        @test w.blocked == NS.WAIT_NOT_REQUESTED
+                        # The supervisor asking again does not undo the withdrawal, and a run does, so
+                        # the task in flight keeps what it gets.
+                        @test NS._place_in_background!("queue", nb) === nothing
+                        @test NS._withdrawn_while_placing("queue")
+                        @test NS._place_in_background!("queue", nb; by_run = true) === nothing
+                        @test NS._region_queued("queue")
+
+                        # A cancellation that fails leaves the request standing, and the task keeps serving it.
+                        waiting()
+                        write(joinpath(bin, "queue"), "125|PENDING||\n")
+                        touch(joinpath(bin, "stuck"))
+                        res, told = release!()
+                        rm(joinpath(bin, "stuck"))
+                        @test !res.ok && res.left.state === :pending && told
+                        @test NS._region_queued("queue") && w.state == RE.BLOCKED && w.blocked == NS.WAIT_QUEUED
+                        # The agent reads what the cell waits for, not the output of its earlier run.
+                        @test NS._cell_result_text(w) == "(queued for a node)"
+                    end
+                finally
+                    lock(NS._PLACING_LOCK) do
+                        delete!(NS._PLACING, "queue"); delete!(NS._PLACING_SINCE, "queue")
+                        delete!(NS._WITHDRAWN_AT, "queue")
+                    end
+                    RE.region_delete!("queue")
                 end
             end
 

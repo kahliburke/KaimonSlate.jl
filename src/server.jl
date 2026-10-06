@@ -1887,6 +1887,47 @@ _alloc_wait_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_ALLOC_WAIT",
 const _PLACING = Set{String}()
 const _PLACING_LOCK = ReentrantLock()
 
+# When the placement task of each region started, and when the request of each region was last
+# withdrawn, both under `_PLACING_LOCK`. A withdrawal can arrive before the task has submitted the
+# job, and the release then finds nothing to cancel. The task learns from these stamps that its
+# request is no longer wanted.
+const _PLACING_SINCE = Dict{String,Float64}()
+const _WITHDRAWN_AT = Dict{String,Float64}()
+
+_withdrawn_while_placing(name::AbstractString) = lock(_PLACING_LOCK) do
+    since = get(_PLACING_SINCE, String(name), nothing)
+    since !== nothing && get(_WITHDRAWN_AT, String(name), 0.0) >= since
+end
+
+# Stamp a withdrawal of region `name`, and return the stamp it replaced.
+_stamp_withdraw!(name::AbstractString, t::Float64 = time()) = lock(_PLACING_LOCK) do
+    prev = get(_WITHDRAWN_AT, String(name), nothing)
+    _WITHDRAWN_AT[String(name)] = t
+    prev
+end
+
+# A request for a node is still wanted when a placement task runs for it and no withdrawal has
+# arrived since that task started.
+_region_queued(name::AbstractString) =
+    lock(_PLACING_LOCK) do; String(name) in _PLACING; end && !_withdrawn_while_placing(name)
+
+# After a request for region `name` was withdrawn, the cells of `nb` waiting in its queue wait for a
+# run instead. Left waiting as queued, the supervisor (`_reconcile_blocked_regions!`) would ask for a
+# node again within `_REPLACE_EVERY`; a cell that waits to be run is one it leaves alone.
+function _withdraw_region_waits!(nb::LiveNotebook, name::AbstractString)
+    n = 0
+    lock(nb.lock) do
+        for c in nb.report.cells
+            (c.state == BLOCKED && c.blocked == WAIT_QUEUED && c.blocked_region == name) || continue
+            ReportEngine.mark_blocked!(c, WAIT_NOT_REQUESTED, c.blocked_host, name)
+            n += 1
+        end
+        n > 0 && (nb.version += 1)
+    end
+    n > 0 && (try; _broadcast(nb, string(nb.version)); catch; end)
+    return n
+end
+
 # The cells that were waiting on this region: mark them stale so the next drain picks them up.
 # BLOCKED is the state a wait leaves behind; ERRORED is included too because a cell that failed for
 # its own reasons simply fails again, which is cheaper than matching on error text that is free to
@@ -1969,10 +2010,18 @@ function _connect_in_background!(name::AbstractString, nb::Union{LiveNotebook,No
     return nothing
 end
 
-function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Nothing} = nothing)
+# `by_run` says that a cell run asks, rather than the supervisor. A run wants the node again even when
+# the request of the task still in flight was withdrawn, so that task keeps what it gets.
+function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Nothing} = nothing;
+                               by_run::Bool = false)
     lock(_PLACING_LOCK) do
-        String(name) in _PLACING && return false
-        push!(_PLACING, String(name)); true
+        if String(name) in _PLACING
+            by_run && _withdrawn_while_placing(name) && (_PLACING_SINCE[String(name)] = time())
+            return false
+        end
+        push!(_PLACING, String(name))
+        _PLACING_SINCE[String(name)] = time()
+        true
     end || return nothing
     Threads.@spawn try
         # This task exists only to bring `name` up, so tag every _rlog it emits into that region's
@@ -1990,6 +2039,15 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
                 try; facts_changed!(); catch; end   # the pill says "queued" NOW, not once it lands
             end
             _, alloc = ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
+            # Withdrawn while this task submitted the request or waited on it: whatever the scheduler
+            # holds for it is given back, and the cells that waited on it wait for a run.
+            if _withdrawn_while_placing(name)
+                ReportEngine._rlog("region[$name]: the request was withdrawn while it was placed — releasing it")
+                ReportEngine.region_release!(r) ||
+                    ReportEngine._rlog("region[$name]: releasing the withdrawn request failed; " *
+                                       "the scheduler may still hold it")
+                return
+            end
             if !ReportEngine._region_holds_node(r)
                 p = ReportEngine.placement_note(r, alloc)
                 ReportEngine._rlog("region[$name]: " * p.text)
@@ -2021,7 +2079,10 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
         ReportEngine._rlog("region[$name]: placement failed — $(first(sprint(showerror, e), 160))")
         nb === nothing || (try; _broadcast(nb, "bringup:region '$name': could not get a node — $(first(sprint(showerror, e), 120))"); catch; end)
     finally
-        lock(_PLACING_LOCK) do; delete!(_PLACING, String(name)); end
+        lock(_PLACING_LOCK) do
+            delete!(_PLACING, String(name))
+            delete!(_PLACING_SINCE, String(name))
+        end
         nb === nothing || (try; facts_changed!(); catch; end)   # …and stops saying it afterwards
     end
     return nothing
@@ -2114,7 +2175,7 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
                     _connect_in_background!(name, nb, r.host)
                     throw(RegionWaiting(WAIT_CONNECTING, r.host, r.name))
                 end
-                _place_in_background!(name, nb)
+                _place_in_background!(name, nb; by_run = true)
                 # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
                 # placement task re-runs this cell itself when the scheduler grants a node.
                 throw(RegionWaiting(WAIT_QUEUED, r.host, r.name))
@@ -4218,7 +4279,7 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
                 ReportEngine.mark_blocked!(cell, WAIT_QUEUED, r.host, r.name)
                 _broadcast_progress(nb, cell)
             end
-            _place_in_background!(String(side), nb)
+            _place_in_background!(String(side), nb; by_run = true)
             try; facts_changed!(); catch; end
             return false
         end

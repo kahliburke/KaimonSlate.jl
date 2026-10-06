@@ -878,20 +878,58 @@ end
 #
 # Off the request, because it takes each notebook's lock and the caller must not wait on that. At
 # module scope rather than inside `_make_router`, where every handler closes over one shared scope
-# and a loop variable would be an assignment they all see.
-function _announce_region_change!(h, name::AbstractString, f = nothing)
+# and a loop variable would be an assignment they all see. `done`, when given, runs once every
+# notebook has been told. Returns the task that tells them, or `nothing` when there is nothing to run.
+function _announce_region_change!(h, name::AbstractString, f = nothing; done = nothing)
     facts_changed!()
-    f === nothing && return nothing
-    Threads.@spawn try
-        for anb in lock(h.lock) do; collect(values(h.notebooks)); end
-            uses = lock(anb.lock) do; any(c -> _cell_region(c) == name, anb.report.cells); end
-            uses && (try; f(anb); catch; end)
+    (f === nothing && done === nothing) && return nothing
+    return Threads.@spawn try
+        if f !== nothing
+            for anb in lock(h.lock) do; collect(values(h.notebooks)); end
+                uses = lock(anb.lock) do; any(c -> _cell_region(c) == name, anb.report.cells); end
+                uses && (try; f(anb); catch; end)
+            end
         end
     catch e
         ReportEngine._rlog("region[$name]: announcing the change failed — " *
                            first(sprint(showerror, e), 120))
+    finally
+        done === nothing || (try; done(); catch; end)
     end
-    return nothing
+end
+
+"""
+    _release_region!(h, r) -> (; ok, left, told)
+
+Release the allocation of region `r` on request from a page or an agent. `ok` says whether the
+scheduler confirmed the release; when it did not, `left` is what it lists under the job name
+afterwards (`nothing` when it could not be asked). `told` is the task that tells the pages, or
+`nothing` without a hub.
+
+The request is gone when the release succeeds or the scheduler lists nothing, and the cells waiting
+in its queue then wait for a run in every notebook that uses the region. A withdrawal can arrive
+before the placement task has submitted the job, so the withdrawal stamp tells that task to release
+whatever it submits. The stamp is set again once the cells have stopped waiting, so a task the
+supervisor started for them during the release counts as withdrawn too. When the scheduler still
+lists the job, the request stands: the stamp is undone and the task in flight keeps serving it.
+"""
+function _release_region!(h, r)
+    t = time()
+    prev = _stamp_withdraw!(r.name, t)
+    ok = ReportEngine.region_release!(r)
+    left = ok ? nothing : ReportEngine.region_allocation(r)
+    gone = ok || (left !== nothing && left.state === :none)
+    gone || lock(_PLACING_LOCK) do
+        get(_WITHDRAWN_AT, r.name, nothing) == t || return
+        prev === nothing ? delete!(_WITHDRAWN_AT, r.name) : (_WITHDRAWN_AT[r.name] = prev)
+    end
+    h === nothing && return (; ok, left, told = nothing)
+    told = gone ? _announce_region_change!(h, r.name, nb -> begin
+                      _withdraw_region_waits!(nb, r.name)
+                      _push_alloc_event!([nb], r.name, "released"; reason = "manual")
+                  end; done = () -> _stamp_withdraw!(r.name)) :
+                  _announce_region_change!(h, r.name)
+    return (; ok, left, told)
 end
 
 # Everything the hub holds between requests, handed to SlateDiag as callbacks so it needs no
@@ -1541,11 +1579,9 @@ function _make_router(h::Hub)
         name = strip(String(get(_body(req), "region", "")))
         r = ReportEngine.region_get(name)
         r === nothing && return _json(Dict("ok" => false, "error" => "no region `$name`"))
-        ok = ReportEngine.region_release!(r)
         # Say so. The node is gone the moment this returns, and a panel still showing its walltime
         # reads as one that is still held.
-        ok && _announce_region_change!(h, r.name,
-                                       nb -> _push_alloc_event!([nb], r.name, "released"; reason = "manual"))
+        ok = _release_region!(h, r).ok
         _json(Dict("ok" => ok, "region" => r.name))
     end)
     # Create/update a named region and reconcile toward its warm count. The form sends every field it
@@ -2266,8 +2302,7 @@ function _make_router(h::Hub)
             r = isempty(side) ? nothing : ReportEngine.region_get(side)
             (r === nothing || r.scheduler === :none) &&
                 return _json(Dict("ok" => false, "error" => "no_allocation"))
-            ok = ReportEngine.region_release!(r)     # reaps the workers on it, then gives the node back
-            ok && _push_alloc_event!([nb], r.name, "released"; reason = "manual")
+            ok = _release_region!(h, r).ok     # reaps the workers on it, then gives the node back
             return _json(Dict("ok" => ok, "did" => "released"))
         end
         k = isempty(side) ? nb.kernel :
@@ -3727,10 +3762,10 @@ function _region_alloc_facts(side::AbstractString)
         # its own test for it, which is how the same worker came to read as held in one panel and
         # free in another. `scheduler` says the question applies at all; `held` answers it; and
         # `allocState` says which KIND of held, since a queued request is withdrawn rather than
-        # released. All three are local: a granted node is a placement, a queued one is `_PLACING`.
+        # released. All three are local: a granted node is a placement, a queued one is `_region_queued`.
         d["scheduler"] = String(r.scheduler)
         p = ReportEngine.region_placement(r)
-        queued = lock(_PLACING_LOCK) do; String(side) in _PLACING; end
+        queued = _region_queued(side)
         d["allocState"] = p !== nothing ? "running" : queued ? "pending" : "none"
         # Mirrors `Sweep.settled`: running or queued is something to give back, nothing else is.
         d["held"] = d["allocState"] != "none"

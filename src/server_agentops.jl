@@ -244,7 +244,25 @@ end
 # Compact text of a cell's result for the agent: the value/stdout, or the error,
 # plus a note that rich output (image/chart) rendered (the agent can't see the
 # pixels here, but knows it worked); tables are rendered as text so their data IS visible.
-_cell_result_text(c::Cell) = (o = c.output; o === nothing ? "(not run)" : _output_result_text(o))
+#
+# A waiting cell has no result yet, whatever an earlier run left in its output, so the text says
+# what it waits for.
+# The words match the page's (`BLOCKED_TEXT` in view.js).
+const _WAIT_TEXT = Dict(WAIT_QUEUED => "queued for a node", WAIT_NOT_SIGNED_IN => "waiting for a sign-in",
+                        WAIT_CONNECTING => "connecting", WAIT_NOT_REQUESTED => "run it to request a node",
+                        WAIT_NEEDS_PREPARE => "the region needs a prepare", WAIT_PREPARING => "preparing the region")
+function _cell_result_text(c::Cell)
+    if c.state == BLOCKED
+        # A locked wait names a cell, not a machine: the locked cell whose ▶ ends it.
+        c.blocked == WAIT_LOCKED &&
+            return (isempty(c.blocked_host) || c.blocked_host == c.id) ? "(locked; run it to compute)" :
+                                                                         "(waits on locked cell $(c.blocked_host))"
+        why = get(_WAIT_TEXT, c.blocked, replace(c.blocked, '_' => ' '))
+        return "(" * why * (isempty(c.blocked_host) ? "" : " on " * c.blocked_host) * ")"
+    end
+    o = c.output
+    return o === nothing ? "(not run)" : _output_result_text(o)
+end
 # The agent-facing text for a captured eval result — shared by cells and out-of-band (scratch) evals.
 #
 # Colour is STRIPPED here and only here. Captured output carries SGR now (the page renders it as
