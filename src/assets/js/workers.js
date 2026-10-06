@@ -60,8 +60,7 @@ function _wpStatsChips(statsJson, note) {
                 memo >= 0 ? 'memo ' + _wpBytes(memo) : null, s.evals > 0 ? s.evals + ' running' : null,
                 s.load1 >= 0 ? 'load ' + s.load1 : null].filter(Boolean);
   return warn + '<div class="wm" title="Open telemetry" onclick="wpOpenTelemetry()">' + rows.join('') +
-    (rest.length ? '<div class="wm-rest">' + _wpEsc(rest.join(' · ')) + '</div>' : '') +
-    '<div class="wm-open">Open telemetry ›</div></div>';
+    (rest.length ? '<div class="wm-rest">' + _wpEsc(rest.join(' · ')) + '</div>' : '') + '</div>';
 }
 // The whole log of the worker the panel is showing, in the log viewer (logview.js): paged by byte
 // range and searchable however large it is, with its colour kept.

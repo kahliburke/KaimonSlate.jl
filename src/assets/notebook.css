@@ -3869,4 +3869,3 @@ body.record-plain .srec-plain { display:block; }
 .wm-bar > span.wm-peak { background:var(--green); opacity:.45; }
 .wm-v { color:var(--text); font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .wm-rest { font-size:.72rem; color:var(--dim); font-variant-numeric:tabular-nums; }
-.wm-open { font-size:.72rem; color:var(--accent); align-self:flex-end; }
