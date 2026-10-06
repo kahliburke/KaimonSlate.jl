@@ -263,9 +263,9 @@ function Section({ title, children, aside }) {
 
 function Tile({ label, value, sub, frac, tone }) {
   return html`<div class=${'tm-tile' + (tone ? ' ' + tone : '')}>
-    <div class="tm-tlabel">${label}</div><div class="tm-tval">${value}</div>
+    <div class="tm-ttop"><span class="tm-tlabel">${label}</span><span class="tm-tval">${value}</span></div>
     ${frac != null ? html`<div class="tm-bar"><span style=${'width:' + Math.min(100, Math.max(0, frac * 100)) + '%'}></span></div>` : null}
-    ${sub ? html`<div class="tm-tsub">${sub}</div>` : null}</div>`;
+    ${sub ? html`<div class="tm-tsub" onMouseEnter=${(e) => { const t = e.currentTarget; t.title = t.scrollWidth > t.clientWidth ? sub : ''; }}>${sub}</div>` : null}</div>`;
 }
 
 function Telemetry() {
@@ -299,7 +299,7 @@ function Telemetry() {
 
   const tiles = html`<div class="tm-tiles">
     <${Tile} label="CPU" value=${r.cpuText} tone=${throttled > 0 ? 'warn' : ''}
-             sub=${dot(r.hostCpu != null ? 'host ' + pct(r.hostCpu) + (nc ? ' of ' + nc + ' cores' : '') : '',
+             sub=${dot(r.hostCpu != null ? 'host ' + pct(r.hostCpu) : '',
                        last.load1 >= 0 ? 'load ' + last.load1 : '', throttled > 0 ? 'throttled ' + throttled + '×' : '')}/>
     <${Tile} label=${r.mem && r.mem.of === 'host' ? 'Memory · host' : 'Memory'}
              value=${r.mem ? B(r.mem.used) + ' / ' + B(r.mem.limit) : B(last.rss)}
