@@ -93,8 +93,15 @@ function close() {
 }
 
 // While the tab is hidden only the first load is made; the rest catches up when it is shown again.
+// One poll at a time: a reply slower than the interval would otherwise let the next poll ask from the
+// same point, and both would append the same samples.
+let polling = false;
 async function poll(g) {
-  const v = view.value; if (!v || (document.hidden && isFinite(lastT))) return;
+  const v = view.value; if (!v || polling || (document.hidden && isFinite(lastT))) return;
+  polling = true;
+  try { await pollOnce(g, v); } finally { polling = false; }
+}
+async function pollOnce(g, v) {
   let r;
   try {
     // A hub route, not a notebook's: fetched directly, since `api()` would put the notebook's id in the path.
@@ -111,7 +118,8 @@ async function poll(g) {
   const seen = new Set(runs.value.map(x => x.id + '@' + x.t1));
   const fresh = (r.runs || []).filter(x => !seen.has(x.id + '@' + x.t1));
   if (fresh.length) { const rs = runs.value.concat(fresh); runs.value = rs.length > 2000 ? rs.slice(rs.length - 2000) : rs; }
-  const add = r.samples || [];
+  // Only what is newer than what the view holds: the hub's `since` may include the sample it starts at.
+  const add = (r.samples || []).filter(x => x.t > lastT);
   if (!add.length) return;
   lastT = add[add.length - 1].t;
   const all = samples.value.concat(add);
