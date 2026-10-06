@@ -552,19 +552,20 @@ function Telemetry() {
         </div></div>`)}</div>
       <div class="tm-grid"><${Chart} option=${gpuBusy}/><${Chart} option=${gpuHeat}/></div></${Section}>` : null;
 
-  const gcSel = gcEach ? html`<span class="tm-seg">${[['all', 'all'], ['full', 'full only']]
-      .map(([k, l]) => html`<button class=${'tm-segb' + (gcShow.value === k ? ' on' : '')}
-                                    onClick=${() => { gcShow.value = k; }}>${l}</button>`)}</span>` : null;
-  const gcButtons = v.nb ? html`<span class="tm-seg">${[['minor', 'Minor GC', false], ['full', 'Full GC', true]]
-      .map(([k, l, full]) => html`<button class="tm-segb" disabled=${!!gcBusy.value}
-                                          onClick=${() => collectNow(v, full)}>${gcBusy.value === k ? 'Collecting…' : l}</button>`)}</span>` : null;
+  const gcSel = gcEach ? html`<label class="tm-tog">
+      <input type="checkbox" checked=${gcShow.value === 'full'}
+             onChange=${(e) => { gcShow.value = e.currentTarget.checked ? 'full' : 'all'; }}/><i></i>full GC only</label>` : null;
+  const gcButtons = v.nb ? [['minor', 'Minor GC', false], ['full', 'Full GC', true]]
+      .map(([k, l, full]) => html`<button class="tm-btn" disabled=${!!gcBusy.value}
+                                          onClick=${() => collectNow(v, full)}>${gcBusy.value === k ? 'Collecting…' : l}</button>`) : null;
+  const gcCtl = gcSel || gcButtons ? html`<span class="tm-gcctl">${gcSel}${gcButtons}</span>` : null;
 
   return html`<div class="tm-bg" onMouseDown=${e => e.target.classList.contains('tm-bg') && close()}>
     <div class="tm-card" role="dialog" aria-modal="true">
       ${head}${acts}
       <div class="tm-body">
         ${tiles}
-        <${Section} title="Timeline" aside=${html`${spanKey}${gcSel}${gcButtons}`}>${running}</${Section}>
+        <${Section} title="Timeline" aside=${html`${spanKey}${gcCtl}`}>${running}</${Section}>
         <${Section} title="CPU" aside=${cpuLimit}><div class="tm-grid"><${Chart} option=${cpu}/>${heat ? html`<${Chart} option=${heat}/>` : null}</div></${Section}>
         <${Section} title="Memory" aside=${memLimitText}><${Chart} option=${mem}/></${Section}>
         ${gpuSec}
