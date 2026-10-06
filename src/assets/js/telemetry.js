@@ -331,7 +331,8 @@ function Telemetry() {
     const loads = cols.map(x => { const c = (x.host || {}).cores || []; return own.map(k => c[k] ?? 0); });
     const data = [];
     cols.forEach((x, ci) => loads[ci].forEach((v, row) => data.push([ms(x), row, v, ends[ci]])));
-    const RAMP = ['#151a2b', '#1f4f8a', '#3f8fe0', '#9fd2ff'];
+    // Dark when idle, through blue at moderate load, warming to red at full.
+    const RAMP = ['#151a2b', '#1d3f7a', '#2f7fd0', '#36b3a8', '#e3c34a', '#f08a3c', '#e5484d'];
     const colAt = (t) => { let ci = cols.length - 1; while (ci > 0 && ms(cols[ci]) > t) ci--; return ci; };
     // The hover follows the time line shared with the charts above, and sums the cores at that time.
     heat = { animation: false, grid: { left: 56, right: 16, top: 8, bottom: 24 }, xAxis: AXIS,
