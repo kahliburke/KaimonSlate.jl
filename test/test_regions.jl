@@ -163,6 +163,25 @@ end
         end
     end
 
+    @testset "a sign-in that failed is not one under way" begin
+        # A failed open leaves its owner task answering every request with the error, so a running
+        # owner alone does not mean a login is in flight; read that way, every later sign-in to the
+        # host is refused as "still under way".
+        ST = KaimonSlate.SshTransport
+        host = "openingtest.invalid"
+        ep = ST.Endpoint(host, host, 22, "nobody", String[], "")
+        s = ST.Session(ep, Cint(-1), C_NULL, Channel{Any}(1), nothing, ST.Prompter(host), false, "", ST.Fwd[])
+        s.owner = @async sleep(30)
+        try
+            lock(ST._REG_LOCK) do; ST._SESSIONS[host] = s; end
+            @test ST.opening(host)                   # no answer yet: in flight
+            s.err = "connection refused"
+            @test !ST.opening(host)                  # failed: nothing is under way
+        finally
+            lock(ST._REG_LOCK) do; delete!(ST._SESSIONS, host); end
+        end
+    end
+
     @testset "a session that cannot open a channel is dropped" begin
         # A transport dies quietly — the far side reboots, a NAT drops the flow, an idle timeout
         # fires — and nothing says so. `alive` is set once at authentication and never revalidated,

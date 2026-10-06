@@ -1253,10 +1253,13 @@ function probe(host::AbstractString)
     end
 end
 
-"Is a login to `host` in flight — waiting on a handshake, or on someone answering a prompt?"
+"""
+Is a login to `host` in flight — waiting on a handshake, or on someone answering a prompt? A login
+that failed is not: its owner task goes on answering requests with the cached error (see `session`).
+"""
 opening(host::AbstractString) = lock(_REG_LOCK) do
     s = get(_SESSIONS, String(host), nothing)
-    s !== nothing && !s.alive && s.owner !== nothing && !istaskdone(s.owner)
+    s !== nothing && !s.alive && isempty(s.err) && s.owner !== nothing && !istaskdone(s.owner)
 end
 
 "Every host with a live session."
