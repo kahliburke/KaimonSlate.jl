@@ -20,7 +20,7 @@ const A = (m, p, b) => window.api(m, p, b);
 // ── state ─────────────────────────────────────────────────────────────────────────────────────────
 const pf = signal(null);         // {cell, side, status, prepared, profile, source, error}
 const sel = signal(0);           // the selected node (model id), 0 for none
-const zoom = signal(1);          // the node the graph is rooted at
+const zoom = signal(1);          // the node last zoomed to, for the breadcrumb
 const hover = signal(null);      // the display node under the pointer
 const hotLine = signal(null);    // {file, line} under the pointer in the code pane
 const fold = signal((() => { try { return localStorage.getItem('slateProfFold') !== '0'; } catch (_) { return true; } })());
@@ -92,8 +92,7 @@ function dtree(n, M) {
 
 const dview = computed(() => {
   const M = model.value; if (!M) return null;
-  const root = M.nodes[zoom.value] || M.nodes[1];
-  return dtree(root, M);
+  return dtree(M.nodes[1], M);
 });
 
 // ── source ────────────────────────────────────────────────────────────────────────────────────────
@@ -132,7 +131,7 @@ function cellSource(id) {
 }
 export async function openProfile(cellId) {
   pf.value = { cell: cellId, side: '', status: 'idle', prepared: null, profile: null, source: cellSource(cellId), error: null };
-  sel.value = 0; zoom.value = 1; opened.value = new Set(); srcs.value = {};
+  sel.value = 0; zoom.value = 1; opened.value = new Set(); srcs.value = {}; view.value = { v0: 0, v1: 1 };
   codeAt.value = { file: 'cell:' + cellId, line: 0 };
   try {
     const r = await A('GET', '/api/profile/last?cell=' + encodeURIComponent(cellId));
@@ -153,7 +152,7 @@ function apply(p) {
   else if (p.kind === 'error') Object.assign(next, { status: 'error', error: p.error });
   else if (p.kind === 'result') {
     Object.assign(next, { status: 'done', profile: p.profile, source: p.source || cur.source, error: null });
-    sel.value = 0; zoom.value = 1; opened.value = new Set(); srcs.value = {};
+    sel.value = 0; zoom.value = 1; opened.value = new Set(); srcs.value = {}; view.value = { v0: 0, v1: 1 };
     codeAt.value = { file: 'cell:' + cur.cell, line: 0 };
   }
   pf.value = next;
@@ -192,96 +191,165 @@ function cellLabel(dn, M) {
   return n.line + (t ? '  ' + t : '');
 }
 
-function layout(root, W, M) {
-  const rects = [];
+// Horizontal zoom: the part of the run on screen, as fractions of the whole. Double-click a bar or
+// click a crumb to zoom to it; ⌘/Ctrl + wheel (or a pinch) zooms about the pointer; dragging or a
+// sideways scroll pans. The callers of whatever is zoomed to stay on screen above it.
+const view = signal({ v0: 0, v1: 1 });
+const MINSPAN = 1e-5;
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+let _lay = null;                  // the current layout, for zooming to a node from outside the graph
+let _anim = 0;
+
+function setView(v0, v1) {
+  const s = clamp(v1 - v0, MINSPAN, 1);
+  v0 = clamp(v0, 0, 1 - s);
+  view.value = { v0, v1: v0 + s };
+}
+function zoomAt(f, factor) {
+  const { v0, v1 } = view.value, s = v1 - v0, ns = clamp(s * factor, MINSPAN, 1);
+  const a = (f - v0) / s;
+  setView(f - a * ns, f - a * ns + ns);
+}
+function animateTo(t0, t1) {
+  cancelAnimationFrame(_anim);
+  const { v0, v1 } = view.value, start = performance.now(), D = 200;
+  const step = (now) => {
+    const k = Math.min(1, (now - start) / D), e = 1 - Math.pow(1 - k, 3);
+    setView(v0 + (t0 - v0) * e, v1 + (t1 - v1) * e);
+    if (k < 1) _anim = requestAnimationFrame(step);
+  };
+  _anim = requestAnimationFrame(step);
+}
+function focusOn(id) {
+  zoom.value = id;
+  const sp = _lay && _lay.span.get(id);
+  if (sp) animateTo(sp[0], sp[0] + sp[1]);
+}
+
+// Positions as fractions of the root, so zooming only remaps them.
+function layout(root, M) {
+  const rects = [], span = new Map([[root.n.id, [0, 1]]]);
   let depth = 0;
   const T = Math.max(1, root.total);
-  const place = (parent, x0, w, d) => {
+  const key = (k) => (k.folded ? 'f:' : '') + k.n.func + '\x1f' + k.n.file + '\x1f' + k.n.kind;
+  const place = (parent, u0, d) => {
     depth = Math.max(depth, d);
     const y = d * LEVEL;
-    let x = x0, i = 0;
+    let u = u0, i = 0;
     const ks = parent.kids;
     while (i < ks.length) {
       // A band per run of siblings in the same function.
-      const key = (k) => (k.folded ? 'f:' : '') + k.n.func + '\x1f' + k.n.file + '\x1f' + k.n.kind;
-      let j = i, gw = 0;
-      while (j < ks.length && key(ks[j]) === key(ks[i])) { gw += ks[j].total / T * W; j++; }
-      if (gw >= 0.5) rects.push({ band: true, x, y, w: gw, h: BAND, dn: ks[i], group: ks.slice(i, j) });
+      let j = i, gu = 0;
+      while (j < ks.length && key(ks[j]) === key(ks[i])) { gu += ks[j].total / T; j++; }
+      rects.push({ band: true, u, uw: gu, y, h: BAND, dn: ks[i] });
       for (let k = i; k < j; k++) {
-        const cw = ks[k].total / T * W;
-        if (cw >= 0.5) {
-          rects.push({ band: false, x, y: y + BAND, w: cw, h: ROW, dn: ks[k] });
-          if (ks[k].kids.length) place(ks[k], x, cw, d + 1);
-        }
-        x += cw;
+        const cu = ks[k].total / T;
+        rects.push({ band: false, u, uw: cu, y: y + BAND, h: ROW, dn: ks[k] });
+        span.set(ks[k].n.id, [u, cu]);
+        if (ks[k].kids.length) place(ks[k], u, d + 1);
+        u += cu;
       }
       i = j;
     }
   };
-  rects.push({ band: true, x: 0, y: 0, w: W, h: BAND, dn: root, group: [root], top: true });
-  place(root, 0, W, 0);
-  return { rects, height: (depth + 1) * LEVEL + 4 };
+  rects.push({ band: true, u: 0, uw: 1, y: 0, h: BAND, dn: root, top: true });
+  place(root, 0, 0);
+  return { rects, span, height: (depth + 1) * LEVEL + 4, root };
 }
 
 function Flame() {
-  const M = model.value, root = dview.value;
-  const box = useRef(null), cv = useRef(null), tip = useRef(null), lay = useRef(null);
+  const M = model.value, root = dview.value, vw = view.value;
+  const box = useRef(null), cv = useRef(null), tip = useRef(null), drawn = useRef([]), drag = useRef(null);
+  if (M && root && (!_lay || _lay.root !== root)) _lay = layout(root, M);
   useEffect(() => {
-    const el = box.current, c = cv.current; if (!el || !c || !M || !root) return;
-    const W = Math.max(200, el.clientWidth - 2);
-    const L = layout(root, W, M); lay.current = L;
+    const el = box.current, c = cv.current; if (!el || !c || !M || !root || !_lay) return;
+    const W = Math.max(200, el.clientWidth - 18), L = _lay;
     const dpr = window.devicePixelRatio || 1;
     c.width = W * dpr; c.height = L.height * dpr; c.style.width = W + 'px'; c.style.height = L.height + 'px';
     const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, W, L.height);
-    g.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace'; g.textBaseline = 'middle';
-    const hl = hotLine.value, hv = hover.value;
+    g.textBaseline = 'middle';
+    const kx = W / (vw.v1 - vw.v0), hl = hotLine.value, hv = hover.value, out = [];
     for (const r of L.rects) {
-      const dn = r.dn, n = dn.n, base = colorOf(dn, M);
+      const x = (r.u - vw.v0) * kx, w = r.uw * kx;
+      if (w < 0.5 || x + w < 0 || x > W) continue;
+      const cx = Math.max(0, x), cw = Math.min(W, x + w) - cx;
+      out.push({ ...r, x: cx, w: cw });
+      const dn = r.dn, n = dn.n;
       g.globalAlpha = r.band ? 0.55 : 1;
-      g.fillStyle = base;
-      g.fillRect(r.x + 0.5, r.y + 0.5, Math.max(0.5, r.w - 1), r.h - 1);
+      g.fillStyle = colorOf(dn, M);
+      g.fillRect(cx + (x >= 0 ? 0.5 : 0), r.y + 0.5, Math.max(0.5, cw - 1), r.h - 1);
       g.globalAlpha = 1;
       if (!r.band) {
         const hot = hl && n.kind === K.line && !dn.folded && n.file === hl.file && n.line === hl.line;
         if (n.id === sel.value || hot || (hv && hv.n.id === n.id)) {
           g.strokeStyle = hot ? '#ffd75e' : n.id === sel.value ? '#ffffff' : 'rgba(255,255,255,.55)';
           g.lineWidth = hot || n.id === sel.value ? 2 : 1;
-          g.strokeRect(r.x + 1, r.y + 1, Math.max(1, r.w - 2), r.h - 2);
+          g.strokeRect(cx + 1, r.y + 1, Math.max(1, cw - 2), r.h - 2);
         }
         // Marks: a share of the time under runtime dispatch, compilation or GC.
         const share = (v) => v / Math.max(1, dn.total);
-        let mx = r.x + r.w - 4;
-        g.textAlign = 'right';
+        let mx = cx + cw - 4;
+        g.textAlign = 'right'; g.font = '11px system-ui, sans-serif';
         for (const [v, ch, col] of [[dn.g, '♻', '#ff8a8a'], [dn.c, '⚙', '#c9b4ff'], [dn.d, '⤳', '#ffd27a']]) {
-          if (share(v) >= 0.05 && r.w > 40) { g.fillStyle = col; g.fillText(ch, mx, r.y + r.h / 2 + 0.5); mx -= 12; }
+          if (share(v) >= 0.05 && cw > 40) { g.fillStyle = col; g.fillText(ch, mx, r.y + r.h / 2 + 0.5); mx -= 12; }
         }
         g.textAlign = 'left';
       }
       const label = r.top ? funcLabel(dn) + '  ·  ' + M.P.samples + ' samples'
                   : r.band ? funcLabel(dn) + (dn.folded ? '  ▸' : '') : cellLabel(dn, M);
-      const room = r.w - 8 - (r.band ? 0 : 14);
+      const room = cw - 8 - (r.band ? 0 : 14);
       if (room > 14) {
         g.fillStyle = r.band ? 'rgba(235,238,250,.85)' : '#f4f5fb';
         g.font = r.band ? '10px system-ui, sans-serif' : '11px ui-monospace, SFMono-Regular, Menlo, monospace';
         let t = label;
         while (t.length > 1 && g.measureText(t).width > room) t = t.slice(0, Math.max(1, Math.floor(t.length * room / g.measureText(t).width) - 1));
         if (t !== label) t = t.slice(0, -1) + '…';
-        g.fillText(t, r.x + 4, r.y + r.h / 2 + 0.5);
+        g.fillText(t, cx + 4, r.y + r.h / 2 + 0.5);
       }
     }
+    drawn.current = out;
   });
+  // Zooming and sideways scrolling are the graph's; an ordinary scroll still scrolls a deep graph.
+  useEffect(() => {
+    const el = box.current; if (!el) return;
+    const wheel = (ev) => {
+      const b = cv.current && cv.current.getBoundingClientRect(); if (!b) return;
+      const { v0, v1 } = view.value, f = v0 + clamp((ev.clientX - b.left) / b.width, 0, 1) * (v1 - v0);
+      if (ev.ctrlKey || ev.metaKey) {
+        ev.preventDefault();
+        zoomAt(f, Math.exp(ev.deltaY * 0.0025));
+      } else if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY) || ev.shiftKey) {
+        ev.preventDefault();
+        const d = (Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY) / b.width * (v1 - v0);
+        setView(v0 + d, v1 + d);
+      }
+    };
+    el.addEventListener('wheel', wheel, { passive: false });
+    return () => el.removeEventListener('wheel', wheel);
+  }, [!!M]);
   if (!M || !root) return html`<div class="pfflame pfempty">${pf.value && pf.value.status === 'running' ? 'profiling…' : 'Run the cell to profile it.'}</div>`;
   const at = (ev) => {
-    const L = lay.current, c = cv.current; if (!L || !c) return null;
-    const b = c.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top;
-    for (let i = L.rects.length - 1; i >= 0; i--) {
-      const r = L.rects[i];
+    const c = cv.current; if (!c) return null;
+    const b = c.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top, rs = drawn.current;
+    for (let i = rs.length - 1; i >= 0; i--) {
+      const r = rs[i];
       if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return r;
     }
     return null;
   };
   const move = (ev) => {
+    const dr = drag.current;
+    if (dr && ev.buttons === 1) {
+      const dx = ev.clientX - dr.x;
+      if (Math.abs(dx) > 3) dr.moved = true;
+      if (dr.moved) {
+        const d = -dx / cv.current.getBoundingClientRect().width * (dr.v1 - dr.v0);
+        setView(dr.v0 + d, dr.v1 + d);
+        if (tip.current) tip.current.style.display = 'none';
+        return;
+      }
+    }
     const r = at(ev), t = tip.current;
     hover.value = r && !r.band ? r.dn : null;
     if (!t) return;
@@ -301,31 +369,46 @@ function Flame() {
     t.style.left = Math.min(ev.clientX - b.left + 14, b.width - 260) + 'px';
     t.style.top = (ev.clientY - b.top + box.current.scrollTop + 16) + 'px';
   };
+  const down = (ev) => { if (ev.button === 0) drag.current = { x: ev.clientX, ...view.value, moved: false }; };
   const click = (ev) => {
+    const dr = drag.current; drag.current = null;
+    if (dr && dr.moved) return;
     const r = at(ev); if (!r) return;
     const dn = r.dn, n = dn.n;
     if (dn.folded) { opened.value = new Set([...opened.value, n.id]); return; }
     sel.value = n.id;
     if (n.kind === K.line) showCode(n.file, n.line);
   };
-  const dbl = (ev) => { const r = at(ev); if (r && !r.dn.folded) zoom.value = r.dn.n.id; };
-  return html`<div class="pfflame" ref=${box} onMouseMove=${move}
-      onMouseLeave=${() => { hover.value = null; if (tip.current) tip.current.style.display = 'none'; }}>
+  const dbl = (ev) => { const r = at(ev); if (r && !r.dn.folded) focusOn(r.dn.n.id); };
+  return html`<div class="pfflame" ref=${box} onMouseMove=${move} onMouseDown=${down}
+      onMouseLeave=${() => { hover.value = null; drag.current = null; if (tip.current) tip.current.style.display = 'none'; }}>
     <canvas ref=${cv} onClick=${click} onDblClick=${dbl}></canvas>
     <div class="pftip" ref=${tip}></div>
   </div>`;
 }
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
+// The way to what is zoomed to, and the zoom controls.
 function Crumbs() {
   const M = model.value; if (!M) return null;
   const path = [];
   for (let n = M.nodes[zoom.value]; n; n = M.nodes[n.parent]) path.unshift(n);
-  if (path.length < 2) return null;
-  return html`<div class="pfcrumbs">${path.map((n, i) => html`
-    ${i ? html`<span class="pfsep">›</span>` : null}
-    <button class=${'pfcrumb' + (i === path.length - 1 ? ' on' : '')} onClick=${() => { zoom.value = n.id; }}>
-      ${i === 0 ? 'cell ' + M.P.cell : (n.kind === K.line ? n.func + ':' + n.line : n.func)}</button>`)}</div>`;
+  const { v0, v1 } = view.value, x = 1 / (v1 - v0);
+  const mid = (v0 + v1) / 2;
+  return html`<div class="pfcrumbs">
+    ${path.map((n, i) => html`
+      ${i ? html`<span class="pfsep">›</span>` : null}
+      <button class=${'pfcrumb' + (i === path.length - 1 ? ' on' : '')} onClick=${() => focusOn(n.id)}>
+        ${i === 0 ? 'cell ' + M.P.cell : (n.kind === K.line ? n.func + ':' + n.line : n.func)}</button>`)}
+    <span class="pfsp"></span>
+    <span class="pfkey"><span><i style="color:#ffd27a">⤳</i>dispatch</span><span><i style="color:#c9b4ff">⚙</i>compiling</span><span><i style="color:#ff8a8a">♻</i>GC</span></span>
+    <span class="pfzoom">
+      <button onClick=${() => zoomAt(mid, 2)} disabled=${x <= 1.0001} title="zoom out">−</button>
+      <span class="pfzx" title="⌘/Ctrl + scroll to zoom, drag to pan">${x < 10 ? x.toFixed(1) : Math.round(x)}×</span>
+      <button onClick=${() => zoomAt(mid, 0.5)} title="zoom in">+</button>
+      <button onClick=${() => { zoom.value = 1; animateTo(0, 1); }} disabled=${x <= 1.0001} title="show the whole run">Fit</button>
+    </span>
+  </div>`;
 }
 
 // ── the code pane ─────────────────────────────────────────────────────────────────────────────────
@@ -409,19 +492,19 @@ function Facts() {
   // Idle threads are not the cell's and say nothing about it; samples from other cells or the
   // worker's own tasks are worth knowing were left out.
   const dr = pr && pr.dropped ? Object.entries(pr.dropped).filter(([k, v]) => v > 0 && k !== 'idle') : [];
+  const left = dr.reduce((t, [, v]) => t + v, 0);
+  if (!pp && !pr) return null;
   return html`<div class="pffacts">
-    ${pp ? html`<div class=${'pfprep' + (pp.ok ? '' : ' bad')}>
-      ${pp.ok ? html`Compiled in ${ms(pp.compile_ms)}${pp.args && pp.args.length ? html`, with ${pp.args.join(', ')} as they are now` : ''}.
-                     ${pp.skipped && pp.skipped.length ? html` Definitions on line ${pp.skipped.join(', ')} run with the cell.` : ''}`
-              : html`${pp.error}`}</div>` : null}
-    ${pr ? html`<div class="pfrun">
+    ${pp ? (pp.ok ? html`<span class="pfprep">compiled ${ms(pp.compile_ms)}</span>`
+                  : html`<span class="pfwarn" title=${pp.error}>${String(pp.error).split('\n')[0]}</span>`) : null}
+    ${pr ? html`
       <span>${ms(pr.duration_ms)}</span>
-      <span>${pr.samples} samples${pr.threads > 1 ? ' on ' + pr.threads + ' threads' : ''}</span>
-      ${pr.compile_ms > 0.5 ? html`<span class="c">compiling ${ms(pr.compile_ms)}</span>` : null}
-      ${pr.gc_ms > 0.5 ? html`<span class="g">GC ${ms(pr.gc_ms)}</span>` : null}
-      ${dr.length ? html`<span class="pfdim" title="samples not counted">left out: ${dr.map(([k, v]) => v + ' ' + k).join(', ')}</span>` : null}
-      ${pr.error ? html`<span class="pfwarn">the cell threw: ${String(pr.error).split('\n')[0]}</span>` : null}
-    </div>` : null}
+      <span>${pr.samples} samples</span>
+      ${pr.threads > 1 ? html`<span>${pr.threads} threads</span>` : null}
+      ${pr.compile_ms > 0.5 ? html`<span class="c">⚙ ${ms(pr.compile_ms)}</span>` : null}
+      ${pr.gc_ms > 0.5 ? html`<span class="g">♻ ${ms(pr.gc_ms)}</span>` : null}
+      ${left ? html`<span class="pfdim" title=${dr.map(([k, v]) => v + ' ' + k).join(', ')}>left out ${left}</span>` : null}
+      ${pr.error ? html`<span class="pfwarn" title=${pr.error}>threw ${String(pr.error).split('\n')[0]}</span>` : null}` : null}
   </div>`;
 }
 
@@ -493,13 +576,14 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pftog i::after { content:''; position:absolute; top:1px; left:1px; width:9px; height:9px; border-radius:50%; background:var(--dim); transition:transform .15s; }
 .pftog input:checked + i { border-color:#e8933a; background:color-mix(in srgb, #e8933a 30%, transparent); }
 .pftog input:checked + i::after { transform:translateX(11px); background:#e8933a; }
-.pffacts { padding:6px 12px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.76rem; display:flex; flex-direction:column; gap:3px; }
-.pffacts:empty { display:none; }
+.pffacts { padding:6px 12px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.76rem;
+  display:flex; flex-wrap:wrap; align-items:center; gap:14px; color:var(--text); white-space:nowrap; }
+.pffacts .pfwarn { overflow:hidden; text-overflow:ellipsis; max-width:60ch; }
 .pfprep { color:var(--dim); }
-.pfprep.bad { color:var(--red); }
-.pfrun { display:flex; flex-wrap:wrap; gap:14px; color:var(--text); }
-.pfrun .c { color:#b9a3f5; }
-.pfrun .g { color:#f08a92; }
+.pffacts .c { color:#b9a3f5; }
+.pffacts .g { color:#f08a92; }
+.pfkey { display:inline-flex; gap:10px; color:var(--dim); font-size:.7rem; }
+.pfkey i { font-style:normal; margin-right:3px; }
 .pfbody { flex:1 1 auto; min-height:0; display:grid; grid-template-columns:minmax(320px, 40%) minmax(0, 1fr); }
 .pfcode { display:flex; flex-direction:column; min-width:0; min-height:0; border-right:1px solid var(--border); }
 .pfcodehead { display:flex; align-items:center; gap:8px; padding:5px 10px; border-bottom:1px solid var(--border);
@@ -517,6 +601,13 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pfsep { color:var(--dim); }
 .pfflame { position:relative; flex:1 1 60%; min-height:0; overflow:auto; padding:6px 8px; }
 .pfflame canvas { display:block; cursor:pointer; }
+.pfflame:active canvas { cursor:grabbing; }
+.pfzoom { display:inline-flex; align-items:center; gap:3px; }
+.pfzoom button { font:inherit; min-width:24px; padding:1px 7px; border-radius:5px; cursor:pointer;
+  background:var(--bg3); color:var(--text); border:1px solid var(--border); }
+.pfzoom button:hover { border-color:#e8933a; }
+.pfzoom button[disabled] { opacity:.45; cursor:default; }
+.pfzx { min-width:38px; text-align:center; color:var(--dim); font-variant-numeric:tabular-nums; }
 .pfempty { display:flex; align-items:center; justify-content:center; color:var(--dim); font-size:.82rem; }
 .pftip { display:none; position:absolute; z-index:2; max-width:250px; pointer-events:none; padding:6px 8px;
   border-radius:6px; background:var(--bg2); border:1px solid var(--border); box-shadow:0 6px 20px rgba(0,0,0,.4);
