@@ -363,8 +363,7 @@ function _wpPaintTabs() {
   const rest = ranked.filter(w => !shown.includes(w));
   const tab = w => {
     const side = w.side || '', lbl = _wpLabel(side, w.host);
-    // A narrow tab ellipsizes the label, so carry the full name in the title - the tab is a picker,
-    // and you should be able to read which worker it is even when the strip is crowded.
+    // A narrow tab ellipsizes the label; only then does hovering it show the full name (see below).
     return '<button class="wptab' + (side === _wpSide ? ' on' : '') + '" data-wptab="' + _wpEsc(side) +
       '">' + _wpOverflowDot(w) + ' ' + _wpEsc(lbl) + '</button>';
   };
@@ -636,6 +635,12 @@ document.addEventListener('click', e => {
   if (e.target.closest('#workerpopbg')) return;                 // clicks inside the panel don't dismiss it
   if (_wpMenuOpen()) _wpCloseMenu();                            // click-away closes the dropdown…
   if (!_wpPinned && _wpSide !== null) closeWorkerPop();         // …and an UNPINNED preview; a pinned panel stays
+});
+// A tab whose label is cut short shows its full name on hover; one that reads in full has no tooltip
+// repeating it.
+document.addEventListener('mouseover', e => {
+  const tab = e.target && e.target.closest && e.target.closest('#workerpop-tabs .wptab');
+  if (tab) tab.title = tab.scrollWidth > tab.clientWidth ? tab.textContent.trim() : '';
 });
 // Hover a row → preview it; being over any row/the panel keeps the panel; leaving the whole area hides a preview.
 document.addEventListener('mouseover', e => {
