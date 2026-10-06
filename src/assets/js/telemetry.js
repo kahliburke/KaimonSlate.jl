@@ -156,6 +156,20 @@ function cellSpans(s, done) {
 }
 const SPAN_COLOR = { ran: '#569cd6', running: '#56d364', restored: '#9d8fd6', err: '#e5636e' };
 
+// The intervals between samples in which the worker collected, from its cumulative counts: how many
+// pauses, how many of them full, and the GC time. A sample is the finest the counts resolve.
+const GC_COLOR = '#8a93b8', GC_FULL = '#e8a33d';
+function gcSpans(s) {
+  const out = [], P = (x) => x.proc || {};
+  for (let i = 1; i < s.length; i++) {
+    const p = s[i - 1], x = s[i], n = P(x).gc_pauses - P(p).gc_pauses;
+    if (!(P(p).gc_pauses >= 0) || !(n > 0)) continue;
+    const full = Math.max(0, (P(x).gc_full ?? 0) - (P(p).gc_full ?? 0)), t = Math.max(0, x.gc_ms - p.gc_ms);
+    out.push({ a: ms(p), b: ms(x), n, full, t, share: x.t > p.t ? Math.min(1, t / 1000 / (x.t - p.t)) : 0 });
+  }
+  return out;
+}
+
 // A cumulative milliseconds counter (GC time, compile time) as a share of wall time between samples.
 const msShare = (s, get) => s.map((x, i) => {
   if (!i) return [ms(x), null];
@@ -323,8 +337,9 @@ function Telemetry() {
              sub=${d.path}/>`)}
   </div>`;
 
-  const spanKey = html`<span class="tm-key">${Object.entries({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })
-    .map(([k, l]) => html`<span><i style=${'background:' + SPAN_COLOR[k]}></i>${l}</span>`)}</span>`;
+  const spanKey = html`<span class="tm-key">${[...Object.entries({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })
+      .map(([k, l]) => [SPAN_COLOR[k], l]), [GC_COLOR, 'GC'], [GC_FULL, 'full GC']]
+    .map(([c, l]) => html`<span><i style=${'background:' + c}></i>${l}</span>`)}</span>`;
   // A run clicked here brings its cell into view in the notebook behind, so it is there on closing.
   const reveal = (id) => {
     const el = document.getElementById('cell-' + id);
@@ -333,26 +348,37 @@ function Telemetry() {
     el.scrollIntoView({ block: el.getBoundingClientRect().height >= window.innerHeight * 0.9 ? 'start' : 'center',
                         behavior: 'smooth' });
   };
-  const running = ids.length ? html`<${Chart} height=${Math.min(120, 30 + 16 * ids.length)}
+  const gcs = gcSpans(s), lanes = gcs.length ? [...ids, 'GC'] : ids;
+  // One bar drawer for runs and collections, kept inside the plot: nothing draws over the lane names
+  // or past the last sample.
+  const bar = (params, api) => {
+    const y = api.value(0), a = api.coord([api.value(1), y]), b = api.coord([api.value(2), y]);
+    const h = api.size([0, 1])[1] * 0.6, cs = params.coordSys;
+    const r = window.echarts.graphic.clipRectByRect(
+      { x: a[0], y: a[1] - h / 2, width: Math.max(2, b[0] - a[0]), height: h },
+      { x: cs.x, y: cs.y, width: cs.width, height: cs.height });
+    return r && { type: 'rect', shape: Object.assign(r, { r: 3 }), style: api.style() };
+  };
+  const running = lanes.length ? html`<${Chart} height=${Math.min(136, 30 + 16 * lanes.length)}
       onClick=${(p) => p && p.data && p.data.value && reveal(p.data.value[3])} option=${{
       animation: false, grid: { left: 90, right: 16, top: 6, bottom: 20 }, xAxis: AXIS,
-      yAxis: { type: 'category', data: ids, axisLabel: { width: 80, overflow: 'truncate' } },
+      yAxis: { type: 'category', data: lanes, axisLabel: { width: 80, overflow: 'truncate' } },
       tooltip: { formatter: (p) => {
+        if (p.seriesId === 'gc') {
+          const g = gcs[p.dataIndex];
+          return 'GC · ' + g.n + (g.n > 1 ? ' pauses' : ' pause') + (g.full ? ' · ' + g.full + ' full' : '') +
+                 ' · ' + window.slateDuration(g.t);
+        }
         const [, a, b, id, kind] = p.data.value, d = b - a;
         return id + ' · ' + window.slateDuration(d) +
                ' · ' + ({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })[kind];
       } },
-      series: [{ type: 'custom', encode: { x: [1, 2], y: 0 }, cursor: 'pointer',
-        renderItem: (params, api) => {
-          const y = api.value(0), a = api.coord([api.value(1), y]), b = api.coord([api.value(2), y]);
-          const h = api.size([0, 1])[1] * 0.6, cs = params.coordSys;
-          // Kept inside the plot: nothing draws over the cell names or past the last sample.
-          const r = window.echarts.graphic.clipRectByRect(
-            { x: a[0], y: a[1] - h / 2, width: Math.max(2, b[0] - a[0]), height: h },
-            { x: cs.x, y: cs.y, width: cs.width, height: cs.height });
-          return r && { type: 'rect', shape: Object.assign(r, { r: 3 }), style: api.style() };
-        },
-        data: spans.map(x => ({ value: [ids.indexOf(x.id), x.a, x.b, x.id, x.kind], itemStyle: { color: SPAN_COLOR[x.kind] } })) }] }}/>` : html`<div class="tm-none">no cell ran in this window</div>`;
+      series: [{ id: 'runs', type: 'custom', encode: { x: [1, 2], y: 0 }, cursor: 'pointer', renderItem: bar,
+        data: spans.map(x => ({ value: [ids.indexOf(x.id), x.a, x.b, x.id, x.kind], itemStyle: { color: SPAN_COLOR[x.kind] } })) },
+        gcs.length ? { id: 'gc', type: 'custom', encode: { x: [1, 2], y: 0 }, cursor: 'default', renderItem: bar,
+          data: gcs.map(g => ({ value: [ids.length, g.a, g.b],
+                                itemStyle: { color: g.full ? GC_FULL : GC_COLOR, opacity: 0.35 + 0.65 * Math.min(1, g.share * 4) } })) } : null
+      ].filter(Boolean) }}/>` : html`<div class="tm-none">no cell ran in this window</div>`;
 
   // Scaled to what the worker may use, so the headroom shows: the job's allowance on a scheduler
   // node, the host's cores elsewhere. The top of the axis is the limit, which the section header
@@ -505,7 +531,7 @@ function Telemetry() {
       ${head}${acts}
       <div class="tm-body">
         ${tiles}
-        <${Section} title="Cells running" aside=${spanKey}>${running}</${Section}>
+        <${Section} title="Timeline" aside=${spanKey}>${running}</${Section}>
         <${Section} title="CPU" aside=${cpuLimit}><div class="tm-grid"><${Chart} option=${cpu}/>${heat ? html`<${Chart} option=${heat}/>` : null}</div></${Section}>
         <${Section} title="Memory" aside=${memLimitText}><${Chart} option=${mem}/></${Section}>
         ${gpuSec}
