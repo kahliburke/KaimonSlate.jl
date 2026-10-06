@@ -471,9 +471,9 @@ end
                     try
                         @test why() == NS.WAIT_PREPARING
                         # A cell already waiting says what for, and the pill says preparing, not queued.
-                        RE.mark_blocked!(c, NS.WAIT_NEEDS_PREPARE, "login")
+                        RE.mark_blocked!(c, NS.WAIT_NEEDS_PREPARE, "login", "gpu")
                         NS._mark_region_preparing!(nb, "gpu")
-                        @test c.blocked == NS.WAIT_PREPARING
+                        @test c.blocked == NS.WAIT_PREPARING && c.blocked_region == "gpu"   # still the region it waits for
                         # (Signed out outranks it: nothing can start until someone signs in.)
                         w = only(filter(w -> w["side"] == "gpu", NS._workers_json(nb)))
                         @test w["face"] == (get(w, "noteCode", "") == "not_signed_in" ? "signed out" : "preparing")

@@ -1332,7 +1332,7 @@ function _mark_region_preparing!(nb::LiveNotebook, name::AbstractString)
     lock(nb.lock) do
         for c in nb.report.cells
             (c.state == BLOCKED && _cell_region(c) == name && c.blocked != WAIT_PREPARING) || continue
-            ReportEngine.mark_blocked!(c, WAIT_PREPARING, c.blocked_host)
+            ReportEngine.mark_blocked!(c, WAIT_PREPARING, c.blocked_host, String(name))
             _broadcast_progress(nb, c)
         end
     end
