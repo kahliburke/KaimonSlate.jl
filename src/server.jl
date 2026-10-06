@@ -2514,7 +2514,10 @@ function _proc_cpu_rss(pid::Integer)
         buf = Vector{UInt8}(undef, 256)                       # rusage_info_v0
         ccall(:proc_pid_rusage, Cint, (Cint, Cint, Ptr{UInt8}), Int32(pid), Cint(0), buf) == 0 || return nothing
         user, sys, rss = (reinterpret(UInt64, @view buf[r])[1] for r in (17:24, 25:32, 65:72))
-        return ((user + sys) / 1e9, Int(rss))
+        # Mach ticks, nanoseconds only on Intel (see the worker's `_telemetry_loop!`).
+        tb = zeros(UInt32, 2)
+        ccall(:mach_timebase_info, Cint, (Ptr{UInt32},), tb)
+        return ((user + sys) * (tb[2] > 0 ? tb[1] / tb[2] : 1.0) / 1e9, Int(rss))
     end
     return nothing
 end

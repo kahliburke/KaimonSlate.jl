@@ -717,6 +717,10 @@ end
             @testset "a worker's process is read from outside when it sends nothing" begin
                 r = NS._proc_cpu_rss(getpid())
                 @test r !== nothing && r[1] > 0 && r[2] > 0
+                # In seconds: half a second spent computing reads as about that much CPU time.
+                burn() = (t = time(); x = 0.0; while time() - t < 0.5; x += sin(x); end; x)
+                c0 = NS._proc_cpu_rss(getpid())[1]; burn()
+                @test NS._proc_cpu_rss(getpid())[1] - c0 > 0.3
                 @test NS._proc_cpu_rss(typemax(Int32)) === nothing    # no such process
             end
 

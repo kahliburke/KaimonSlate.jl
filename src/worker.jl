@@ -2950,12 +2950,17 @@ function _telemetry_loop!(stats_path::String)
     pagesz = Sys.islinux() ? Int(ccall(:sysconf, Clong, (Cint,), 30)) : 4096   # _SC_PAGESIZE
     clk    = Sys.islinux() ? Int(ccall(:sysconf, Clong, (Cint,), 2))  : 100   # _SC_CLK_TCK
     # macOS: proc_pid_rusage (libproc, unprivileged — no /proc, no Instruments, no root) gives CURRENT
-    # RSS + cumulative user/system CPU ns. Offsets from rusage_info_v0 (see perf_monitor_macos.jl).
+    # RSS + cumulative user/system CPU time. Offsets from rusage_info_v0 (see perf_monitor_macos.jl).
+    # The times are in Mach ticks, which are nanoseconds only on Intel: on Apple silicon a tick is
+    # 125/3 ns, so the timebase converts them.
+    tb = zeros(UInt32, 2)
+    Sys.isapple() && ccall(:mach_timebase_info, Cint, (Ptr{UInt32},), tb)
+    tick_ns = Sys.isapple() && tb[2] > 0 ? tb[1] / tb[2] : 1.0
     macos_rusage() = try
         buf = Vector{UInt8}(undef, 256)
         ccall(:proc_pid_rusage, Cint, (Cint, Cint, Ptr{UInt8}), Int32(getpid()), Cint(0), buf) == 0 || return nothing
-        (user_ns = reinterpret(UInt64, @view buf[17:24])[1],
-         sys_ns  = reinterpret(UInt64, @view buf[25:32])[1],
+        (user = reinterpret(UInt64, @view buf[17:24])[1],     # in Mach ticks
+         sys  = reinterpret(UInt64, @view buf[25:32])[1],
          rss     = reinterpret(UInt64, @view buf[65:72])[1])
     catch; nothing; end
     cputime() = if Sys.islinux()
@@ -2965,7 +2970,7 @@ function _telemetry_loop!(stats_path::String)
             (parse(Int, rest[12]) + parse(Int, rest[13])) / clk   # utime + stime (fields 14/15)
         catch; -1.0; end
     elseif Sys.isapple()
-        r = macos_rusage(); r === nothing ? -1.0 : (r.user_ns + r.sys_ns) / 1e9
+        r = macos_rusage(); r === nothing ? -1.0 : (r.user + r.sys) * tick_ns / 1e9
     else
         -1.0                                            # Windows/other: no cheap cpu-time source → cpu% n/a
     end
