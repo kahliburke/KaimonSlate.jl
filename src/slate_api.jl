@@ -1069,10 +1069,11 @@ See also `save_asset`, `FileUpload`."""),
     SlateApiEntry("worker", "Remote & regions",
         "AGENT TOOL — the worker PROCESS behind a notebook: where it runs, restart it, remove it.",
         ["restart", "worker", "kernel", "process", "hung", "wedged", "stuck", "frozen", "kill",
-         "respawn", "reset", "namespace", "reap", "roster", "pid"],
-        "slate.worker(notebook) · action=status|list|restart|reap",
-        """The worker PROCESS a notebook runs on. One tool, four actions, and the same arguments
-        whatever the worker is — where it runs is not something the caller has to know:
+         "respawn", "reset", "namespace", "reap", "roster", "pid", "release", "allocation", "keep",
+         "idle", "queued", "scheduler", "log"],
+        "slate.worker(notebook) · action=status|list|restart|reap · action=release|keep|log with region",
+        """The worker PROCESS a notebook runs on. One tool, four actions on a worker, and the same
+        arguments whatever the worker is; where it runs is not something the caller has to know:
           • `slate.worker(notebook)` — where it runs right now, ports, env, connection state
             (`action="status"`, the default). Read-only.
           • `slate.worker(action="list")` — this hub's roster; pass `host` for another machine's.
@@ -1083,7 +1084,15 @@ See also `save_asset`, `FileUpload`."""),
           • `slate.worker(action="reap", notebook)` — kill the worker and remove its files. Its
             notebook is left worker-less until the next run, so `restart` is usually what you want.
             Identify by `notebook`, or by `host`+`port` from `list`.
-        Nothing is auto-reaped: a worker may hold results worth keeping, so removal is explicit."""),
+        Three more actions take a `region` instead of a worker:
+          • `slate.worker(action="release", region)` - return the allocation of a scheduler region.
+            A queued request is withdrawn, and a running job is cancelled with every worker on it.
+          • `slate.worker(action="keep", region)` - restart the idle clock of a scheduler region,
+            which answers its idle-release warning.
+          • `slate.worker(action="log", region)` - the bring-up log of any region: queued, node
+            granted, provisioning, spawn and connect.
+        Apart from the idle release of a scheduler region, nothing is auto-reaped: a worker may hold
+        results worth keeping, so removal is explicit."""),
     SlateApiEntry("remote", "Remote & regions",
         "AGENT TOOLS — run a WHOLE notebook's worker on another machine (SSH), transparently.",
         ["ssh", "host", "offload", "gpu", "cluster", "move", "elsewhere"],
@@ -1114,7 +1123,8 @@ See also `save_asset`, `FileUpload`."""),
             SCHEDULER region (`scheduler=:slurm`/`:pbs`): its node is an allocation rather than a
             host to keep workers on, and holding workers there holds the node.
           • `slate.region_on(notebook, "name1,name2")` — choose which regions a notebook uses (durable in
-            its footer). `slate.regions()` lists the registry + parked wires.
+            its footer). `slate.regions()` lists the registry + parked wires, and for a scheduler
+            region what it asks for and the allocation this hub holds.
           • Tag a cell `region=<name>` (the 🏷 tag editor's "Run on") to run it there. Keep the main kernel
             and `@bind` cells local; a region cell should PRODUCE values, not mutate main-kernel state (v1).
         A SHARED KERNEL cell — `using X` plus the functions the region cells call — needs no annotation:

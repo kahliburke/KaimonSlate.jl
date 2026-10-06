@@ -3412,7 +3412,7 @@ function _push_alloc_notice!(nbs, r, extra::Dict{String,Any})
     p = ReportEngine.region_placement(r)
     payload = merge(Dict{String,Any}("region" => r.name, "host" => r.host,
                                      "node" => ReportEngine.region_host(r),
-                                     "walltime_left" => p === nothing ? -1 :
+                                     "walltime_left" => (p === nothing || !isfinite(p.until)) ? -1 :
                                                        max(0, round(Int, p.until - time())),
                                      "idle_release" => r.idle_release, "idle_warn" => r.idle_warn,
                                      "extendable" => ext.ok === true,

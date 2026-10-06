@@ -898,6 +898,24 @@ function _announce_region_change!(h, name::AbstractString, f = nothing; done = n
     end
 end
 
+# Whether a cell of an open notebook waits in the queue of region `name`. A rejected submission
+# leaves such cells with no placement task running, so this is the request a release withdraws.
+_region_waits(h, name::AbstractString) =
+    any(lock(h.lock) do; collect(values(h.notebooks)); end) do nb
+        lock(nb.lock) do
+            any(c -> c.state == BLOCKED && c.blocked == WAIT_QUEUED && c.blocked_region == name,
+                nb.report.cells)
+        end
+    end
+
+# Restart a region's idle clock because someone is still using it. Every page that uses the region
+# is told, so an idle notice still open on another page closes.
+function _keep_region!(h, name::AbstractString)
+    _region_used!(name)
+    _announce_region_change!(h, name, nb -> _push_alloc_event!([nb], name, "kept"))
+    return nothing
+end
+
 """
     _release_region!(h, r) -> (; ok, left, told)
 
@@ -1569,10 +1587,9 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/allocation/keep", req -> begin
         name = strip(String(get(_body(req), "region", "")))
         isempty(name) && return _json(Dict("ok" => false, "error" => "no_region"))
-        _region_used!(name)
         # The clock the page is showing just moved, and nothing else would say so until the next
         # state push — which for an idle notebook is exactly what there isn't.
-        _announce_region_change!(h, name)
+        _keep_region!(h, name)
         _json(Dict("ok" => true, "region" => name))
     end)
     HTTP.register!(router, "POST", "/api/allocation/release", req -> begin
@@ -3772,7 +3789,8 @@ function _region_alloc_facts(side::AbstractString)
         p === nothing && return d
         # DURATIONS, not instants: the page is a third clock again, and only an age survives the
         # crossing. It anchors these to its own `Date.now()` on receipt and ticks from there.
-        d["walltimeLeft"] = max(0, round(Int, p.until - time()))
+        # A job with no time limit has no end to count down to, so it reports none.
+        isfinite(p.until) && (d["walltimeLeft"] = max(0, round(Int, p.until - time())))
         if r.idle_release > 0
             d["idleRelease"] = r.idle_release
             d["idleWarn"] = r.idle_warn

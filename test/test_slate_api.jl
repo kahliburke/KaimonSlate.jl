@@ -64,22 +64,7 @@ function injected_names()
                   if !startswith(String(n), "__") && !(n in skip) && !startswith(String(n), "#")]
 end
 
-# Stands in for `KaimonGate.GateTool` so `create_tools` can be built without Kaimon loaded. The
-# handlers reach the gate through `parentmodule(GateTool)`, so the caller/agent accessors live here.
-module StubGate
-struct GateTool
-    name::String
-    handler::Function
-    timeout_ms::Union{Nothing,Int}
-end
-# Mirrors KaimonGate's constructor — `create_tools` declares a silence budget on the tools that
-# block silently. There is no caller-facing override by design.
-GateTool(name::AbstractString, handler::Function;
-         timeout_ms::Union{Nothing,Integer} = nothing) =
-    GateTool(String(name), handler, timeout_ms === nothing ? nothing : Int(timeout_ms))
-current_caller() = nothing
-current_agent_id() = nothing
-end
+include("stubgate.jl")
 
 @testset "slate api registry" begin
     @testset "no undocumented cell helper (drift guard)" begin
@@ -269,7 +254,7 @@ end
     # The worker PROCESS lifecycle is one tool with an action, not one tool per verb: an agent that
     # wants a fresh worker should find `restart` next to `reap` rather than reaching for whichever
     # name sounds closest. Where the worker runs is not part of the interface.
-    @testset "worker lifecycle is one tool with four actions" begin
+    @testset "worker lifecycle is one tool with an action" begin
         tools = KaimonSlate.create_tools(StubGate.GateTool)
         names = [t.name for t in tools]
         @test "worker" in names
@@ -287,8 +272,9 @@ end
         @test w(notebook = "") == w(notebook = "", action = "status")
 
         # Every action takes the same arguments — the caller never selects a local or remote form.
+        # `region` names the region that `release`, `keep` and `log` act on.
         kw = Base.kwarg_decl(only(methods(w)))
-        @test Set(kw) == Set([:notebook, :host, :port, :action])
+        @test Set(kw) == Set([:notebook, :host, :port, :action, :region])
     end
 
     @testset "declared timeout budgets" begin

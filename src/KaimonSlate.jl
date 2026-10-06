@@ -1052,6 +1052,8 @@ function create_tools(GateTool::Type)
     Test + prime an SSH host for remote notebooks: a full reported dry-run — ssh reachability, Julia
     presence (+version), env provisioning, KaimonGate load, CURVE key (for `direct`), then a real
     spawn → connect → round-trip eval → clean teardown. `transport` = "tunnel" (default) | "direct".
+    The checklist also names a scheduler the host can reach, with the GPUs and time limit of each
+    partition.
     Returns a step-by-step checklist. Slow on a cold host (first-time provisioning). Run this before
     `run_on` to catch setup problems early; it also primes the host so the first real run is fast.
     """
@@ -1159,7 +1161,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        worker(; notebook="", host="", port=0, action="status") -> String
+        worker(; notebook="", host="", port=0, action="status", region="") -> String
 
     Inspect and control the worker PROCESS a notebook runs on — local or remote. One tool for the
     whole lifecycle so the right verb is always in reach:
@@ -1177,19 +1179,103 @@ function create_tools(GateTool::Type)
       `notebook`, or by `host`+`port` from `list`. Its notebook is left worker-less until the next
       run, so prefer `restart` unless you actually want it gone.
 
-    Where a worker runs is not your problem: every action takes the same arguments and does the
-    right thing for a local or a remote one. Nothing is ever auto-reaped — a worker may hold
-    results worth keeping, so removal is always explicit.
+    Three actions take a `region` instead of a worker. `release` and `keep` act on the allocation
+    of a scheduler region, and `log` works on any region:
+
+    - `release` - return the allocation to the scheduler. A queued request is withdrawn, and the
+      cells waiting on it wait to be run. A running job is cancelled after its workers are
+      reaped, which stops the work of every notebook on its node. The region stays defined, and its
+      next cell asks for a new allocation.
+    - `keep` - restart the idle clock, which answers the idle-release warning: the idle release
+      waits for another full period without use. A node with no live worker on it is still
+      released at the next check of the hub, which runs every minute.
+    - `log` - return the bring-up log of the region from this hub: queued, node granted,
+      provisioning, spawn and connect. Read it when a region cell stays queued, connecting or
+      disconnected.
+
+    `status`, `list`, `restart` and `reap` take the same arguments for a local and a remote worker,
+    so the caller does not need to know where a worker runs. Apart from the idle release of a
+    scheduler region, no worker is reaped automatically, because a worker may hold results worth
+    keeping.
     """
     function worker(; notebook::String = "", host::String = "", port::Int = 0,
-                    action::String = "status")::String
+                    action::String = "status", region::String = "")::String
         act = lowercase(strip(action))
-        act in ("status", "list", "restart", "reap") ||
-            return "Unknown action '$action'. Use status | list | restart | reap."
+        act in ("status", "list", "restart", "reap", "release", "keep", "log") ||
+            return "Unknown action '$action'. Use status | list | restart | reap | release | keep | log."
+        act in ("release", "keep", "log") && return _worker_region(act, region)
         act == "status" && return _worker_status(notebook)
         act == "list" && return _worker_list(host)
         act == "restart" && return _worker_restart(notebook, host, port)
         return _worker_reap(notebook, host, port)
+    end
+
+    # `release`, `keep` and `log` name a region, not a worker.
+    function _worker_region(act::String, region::String)::String
+        name = strip(region)
+        isempty(name) && return "Give a region (see regions())."
+        r = ReportEngine.region_get(name)
+        r === nothing && return "No region '$name'. regions() lists them."
+        act == "log" && return _region_log(r)
+        r.scheduler === :none && return "'$(r.name)' has no scheduler, so it holds no allocation."
+        return act == "keep" ? _region_keep(r) : _region_release(r)
+    end
+
+    function _region_log(r)::String
+        t = ReportEngine.region_acquire_trace(r)
+        isempty(t) && return "No bring-up of '$(r.name)' recorded since this hub started."
+        return "Bring-up log of '$(r.name)', oldest line first:\n" * t
+    end
+
+    # Where a region asks its scheduler: its host, or this machine when it names none.
+    _sched_at(r) = isempty(r.host) ? "this machine" : r.host
+
+    function _region_keep(r)::String
+        state = get(NotebookServer._region_alloc_facts(r.name), "allocState", "none")
+        state == "pending" &&
+            return "'$(r.name)' is queued for a node, and its idle clock starts when one is granted."
+        state == "running" || return "'$(r.name)' holds no allocation, so there is nothing to keep."
+        r.idle_release > 0 ||
+            return "'$(r.name)' has no idle release, so its allocation is held until its job ends or " *
+                   "is released."
+        h = _HUB[]
+        h === nothing ? NotebookServer._region_used!(r.name) : NotebookServer._keep_region!(h, r.name)
+        return "✅ kept '$(r.name)': its idle clock restarts now, and the idle release waits for another " *
+               "$(ReportEngine.Sweep.format_duration(r.idle_release)) without use."
+    end
+
+    # The scheduler is asked by job name, so `_region_release` also releases a job that a restarted
+    # hub no longer holds. After a failed release, `_release_region!` reports what the scheduler
+    # still lists, because holding nothing and not answering need different replies.
+    function _region_release(r)::String
+        h = _HUB[]
+        queued = get(NotebookServer._region_alloc_facts(r.name), "allocState", "none") == "pending" ||
+                 (h !== nothing && NotebookServer._region_waits(h, r.name))
+        p = ReportEngine.region_placement(r)
+        res = NotebookServer._release_region!(h, r)
+        a, at = res.left, _sched_at(r)
+        # A queued request counts as withdrawn when the scheduler does not list it either: a placement
+        # task that is still submitting it releases what it submits, and cells that wait with no task
+        # running stop all the same.
+        queued && (res.ok || (a !== nothing && a.state === :none)) &&
+            return "✅ withdrew the queued request of '$(r.name)' on $at. The cells that waited on it " *
+                   "now wait to be run, and running one asks for a new allocation."
+        if res.ok
+            what = p !== nothing ? "job $(p.job) of '$(r.name)' on $(p.host)" :
+                   "the allocation of '$(r.name)' on $at"
+            return "✅ released $what. The region stays defined, and its next cell asks for a new allocation."
+        end
+        a === nothing &&
+            return "❌ the allocation of '$(r.name)' was not released, because the scheduler on $at " *
+                   "could not be identified."
+        a.state === :none &&
+            return "'$(r.name)' holds no allocation on $at, so there is nothing to release."
+        a.state === :unreachable &&
+            return "❌ the allocation of '$(r.name)' may still be held, because the scheduler on $at did " *
+                   "not answer." * (isempty(r.host) ? "" :
+                                    " Release it again once $(r.host) is reachable and signed in.")
+        return "❌ the cancel request failed, and the scheduler on $at still lists job $(a.id) of " *
+               "'$(r.name)' as $(a.state)."
     end
 
     # Restart by NOTEBOOK — every worker it uses — or by the host+port a roster row names, which is
@@ -2257,6 +2343,53 @@ function create_tools(GateTool::Type)
         return String(take!(io))
     end
 
+    # What a scheduler region asks for, under the job name the scheduler lists it by, with the
+    # walltime it would actually request. An option with no value is a switch. A stored option that
+    # the request leaves out (`Sweep._option_args`) is listed apart, as not sent.
+    function _region_request(r)::String
+        SW = ReportEngine.Sweep
+        parts = String["scheduler=$(r.scheduler)", "job_name=$(ReportEngine.region_alloc_name(r))"]
+        isempty(r.partition) || push!(parts, "partition=$(r.partition)")
+        push!(parts, "walltime=$(ReportEngine._alloc_walltime(r))")
+        r.cpus > 0 && push!(parts, "cpus=$(r.cpus)")
+        isempty(r.mem) || push!(parts, "mem=$(r.mem)")
+        isempty(r.gpus) || push!(parts, "gpus=$(r.gpus)")
+        isempty(r.account) || push!(parts, "account=$(r.account)")
+        # An `auto` region resolves its scheduler only when it asks, so an option counts as sent
+        # when either scheduler would send it.
+        unsent = String[]
+        for k in sort!(collect(keys(r.options)))
+            v = r.options[k]
+            kinds = r.scheduler in (:slurm, :pbs) ? (r.scheduler,) : (:slurm, :pbs)
+            sent = any(kind -> !isempty(SW._option_args(kind, Dict(k => v))), kinds)
+            push!(sent ? parts : unsent, isempty(v) ? k : "$k=$v")
+        end
+        r.idle_release > 0 && push!(parts, "idle_release=$(SW.format_duration(r.idle_release))" *
+                                           (r.idle_warn > 0 ? " (warn $(SW.format_duration(r.idle_warn)) before)" : ""))
+        isempty(unsent) || push!(parts, "(not sent: $(join(unsent, ", ")))")
+        return join(parts, "  ")
+    end
+
+    # The allocation as this hub holds it. A hub that restarted holds none until a notebook
+    # attaches to the job again, even when the scheduler still runs it.
+    function _region_allocation(r)::String
+        SW = ReportEngine.Sweep
+        f = NotebookServer._region_alloc_facts(r.name)
+        state = get(f, "allocState", "none")
+        state == "pending" && return "queued for a node on $(_sched_at(r))"
+        p = ReportEngine.region_placement(r)
+        (state == "running" && p !== nothing) ||
+            return "none held by this hub (the next region cell attaches to a job named " *
+                   "$(ReportEngine.region_alloc_name(r)) if the scheduler still lists one, and asks for " *
+                   "a new allocation otherwise)"
+        left = haskey(f, "walltimeLeft") ? "$(SW.hms(f["walltimeLeft"])) of walltime left" :
+               "with no walltime limit"
+        s = "running as job $(p.job) on $(p.host), $left"
+        haskey(f, "idleFor") &&
+            (s *= ", idle for $(SW.hms(f["idleFor"])) of the $(SW.format_duration(f["idleRelease"])) idle release")
+        return s
+    end
+
     """
         machine(; name="", action="list", project="") -> String
 
@@ -2472,6 +2605,13 @@ function create_tools(GateTool::Type)
     connection kept across a notebook close for instant reattach). For the LIVE per-host roster —
     which workers actually run, their state and telemetry — use `worker(action="list", host=…)`;
     for one notebook's placement use `worker(notebook=…)`.
+
+    A scheduler region also shows what it asks for (scheduler, job name, partition, walltime, cpus,
+    mem, gpus, account, further scheduler options, idle release, and any stored option the request
+    does not send) and its allocation as this hub holds it: none, queued, or running with the job
+    id, the node, the walltime left and the idle time. `worker(action="release" | "keep",
+    region=…)` acts on that allocation, and `worker(action="log", region=…)` returns the bring-up
+    log of any region.
     """
     function regions()::String
         rs = ReportEngine.regions()
@@ -2491,6 +2631,10 @@ function create_tools(GateTool::Type)
                 st = ReportEngine.region_status(r.name)
                 st === nothing || println(io, "      last: ", st.ok ? "ok" : "FAILED", " — ", st.msg)
                 println(io, "      ", first(split(ReportEngine.readiness_text(r), '\n')))
+                if r.scheduler !== :none
+                    println(io, "      asks: ", _region_request(r))
+                    println(io, "      allocation: ", _region_allocation(r))
+                end
             end
         end
         if !isempty(parked)
