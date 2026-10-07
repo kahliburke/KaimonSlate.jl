@@ -109,6 +109,23 @@ region_trace_reset!(name::AbstractString) =
 # activity, which shows them, and dropped everywhere text is read: the log file, the logger, a parser.
 _strip_ansi(s::AbstractString) = replace(String(s), r"\e\[[0-9;:]*[A-Za-z]" => "")
 
+# Slate's own activity lines in colour, as the dialog shows a program's: a step's outcome green, yellow
+# or red, its name bold, the prefix saying which part of Slate spoke subdued. A line that already
+# carries colours is left as it is.
+function _activity_line(msg::AbstractString)
+    occursin('\e', msg) && return String(msg)
+    dim(x) = "\e[2m" * x * "\e[22m"
+    m = match(r"^(prepare\[[^\]]*\]: )(.*?) — (ok|warn|fail)\b(.*)$"s, msg)
+    if m !== nothing
+        c = m[3] == "ok" ? "32" : m[3] == "warn" ? "33" : "31"
+        return dim(m[1]) * "\e[1m" * m[2] * "\e[22m — \e[" * c * "m" * m[3] * "\e[39m" * m[4]
+    end
+    m = match(r"^((?:provision \[\d/\d\]|region\[[^\]]*\]:|env:|transfer:|sync:|spawn:|connect(?: OK)?:))(.*)$"s, msg)
+    m === nothing || return dim(m[1]) * m[2]
+    startswith(msg, "FAILED") && return "\e[31mFAILED\e[39m" * msg[7:end]
+    return String(msg)
+end
+
 function _rlog(msg::AbstractString)
     path = _remote_log_path()
     t = Dates.now()
@@ -125,7 +142,8 @@ function _rlog(msg::AbstractString)
     # Mirror into the current region's trace, if this line was emitted while bringing one up. Stamped
     # with a bare HH:MM:SS so the panel renders it the way a worker's own log lines read.
     reg = _current_rlog_region()
-    isempty(reg) || _region_trace_append!(reg, Dates.format(t, "HH:MM:SS") * "  " * String(msg))
+    (isempty(reg) || occursin(r"⟩ @@", msg)) ||          # a script's markers are for the hub, not the reader
+        _region_trace_append!(reg, Dates.format(t, "HH:MM:SS") * "  " * _activity_line(msg))
     @info "slate remote: $plain"   # also to the host logger (message string survives kwarg-stripping)
     return nothing
 end

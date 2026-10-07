@@ -2068,6 +2068,15 @@ end
     @testset "a remote program's colours reach the activity only" begin
         @test RE._strip_ansi("\e[32m  ✓ \e[39mJSON \e[90m[682c06a0]\e[39m") == "  ✓ JSON [682c06a0]"
         @test RE._strip_ansi("no colour here") == "no colour here"
+        # Slate's own lines are coloured for the activity, and read the same once the colour is gone.
+        for l in ("prepare[pm]: Precompile x — ok: compiled already", "prepare[pm]: Get a node — fail: refused",
+                  "provision [3/3] environment unchanged", "FAILED: sending x", "a line of no kind")
+            @test RE._strip_ansi(RE._activity_line(l)) == l
+        end
+        @test occursin("\e[32mok", RE._activity_line("prepare[pm]: Precompile x — ok: compiled already"))
+        @test occursin("\e[31mfail", RE._activity_line("prepare[pm]: Get a node — fail: refused"))
+        @test RE._activity_line("a line of no kind") == "a line of no kind"
+        @test RE._activity_line("\e[32m✓\e[39m JSON") == "\e[32m✓\e[39m JSON"     # its own colours kept
     end
 
     @testset "an unchanged source directory is not sent again" begin
