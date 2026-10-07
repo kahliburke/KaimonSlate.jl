@@ -39,6 +39,8 @@ const zoom = signal(1);          // the node last zoomed to, for the breadcrumb
 const hover = signal(null);      // the display node under the pointer
 const hotLine = signal(null);    // {file, line} under the pointer in the code pane
 const fold = signal(ls('slateProfFold', '1') !== '0');
+// What a bar's colour says: whose code it is, or how much time was spent in it (its self time).
+const colorBy = signal(ls('slateProfColor', 'code'));   // 'code' | 'time'
 const opened = signal(new Set()); // folded library bars clicked open
 const codeAt = signal({ file: '', line: 0 });
 const srcs = signal({});         // file → {text, error}, as the cell's machine has it
@@ -443,6 +445,33 @@ function dragPan(ev, dr, canvas, sig) {
 const KIND_COLOR = { [K.compile]: '#8a6fd1', [K.gc]: '#cf5560', [K.other]: '#363b52', [K.synth]: '#454b6b' };
 function hue(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0; return h; }
 const _colors = new Map();
+// Self time on a cool-to-hot scale, relative to the heaviest: where the time is actually spent
+// glows, everything that only passes through is cool. A line is coloured by its own time over all
+// the places it was called from, as the hot lines table counts it, so a line called from four places
+// is as hot as its total.
+function selfOf(dn, M) {
+  const n = dn.n || dn;
+  if (!dn.folded && n.kind === K.line) {
+    const row = M.lines.get(n.file) && M.lines.get(n.file).get(n.line);
+    if (row) return row.self * M.total;
+  }
+  return dn.self;
+}
+function heatColor(self, M) {
+  if (M.maxSelf == null) {
+    let m = 1;
+    for (const rows of M.lines.values()) for (const r of rows.values()) m = Math.max(m, r.self * M.total);
+    for (const x of M.nodes) if (x && x.kind !== K.line && x.self > m) m = x.self;
+    M.maxSelf = m;
+  }
+  const f = Math.sqrt(Math.min(1, Math.max(0, self) / M.maxSelf));
+  if (f < 0.04) return 'hsl(222, 22%, 30%)';
+  // Blue through violet to red-orange: one direction round the wheel, never through green.
+  return `hsl(${Math.round(212 + 160 * f) % 360}, ${Math.round(48 + 32 * f)}%, ${Math.round(36 + 16 * f)}%)`;
+}
+// A bar's colour: its code's colour, or its self time's, as `colorBy` says.
+const barColor = (dn, M) => colorBy.value === 'time' ? heatColor(selfOf(dn, M), M) : colorOf(dn.n || dn, M);
+
 function colorOf(n, M) {
   if (n.kind !== K.line) return KIND_COLOR[n.kind] || '#454b6b';
   const key = n.pkg + '\x1f' + n.func + (M.mine.has(n.pkg) ? '\x1fm' : '');
@@ -558,7 +587,7 @@ function drawFlame(g, L, W, vw, M, { mini = false, yOff = 0, viewH = Infinity } 
     const dn = r.dn, n = dn.n;
     const dim = mt && !mt.ids.has(n.id) && !r.top;
     g.globalAlpha = (r.band ? 0.42 : 1) * (dim ? 0.28 : 1);
-    g.fillStyle = (!r.band && !dn.folded && diffColor(n, M)) || colorOf(n, M);
+    g.fillStyle = (!r.band && !dn.folded && diffColor(n, M)) || barColor(dn, M);
     const bw = Math.max(0.5, cw - 1), bh = h - (mini ? 0 : 1);
     if (!mini && bw > 4 && g.roundRect) {
       // A function's band and its line rows read as one block: rounded on the outside only.
@@ -616,7 +645,7 @@ function sizeCanvas(c, W, H) {
 function Flame() {
   const M = model.value, root = dview.value, vw = view.value;
   // Read here so a change redraws: the canvas reads them only while drawing.
-  void [sel.value, hover.value, hotLine.value, matches.value, fnSel.value, baseShare.value, unit.value, srcs.value];
+  void [sel.value, hover.value, hotLine.value, matches.value, fnSel.value, baseShare.value, unit.value, srcs.value, colorBy.value];
   const box = useRef(null), cv = useRef(null), mini = useRef(null), tip = useRef(null), drawn = useRef([]), drag = useRef(null);
   const draw = useRef(null);
   if (M && root && (!_lay || _lay.root !== root)) _lay = layout(root);
@@ -784,7 +813,7 @@ const timeline = computed(() => {
 
 function Timeline() {
   const M = model.value, TL = timeline.value;
-  void [sel.value, hover.value, matches.value, fnSel.value, baseShare.value, tview.value, srcs.value];
+  void [sel.value, hover.value, matches.value, fnSel.value, baseShare.value, tview.value, srcs.value, colorBy.value];
   const box = useRef(null), cv = useRef(null), tip = useRef(null), drawn = useRef([]), drag = useRef(null), draw = useRef(null);
   draw.current = () => {
     const el = box.current, c = cv.current; if (!el || !c || !TL) return;
@@ -818,7 +847,7 @@ function Timeline() {
           const cw = run.x1 - run.x0, mixed = run.cover.size > 1;
           const hit = (k) => k.id === sel.value || (hv && hv.n && hv.n.id === k.id) || (fsel && k.fk === fsel) || (mt && mt.ids.has(k.id));
           g.globalAlpha = (mt && ![...run.cover.keys()].some(k => mt.ids.has(k.id)) ? 0.3 : 1) * (mixed ? 0.82 : 1);
-          g.fillStyle = diffColor(n, M) || colorOf(n, M);
+          g.fillStyle = diffColor(n, M) || barColor(n, M);
           if (cw > 4 && g.roundRect) { g.beginPath(); g.roundRect(run.x0, y, cw - 0.5, TL_ROW - 1, 2); g.fill(); }
           else g.fillRect(run.x0, y, Math.max(0.5, cw - 0.5), TL_ROW - 1);
           g.globalAlpha = 1;
@@ -991,6 +1020,23 @@ function Details() {
   </div>`;
 }
 
+// What the colours mean, and the switch between the two ways of colouring. Width is always time.
+function ColorKey() {
+  const M = model.value; if (!M) return null;
+  const sw = (c, label, title) => html`<span title=${title}><i class="pfsw" style=${'background:' + c}></i>${label}</span>`;
+  const pick = (k) => { colorBy.value = k; lsSet('slateProfColor', k); };
+  return html`<span class="pfkey pfcolorkey">
+    <span class="pfseg pfseg-sm">${[['code', 'code'], ['time', 'time']].map(([k, l]) =>
+      html`<button class=${colorBy.value === k ? 'on' : ''} onClick=${() => pick(k)}
+        title=${k === 'code' ? 'colour each bar by whose code it is' : 'colour each bar by the time spent in it, not in what it calls'}>${l}</button>`)}</span>
+    ${colorBy.value === 'time'
+      ? html`<span title="self time: spent in the bar itself, not in what it calls"><i class="pfsw pfgrad"></i>less → more self time</span>`
+      : html`${sw('hsl(36, 72%, 52%)', 'notebook', "this notebook's code")}${M.mine.size ? sw('hsl(212, 58%, 52%)', 'your packages', 'packages loaded from a path, being worked on') : null}${
+             sw('hsl(230, 18%, 42%)', 'Base', "Julia's Base and Core")}${sw('hsl(150, 26%, 40%)', 'packages', 'installed packages, a hue each')}${
+             sw(KIND_COLOR[K.gc], 'GC', 'garbage collection')}${sw(KIND_COLOR[K.compile], 'compiling', 'compiling during the run')}`}
+  </span>`;
+}
+
 function Crumbs() {
   const M = model.value; if (!M) return null;
   const path = [];
@@ -1003,6 +1049,7 @@ function Crumbs() {
       <button class=${'pfcrumb' + (i === path.length - 1 ? ' on' : '')} onClick=${() => focusOn(n.id)}>
         ${i === 0 ? 'cell ' + M.P.cell : (n.kind === K.line ? n.func + ':' + n.line : n.func)}</button>`) : null}
     <span class="pfsp"></span>
+    ${tab.value === 'flame' || tab.value === 'timeline' ? html`<${ColorKey} />` : null}
     <span class="pfkey"><span><i style="color:#ffd27a">⤳</i>dispatch</span><span><i style="color:#c9b4ff">⚙</i>compiling</span><span><i style="color:#ff8a8a">♻</i>GC</span>
       ${staticFound() ? html`<span title="lines JET flagged when the cell was compiled: hover one for what it found"><i style="color:#ffd27a">◆</i>JET</span>` : null}
       ${baseShare.value ? html`<span><i style="color:#e05a5a">■</i>grew</span><span><i style="color:#5a8fe0">■</i>shrank</span>` : null}</span>
@@ -1490,6 +1537,10 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfsep { color:var(--dim); }
 .pfkey { display:inline-flex; gap:10px; color:var(--dim); font-size:.7rem; }
 .pfkey i { font-style:normal; margin-right:3px; }
+.pfcolorkey { margin-right:14px; padding-right:14px; border-right:1px solid var(--border); align-items:center; }
+.pfsw { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:-1px; }
+.pfgrad { width:46px; background:linear-gradient(90deg, hsl(222, 22%, 30%), hsl(212, 48%, 36%), hsl(292, 64%, 44%), hsl(12, 80%, 52%)); }
+.pfseg-sm button { padding:0 6px; font-size:.68rem; }
 .pfzoom { display:inline-flex; align-items:center; gap:3px; margin-left:10px; }
 .pfzoom button { font:inherit; min-width:24px; padding:1px 7px; border-radius:5px; cursor:pointer;
   background:var(--bg3); color:var(--text); border:1px solid var(--border); }
