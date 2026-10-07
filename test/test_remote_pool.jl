@@ -396,13 +396,13 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
 
     @testset "_env_instantiate_script: rewrites Manifest AND Project.toml [sources]" begin
         s = RE._env_instantiate_script(".cache/kaimonslate/remote/NeuroSlate",
-                                       [("NeuroDSL", ".cache/kaimonslate/devsrc/NeuroDSL")], false)
+                                       [("NeuroDSL", ".cache/kaimonslate/devsrc/NeuroDSL")])
         @test !any(a -> a isa Expr && a.head === :error, Meta.parseall(s).args)   # valid Julia
         @test occursin("Manifest.toml", s) && occursin("Project.toml", s)
         @test occursin("\"sources\"", s)                           # the resolver-facing path (Julia ≥1.11)
         @test occursin("devsrc/NeuroDSL", s)
         # No dev deps → no TOML surgery at all, just activate + instantiate.
-        s0 = RE._env_instantiate_script("x", Tuple{String,String}[], false)
+        s0 = RE._env_instantiate_script("x", Tuple{String,String}[])
         @test !occursin("sources", s0) && !occursin("parsefile", s0)
         @test occursin("Pkg.instantiate()", s0)
     end

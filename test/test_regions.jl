@@ -635,13 +635,13 @@ end
                     s = RE.SyncSource(srcdir)
                     d = RE.SyncDest("", dest, ex, "", Dict{String,Tuple{Int,Float64}}(), Dict{String,Any}(), false)
                     @test RE._sync_dest!(s, d, RE._sync_files(srcdir, ex))          # all of it, the first time
-                    @test RE._sync_record_load(srcdir, key) == d.sent
-                    d2 = RE.SyncDest("", dest, ex, "", RE._sync_record_load(srcdir, key), Dict{String,Any}(), false)
+                    @test RE._sent_record_load(srcdir, key) == d.sent
+                    d2 = RE.SyncDest("", dest, ex, "", RE._sent_record_load(srcdir, key), Dict{String,Any}(), false)
                     rm(joinpath(dest, "src", "A.jl"))            # would come back if it were sent again
                     @test RE._sync_dest!(s, d2, RE._sync_files(srcdir, ex)) && !isfile(joinpath(dest, "src", "A.jl"))
                     write(joinpath(srcdir, "src", "B.jl"), "b2")  # edited meanwhile
                     @test RE._sync_dest!(s, d2, RE._sync_files(srcdir, ex)) && read(joinpath(dest, "src", "B.jl"), String) == "b2"
-                    @test isempty(RE._sync_record_load(srcdir, ":/elsewhere"))     # another copy has its own
+                    @test isempty(RE._sent_record_load(srcdir, ":/elsewhere"))     # another copy has its own
                 end
             end
 
@@ -2133,6 +2133,25 @@ end
         end
     end
 
+    @testset "the sync and the provision send nothing the other already sent" begin
+        src, dest, cache = mktempdir(), mktempdir(), mktempdir()
+        withenv("KAIMONSLATE_CACHE_HOME" => cache) do
+            mkpath(joinpath(src, "src")); write(joinpath(src, "src", "A.jl"), "a"); write(joinpath(src, "notes.txt"), "n")
+            to = joinpath(dest, "copy"); ex = RE._DEVSRC_SEND_EXCLUDES; key = RE._sent_key("", to)
+            @test RE._send_tree!("", src, to; excludes = ex)                   # a provision
+            s = RE.SyncSource(src)
+            d = RE.SyncDest("", to, ex, "", RE._sync_seed(src, ex, key), Dict{String,Any}(), false)
+            @test d.sent == RE._sync_files(src, ex)                            # the watch starts from it
+            write(joinpath(src, "src", "A.jl"), "a2")
+            @test RE._sync_dest!(s, d, RE._sync_files(src, ex))               # the sync sends the edit
+            @test isfile(joinpath(to, "notes.txt"))                            # and leaves what it does not watch
+            rm(joinpath(to, "notes.txt"))                                      # would come back if sent again
+            @test RE._send_tree!("", src, to; excludes = ex) && !isfile(joinpath(to, "notes.txt"))
+            write(joinpath(src, "notes.txt"), "n2")                            # outside the watch: the provision's
+            @test RE._send_tree!("", src, to; excludes = ex) && read(joinpath(to, "notes.txt"), String) == "n2"
+        end
+    end
+
     @testset "an unchanged source directory is not sent again" begin
         src, dest, cache = mktempdir(), mktempdir(), mktempdir()
         withenv("KAIMONSLATE_CACHE_HOME" => cache) do
@@ -2193,6 +2212,62 @@ end
         end
     end
 
+    @testset "Slate's packages join a notebook's environment without a resolve" begin
+        entry(v; deps = String[], weak = String[]) =
+            Dict{String,Any}("uuid" => string(Base.UUID(UInt128(hash(v)))), "version" => v, "deps" => deps,
+                             (isempty(weak) ? () : ("weakdeps" => weak,))...)
+        man(jv, deps) = Dict{String,Any}("julia_version" => jv, "manifest_format" => "2.0",
+                                         "deps" => Dict{String,Any}(n => [e] for (n, e) in deps))
+        nbp = Dict{String,Any}("deps" => Dict{String,Any}("A" => "a"), "compat" => Dict{String,Any}("A" => "1"))
+        refp = Dict{String,Any}("deps" => Dict{String,Any}("G" => "g"))
+        nbm = man("1.12.7", ["A" => entry("1.0.0"; deps = ["C"]), "C" => entry("2.0.0")])
+        refm = man("1.12.7", ["G" => entry("3.0.0"; deps = ["C"]), "C" => entry("2.0.0")])
+        p, m = RE._merge_manifests(nbp, nbm, refp, refm)
+        @test p["deps"] == Dict("A" => "a", "G" => "g") && p["compat"] == nbp["compat"]
+        @test sort(collect(keys(m["deps"]))) == ["A", "C", "G"] && m["deps"]["G"] == refm["deps"]["G"]
+        @test !haskey(nbm["deps"], "G")                                   # the inputs are left alone
+        # Anything a resolve would have had to decide is left to one.
+        @test occursin("C is 2.1.0 in the notebook, 2.0.0",
+                       RE._merge_manifests(nbp, man("1.12.7", ["A" => entry("1.0.0"), "C" => entry("2.1.0")]), refp, refm))
+        @test occursin("Julia 1.12.6", RE._merge_manifests(nbp, merge(nbm, Dict("julia_version" => "1.12.6")), refp, refm))
+        @test occursin("weak dependency on G",
+                       RE._merge_manifests(nbp, man("1.12.7", ["A" => entry("1.0.0"; weak = ["G"])]), refp, refm))
+        @test occursin("G as a weak dependency",
+                       RE._merge_manifests(merge(nbp, Dict("weakdeps" => Dict("G" => "g"))), nbm, refp, refm))
+        # The host adds nothing to a combined environment, and points the worker code at this version's copy.
+        valid(s) = !any(x -> x isa Expr && x.head === :error, Meta.parseall(s).args)
+        s = RE._env_instantiate_script("x", Tuple{String,String}[]; merged = true)
+        @test valid(s) && !occursin("Pkg.add", s) && !occursin("Pkg.develop", s)
+        @test occursin(RE._remote_worker_pkg(), s) && occursin(RE._remote_seb(), s) && occursin("project_hash", s)
+        r = RE._infra_ref_script(RE._infra_ref_root())
+        @test valid(r) && occursin("Pkg.add", r) && occursin(RE._remote_seb(), r)
+
+        # For real: two environments resolved apart, combined, are current to Pkg and load.
+        mktempdir() do root
+            function mkpkg(name, deps)
+                d = mkpath(joinpath(root, name, "src"))
+                uuid = string(Base.UUID(UInt128(hash(name))))
+                write(joinpath(root, name, "Project.toml"),
+                      "name = \"$name\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n[deps]\n" *
+                      join(("$x = \"$(Base.UUID(UInt128(hash(x))))\"\n" for x in deps)))
+                write(joinpath(d, "$name.jl"), "module $name\n" * join(("using $x\n" for x in deps)) * "end\n")
+                return joinpath(root, name)
+            end
+            c, a, g = mkpkg("Cdep", String[]), mkpkg("Anb", ["Cdep"]), mkpkg("Ginfra", ["Cdep"])
+            nb, ref, out = (mkpath(joinpath(root, x)) for x in ("nb", "ref", "out"))
+            jl(code) = success(pipeline(setenv(`$(Base.julia_cmd()) --startup-file=no -e $code`,
+                                               merge(ENV, Dict("JULIA_PKG_OFFLINE" => "true", "JULIA_PKG_PRECOMPILE_AUTO" => "0"))),
+                                        stdout = devnull, stderr = devnull))
+            @test jl("import Pkg; Pkg.activate($(repr(nb))); Pkg.develop([Pkg.PackageSpec(path=$(repr(c))), Pkg.PackageSpec(path=$(repr(a)))]);" *
+                     "Pkg.activate($(repr(ref))); Pkg.develop([Pkg.PackageSpec(path=$(repr(c))), Pkg.PackageSpec(path=$(repr(g)))])")
+            T = RE.Sweep.TOML
+            p, m = RE._merge_manifests((T.parsefile(joinpath(d, f)) for d in (nb, ref) for f in ("Project.toml", "Manifest.toml"))...)
+            for (f, x) in (("Project.toml", p), ("Manifest.toml", m)); open(io -> T.print(io, x), joinpath(out, f), "w"); end
+            @test jl("import Pkg; Pkg.activate($(repr(out)))\n" * RE._PROJECT_HASH_SNIPPET *
+                     "Pkg.is_manifest_current($(repr(out))) === true || exit(3); Pkg.instantiate(); using Anb, Ginfra")
+        end
+    end
+
     @testset "a prepare keeps an environment whose depot still holds it" begin
         mktempdir() do home
             rel = ".cache/kaimonslate/remote/nb-1"
@@ -2231,9 +2306,9 @@ end
         @test occursin("Pkg.instantiate()", r) && !occursin("Pkg.add", r) && !occursin("develop", r)
         # Nothing compiles there, so no count of what would (a check per package on a cluster filesystem).
         @test !occursin("SLATE_PREP total", r) &&
-              !occursin("SLATE_PREP total", RE._env_instantiate_script("x", Tuple{String,String}[], false; precompile = false))
-        @test occursin("SLATE_PREP total", RE._env_instantiate_script("x", Tuple{String,String}[], false))
-        @test occursin("x.held", RE._env_instantiate_script("x", Tuple{String,String}[], false; held_file = "x.held"))
+              !occursin("SLATE_PREP total", RE._env_instantiate_script("x", Tuple{String,String}[]; precompile = false))
+        @test occursin("SLATE_PREP total", RE._env_instantiate_script("x", Tuple{String,String}[]))
+        @test occursin("x.held", RE._env_instantiate_script("x", Tuple{String,String}[]; held_file = "x.held"))
         @test RE._seb_sha() == RE._seb_sha() && length(RE._seb_sha()) == 16
     end
 

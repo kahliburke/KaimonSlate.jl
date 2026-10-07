@@ -795,11 +795,8 @@ function _ssh_capture(host, argv::Cmd)
     return (ok, out)
 end
 
-# Send a local dir to the host as a tar over the shared session. Replaced rather than merged
-# when `delete`; `excludes` are matched per path component (see `Sweep.put_dir`).
 # The files a send of `dir` carries (the transfer rules applied), by name, size and modification time,
-# digested. What was last sent to each copy is kept as this in the hub's cache, so a directory nothing
-# changed in is not sent again.
+# digested.
 function _tree_digest(dir::AbstractString, excludes::Vector{String}; region::AbstractString = "")
     keep = Sweep.transfer_keep(dir; region, excludes)
     ctx = _SHA.SHA1_CTX()
@@ -836,8 +833,17 @@ function _files_under(dir::AbstractString; descend = _ -> true)
     visit("")
     return out
 end
-_sent_digest_path(dir::AbstractString, key::AbstractString) =
-    joinpath(_slate_cache_dir(), "sync", bytes2hex(_SHA.sha1(string(dir, "\n", key)))[1:16] * ".digest")
+# The files a send of `dir` carries (the transfer rules applied), each by size and modification time.
+function _tree_files(dir::AbstractString, excludes::Vector{String}; region::AbstractString = "")
+    keep = Sweep.transfer_keep(dir; region, excludes)
+    out = Dict{String,Tuple{Int,Float64}}()
+    for rel in _files_under(dir; descend = r -> basename(r) != ".git" && keep(r))
+        keep(rel) || continue
+        st = try; stat(joinpath(dir, rel)); catch; continue; end
+        out[rel] = (Int(st.size), st.mtime)
+    end
+    return out
+end
 
 # The sources of the packages environment `env` develops from local checkouts, digested: compiled code
 # depends on them, so a compile is current only for the sources it compiled (`_precompiled_check_sh`).
@@ -851,18 +857,24 @@ function _dev_sources_digest(env::AbstractString)
     return isempty(parts) ? "" : bytes2hex(_SHA.sha1(join(sort!(parts), "\n")))[1:16]
 end
 
-# `_send_dir!` with the transfer rules, skipped when the directory's files are what was last sent to
-# this copy, unless `force`.
+# `_send_dir!` with the transfer rules, skipped when the directory's files are what the copy holds by its
+# record (`_sent_record_load`), unless `force`. Not at the same time as the sync sends to it.
 function _send_tree!(host, dir::AbstractString, remote::AbstractString; excludes::Vector{String} = String[],
                      region::AbstractString = "", force::Bool = false)
-    f = _sent_digest_path(dir, string(host, ":", remote))
-    dg = _tree_digest(dir, excludes; region)
-    (!force && isfile(f) && strip(read(f, String)) == dg) && return true
-    ok = _send_dir!(host, dir, remote; excludes, region, filter = true)
-    ok && (try; mkpath(dirname(f)); write(f, dg); catch; end)
-    return ok
+    send = function ()
+        key = _sent_key(host, remote)
+        now = _tree_files(dir, excludes; region)
+        (!force && _sent_record_load(dir, key) == now) && return true
+        ok = _send_dir!(host, dir, remote; excludes, region, filter = true)
+        ok && _sent_record_save(dir, key, now)
+        return ok
+    end
+    src = lock(() -> get(_SYNC_SOURCES, String(dir), nothing), _SYNC_LOCK)
+    return src === nothing ? send() : lock(send, src.sending)
 end
 
+# Send a local dir to the host as a tar over the shared session. Replaced rather than merged
+# when `delete`; `excludes` are matched per path component (see `Sweep.put_dir`).
 function _send_dir!(host, localdir::AbstractString, remotedir::AbstractString; delete::Bool = false,
                  excludes::Vector{String} = String[], region::AbstractString = "",
                  filter::Bool = false)
@@ -1222,12 +1234,13 @@ end
 # A runtime directory is complete once this is in it, written after everything else arrived.
 const _RUNTIME_READY = ".ready"
 
-# Removes old runtime directories, for disk space only: the newest five are always kept, and so is any
-# version touched in the last 14 days, and never `keep`.
-_runtime_prune_sh(keep::AbstractString) =
-    "cd " * Sweep.shq_path(_REMOTE_WORKER * "/payload") * " 2>/dev/null && ls -1dt -- */ 2>/dev/null | tail -n +6 | " *
+# Removes old versions from a directory of them, for disk space only: the newest five are always kept,
+# and so is any version touched in the last 14 days, and never `keep`.
+_versions_prune_sh(root::AbstractString, keep::AbstractString) =
+    "cd " * Sweep.shq_path(root) * " 2>/dev/null && ls -1dt -- */ 2>/dev/null | tail -n +6 | " *
     "while IFS= read -r d; do d=\${d%/}; [ \"\$d\" = " * Sweep.shq(keep) * " ] && continue; " *
     "[ -n \"\$(find \"\$d\" -maxdepth 0 -mtime +14)\" ] && rm -rf -- \"\$d\"; done; true"
+_runtime_prune_sh(keep::AbstractString) = _versions_prune_sh(_REMOTE_WORKER * "/payload", keep)
 const _SEB_EXCLUDES  = [".git", "*.cov"]
 
 # The SDK source as it is sent, hashed by path and content.
@@ -1426,9 +1439,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # `force`, as a repair sends them.
     send_sources! = function (; force::Bool = false)
         isempty(envdir) && return
-        _send_tree!(host, envdir, t.project; region = t.region, force,
-                    excludes = [".git", "*.cov", ".ready", "Project.toml", "Manifest.toml",
-                                "JuliaProject.toml", "JuliaManifest.toml"])
+        _send_tree!(host, envdir, t.project; region = t.region, force, excludes = _PROJECT_SEND_EXCLUDES)
         _send_dev_deps!(t, envdir; force)
     end
     (repair || built) && _forget_env_deps!(t.project)
@@ -1822,7 +1833,7 @@ function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString; force::Bool
             continue
         end
         rp = _devsrc_path(lpath)
-        _send_tree!(host, lpath, rp; excludes = [".git", "*.cov"], region = t.region, force) ||
+        _send_tree!(host, lpath, rp; excludes = _DEVSRC_SEND_EXCLUDES, region = t.region, force) ||
             (_rlog("env: could not send dev dep '$name' → $host"); continue)
         push!(rewrites, (name, rp))
         _rlog("env: dev dep '$name' → $host:$rp")
@@ -1846,21 +1857,183 @@ function _replicate_env!(t::RemoteTarget; precompile::Bool = true, stamp::Abstra
     host = t.ssh_host
     origin = t.origin_env
     _rlog("env: replicating origin env → $host:$(t.project)  (from $origin)")
+    # The notebook's environment with Slate's packages already in it, when the host's reference has them
+    # at the versions the notebook uses; else they are added on the host, which resolves.
+    merged = _infra_merged(t, origin)
+    envfiles = ["Project.toml", "Manifest.toml"]
     # 1. the origin project WHOLESALE, INCLUDING the Manifest (exact versions) + its own /src.
-    _send_dir!(host, origin, t.project; excludes = [".git", "*.cov", ".ready"],
+    _send_dir!(host, origin, t.project; excludes = vcat([".git", "*.cov", ".ready"], merged === nothing ? String[] : envfiles),
                      region = t.region, filter = true) ||
         error("env: could not send the origin project → $host")
+    merged === nothing || _put_texts(host, t.project, collect(zip(envfiles, merged))) ||
+        error("env: could not send the environment's files → $host")
     # 2. dev'd deps: send each local source into its copy; collect (name → $HOME-relative remote path).
     rewrites = _send_dev_deps!(t, origin)
     # 3. rewrite the remote Manifest's dev paths to the shipped locations, then instantiate.
     projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     # STREAM the instantiate/precompile — the long, otherwise-silent step — into the remote log live, so a
     # multi-minute bring-up narrates its progress (resolve, install, Precompiling …) instead of going dark.
-    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise(); precompile,
+    inst(m) = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites; merged = m, precompile,
                                                         held_file = _env_held_path(t), stamp),
                           "instantiate on $host"; stream = true, online = _bringup_note, setup = t.setup)
+    ok, out = inst(merged !== nothing)
+    if !ok && merged !== nothing
+        _rlog("env: instantiating the combined environment on $host failed, resolving: " * first(strip(out), 300))
+        _put_texts(host, t.project, [f => read(joinpath(origin, f), String) for f in envfiles]) ||
+            error("env: could not send the environment's files → $host")
+        ok, out = inst(false)
+    end
     ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
     return nothing
+end
+
+# ── Slate's packages, resolved once per host ─────────────────────────────────────────────────
+# Every worker environment holds Slate's packages beside the notebook's. A host resolves them once, in a
+# reference environment per set of their requirements and Julia version (`_infra_ref!`), and a
+# notebook's environment takes them from its Manifest (`_merge_manifests`), which needs no resolve.
+
+# What the reference's resolve depends on: the packages added and the Projects of the two developed
+# from the worker code. Where that code is does not change it, so a new version of the worker code with
+# the same requirements uses the same reference, its two paths pointed at the new copy.
+function _infra_ref_key()
+    ctx = _SHA.SHA1_CTX()
+    _SHA.update!(ctx, codeunits(_infra_spec()))
+    for p in (joinpath(_LOCAL_SEB, "Project.toml"), joinpath(@__DIR__, "SlateWorker", "Project.toml"))
+        isfile(p) && _SHA.update!(ctx, read(p))
+    end
+    return bytes2hex(_SHA.digest!(ctx))[1:16]
+end
+_infra_ref_root(key::AbstractString = _infra_ref_key()) = "$_REMOTE_WORKER/infra/$key"
+
+# Resolves the reference under the Julia the host's shell runs, into `<root>/<VERSION>`, assembled
+# beside it and moved into place so a reader never sees half of one.
+function _infra_ref_script(root::AbstractString)
+    return """
+    import Pkg
+    $_NO_AUTO_PRECOMPILE
+    let dir = joinpath(homedir(), raw"$root", string(VERSION)), tmp = dir * ".tmp-" * string(getpid())
+        rm(tmp; force = true, recursive = true); mkpath(tmp)
+        Pkg.activate(tmp)
+        Pkg.add($(_infra_spec()))
+        $(_worker_develop())
+        rm(dir; force = true, recursive = true); mv(tmp, dir)
+        println("@@SLATE_INFRA julia=", VERSION)
+    end
+    """
+end
+
+# The reference's (Project, Manifest), or `nothing` when the host has none for this Julia.
+function _read_infra_ref(host::AbstractString, dir::AbstractString)
+    sep = "@@SLATE_MANIFEST"
+    ok, out = _run_on(_host_for_files(host), "cd " * Sweep.shq_path(dir) * " 2>/dev/null && touch -c .. && " *
+                                             "cat Project.toml && echo " * sep * " && cat Manifest.toml")
+    (ok && occursin(sep, out)) || return nothing
+    p, m = split(out, sep * "\n"; limit = 2)
+    return try; (Sweep.TOML.parse(String(p)), Sweep.TOML.parse(String(m))); catch; nothing; end
+end
+
+# Per host (by its files) and Julia version: the reference, read once per hub run.
+const _INFRA_REF = Dict{Tuple{String,String,String},Tuple{Dict{String,Any},Dict{String,Any}}}()
+# Where a resolve ran under a different Julia than the one asked for, so asking again would resolve again.
+const _INFRA_REF_NONE = Set{Tuple{String,String,String}}()
+# One resolve at a time per host and reference; other hosts do not wait on it.
+const _INFRA_REF_LOCKS = Dict{Tuple{String,String,String},ReentrantLock}()
+const _INFRA_REF_LOCK = ReentrantLock()
+
+function _infra_ref!(t::RemoteTarget, julia::AbstractString)
+    isempty(julia) && return nothing
+    host = t.ssh_host
+    key = _infra_ref_key(); root = _infra_ref_root(key)
+    ck = (_host_for_files(host), key, String(julia))
+    known() = lock(_INFRA_REF_LOCK) do
+        haskey(_INFRA_REF, ck) ? _INFRA_REF[ck] : ck in _INFRA_REF_NONE ? false : nothing
+    end
+    lock(lock(() -> get!(ReentrantLock, _INFRA_REF_LOCKS, ck), _INFRA_REF_LOCK)) do
+        k = known(); k === nothing || return k === false ? nothing : k
+        got = _read_infra_ref(host, "$root/$julia")
+        if got === nothing
+            _rlog("provision [3/3] resolving Slate's packages on $host for Julia $julia ($key), once for every notebook there")
+            ok, out = _ssh_julia!(host, _infra_ref_script(root), "resolve Slate's packages on $host";
+                                  setup = t.setup, stream = true, online = _bringup_note)
+            if ok
+                got = _read_infra_ref(host, "$root/$julia")
+                if got === nothing
+                    lock(() -> push!(_INFRA_REF_NONE, ck), _INFRA_REF_LOCK)
+                    m = match(r"@@SLATE_INFRA julia=(\S+)", out)
+                    _rlog("provision [3/3] the host's Julia is $(m === nothing ? "unknown" : m.captures[1]), not $julia")
+                end
+                _run_on(_host_for_files(host), _versions_prune_sh("$_REMOTE_WORKER/infra", key))
+            else
+                _rlog("provision [3/3] resolving Slate's packages on $host failed: " * first(strip(out), 300))
+            end
+        end
+        got === nothing || lock(() -> (_INFRA_REF[ck] = got), _INFRA_REF_LOCK)
+        return got
+    end
+end
+
+# The notebook's environment with Slate's packages added from the reference, as the text of its
+# (Project, Manifest), or `nothing` when that takes a resolve.
+function _infra_merged(t::RemoteTarget, origin::AbstractString)
+    pf, mf = joinpath(origin, "Project.toml"), joinpath(origin, "Manifest.toml")
+    isfile(pf) && isfile(mf) || return nothing
+    nbproj, nbman = try; (Sweep.TOML.parsefile(pf), Sweep.TOML.parsefile(mf)); catch; return nothing; end
+    haskey(nbproj, "workspace") && return nothing
+    ref = _infra_ref!(t, string(get(nbman, "julia_version", "")))
+    ref === nothing && return nothing
+    r = _merge_manifests(nbproj, nbman, ref...)
+    if r isa String
+        _rlog("provision [3/3] adding Slate's packages on $(t.ssh_host) with a resolve: $r")
+        return nothing
+    end
+    _rlog("provision [3/3] Slate's packages from the host's reference, at the notebook's versions: no resolve")
+    return (sprint(io -> Sweep.TOML.print(io, r[1]; sorted = true)), sprint(io -> Sweep.TOML.print(io, r[2]; sorted = true)))
+end
+
+_manifest_names(e, field) = (d = get(e, field, String[]); d isa AbstractDict ? collect(String, keys(d)) : collect(String, d))
+_entry_desc(e) = haskey(e, "version") ? string(e["version"]) : haskey(e, "path") ? "at " * string(e["path"]) : "unversioned"
+
+"""
+    _merge_manifests(nbproj, nbman, refproj, refman) -> (project, manifest) | reason
+
+The notebook's environment with the reference's packages added: its Project with the reference's
+direct dependencies, its Manifest with the reference's entries it lacks. Each side was resolved whole,
+so the result is one a resolve could have produced when the two agree on every package both hold and
+neither holds a weak dependency only the other has. Otherwise the reason, as a phrase.
+"""
+function _merge_manifests(nbproj::AbstractDict, nbman::AbstractDict, refproj::AbstractDict, refman::AbstractDict)
+    (get(nbman, "manifest_format", "") == "2.0" && get(refman, "manifest_format", "") == "2.0") ||
+        return "a Manifest in another format"
+    jv, rv = string(get(nbman, "julia_version", "")), string(get(refman, "julia_version", ""))
+    jv == rv || return "the notebook is resolved for Julia $jv, Slate's packages for $rv"
+    nb = get(nbman, "deps", Dict{String,Any}()); ref = get(refman, "deps", Dict{String,Any}())
+    for d in (nb, ref), (name, es) in d
+        (es isa AbstractVector && length(es) == 1) || return "two packages named $name"
+    end
+    for (name, es) in ref
+        haskey(nb, name) || continue
+        a, b = only(nb[name]), only(es)
+        a == b || return "$name is $(_entry_desc(a)) in the notebook, $(_entry_desc(b)) in Slate's"
+    end
+    nbonly = setdiff(keys(nb), keys(ref)); refonly = setdiff(keys(ref), keys(nb))
+    for (side, other) in ((nb, refonly), (ref, nbonly)), (name, es) in side
+        for w in _manifest_names(only(es), "weakdeps")
+            w in other && return "$name has a weak dependency on $w"
+        end
+    end
+    proj = deepcopy(Dict{String,Any}(nbproj))
+    deps = get!(() -> Dict{String,Any}(), proj, "deps")
+    weak = get(proj, "weakdeps", Dict{String,Any}())
+    for (name, uuid) in get(refproj, "deps", Dict{String,Any}())
+        haskey(weak, name) && return "the notebook lists $name as a weak dependency"
+        get!(deps, name, uuid) == uuid || return "two packages named $name"
+    end
+    man = deepcopy(Dict{String,Any}(nbman))
+    mdeps = get!(() -> Dict{String,Any}(), man, "deps")
+    for name in refonly
+        mdeps[name] = deepcopy(ref[name])
+    end
+    return (proj, man)
 end
 
 # Does the USER use Revise locally (it's in their global default env)? If so we mirror it onto the remote
@@ -1926,8 +2099,6 @@ function _record_rg_path!(host::AbstractString, projrel::AbstractString; setup::
     return nothing
 end
 
-# The remote script: rewrite each dev dep's Manifest `path` to its shipped remote source, then instantiate
-# the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
 # An environment the host already built, whose depot lost some of what it used: instantiate fetches
 # only the missing packages and artifacts. Nothing is sent or added, so nothing resolves.
 function _env_repair_script(projrel::AbstractString; precompile::Bool = true, held_file::AbstractString = "",
@@ -1944,16 +2115,30 @@ function _env_repair_script(projrel::AbstractString; precompile::Bool = true, he
     return String(take!(io))
 end
 
-function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool;
+# The Manifest's `project_hash`, recomputed for a Project that gained Slate's packages without a resolve,
+# so Pkg does not take the environment for one whose requirements changed since it was resolved.
+const _PROJECT_HASH_SNIPPET = raw"""
+try
+    import TOML
+    _env = Pkg.Types.EnvCache(Base.active_project())
+    _h = isdefined(Pkg.Types, :workspace_resolve_hash) ? Pkg.Types.workspace_resolve_hash(_env) :
+                                                        Pkg.Types.project_resolve_hash(_env.project)
+    _m = TOML.parsefile(_env.manifest_file); _m["project_hash"] = _h
+    open(_io -> TOML.print(_io, _m; sorted = true), _env.manifest_file, "w")
+catch
+end
+"""
+
+# The remote script: rewrite each dev dep's Manifest `path` to its shipped remote source, then instantiate
+# the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
+# `merged`: the environment's files already hold Slate's packages (`_merge_manifests`), so nothing is added
+# and nothing resolves; the two developed from the worker code are pointed at this version's copy.
+function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}; merged::Bool = false,
                                  precompile::Bool = true, held_file::AbstractString = "", stamp::AbstractString = "")
-    # `ripgrep_jll` mirrors src/worker_infra: the log viewer searches whole files, which for a job's
-    # output means gigabytes, and rg does that in one pass over a range rather than a transfer.
-    base = "Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), " *
-           "Pkg.PackageSpec(name=\"ripgrep_jll\")"
-    infra = add_revise ? "[$base, Pkg.PackageSpec(name=\"Revise\")]" : "[$base]"
     io = IOBuffer()
     # Redirect dev deps' Manifest + [sources] paths to their shipped devsrc locations (no-op when empty).
-    rw = Sweep.devpaths_script(projrel, rewrites)
+    rw = Sweep.devpaths_script(projrel, merged ? vcat(rewrites, [("SlateExtensionsBase", _remote_seb()),
+                                                                ("SlateWorker", _remote_worker_pkg())]) : rewrites)
     isempty(rw) || print(io, rw)
     println(io, "import Pkg")
     # Fetch only: precompiling here would build for this machine's CPU, which need not be the CPU the
@@ -1961,16 +2146,17 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     precompile || println(io, _NO_AUTO_PRECOMPILE)
     println(io, "proj = joinpath(homedir(), raw\"$projrel\")")
     println(io, "Pkg.activate(proj)")
-    # Add the worker infra INTO this same env so it resolves against the notebook's exact dependency
-    # versions (no stacked-env skew). KaimonGate is always needed (the gate); ExpressionExplorer too
-    # (worker-side macro-aware dep recovery — local workers get it via src/worker_infra on LOAD_PATH, but
-    # that path doesn't exist on a remote host); Revise only if the user uses it locally (see
-    # `_local_has_revise` at the call site) — mirror their setup, don't force it.
-    # preserve=PRESERVE_ALL keeps the notebook's EXACT pins so the infra can't bump a shared dep and
-    # invalidate the notebook's (very expensive, e.g. Makie) precompile cache — that doubles the build.
-    # Fall back to a normal add only if the infra genuinely can't be satisfied against those pins.
-    println(io, "try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end")
-    println(io, _worker_develop())   # the extension SDK and the worker package, dev'd from their shipped sources
+    if merged
+        print(io, _PROJECT_HASH_SNIPPET)
+    else
+        # Add the worker infra INTO this same env so it resolves against the notebook's exact dependency
+        # versions (no stacked-env skew). preserve=PRESERVE_ALL keeps the notebook's EXACT pins so the
+        # infra can't bump a shared dep and invalidate the notebook's precompile cache. Fall back to a
+        # normal add only if the infra genuinely can't be satisfied against those pins.
+        infra = _infra_spec()
+        println(io, "try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end")
+        println(io, _worker_develop())   # the extension SDK and the worker package, dev'd from their shipped sources
+    end
     # The Manifest is resolved (shipped), so count what still needs precompiling BEFORE instantiate's
     # auto-precompile → the banner reads a real "Precompiling k/N · <pkg>", same as a local cold open.
     precompile && print(io, _PREP_TOTAL_SNIPPET)   # a count for the compile's progress bar; costly on a cluster filesystem
@@ -2006,7 +2192,7 @@ mutable struct SyncDest
     failing::Bool
 end
 
-_sync_key(d::SyncDest) = string(d.host, ":", d.remotedir)
+_sync_key(d::SyncDest) = _sent_key(d.host, d.remotedir)
 
 mutable struct SyncSource
     dir::String
@@ -2031,10 +2217,15 @@ _sync_base(t::RemoteTarget) = isempty(t.job) ? string(t.ssh_host, ":", t.project
                                                string(_sync_job_prefix(t.ssh_host, t.job), t.project)
 _sync_job_prefix(host, job) = string(host, "#", job, ":")
 
+# What a source directory's watch covers: its `src/` and `ext/`, or its own files when it has neither.
+_sync_scope(dir::AbstractString) = String[d for d in ("src", "ext") if isdir(joinpath(dir, d))]
+_in_sync_scope(rel::AbstractString, scope::Vector{String}) =
+    isempty(scope) ? !occursin('/', rel) : any(s -> startswith(rel, s * "/"), scope)
+
 # The files a source directory's watch covers, by '/'-separated path relative to it.
 function _sync_files(dir::AbstractString, excludes::Vector{String})
     out = Dict{String,Tuple{Int,Float64}}()
-    scope = String[d for d in ("src", "ext") if isdir(joinpath(dir, d))]
+    scope = _sync_scope(dir)
     paths = isempty(scope) ? (f for f in readdir(dir) if isfile(joinpath(dir, f))) :
             (relpath(joinpath(r, f), dir) for d in scope
                  for (r, _, fs) in walkdir(joinpath(dir, d); onerror = _ -> nothing) for f in fs)
@@ -2047,22 +2238,17 @@ function _sync_files(dir::AbstractString, excludes::Vector{String})
     return out
 end
 
-"""
-    start_sync!(t, parent_project; kernel = nothing, sent = false)
-
-Keep `t`'s host copies of the notebook's parent project (its `src/`, into the worker env) and of each
-dev'd package (into its copy, `_devsrc_path`) current, telling `kernel` which files changed. `sent` says the
-copies were just sent whole (a provision), so only later changes travel; otherwise the first check
-sends whatever differs.
-"""
-# What each copy was last sent, kept in the hub's cache by source directory and copy, so a copy taken up
-# again (a notebook reattaching to its worker, the hub restarted) sends only what changed since, and its
-# worker reloads only that.
-_sync_record_path(dir::AbstractString, key::AbstractString) =
+# What each copy on a host holds, by file, as last sent: kept in the hub's cache by source directory and
+# copy, and shared by the provision that sends the directory whole (`_send_tree!`) and the sync that sends
+# what changes in it, so neither sends what the other already did. A copy taken up again (a notebook
+# reattaching to its worker, the hub restarted) sends only what changed since, and its worker reloads only
+# that. Keyed by the host whose filesystem holds the copy, which a routed node shares with its login node.
+_sent_key(host, remote::AbstractString) = string(_host_for_files(String(host)), ":", remote)
+_sent_record_path(dir::AbstractString, key::AbstractString) =
     joinpath(_slate_cache_dir(), "sync", bytes2hex(_SHA.sha1(string(dir, "\n", key)))[1:16] * ".toml")
-function _sync_record_load(dir::AbstractString, key::AbstractString)
+function _sent_record_load(dir::AbstractString, key::AbstractString)
     out = Dict{String,Tuple{Int,Float64}}()
-    f = _sync_record_path(dir, key)
+    f = _sent_record_path(dir, key)
     isfile(f) || return out
     try
         for (rel, v) in Sweep.TOML.parsefile(f)
@@ -2073,8 +2259,8 @@ function _sync_record_load(dir::AbstractString, key::AbstractString)
     end
     return out
 end
-function _sync_record_save(dir::AbstractString, key::AbstractString, sent)
-    f = _sync_record_path(dir, key)
+function _sent_record_save(dir::AbstractString, key::AbstractString, sent)
+    f = _sent_record_path(dir, key)
     try
         mkpath(dirname(f))
         open(io -> Sweep.TOML.print(io, Dict(rel => [v[1], v[2]] for (rel, v) in sent)), f, "w")
@@ -2082,12 +2268,38 @@ function _sync_record_save(dir::AbstractString, key::AbstractString, sent)
     end
     return nothing
 end
+# The sync's part of the record: what it sent and what it removed. The rest is the provision's.
+function _sent_record_update!(dir::AbstractString, key::AbstractString, sent, gone)
+    rec = _sent_record_load(dir, key)
+    for (rel, v) in sent; rec[rel] = v; end
+    for rel in gone; delete!(rec, rel); end
+    _sent_record_save(dir, key, rec)
+end
 
+# What a watch starts from for a copy: the record's files that the watch covers.
+function _sync_seed(dir::AbstractString, excludes::Vector{String}, key::AbstractString)
+    scope = _sync_scope(dir)
+    return filter(((rel, _),) -> _in_sync_scope(rel, scope) && !Sweep._excluded(rel, excludes), _sent_record_load(dir, key))
+end
+
+# Held back from a project's copy, by the provision and the sync alike: its environment's files are the
+# host's own, rewritten for its paths.
+const _PROJECT_SEND_EXCLUDES = [".git", "*.cov", ".ready", "Project.toml", "Manifest.toml",
+                                "JuliaProject.toml", "JuliaManifest.toml"]
+const _DEVSRC_SEND_EXCLUDES = [".git", "*.cov"]
+
+"""
+    start_sync!(t, parent_project; kernel = nothing, sent = false)
+
+Keep `t`'s host copies of the notebook's parent project (its `src/`, into the worker env) and of each
+dev'd package (into its copy, `_devsrc_path`) current, telling `kernel` which files changed. `sent` says the
+copies were just sent whole (a provision), so only later changes travel; otherwise the first check
+sends whatever differs.
+"""
 function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = nothing, sent::Bool = false)
     (isempty(parent_project) || !isdir(parent_project)) && return
     owner = _sync_base(t)
-    pairs = Tuple{String,String,Vector{String}}[
-        (String(parent_project), String(t.project), ["Manifest.toml", "Project.toml", ".git", "*.cov"])]
+    pairs = Tuple{String,String,Vector{String}}[(String(parent_project), String(t.project), _PROJECT_SEND_EXCLUDES)]
     # Read the SAME env whose Manifest provisioning replicated (origin_env, else the parent) to find the
     # dev'd packages; skip the project itself and any vanished source.
     env = isempty(t.origin_env) ? parent_project : t.origin_env
@@ -2095,7 +2307,7 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = n
     for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? env : dirname(abspath(mf)))
         rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
         isdir(lpath) || continue
-        push!(pairs, (String(lpath), _devsrc_path(lpath), [".git", "*.cov"]))
+        push!(pairs, (String(lpath), _devsrc_path(lpath), _DEVSRC_SEND_EXCLUDES))
     end
     lock(_SYNC_LOCK) do
         for (dir, remotedir, excludes) in pairs
@@ -2103,10 +2315,10 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = n
             key = string(t.ssh_host, ":", remotedir)
             # Just sent whole by a provision, or as recorded the last time it was sent.
             d = get!(src.dests, key) do
-                had = sent ? _sync_files(dir, excludes) : _sync_record_load(dir, key)
-                sent && _sync_record_save(dir, key, had)
+                had = sent ? _sync_files(dir, excludes) : _sync_seed(dir, excludes, _sent_key(t.ssh_host, remotedir))
                 SyncDest(String(t.ssh_host), remotedir, excludes, String(t.region), had, Dict{String,Any}(), false)
             end
+            sent && (d.sent = _sync_files(dir, excludes))
             d.kernels[owner] = kernel
             (src.task === nothing || istaskdone(src.task)) && (src.task = Threads.@spawn _sync_poll(src))
         end
@@ -2128,7 +2340,7 @@ function _sync_dest!(src::SyncSource, d::SyncDest, now::Dict{String,Tuple{Int,Fl
     # nothing.
     keep = Sweep.transfer_keep(src.dir; region = d.region, excludes = d.excludes)
     filter!(keep, changed)
-    (isempty(changed) && isempty(gone)) && (d.sent = now; _sync_record_save(src.dir, _sync_key(d), now); return true)
+    (isempty(changed) && isempty(gone)) && (d.sent = now; return true)
     ok = try
         if length(changed) > _SYNC_FILEWISE_MAX
             _send_dir!(d.host, src.dir, d.remotedir; excludes = d.excludes, region = d.region, filter = true)
@@ -2149,7 +2361,7 @@ function _sync_dest!(src::SyncSource, d::SyncDest, now::Dict{String,Tuple{Int,Fl
     d.failing && _rlog("sync: $(basename(src.dir)) → $(d.host):$(d.remotedir) caught up")
     d.failing = false
     d.sent = now
-    _sync_record_save(src.dir, _sync_key(d), now)
+    _sent_record_update!(src.dir, _sync_key(d), (rel => now[rel] for rel in changed), gone)
     _rlog("sync: $(basename(src.dir)) → $(d.host): " *
           join(vcat(changed, ["−" * g for g in gone])[1:min(end, 6)], ", ") *
           (length(changed) + length(gone) > 6 ? ", …" : ""))
