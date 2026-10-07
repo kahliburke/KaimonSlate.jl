@@ -41,7 +41,7 @@ const hover = signal(null);      // the display node under the pointer
 const hotLine = signal(null);    // {file, line} under the pointer in the code pane
 const fold = signal(ls('slateProfFold', '1') !== '0');
 // What a bar's colour says: whose code it is, or how much time was spent in it (its self time).
-const colorBy = signal(ls('slateProfColor', 'code'));   // 'code' | 'time'
+const colorBy = signal(ls('slateProfColor', 'time'));   // 'time' | 'code'
 const opened = signal(new Set()); // folded library bars clicked open
 const codeAt = signal({ file: '', line: 0 });
 const srcs = signal({});         // file → {text, error}, as the cell's machine has it
@@ -442,8 +442,9 @@ function dragPan(ev, dr, canvas, sig) {
 
 // ── colour ────────────────────────────────────────────────────────────────────────────────────────
 // A family of colours per kind of code, and within it a shade per function, so two neighbouring
-// functions are told apart: warm for the notebook's own code, blue for packages being worked on,
-// slate for Base, a muted hue of its own for each other package.
+// functions are told apart: teal for the notebook's own code, green for packages being worked on,
+// slate for Base, a muted blue-to-violet for each other package. No warm colours: they read as
+// "expensive", which is what the time colouring says, not this one.
 const KIND_COLOR = { [K.compile]: '#8a6fd1', [K.gc]: '#cf5560', [K.other]: '#363b52', [K.synth]: '#454b6b' };
 function hue(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0; return h; }
 const _colors = new Map();
@@ -481,11 +482,11 @@ function colorOf(n, M) {
   let c = _colors.get(key);
   if (c) return c;
   const h = hue(n.func), j = (h % 1000) / 1000, j2 = ((h >>> 10) % 1000) / 1000;
-  if (n.pkg === 'cell' || n.pkg === 'notebook')
-    c = `hsl(${(n.pkg === 'cell' ? 30 : 18) + j * 16}, ${66 + j2 * 14}%, ${n.pkg === 'cell' ? 50 + j2 * 8 : 44 + j2 * 7}%)`;
-  else if (M.mine.has(n.pkg)) c = `hsl(${204 + j * 18}, ${52 + j2 * 14}%, ${48 + j2 * 8}%)`;
+  if (n.pkg === 'cell') c = `hsl(${180 + j * 16}, ${50 + j2 * 14}%, ${38 + j2 * 8}%)`;
+  else if (n.pkg === 'notebook') c = `hsl(${198 + j * 14}, ${46 + j2 * 12}%, ${38 + j2 * 7}%)`;
+  else if (M.mine.has(n.pkg)) c = `hsl(${138 + j * 18}, ${38 + j2 * 12}%, ${36 + j2 * 8}%)`;
   else if (n.pkg === 'Base') c = `hsl(${222 + j * 16}, ${14 + j2 * 8}%, ${38 + j2 * 8}%)`;
-  else c = `hsl(${hue(n.pkg) % 360}, ${24 + j2 * 10}%, ${38 + j * 8}%)`;
+  else c = `hsl(${236 + hue(n.pkg) % 70}, ${22 + j2 * 10}%, ${40 + j * 8}%)`;
   _colors.set(key, c);
   return c;
 }
@@ -1034,13 +1035,13 @@ function ColorKey() {
   const sw = (c, label, title) => html`<span title=${title}><i class="pfsw" style=${'background:' + c}></i>${label}</span>`;
   const pick = (k) => { colorBy.value = k; lsSet('slateProfColor', k); };
   return html`<span class="pfkey pfcolorkey">
-    <span class="pfseg pfseg-sm">${[['code', 'code'], ['time', 'time']].map(([k, l]) =>
+    <span class="pfseg pfseg-sm">${[['time', 'time'], ['code', 'code']].map(([k, l]) =>
       html`<button class=${colorBy.value === k ? 'on' : ''} onClick=${() => pick(k)}
         title=${k === 'code' ? 'colour each bar by whose code it is' : 'colour each bar by the time spent in it, not in what it calls'}>${l}</button>`)}</span>
     ${colorBy.value === 'time'
       ? html`<span title="self time: spent in the bar itself, not in what it calls"><i class="pfsw pfgrad"></i>less → more self time</span>`
-      : html`${sw('hsl(36, 72%, 52%)', 'notebook', "this notebook's code")}${M.mine.size ? sw('hsl(212, 58%, 52%)', 'your packages', 'packages loaded from a path, being worked on') : null}${
-             sw('hsl(230, 18%, 42%)', 'Base', "Julia's Base and Core")}${sw('hsl(150, 26%, 40%)', 'packages', 'installed packages, a hue each')}${
+      : html`${sw('hsl(188, 57%, 42%)', 'notebook', "this notebook's code")}${M.mine.size ? sw('hsl(147, 44%, 40%)', 'your packages', 'packages loaded from a path, being worked on') : null}${
+             sw('hsl(230, 18%, 42%)', 'Base', "Julia's Base and Core")}${sw('hsl(268, 27%, 44%)', 'packages', 'installed packages, a hue each')}${
              sw(KIND_COLOR[K.gc], 'GC', 'garbage collection')}${sw(KIND_COLOR[K.compile], 'compiling', 'compiling during the run')}`}
   </span>`;
 }
