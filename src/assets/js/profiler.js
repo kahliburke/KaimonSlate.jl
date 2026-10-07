@@ -779,7 +779,8 @@ function Flame() {
     if (dr && dr.moved) return;
     const r = at(ev); if (!r) return;
     const dn = r.dn, n = dn.n;
-    if (dn.folded) { opened.value = new Set([...opened.value, n.id]); return; }
+    // A folded run of library frames opens, and its first frame is selected, so the code follows.
+    if (dn.folded) opened.value = new Set([...opened.value, n.id]);
     select(n);
   };
   const dbl = (ev) => { const r = at(ev); if (r && !r.dn.folded) focusOn(r.dn.n.id); else if (!r) zoomOutAt(ev, cv.current, view); };
