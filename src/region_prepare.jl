@@ -597,7 +597,8 @@ end
 
 # What a prepare's compile was for, kept beside the environment's stamp (`mark`): the environment (its
 # stamp without the "compiled" suffix a compile adds), the node's CPU, the options its workers boot
-# with (the sysimage among them), and the sources of the packages it develops (`_dev_sources_digest`).
+# with (the sysimage among them), and the sources of the packages it develops (`_dev_sources_digest`,
+# and Slate's worker package and SDK, which every worker environment develops).
 # Before Julia starts, the shell compares them and stops when they match; after a compile, Julia writes
 # them. Both read `$SLATE_PC`, which the check sets.
 function _precompiled_check_sh(t, mark::AbstractString; sources::AbstractString = "")
@@ -653,7 +654,8 @@ function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothi
                                     "println(\"@@JULIA julia version \", VERSION)\n" * _precompiled_mark_snippet(mark),
                               "precompile $name on $host"; stream = true, jopt = true,
                               setup = t.setup * pro * _sysimage_jopt_sh(t) * "; " *
-                                      _precompiled_check_sh(t, mark; sources = _dev_sources_digest(ref[1])))
+                                      _precompiled_check_sh(t, mark; sources = _dev_sources_digest(ref[1]) *
+                                                                         "." * _payload_sha() * "." * _seb_sha()))
         ok || return ("fail", first(strip(out), 400))   # the step shows its own time
         occursin("@@PRECOMPILED current", out) && return ("ok", "compiled already for this node, image and environment")
         # Compiled now, so a start finds the environment complete and builds nothing.
