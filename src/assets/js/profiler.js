@@ -1325,11 +1325,8 @@ const setTabTo = (t) => { tab.value = t; lsSet('slateProfTab', t); };
 // What a static finding means, its likely cause, and the usual fix, read from the types JET
 // reports on the line. `what` is the same for every finding of a kind; `why` and `fix` are this one's.
 const STATIC_WHAT = {
-  dispatch: 'Runtime dispatch: Julia cannot tell when it compiles this code which method these calls need, ' +
-            'so it looks each one up while the line runs and boxes the result. On a hot line that is usually ' +
-            'most of the cost, and it allocates.',
-  captured: 'Boxed capture: a closure assigns to a variable it captured, so Julia keeps the variable in a ' +
-            'box (Core.Box) whose contents have no fixed type, and every use of it is dispatched at runtime.',
+  dispatch: 'Runtime dispatch: the method is chosen while the code runs, not when it compiles. Slow, and it allocates.',
+  captured: 'Boxed capture: a closure reassigns a variable it captured, so the variable lives in an untyped box.',
 };
 const ABSTRACT = /::(Real|Number|AbstractFloat|Integer|Signed|Unsigned|AbstractString|Function|DataType|Abstract\w*(?:\{[^}]*\})?)(?![\w{])/g;
 function explainStatic(g) {
@@ -1338,22 +1335,21 @@ function explainStatic(g) {
   if (g.kinds.captured) {
     const vars = [...new Set(g.sigs.map(s => (/^([^\s=]+) = Core\.Box/.exec(s) || [])[1]).filter(Boolean))];
     const v = vars.map(x => '`' + x + '`').join(' and ') || 'a variable';
-    out.push({ why: 'A closure here reassigns ' + v + ' after capturing ' + (vars.length > 1 ? 'them' : 'it') + '.',
-               fix: 'Avoid reassigning a captured variable: use a plain loop instead of the closure, or hold the value in a typed Ref (' +
-                    (vars[0] ? vars[0] + ' = Ref(…)' : 'x = Ref(…)') + ', then ' + (vars[0] || 'x') + '[] = …).' });
+    out.push({ why: 'The closure reassigns ' + v + '.',
+               fix: 'Use a plain loop, or a `Ref`: `' + (vars[0] || 'x') + ' = Ref(…)`, then `' + (vars[0] || 'x') + '[] = …`.' });
   }
   if (g.kinds.dispatch) {
     const abs = [...new Set([...sigs.matchAll(ABSTRACT)].map(m => m[1]))];
     const anyT = /::Any\b/.test(sigs), anyArr = /\{Any\}|Array\{Any|Vector\{Any/.test(sigs);
-    if (abs.length) out.push({ why: 'Values here have an abstract type (' + abs.slice(0, 3).join(', ') + '), usually from a struct field or a container declared with one; Julia cannot specialise the code on it.',
-                               fix: 'Give the field or container a concrete type (Float64), or make the struct parametric: struct P{T<:Real}; β::T; end.' });
-    if (anyArr) out.push({ why: 'A container here holds Any: one created as [] is a Vector{Any}.',
-                           fix: 'Create it with an element type, as Float64[] or Vector{Float64}(undef, n).' });
-    if (anyT && !abs.length && !anyArr) out.push({ why: 'Values here have type Any: their type is lost before this line, often by an untyped [] container, an abstractly typed field, or a function whose return type depends on runtime values.',
-                                                  fix: 'Find where it is lost: @code_warntype on the function, at these arguments, shows each value typed Any.' });
-    if (!abs.length && !anyT) out.push({ why: 'The argument types of these calls are not known when the code is compiled.', fix: '@code_warntype on the function shows which value is the problem.' });
+    if (abs.length) out.push({ why: 'Abstract type: `' + abs.slice(0, 3).join('`, `') + '`.',
+                               fix: 'Use a concrete type, or a type parameter: `struct P{T<:Real}; β::T; end`.' });
+    if (anyArr) out.push({ why: 'A `[]` container holds `Any`.', fix: 'Give it an element type: `Float64[]`.' });
+    if (anyT && !abs.length && !anyArr) out.push({ why: 'A value here is inferred as `Any`.',
+                                                  fix: '`@code_warntype` on the function shows where the type is lost.' });
+    if (!abs.length && !anyT) out.push({ why: 'The argument types are not known at compile time.',
+                                         fix: '`@code_warntype` on the function shows which value.' });
   }
-  if (g.lib) out.push({ why: g.lib + ' more inside library calls this line makes (' + g.calls.slice(0, 4).join(', ') + '): they dispatch because they were handed these values, and go when this line is fixed.' });
+  if (g.lib) out.push({ why: 'Also flagged: ' + g.lib + ' in `' + g.calls.slice(0, 3).join('`, `') + '`, called from this line with the same values. Fixing this line fixes ' + (g.lib === 1 ? 'it' : 'them') + ' too.' });
   return out;
 }
 
