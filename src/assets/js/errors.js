@@ -80,21 +80,41 @@ function _applyMissingPkg(c) {
 }
 window._applyMissingPkg = _applyMissingPkg;
 
-// The live install status from the worker log. Precompilation prints a "✓ <pkg>" line as EACH package
-// finishes (there's no in-progress line in a non-TTY log), so we surface the most-recently-completed
-// package — the status then advances package-by-package instead of sitting on "Precompiling packages…".
-// Falls back to the latest Resolving/Installed/… line before precompilation begins.
-function _lastPkgLine(log) {
-  if (!log) return '';
-  const lines = String(log).split('\n').map(s => s.replace(/[\s│]+$/, '').replace(/^[\s│]+/, '')).filter(Boolean);
-  if (!lines.length) return '';
-  for (let i = lines.length - 1; i >= 0; i--) {              // most recent completed package
-    const m = lines[i].match(/[✓√]\s+(\S[^│]*)$/);
-    if (m) return 'compiled ' + m[1].trim().slice(0, 60);
-  }
-  const pat = /(Precompil|Resolv|Installed|Download|Updating|Building|Added|No Changes|Cloning|Compiling)/i;
-  for (let i = lines.length - 1; i >= 0; i--) if (pat.test(lines[i])) return lines[i].slice(0, 90);
-  return lines[lines.length - 1].slice(0, 90);
+// The live install status from the worker log: the last few lines of Pkg's own output. Precompilation
+// prints a "✓ <pkg>" line as EACH package finishes (there's no in-progress line in a non-TTY log), so
+// a tail advances package-by-package instead of sitting on "Precompiling packages…".
+//
+// Lines keep their ANSI, because the caller colours them — Pkg writes SGR into the log, and the
+// package names and counts are the part that is coloured. Matching and trimming run against the
+// ESCAPE-STRIPPED text: a `[32m` between the ✓ and the name defeats the pattern otherwise, and
+// nothing here truncates, so there is no way to cut a line mid-sequence and leave a dangling escape.
+// Width is the card's problem, handled in CSS.
+const _PKG_LOG_LINES = 4;
+// Margin whitespace and box-drawing, trimmed from both ends while STEPPING OVER the colour runs. Pkg
+// opens the colour before its indent (`ESC[32m  ✓ ESC[39mExample`), so a plain anchored trim sees the
+// escape first and leaves the indentation behind it — every line would sit ragged in a left-aligned
+// box. The escapes are kept exactly where they are, since each one colours the text that follows it.
+const _SGR_RUN = '(?:\\x1b\\[[0-9;:]*m)*';
+const _PKG_LEAD = new RegExp('^(' + _SGR_RUN + ')[\\s│]+');
+const _PKG_TAIL = new RegExp('[\\s│]+(' + _SGR_RUN + ')$');
+function _trimPkgMargin(s) {
+  let prev;
+  do { prev = s; s = s.replace(_PKG_LEAD, '$1').replace(_PKG_TAIL, '$1'); } while (s !== prev);
+  return s;
+}
+function _lastPkgLines(log, n) {
+  n = n || _PKG_LOG_LINES;
+  if (!log) return [];
+  const plain = s => (window.slateAnsiText ? window.slateAnsiText(s) : s);
+  const lines = String(log).split('\n')
+    .map(s => _trimPkgMargin(s))
+    .map(raw => ({ raw, text: plain(raw) }))
+    .filter(l => l.text);
+  if (!lines.length) return [];
+  // Pkg activity only, so unrelated worker chatter cannot crowd the install out of a short window.
+  const pat = /[✓√]|Precompil|Resolv|Installed|Download|Updating|Building|Added|No Changes|Cloning|Compiling/i;
+  const hits = lines.filter(l => pat.test(l.text));
+  return (hits.length ? hits : lines).slice(-n).map(l => l.raw);
 }
 
 // Install the missing package — into the NOTEBOOK's own env (reproducible; travels to a remote worker
@@ -102,11 +122,17 @@ function _lastPkgLine(log) {
 // install status by tailing the worker log while the (blocking) add runs.
 function hidePkgInstalling() { const bg = document.getElementById('pkginstallbg'); if (bg) bg.classList.remove('show'); }
 window.hidePkgInstalling = hidePkgInstalling;
-// Show a package-install failure IN the blocking modal (leaves it up with a Close button).
+// SGR → spans, escaping as it goes. Falls back to escaped text so a missing ansi.js degrades to
+// readable output rather than markup. `slateEscHtml` is core.js's, which ansi.js itself uses: this
+// must not grow its own escaper (see test/js/esc_html.mjs).
+const _ansi = s => (window.slateAnsiHtml ? window.slateAnsiHtml(s) : window.slateEscHtml(String(s == null ? '' : s)));
+// Show a package-install failure IN the blocking modal (leaves it up with a Close button). Pkg's
+// message carries its own colour, and `<`/`>` appear in real ones (a version bound, a type in a
+// stacktrace), so it is escaped rather than having those characters deleted from it.
 function _pkgInstallFail(msg) {
   const st = document.getElementById('pkginstallstatus'), sp = document.getElementById('pkginstallspin'),
         ac = document.getElementById('pkginstallactions');
-  if (st) { st.innerHTML = '⚠ ' + String(msg || '?').replace(/[<>&]/g, ''); st.style.color = 'var(--red)'; }
+  if (st) { st.innerHTML = '⚠ ' + _ansi(String(msg == null ? '?' : msg)); st.style.color = 'var(--red)'; st.classList.add('failed'); }
   if (sp) sp.style.display = 'none';
   if (ac) { ac.style.display = 'flex'; ac.innerHTML = '<button onclick="hidePkgInstalling()">Close</button>'; }
 }
@@ -118,13 +144,29 @@ function startPkgInstall(titleHtml) {
         sp = document.getElementById('pkginstallspin'), ac = document.getElementById('pkginstallactions');
   if (!bg) return () => {};
   document.getElementById('pkginstalltitle').innerHTML = titleHtml;
-  if (st) { st.textContent = 'resolving…'; st.style.color = 'var(--accent)'; }
+  // `failed` is cleared, not just overwritten: a retry after a failure would otherwise keep the
+  // wrapping, auto-height layout that message needed.
+  if (st) { st.innerHTML = '<div class="pkgline">resolving…</div>'; st.style.color = 'var(--accent)'; st.classList.remove('failed'); }
   if (sp) sp.style.display = '';
   if (ac) { ac.style.display = 'none'; ac.innerHTML = ''; }
   bg.classList.add('show');
   let live = true;
+  // THIS install's output only. The worker log is cumulative, so whatever is in it when the modal
+  // opens belongs to earlier work and would otherwise be presented as install progress. The baseline
+  // is taken on the first poll (rather than before the modal opens, which would make this function
+  // async and change its contract) and lands on a line boundary, so a line still being written is
+  // treated as new rather than shown from its middle. A log shorter than the baseline has rotated,
+  // and then all of it is new.
+  let base = null;
   (async () => { while (live) {
-    try { const r = await api('GET', '/api/worker-log'); const l = _lastPkgLine(r && r.log); if (l && live && st) st.textContent = l; } catch (_) {}
+    try {
+      const r = await api('GET', '/api/worker-log');
+      const log = String((r && r.log) || '');
+      if (base === null) base = log.lastIndexOf('\n') + 1;
+      else if (log.length < base) base = 0;
+      const ls = _lastPkgLines(log.slice(base));
+      if (ls.length && live && st) st.innerHTML = ls.map(l => '<div class="pkgline">' + _ansi(l) + '</div>').join('');
+    } catch (_) {}
     await new Promise(res => setTimeout(res, 1500));
   } })();
   return () => { live = false; };

@@ -1073,9 +1073,17 @@ function wireControl(el) {
     // cell re-runs and the SERVER-rendered (Makie) figures re-theme too. setSlateTheme no-ops on an
     // unknown value, so this is inert for every other bind.
     if (name === 'ui_theme' && window.setSlateTheme) { try { window.setSlateTheme(v); } catch (_) {} }
+    // A value held while this one was in flight goes next, unless it is the same value and this send
+    // arrived: a select fires `input` and then `change` for one choice.
+    const sent = _valKey(v);
+    let arrived = false;
     api('POST', '/api/bind/' + id, { name, value: v })
-      .then(applyAck)
-      .finally(() => { inflight = false; if (pending !== null) schedule(pending); });
+      .then(s => { arrived = true; return applyAck(s); })
+      .finally(() => {
+        inflight = false;
+        if (arrived && pending !== null && _valKey(pending) === sent) pending = null;
+        if (pending !== null) schedule(pending);
+      });
   };
   const schedule = v => {                       // throttled, coalescing
     pending = v;

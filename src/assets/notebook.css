@@ -2260,7 +2260,16 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
   max-width:460px; width:90%; box-shadow:0 18px 52px #000b; text-align:center; }
 .pkginstall-spin { display:inline-block; width:30px; height:30px; border-width:3px; margin-bottom:14px; }
 .pkginstall-title { font-weight:700; font-size:1rem; color:var(--text); margin-bottom:8px; }
-.pkginstall-status { color:var(--accent); font-family:'Cascadia Code',monospace; font-size:.8rem; min-height:1.2em; word-break:break-word; }
+/* A tail of Pkg's own output. Held at exactly `_PKG_LOG_LINES` lines tall so the card does not
+   resize as lines stream in, and left-aligned against the centred card because a log that re-centres
+   per line is unreadable. A line clips rather than wrapping, for the same reason: a long package path
+   would otherwise reflow everything below it on every poll. */
+.pkginstall-status { color:var(--accent); font-family:'Cascadia Code',monospace; font-size:.8rem;
+  line-height:1.45; height:calc(4 * 1.45em); text-align:left; overflow:hidden; }
+.pkginstall-status .pkgline { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* The failure message replaces the tail, where wrapping is what you want: it is one message, it can
+   be long, and nothing streams in after it to be pushed around. */
+.pkginstall-status.failed { height:auto; min-height:calc(4 * 1.45em); white-space:pre-wrap; word-break:break-word; }
 .pkginstall-note { color:var(--dim); font-size:.78rem; line-height:1.55; margin-top:14px; }
 .pkginstall-actions { margin-top:16px; display:flex; gap:10px; justify-content:center; }
 .pkginstall-actions button { background:var(--bg3); color:var(--text); border:1px solid var(--border);

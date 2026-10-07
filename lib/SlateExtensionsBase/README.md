@@ -78,6 +78,10 @@ A package extension resolves the `showable` ambiguity between Slate's MIME metho
 greedy `showable(::MIME, ::Figure)`. It loads only when Makie is already present, so Makie stays
 a weak dependency and this package stays install-light.
 
+## Changelog
+
+What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

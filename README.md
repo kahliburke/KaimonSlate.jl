@@ -140,3 +140,5 @@ serve_notebook("notebook.jl"; port = 8765)   # blocks; open http://127.0.0.1:876
 ```
 
 See the [installation guide](https://kahliburke.github.io/KaimonSlate.jl/dev/installation) and the [architecture overview](https://kahliburke.github.io/KaimonSlate.jl/dev/architecture) for details.
+
+What changed in each release is in [CHANGELOG.md](CHANGELOG.md).

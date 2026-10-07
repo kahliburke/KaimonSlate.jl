@@ -1200,6 +1200,12 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
     isempty(cell.binds) && return nb
     nsym = Symbol(name)
     any(b -> b.name == nsym, cell.binds) || return nb   # not a bind of this cell → no-op (no phantom worker assign)
+    # The value a control already holds changes nothing, so its readers are not run again. A control
+    # can send one value twice as it settles (a select fires `input` and then `change`). A button is
+    # exempt: pressing it is the change.
+    spec = cell.binds[findfirst(b -> b.name == nsym, cell.binds)]
+    unchanged(v) = spec.widget != "button" && (isequal(v, spec.value) || (v == spec.value) === true)
+    unchanged(value) && return nb
     # Push the value to the kernel the DEFINING cell runs on, OFF nb.lock (protocol): a region-tagged
     # `@bind` cell lives on its region kernel (attach + `prepare!` are round-trips), and `assign_bind!`
     # coerces the value on the worker — all shared-gate work, serialized on the notebook's eval mutex (as
@@ -1217,6 +1223,7 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
         end
         ReportEngine.assign_bind!(bk, nb.report, nsym, value)   # coerce on the worker + update its registry/global
     end
+    unchanged(coerced) && return nb    # sent in another form (a label, a string number) of the same value
     # Mirror the coerced value into the host BindSpec + restale readers under nb.lock (host mutation only).
     @report_op nb report begin
         i = findfirst(b -> b.name == nsym, cell.binds)

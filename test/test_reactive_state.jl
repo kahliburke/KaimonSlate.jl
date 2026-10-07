@@ -436,6 +436,41 @@ end
     end
 end
 
+# A control can send the value it already holds (a select fires `input` and then `change` for one
+# choice). That changes nothing, so its readers must not run again.
+@testset "a control set to the value it holds runs nothing" begin
+    hub = NS.start_hub(; port = 8873)
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, """
+              #%% code id=ctl
+              @bind pick Select(["a", "b"])
+              @bind go Button("Run")
+              #%% code id=reader
+              runs = (isdefined(@__MODULE__, :runs) ? runs : 0) + 1
+              string(pick, go, "|", runs)
+              """)
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        reader() = nb.report.cells[findfirst(c -> c.id == "reader", nb.report.cells)]
+        settled(s) = timedwait(() -> occursin(s, NS._result_of(nb, "reader")) && reader().state == RE.FRESH,
+                               60.0; pollint = 0.05) === :ok
+
+        @test settled("a0|1")
+        NS.set_bind!(nb, "ctl", "pick", "b")
+        @test settled("b0|2")
+        # The same value again: the reader is not made stale, so it does not run.
+        NS.set_bind!(nb, "ctl", "pick", "b")
+        @test reader().state == RE.FRESH && occursin("b0|2", NS._result_of(nb, "reader"))
+        # A button counts every press, so a second press is a change like the first.
+        NS.set_bind!(nb, "ctl", "go", nothing)
+        @test settled("b1|3")
+        NS.set_bind!(nb, "ctl", "go", nothing)
+        @test settled("b2|4")
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
 # The receipt a control change now gets instead of the notebook. Its whole reason for existing is
 # that its size tracks the number of CELLS, not the size of their outputs — the old reply was
 # measured at 278KB on a real notebook, 198KB of it two chart specs, shipped on every slider nudge.
