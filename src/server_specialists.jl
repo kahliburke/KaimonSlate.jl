@@ -123,8 +123,7 @@ function summon!(nb::LiveNotebook, role::AbstractString; subject::AbstractString
     # An explicit model wins; else the role's configured default; else the notebook's own agent
     # model, which is what `_ensure_agent!` falls back to for an empty string.
     m = isempty(strip(String(model))) ? specialist_model(s.name) : String(model)
-    aid = _ensure_agent!(nb; crew = s.name, model = m, permission = s.permission,
-                         system_prompt = s.brief, allowed_tools = tool_names(s))
+    aid = _ensure_agent!(nb; crew = s.name, model = m)   # the role supplies preset, brief and tools
     turn = Base.invokelatest(s.briefing, nb, String(subject), String(task))
     lock(_SPEC_LOCK) do; _SPEC_BRIEFING[(nb.id, s.name)] = turn; end
     register_orchestrator!(nb, s.name, orchestrator)

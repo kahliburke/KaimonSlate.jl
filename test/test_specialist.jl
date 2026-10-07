@@ -90,6 +90,25 @@ current_agent_id() = nothing
             @test occursin(nb.id, brief)
         end
 
+        @testset "a reply typed into the pane reaches the same specialist" begin
+            aid = NS.specialist_here(nb, "debugger")
+            empty!(FAKE_CALLS)
+            # What the chat route does with a message typed into a specialist's pane: the crew name,
+            # and no preset, brief or model.
+            @test NS._ensure_agent!(nb; crew = "debugger") == aid
+            @test !any(c -> c[1] in (:agent_close, :agent_open), FAKE_CALLS)
+
+            # One that is gone comes back as the same specialist, not as the notebook's own agent.
+            delete!(Main.Kaimon.KaimonGate.OPEN, aid)
+            empty!(FAKE_CALLS)
+            NS._ensure_agent!(nb; crew = "debugger")
+            reopened = only(a for (t, a) in FAKE_CALLS if t === :agent_open)
+            role = NS.specialist("debugger")
+            @test reopened["permission"] == role.permission &&
+                  reopened["system_prompt"] == role.brief &&
+                  !isempty(get(reopened, "allowed_tools", String[]))
+        end
+
         @testset "the verbs a specialist calls reach the kernel" begin
             # The script IS the specialist: arm a predicate, continue, read the frame.
             seen = Ref{Any}(nothing)

@@ -5756,6 +5756,13 @@ function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::Abst
                         permission::AbstractString = "",
                         system_prompt::AbstractString = "", allowed_tools::Vector{String} = String[])
     label = String(crew)
+    # A specialist's preset, brief and tools belong to its role, whoever is writing to it. A reply
+    # typed into its pane carries none of them, and reading that as a different preset would
+    # replace the agent mid-conversation with one that has never seen it.
+    role = isempty(label) ? nothing : specialist(label)
+    if role !== nothing
+        permission = role.permission; system_prompt = role.brief; allowed_tools = tool_names(role)
+    end
     perm = _effective_perm(nb, permission, label)
     existing = get(nb.agents, label, "")
     if !isempty(existing)
@@ -5818,7 +5825,8 @@ function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::Abst
             # evaluate has nothing to do but debug, and that is what makes it good at it.
             "system_prompt" => (isempty(system_prompt) ? _agent_system_prompt(nb) : String(system_prompt)))
     isempty(allowed_tools) || (open_args["allowed_tools"] = allowed_tools)
-    isempty(model) || (open_args["model"] = model)   # omit → Kaimon's default (sonnet)
+    spawn_model = isempty(model) && role !== nothing ? specialist_model(role.name) : String(model)
+    isempty(spawn_model) || (open_args["model"] = spawn_model)   # omit → Kaimon's default (sonnet)
     res = try
         _agent_call(:agent_open, open_args)
     catch e
