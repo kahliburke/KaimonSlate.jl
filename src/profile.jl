@@ -349,8 +349,8 @@ end
 # hundreds of driver calls per array operation, almost all of them queries, and recording each one
 # costs more than the run.
 # Everything a GPU-mode run needs, done before its clock starts: CUPTI's call names (looked up once
-# per process), the configurations, and one empty collection that compiles the callback and CUPTI's
-# own paths. A string says why there is no CUPTI.
+# per process), the configurations, and one empty collection with them, which compiles the callback
+# and pays CUPTI's first enable of each. A string says why there is no CUPTI.
 const _CUPTI_NAMES = Ref{Any}(nothing)
 
 function _cupti_prepare(m)
@@ -385,9 +385,11 @@ function _cupti_prepare(m)
                  set = K(:CUPTI_ACTIVITY_KIND_MEMSET))
         sync = getproperty(m, :synchronize)
         ccfg = il(K(:CallbackConfig), cb, [drv])
-        il(K(:enable!), () -> il(K(:enable!), () -> il(sync), il(K(:ActivityConfig), collect(values(kinds)))), ccfg)
+        acfg = il(K(:ActivityConfig), collect(values(kinds)))
+        il(K(:enable!), () -> il(K(:enable!), () -> il(sync), acfg), ccfg)
+        il(K(:process), (ctx, sid, r) -> nothing, acfg)
         _clear!(calls)
-        return (; CU, calls, names, kinds, sync, ccfg, acfg = il(K(:ActivityConfig), collect(values(kinds))))
+        return (; CU, calls, names, kinds, sync, ccfg, acfg)
     catch e
         return "CUPTI: " * first(sprint(showerror, e), 300)
     end
