@@ -1754,6 +1754,72 @@ function create_tools(GateTool::Type)
     end
 
     """
+        prof_run(notebook, cell; mode="cpu") -> String
+
+    Run `cell` under the sampling profiler, on whichever kernel it runs on (a `region=` cell on its
+    node), and wait for it. The run is a real one: the cell's output, bindings and stored result are
+    what this run leaves. Returns the profile's summary, with the run before it for comparison.
+
+    The first run of a cell includes compiling its code; run it again for the steady state.
+    """
+    function prof_run(notebook::String, cell::String; mode::String = "cpu")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = NotebookServer.profile_now!(nb, strip(cell); mode = mode)
+        get(r, "kind", "") == "result" || return "⛔ " * String(get(r, "error", "the profile did not complete"))
+        return NotebookServer.profile_summary_text(nb, strip(cell))
+    end
+
+    """
+        prof_summary(notebook, cell) -> String
+
+    The last profile of `cell`: how long it ran, the lines that took the most time of their own
+    (with their total, and whether that time was runtime dispatch, GC or compiling), and the hot
+    path under each of the cell's heaviest lines.
+    """
+    function prof_summary(notebook::String, cell::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return NotebookServer.profile_summary_text(nb, strip(cell))
+    end
+
+    """
+        prof_tree(notebook, cell; at="", depth=6, min=1.0) -> String
+
+    The call tree of the last profile, keyed by source line: each entry is one line of one function
+    with its share of the run and of its own time. `at` starts it somewhere: `cell:<id>:<line>`, a
+    `file:line` (a suffix of the path is enough), or a function name. Entries under `min` percent of
+    the run are left out, and it stops `depth` levels down.
+    """
+    function prof_tree(notebook::String, cell::String; at::String = "", depth::Int = 6, min::Float64 = 1.0)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return NotebookServer.profile_tree_text(nb, strip(cell); at = at, depth = depth, min = min)
+    end
+
+    """
+        prof_source(notebook, cell, file; line=0, around=20) -> String
+
+    `file` as the machine the cell ran on has it, with each line's share of the last profile (total
+    and self) and its marks, `around` lines either side of `line`. `file` may be a suffix of the path
+    as the summary or tree shows it, or `cell:<id>` for a cell.
+    """
+    function prof_source(notebook::String, cell::String, file::String; line::Int = 0, around::Int = 20)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return NotebookServer.profile_source_text(nb, strip(cell), file; line = line, around = around)
+    end
+
+    """
+        prof_eval(notebook, cell, code) -> String
+
+    Evaluate `code` on the kernel `cell` runs on, in the notebook's namespace, and return what it
+    printed and its value. This is where a hypothesis is checked at the values the cell uses:
+    `@code_warntype f(x)`, `@allocated f(x)`, `@time f(x)`, `typeof(x)`. It changes nothing in the
+    notebook unless the code does, so do not assign to the notebook's names here.
+    """
+    function prof_eval(notebook::String, cell::String, code::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return NotebookServer.profile_eval(nb, strip(cell), code)
+    end
+
+    """
         dbg_frame(notebook) -> String
 
     Where the session is now, without advancing: the line, the call stack, every local in the
@@ -3836,6 +3902,12 @@ function create_tools(GateTool::Type)
         GateTool("dbg_eval", dbg_eval; timeout_ms = CELL_RUN_MS),
         GateTool("dbg_break", dbg_break),
         GateTool("dbg_watch", dbg_watch),
+        # Cell profiler: a run waits for the cell, so it gets the cell-run budget, as does an eval.
+        GateTool("prof_run", prof_run; timeout_ms = CELL_RUN_MS),
+        GateTool("prof_summary", prof_summary),
+        GateTool("prof_tree", prof_tree),
+        GateTool("prof_source", prof_source),
+        GateTool("prof_eval", prof_eval; timeout_ms = CELL_RUN_MS),
         GateTool("request_file_access", request_file_access; timeout_ms = ASK_MS),
         GateTool("spec_findings", spec_findings),
         GateTool("spec_propose", spec_propose; timeout_ms = ASK_MS),

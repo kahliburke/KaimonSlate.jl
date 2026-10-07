@@ -513,6 +513,45 @@ function Facts() {
   </div>`;
 }
 
+// ── the profiler specialist ───────────────────────────────────────────────────────────────────────
+// Summoned from the dock; it works in the chat pane, where its reasoning and tool calls stream.
+const models = signal(null);
+const pickOpen = signal(false);
+const pickQ = signal('');
+const summoning = signal(false);
+const bareModel = (m) => String(m).replace(/^acp:\w+:/, '').replace(/^.*\//, '');
+const lastModel = () => { try { return localStorage.getItem('slateProfModel') || localStorage.getItem('slateDbgModel') || ''; } catch (_) { return ''; } };
+async function summon(model) {
+  const P = pf.value; if (!P || summoning.value) return;
+  summoning.value = true; pickOpen.value = false;
+  try { localStorage.setItem('slateProfModel', model); } catch (_) {}
+  try { await A('POST', '/api/profile/agent', { cell: P.cell, model }); } catch (_) {}
+  summoning.value = false;
+}
+function Specialist() {
+  const open = async () => {
+    pickOpen.value = !pickOpen.value; pickQ.value = '';
+    if (!models.value) { try { const r = await A('GET', '/api/acp-models'); models.value = (r && r.models) || []; } catch (_) { models.value = []; } }
+  };
+  const q = pickQ.value.trim().toLowerCase(), all = models.value || [];
+  const shown = (q ? all.filter(m => m.toLowerCase().includes(q)) : all).slice(0, 60);
+  const prev = lastModel();
+  return html`<span class="pfspec">
+    <button class="pfbtn" disabled=${summoning.value} onClick=${open} title="bring in a profiling specialist to work on this cell with you">
+      ${summoning.value ? html`<span class="hydspin"></span>` : '＋ specialist'}</button>
+    ${pickOpen.value ? html`<div class="pfspecmenu">
+      <input autofocus placeholder="search models…" value=${pickQ.value} onInput=${e => pickQ.value = e.target.value}
+        onKeyDown=${e => { if (e.key === 'Escape') pickOpen.value = false; else if (e.key === 'Enter' && shown.length) summon(shown[0]); }}/>
+      <div class="pfspeclist">
+        ${!q && prev ? html`<div class="pfspecrow" onClick=${() => summon(prev)}>↩ ${bareModel(prev)}</div>` : null}
+        ${!q ? html`<div class="pfspecrow" onClick=${() => summon('')}>Default model</div>` : null}
+        ${models.value === null ? html`<div class="pfspecnote"><span class="hydspin"></span></div>`
+          : shown.map(m => html`<div class="pfspecrow" key=${m} onClick=${() => summon(m)}>${bareModel(m)}</div>`)}
+      </div>
+    </div>` : null}
+  </span>`;
+}
+
 function Dock() {
   const P = pf.value;
   if (!P) return null;
@@ -529,6 +568,7 @@ function Dock() {
         <label class="pftog" title="fold library code into one bar per package">
           <input type="checkbox" checked=${fold.value}
             onChange=${e => { fold.value = e.currentTarget.checked; try { localStorage.setItem('slateProfFold', fold.value ? '1' : '0'); } catch (_) {} }}/><i></i>fold libraries</label>
+        <${Specialist} />
         <button class="pfbtn" disabled=${busy} onClick=${prepare} title="compile the cell's code without running it">Compile</button>
         <button class="pfbtn primary" disabled=${busy} onClick=${run}>▶ Run and profile</button>
         <button class="pfx" onClick=${close} title="close (Esc)">✕</button>
@@ -573,6 +613,15 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pfbtn:hover { border-color:#e8933a; }
 .pfbtn.primary { border-color:color-mix(in srgb, #e8933a 60%, var(--border)); background:color-mix(in srgb, #e8933a 18%, var(--bg3)); }
 .pfbtn[disabled] { opacity:.5; cursor:default; }
+.pfspec { position:relative; }
+.pfspecmenu { position:absolute; right:0; top:calc(100% + 4px); z-index:5; width:280px; padding:6px;
+  background:var(--bg2); border:1px solid var(--border); border-radius:8px; box-shadow:0 12px 32px rgba(0,0,0,.5); }
+.pfspecmenu input { width:100%; box-sizing:border-box; font:inherit; font-size:.76rem; padding:4px 7px; border-radius:5px;
+  background:var(--bg); color:var(--text); border:1px solid var(--border); }
+.pfspeclist { max-height:300px; overflow:auto; margin-top:5px; }
+.pfspecrow { padding:4px 7px; border-radius:5px; cursor:pointer; font-size:.76rem; font-family:var(--mono,ui-monospace,monospace); }
+.pfspecrow:hover { background:color-mix(in srgb, #e8933a 14%, transparent); }
+.pfspecnote { padding:6px; text-align:center; }
 .pfx { padding:2px 8px; border-radius:6px; background:transparent; border:1px solid transparent; color:var(--dim); cursor:pointer; }
 .pfx:hover { color:var(--red); border-color:var(--border); background:var(--bg3); }
 .pftog { display:inline-flex; align-items:center; gap:6px; color:var(--dim); font-size:.74rem; cursor:pointer; user-select:none; }
