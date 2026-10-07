@@ -1974,6 +1974,33 @@ end
         @test occursin("'/abs/env/Manifest.toml'", RE._host_state_script("/abs/env"))   # not under \$HOME
     end
 
+    @testset "what does not change is not asked again" begin
+        # A worker environment's Manifest, read once per (host, environment) and forgotten when a
+        # provision changes that environment, on every host that names it.
+        RE._ENV_DEPS[("login", "~/env-a")] = Dict("A" => Any[]); RE._ENV_DEPS[("node1", "~/env-a")] = Dict("A" => Any[])
+        RE._ENV_DEPS[("login", "~/env-b")] = Dict("B" => Any[])
+        @test RE._worker_env_deps("login", "~/env-a") === RE._ENV_DEPS[("login", "~/env-a")]   # no ssh: unknown host
+        RE._forget_env_deps!("~/env-a")
+        @test !haskey(RE._ENV_DEPS, ("login", "~/env-a")) && !haskey(RE._ENV_DEPS, ("node1", "~/env-a"))
+        @test haskey(RE._ENV_DEPS, ("login", "~/env-b"))
+        RE._forget_env_deps!("~/env-b")
+
+        # The scheduler `:auto` found on a host, asked once.
+        r = RE.region_set!("autosched"; host = "auto-host-unreached", scheduler = :auto)
+        try
+            RE._AUTO_SCHEDULER["auto-host-unreached"] = :slurm
+            @test RE.region_scheduler(r) === :slurm
+        finally
+            delete!(RE._AUTO_SCHEDULER, "auto-host-unreached"); RE.region_delete!("autosched")
+        end
+
+        # Several files in one transfer, from their contents.
+        mktempdir() do dest
+            @test RE._put_texts("", dest, ["a.json" => "{}", "a.state" => "idle 1"])
+            @test read(joinpath(dest, "a.json"), String) == "{}" && read(joinpath(dest, "a.state"), String) == "idle 1"
+        end
+    end
+
     @testset "a prepare compiles again only for a new environment, node type or image" begin
         mktempdir() do home
             t = RE.RemoteTarget("h"; project = "~/.cache/kaimonslate/remote/nb-1")

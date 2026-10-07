@@ -169,9 +169,7 @@ function provision_payload!(host::AbstractString, root_remote::AbstractString)
     # Say the one thing that is wrong. Wrapped in "could not create <path> on <host>", a missing
     # sign-in reads as a permissions or filesystem problem on the cluster.
     connected(host) || error(_offline(host))
-    dst = "$(root_remote)/src"
-    ok, out = _ssh_run(host, "mkdir -p $(dst)")
-    ok || error("could not create $(dst) on $(host): $(strip(out))")
+    dst = "$(root_remote)/src"                 # `put_files` makes it
     src = dirname(String(first(methods(paramgrid)).file))
     files = [joinpath(src, f) for f in SlateTask.PAYLOAD_FILES]
     put_files(host, files, dst) ||

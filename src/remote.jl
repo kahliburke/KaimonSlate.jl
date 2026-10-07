@@ -707,6 +707,17 @@ _pbs_attached(cmd::AbstractString) =
 _host_for_files(host::AbstractString) = (v = via(host); v === nothing ? String(host) : v.host)
 
 _put_file(host, data, path) = Sweep.put_file(_host_for_files(String(host)), data, path)
+
+# Several small files into one directory on the host in one transfer, from their contents (`name => text`).
+function _put_texts(host, dest::AbstractString, files)
+    dir = mktempdir()
+    try
+        paths = String[(p = joinpath(dir, String(n)); write(p, body); p) for (n, body) in files]
+        return Sweep.put_files(_host_for_files(String(host)), paths, dest)
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
 _put_dir(host, localdir, dest; kw...) = Sweep.put_dir(_host_for_files(String(host)), localdir, dest; kw...)
 
 function _ssh_capture(host, argv::Cmd)
@@ -1282,6 +1293,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
                                "JuliaProject.toml", "JuliaManifest.toml"])
         _send_dev_deps!(t, envdir)
     end
+    (repair || built) && _forget_env_deps!(t.project)
     if repair
         _rlog("provision [3/3] environment unchanged on $host but its depot lacks some of it — instantiating it as it is")
         _prep_stage("Fetching missing packages on $host")
@@ -1449,11 +1461,23 @@ end
 # resolving them can move other packages to other versions.
 function _worker_env_deps(host::AbstractString, project::AbstractString)
     (isempty(host) || isempty(project)) && return nothing
+    k = (String(host), String(project))
+    d = lock(() -> get(_ENV_DEPS, k, nothing), _ENV_DEPS_LOCK)
+    d === nothing || return d
     ok, out = _run_on(host, "cat " * Sweep.shq_path(rstrip(String(project), '/') * "/Manifest.toml") * " 2>/dev/null")
     (ok && !isempty(strip(out))) || return nothing
     d = try; get(Sweep.TOML.parse(out), "deps", nothing); catch; nothing; end
-    return d isa AbstractDict ? d : nothing
+    d isa AbstractDict || return nothing
+    lock(() -> (_ENV_DEPS[k] = d), _ENV_DEPS_LOCK)
+    return d
 end
+
+# The Manifests `_worker_env_deps` read, by (host, environment). A provision that builds or repairs an
+# environment forgets it on every host, since a shared home is one file under several names.
+const _ENV_DEPS = Dict{Tuple{String,String},Any}()
+const _ENV_DEPS_LOCK = ReentrantLock()
+_forget_env_deps!(project::AbstractString) =
+    lock(() -> filter!(kv -> kv[1][2] != String(project), _ENV_DEPS), _ENV_DEPS_LOCK)
 
 # Shell that sets `JOPT` to `--sysimage=<image>` when a worker for `t` boots from its region's image
 # (`sysimage_plan`) and this node's CPU has that image, else to nothing, for a `julia \$JOPT …` after
@@ -2172,7 +2196,6 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     # log file — also survives the ssh channel closing. Paths are $HOME-relative (ssh login cwd).
     remote_script = "$_REMOTE_WORKER/worker-$port.jl"
     logf = "$_REMOTE_WORKER/worker-$port.log"
-    _put_file(host, Vector{UInt8}(codeunits(script)), remote_script)
     nthreads = effective_worker_threads(threads)
     proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
     # Self-identifying process tag: which region/notebook/port this worker serves, so `ps` isn't a wall of
@@ -2191,6 +2214,8 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     siresolve = _sysimage_jopt_sh(t)
     xflags = effective_worker_extra_flags(extra_flags)
     jl = "julia \$JOPT --project=$proj --startup-file=no --threads=$nthreads $xflags $remote_script '$tag'"
+    _put_texts(host, _REMOTE_WORKER, ["worker-$port.jl" => script]) ||
+        _rlog("spawn: could not send the worker script to $host")
     # A region's prologue, if it has one: `module load cuda`, a scratch dir, a venv. It runs HERE and
   # nowhere else. The allocation's own job body only sleeps, so shell put there would exit without
   # touching anything, and `_run_on` carries every poll and status command too — a `module load` on
@@ -2254,8 +2279,11 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
               "port" => string(port), "stream_port" => string(stream_port),
               "client_pubkey" => hubkey, "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS")]
     isempty(region) || push!(fields, "region" => String(region))   # the named region this worker serves (adoption key)
-    _write_worker_manifest!(host, port, fields)
-    _write_worker_state!(host, port, warm ? "idle" : "attached")
+    # Written after the launch, so a roster never lists a worker whose process has not started; the
+    # manifest and its state sidecar (`_write_worker_state!`) in one transfer.
+    _put_texts(host, _REMOTE_WORKER, ["worker-$port.json" => _flat_json(fields),
+                                      "worker-$port.state" => string(warm ? "idle" : "attached", " ", round(Int, time()))]) ||
+        _rlog("manifest: could not write $host:$_REMOTE_WORKER/worker-$port.json")
     return nothing
 end
 
@@ -4846,9 +4874,17 @@ may sit behind a `module load` that a probe cannot see.
 """
 function region_scheduler(r::Region)
     r.scheduler === :auto || return r.scheduler
+    k = lock(() -> get(_AUTO_SCHEDULER, r.host, nothing), _AUTO_SCHEDULER_LOCK)
+    k === nothing || return k
     h = try; Sweep.detect_scheduler(r.host); catch; nothing; end
-    return h === nothing ? :none : Sweep.SchedulerDetect.resolve(h, :auto)
+    h === nothing && return :none                      # not answered: asked again next time
+    k = Sweep.SchedulerDetect.resolve(h, :auto)
+    lock(() -> (_AUTO_SCHEDULER[r.host] = k), _AUTO_SCHEDULER_LOCK)
+    return k
 end
+# What `:auto` found on each host, asked once per hub: a host does not change its scheduler under it.
+const _AUTO_SCHEDULER = Dict{String,Symbol}()
+const _AUTO_SCHEDULER_LOCK = ReentrantLock()
 
 """
     region_host(r) -> String
@@ -4995,14 +5031,16 @@ being busy rather than a failure — the caller reports it and reconciles again 
 notebook opening does, since only a person asks for a node.
 """
 function region_place!(r::Region; wait_s::Real = 120, submit::Bool = true)
-    kind = region_scheduler(r)
-    kind === :none && return (r.host, nothing)
-    isempty(r.host) && error("region '$(r.name)' has a scheduler but no host to ask")
-    name = region_alloc_name(r)
+    r.scheduler === :none && return (r.host, nothing)
+    # A placement is only ever recorded under a scheduler, so a fresh one answers before asking which.
     cached = _placement(r)
     if cached !== nothing && time() - cached.checked < _PLACE_TTL
         return (cached.host, nothing)
     end
+    kind = region_scheduler(r)
+    kind === :none && return (r.host, nothing)
+    isempty(r.host) && error("region '$(r.name)' has a scheduler but no host to ask")
+    name = region_alloc_name(r)
     a = submit ? Sweep.allocation_node!(kind, r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
                                         partition = r.partition, cpus = r.cpus, mem = r.mem,
                                         gpus = r.gpus, account = r.account, options = r.options, submit = r.submit) :

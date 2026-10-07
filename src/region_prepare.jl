@@ -427,9 +427,13 @@ function _site_steps!(step, host::AbstractString, m, facts; own::AbstractString 
     end
     signed == "fail" && return signed
     step("Julia on $host") do
-        # A machine that names its own julia is used as it is; otherwise juliaup at the hub's.
-        isempty(m.julia) && (_ensure_julia!(host) || return ("fail", "no working julia after the install; see remote.log"))
+        # A machine that names its own julia is used as it is; otherwise juliaup at the hub's, installed
+        # only when there is none, and asked for its version again only after an install.
         ok, out = _run_on(host, machine_setup(m) * "julia --version")
+        if isempty(m.julia)
+            _ensure_julia!(host; version = ok ? out : "") || return ("fail", "no working julia after the install; see remote.log")
+            ok || ((ok, out) = _run_on(host, machine_setup(m) * "julia --version"))
+        end
         ok || return ("fail", strip(out))
         v = match(r"(\d+\.\d+\.\d+)", out)
         (v === nothing || v.captures[1] == string(VERSION)) ? ("ok", strip(out)) :
