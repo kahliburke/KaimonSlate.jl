@@ -77,11 +77,21 @@ end
         @test sum(nd["dispatch"]) > 0
     end
 
-    @testset "work on other threads is kept when it runs the cell's code" begin
+    @testset "work handed to other threads hangs under the line that handed it out" begin
         Threads.nthreads() > 1 || return
-        src = "acc = zeros(Threads.nthreads())\nThreads.@threads for k in 1:Threads.nthreads()\n    acc[Threads.threadid()] += work(n ÷ 4)\nend\n"
-        _, p = profile_cell(ProfNS, "pt", src)
+        # The threaded function is defined by another cell, as in a notebook.
+        RE.run_capture(ProfNS, "function spread(m)\n    acc = zeros(Threads.nthreads())\n    Threads.@threads for k in 1:4Threads.nthreads()\n        acc[Threads.threadid()] += work(m)\n    end\n    sum(acc)\nend\n", "cell:defs")
+        _, p = profile_cell(ProfNS, "pt", "a = 1\ns = spread(n ÷ 8)\n")
         @test p["threads"] >= 2
+        nd = nodes(p)
+        @test !any(i -> str(p, nd["func"][i]) == "other threads", eachindex(nd["func"]))
+        l2 = only(i for i in eachindex(nd["parent"]) if nd["parent"][i] == 1 && nd["line"][i] == 2)
+        @test nd["total"][l2] >= 0.8 * p["samples"]
+        # `work` is reached from the threads' tasks, beneath the cell's line, through `spread`.
+        under(i, a) = (while i > 0; i == a && return true; i = nd["parent"][i]; end; false)
+        w = [i for i in eachindex(nd["func"]) if str(p, nd["func"][i]) == "work" && under(i, l2)]
+        @test sum(nd["total"][w]) >= 0.5 * p["samples"]
+        @test p["dropped"]["other cells"] == 0
     end
 
     @testset "source for a frame is read on the kernel's machine" begin

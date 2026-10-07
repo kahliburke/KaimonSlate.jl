@@ -19,6 +19,10 @@ const _PROF_ARMED = Dict{String,String}()          # cell id → mode, for its n
 const _PROF_RESULT = Dict{String,Any}()            # cell id → the last profile of it
 const _PROF_STATE_LOCK = ReentrantLock()           # guards the two dicts above
 
+# The tasks of the other cells running in this process while one is profiled, as task ids: their
+# samples are theirs. The worker, which runs cells concurrently, sets this; the engine runs one at a time.
+const _PROF_OTHER_TASKS = Ref{Any}(() -> UInt[])
+
 # Samples every millisecond into a buffer of `_PROF_BUFFER` instruction pointers. A sample is its
 # stack depth plus six words, so this holds a few minutes of one busy thread at typical depths.
 const _PROF_DELAY = 0.001
@@ -36,6 +40,12 @@ profile_result(cell::AbstractString) = lock(_PROF_STATE_LOCK) do; get(_PROF_RESU
 
 _profile_take(cid::AbstractString) = lock(_PROF_STATE_LOCK) do; pop!(_PROF_ARMED, String(cid), nothing); end
 
+# Where in the sample buffer each statement of a profiled cell began, with its line. The buffer
+# fills in the order samples are taken, so its length is a clock every thread's samples share: a
+# sample on any thread falls in the statement running when it was taken.
+_prof_mark(line::Int) = (m = get(task_local_storage(), :slate_prof_marks, nothing);
+                         m === nothing || push!(m, (Int(ccall(:jl_profile_len_data, Csize_t, ())), line)); nothing)
+
 # Called by `run_capture` around a cell's evaluation. Unarmed, it is the evaluation.
 function _profiled(f, cid::AbstractString)
     mode = _profile_take(cid)
@@ -46,24 +56,28 @@ function _profiled(f, cid::AbstractString)
         Base.cumulative_compile_timing(true)
         c0 = Base.cumulative_compile_time_ns()[1]; g0 = Base.gc_num().total_time; t0 = time_ns()
         task = UInt(pointer_from_objref(current_task()))
+        others = delete!(Set{UInt}(_PROF_OTHER_TASKS[]()), task)
         facts() = (; mode, ms = (time_ns() - t0) / 1e6,
                      compile_ms = (Base.cumulative_compile_time_ns()[1] - c0) / 1e6,
                      gc_ms = (Base.gc_num().total_time - g0) / 1e6)
-        store!(fx, err) = (r = _profile_build(String(cid), task, fx; error = err);
+        store!(fx, err) = (union!(others, _PROF_OTHER_TASKS[]()); delete!(others, task);
+                           r = _profile_build(String(cid), task, fx; error = err, others = others, marks = marks);
                            lock(_PROF_STATE_LOCK) do; _PROF_RESULT[String(cid)] = r; end)
         local v
         task_local_storage(:slate_profiling, true)   # `_eval_cell_source` compiles the cell's statements
+        marks = Tuple{Int,Int}[]
+        task_local_storage(:slate_prof_marks, marks)
         try
             v = Profile.@profile f()
         catch e
             fx = facts(); Base.cumulative_compile_timing(false)
-            delete!(task_local_storage(), :slate_profiling)
+            delete!(task_local_storage(), :slate_profiling); delete!(task_local_storage(), :slate_prof_marks)
             try; store!(fx, sprint(showerror, e)); catch; end
             Profile.clear()
             rethrow()
         end
         fx = facts(); Base.cumulative_compile_timing(false)
-        delete!(task_local_storage(), :slate_profiling)
+        delete!(task_local_storage(), :slate_profiling); delete!(task_local_storage(), :slate_prof_marks)
         try
             store!(fx, nothing)
         catch e
@@ -83,6 +97,7 @@ struct _Sample
     ips::UnitRange{Int}
     thread::UInt
     task::UInt
+    clock::UInt
     awake::Bool
 end
 
@@ -94,7 +109,8 @@ function _profile_samples(data::Vector{UInt})
         ipend = i - Profile.nmeta - 2
         sleeping = data[i - Profile.META_OFFSET_SLEEPSTATE] == 2   # stored as state + 1
         push!(out, _Sample(start:ipend, data[i - Profile.META_OFFSET_THREADID],
-                           data[i - Profile.META_OFFSET_TASKID], !sleeping))
+                           data[i - Profile.META_OFFSET_TASKID], data[i - Profile.META_OFFSET_CPUCYCLECLOCK],
+                           !sleeping))
         start = i + 1
     end
     return out
@@ -167,6 +183,10 @@ _user_pkg(pkg::AbstractString, file::AbstractString) =
     !(pkg in ("cell", "notebook", "Base", "Compiler", "?", "")) && isabspath(file) &&
     !occursin("/packages/", file) && !occursin("/share/julia/", file) && !occursin("/stdlib/", file)
 
+# Where a task waits for work it handed to others: the caller of the first of these is where that
+# work is drawn.
+const _WAIT_FNS = (:threading_run, :wait, :_wait, :_wait2, :fetch, :sync_end, :take!, :wait_forever)
+
 # ── the tree ────────────────────────────────────────────────────────────────────────────────────
 
 const _K_LINE, _K_COMPILE, _K_GC, _K_OTHER, _K_SYNTH = 0, 1, 2, 3, 4
@@ -208,58 +228,79 @@ threads, samples inside another cell, and the worker's own tasks. A sample of a 
 not obviously start, doing work that is not the worker's, is kept under "other threads": library
 code the cell set running on a thread pool lands there.
 """
-function _profile_build(cid::String, task::UInt, facts; error = nothing)
+function _profile_build(cid::String, task::UInt, facts; error = nothing, others::Set{UInt} = Set{UInt}(),
+                        marks::Vector{Tuple{Int,Int}} = Tuple{Int,Int}[])
     data = Profile.fetch(include_meta = true)
     lidict = Profile.getdict(data)
     cellfile = "cell:" * cid
     t = _ProfTree()
     root = _node!(t, 0, cellfile, 0, "cell " * cid, "cell", _K_SYNTH)
-    toplevel = 0; others = 0
+    toplevel = 0; spare = 0
     dropped = Dict{String,Int}("idle" => 0, "other cells" => 0, "worker" => 0)
     kept = 0; threads = Set{UInt}()
     lines = Dict{Tuple{Int,Int},Vector{Int}}()    # (file, line) → [incl, self, dispatch, gc, compile]
     frames = Base.StackTraces.StackFrame[]
     seen = Set{Tuple{Int,Int}}()
     pkgfile = Dict{String,String}()               # package → a file of it, to tell the user's own
+    path = Int[]; pathfn = Symbol[]               # the line nodes this sample went through
+    # Work the cell hands to other tasks is the cell's, and belongs under the call that handed it
+    # out. A task waiting for that work leaves no samples, so it goes where the cell's own task last
+    # was in the same statement (inside the `@threads` loop, the `fetch`), or else on the
+    # statement's line. Samples are in the order they were taken, which is what `marks` index.
+    graft = 0; graftat = 0; mi = 0
     for s in _profile_samples(data)
+        while mi < length(marks) && marks[mi + 1][1] < first(s.ips); mi += 1; end
+        stmt0 = mi == 0 ? 0 : marks[mi][1]
         s.awake || (dropped["idle"] += 1; continue)
+        s.task in others && (dropped["other cells"] += 1; continue)
         empty!(frames)
         for k in s.ips   # leaf first; each ip may expand to several inlined frames, innermost first
             append!(frames, get(lidict, data[k], Base.StackTraces.StackFrame[]))
         end
         reverse!(frames)                                  # root first
-        cidx = findfirst(fr -> _ffile(fr) == cellfile, frames)
-        if cidx === nothing
-            s.task != task && any(fr -> (f = _ffile(fr); startswith(f, "cell:") && f != cellfile), frames) &&
-                (dropped["other cells"] += 1; continue)
-            # Below what the sample has to say: the task entry and, on the cell's task, the
-            # evaluation machinery up to the cell (`_eval_cell_source` and `eval`).
+        own = s.task == task
+        cidx = own ? findfirst(fr -> _ffile(fr) == cellfile, frames) : nothing
+        if own && cidx !== nothing
+            cur = root; start = cidx
+        elseif own
+            # The cell's task outside its code: parsing, lowering and compiling its statements,
+            # below the evaluation machinery that brought it there.
             ev = findlast(fr -> fr.func === :_eval_cell_source, frames)
             start = ev === nothing ? 1 : ev + 1
             while start <= length(frames) && (frames[start].from_c || frames[start].func === :eval ||
                                               _frame_pkg(frames[start], cellfile) in _INFRA_PKGS)
                 start += 1
             end
-            if s.task != task
-                any(fr -> !fr.from_c && _frame_pkg(fr, cellfile) in _INFRA_PKGS, frames) &&
-                    (dropped["worker"] += 1; continue)
-                # A thread with nothing but the runtime and Base's scheduler on it is waiting for work.
-                any(j -> !frames[j].from_c && !(_frame_pkg(frames[j], cellfile) in ("Base", "Compiler")),
-                    start:length(frames)) || (dropped["idle"] += 1; continue)
-                others == 0 && (others = _node!(t, root, "", 0, "other threads", "", _K_SYNTH))
-                cur = others
-            else
-                # The cell's task outside its code: parsing, lowering and compiling its statements.
-                toplevel == 0 && (toplevel = _node!(t, root, cellfile, 0, "top level", "cell", _K_SYNTH))
-                cur = toplevel
-            end
+            toplevel == 0 && (toplevel = _node!(t, root, cellfile, 0, "top level", "cell", _K_SYNTH))
+            cur = toplevel
         else
-            cur = root; start = cidx
+            any(fr -> !fr.from_c && _frame_pkg(fr, cellfile) in _INFRA_PKGS, frames) &&
+                (dropped["worker"] += 1; continue)
+            # From the first frame of real work: past the task entry and Base's scheduling. A thread
+            # with nothing else on it is waiting for work.
+            start = findfirst(fr -> !fr.from_c && !(_frame_pkg(fr, cellfile) in ("Base", "Compiler")), frames)
+            start === nothing && (dropped["idle"] += 1; continue)
+            if graft > 0 && graftat >= stmt0
+                cur = graft
+            elseif mi > 0 && marks[mi][2] > 0
+                cur = _node!(t, root, cellfile, marks[mi][2], "top-level scope", "cell", _K_LINE)
+            else
+                spare == 0 && (spare = _node!(t, root, "", 0, "other threads", "", _K_SYNTH))
+                cur = spare
+            end
         end
         kept += 1; push!(threads, s.thread)
-        t.total[root] += 1
-        cur == root || (t.total[cur] += 1)
-        empty!(seen)
+        # Everything above where this sample starts holds it too, lines included.
+        empty!(seen); empty!(path); empty!(pathfn)
+        a = cur
+        while a > 0
+            t.total[a] += 1
+            if t.kind[a] == _K_LINE
+                key = (t.file[a], t.line[a])
+                key in seen || (push!(seen, key); get!(() -> zeros(Int, 5), lines, key)[1] += 1)
+            end
+            a = t.parent[a]
+        end
         leafline = (0, 0)
         for j in start:length(frames)
             fr = frames[j]
@@ -292,6 +333,7 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing)
             file = _ffile(fr); ln = Int(fr.line)
             cur = _node!(t, cur, file, ln, string(fr.func), pkg, _K_LINE)
             t.total[cur] += 1
+            push!(path, cur); push!(pathfn, fr.func)
             key = (_str!(t, file), ln)
             if !(key in seen)
                 push!(seen, key)
@@ -301,6 +343,11 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing)
         end
         t.self[cur] += 1
         leafline[1] > 0 && (get!(() -> zeros(Int, 5), lines, leafline)[2] += 1)
+        # Where work handed out now would hang: the frame that waits for it, else the cell's line.
+        if own && cidx !== nothing && !isempty(path)
+            w = findfirst(in(_WAIT_FNS), pathfn)
+            graft = w === nothing ? path[1] : path[max(1, w - 1)]; graftat = first(s.ips)
+        end
     end
     tree = _profile_prune(t, kept)
     return Dict{String,Any}(

@@ -228,6 +228,7 @@ function __init__()
     _LAST_EVAL_AT[] = time_ns()
     _load_libcrypto!()
     _NS[] = _new_ns()
+    _PROF_OTHER_TASKS[] = _running_task_ids
 end
 const _MEMO_DIR = Ref{String}("")
 # On-disk ceiling for the durable memo store (LRU-evicted). Configurable — big-data notebooks
@@ -1019,6 +1020,8 @@ _cell_get(c, k, default) = c isa AbstractDict ? get(c, k, get(c, Symbol(k), defa
 # ids are unique within it. Guarded by a lock (mutated from the scheduler task + the cancel handler).
 const _CANCEL_LOCK = ReentrantLock()
 const _RUNNING_TASKS = Dict{String,Task}()
+# The running cells' tasks, for the profiler to tell another cell's samples from the profiled one's.
+_running_task_ids() = lock(_CANCEL_LOCK) do; UInt[UInt(pointer_from_objref(t)) for t in values(_RUNNING_TASKS)]; end
 const _WARM_STATUS = Ref{String}("")     # pool worker's preload/precompile progress → telemetry → pool UI
 const _LAST_HUB_REQ = Ref(time())        # wall time of the last hub heartbeat (__slate_running) — the spin-guard's orphan signal
 const _LAST_EVAL_AT = Ref(time_ns())     # MONOTONIC: reported as an instant, mapped into hub time by ClockTrack

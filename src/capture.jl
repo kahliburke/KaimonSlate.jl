@@ -122,6 +122,7 @@ function _eval_cell_source(mod::Module, source::AbstractString, filename::Abstra
         else
             push!(srcs, string(a))                                   # deparsed statement source (replay unit)
             push!(marked, Expr(:call, _slate_mark_stmt, length(srcs)))   # mark before running it
+            compiled && push!(marked, Expr(:call, _prof_mark, lnn === nothing ? 0 : lnn.line))
             push!(marked, (compiled && !_toplevel_only(a)) ?
                           Expr(:block, something(lnn, LineNumberNode(0)), Expr(:meta, :force_compile), a) : a)
         end
