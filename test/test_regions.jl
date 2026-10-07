@@ -1881,6 +1881,15 @@ end
         empty!(steps); empty!(ran)
         RE._prepare_in_worker!(step, Dict{String,Any}(), "proj", (start = (_ = false) -> error("no"), run = worker.run))
         @test steps == [("Start the notebook's worker", "fail")] && isempty(ran)
+        # A worker is started fresh when this prepare built its image or its environment anew, since a
+        # running one keeps the packages it loaded.
+        fresh = Bool[]
+        w2 = (start = f -> push!(fresh, f), run = worker.run)
+        for m in (Dict{String,Any}(), Dict{String,Any}("env_action" => :held),
+                  Dict{String,Any}("env_action" => :build), Dict{String,Any}("sysimage" => Dict("result" => "built")))
+            RE._prepare_in_worker!(step, m, "proj", w2)
+        end
+        @test fresh == [false, false, true, true]
         # The code it sends runs in a module of its own (its imports are top-level there) and reports.
         mktempdir() do d
             write(joinpath(d, "Project.toml"), "")

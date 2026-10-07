@@ -1337,12 +1337,14 @@ function _provision_runtime!(host; seen = nothing, setup::AbstractString = "", n
 end
 
 """
-    provision_remote!(t::RemoteTarget, parent_project) -> nothing
+    provision_remote!(t::RemoteTarget, parent_project; rebuild = false) -> Symbol
 
 Idempotent. Ensure the host can run a SlateWorker: (1) send Slate's worker payload,
 (2) materialise a KaimonGate worker env (added from the registry) + Revise, instantiate,
-(3) send the notebook's parent project (Project.toml + /src) and instantiate it. Cheap on
-reruns (the env instantiate is skipped once `.ready` exists).
+(3) put the notebook's environment there: built when the host has none or another, else kept as it
+is, its sources sent when they changed. `rebuild` (a prepare) also tests that the depot still holds
+the environment and fetches what it lost. Returns what became of the environment (`_env_action`):
+`:build`, `:repair`, `:held` or `:keep`.
 """
 function provision_remote!(t::RemoteTarget, parent_project::AbstractString; precompile::Bool = true,
                            seen = nothing, rebuild::Bool = false)
@@ -1468,7 +1470,8 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # when the path went missing.
     (!scripted && get(st, "rg", "") != "1") && _record_rg_path!(host, rel; setup = t.setup)
     _rlog("provision DONE host=$host")
-    return nothing
+    # What became of the environment: `:build` when its files were written anew, else as `_env_action`.
+    return built ? :build : action
 end
 
 # ── worker sysimage ───────────────────────────────────────────────────────────────────────────

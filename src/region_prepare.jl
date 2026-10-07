@@ -297,7 +297,7 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
                 t = _region_target(r; origin_env = ref[1], at = (String(host), ""))
                 # `rebuild` also tests that the depot still holds what the stamp says was built, and
                 # fetches only what it lost (`_env_action`).
-                provision_remote!(t, ref[2]; precompile = false, rebuild = true)
+                measured["env_action"] = provision_remote!(t, ref[2]; precompile = false, rebuild = true)
                 measured["downloaded"] = true
                 ("ok", "")
             end
@@ -632,7 +632,8 @@ function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothi
     # shares the login node's home finds it there already, sources included.
     got = step("Install $name") do
         rebuild || return ("ok", "downloaded on the login node, which shares its home")
-        provision_remote!(t, ref[2]; rebuild, precompile = false)
+        a = provision_remote!(t, ref[2]; rebuild, precompile = false)
+        a === :build && (measured["env_action"] = a)
         ("ok", "")
     end
     got == "fail" && return nothing
@@ -701,7 +702,8 @@ end
 function _prepare_in_worker!(step, measured, name, worker)
     # A worker already running booted from whatever image there was then: when this prepare built a new
     # one, the notebook's worker is replaced so it boots from it.
-    fresh = get(get(measured, "sysimage", Dict()), "result", "") == "built"
+    # So is one whose environment this prepare built anew: it loaded the packages it had.
+    fresh = get(get(measured, "sysimage", Dict()), "result", "") == "built" || get(measured, "env_action", :keep) === :build
     up = step("Start the notebook's worker") do
         t0 = time()
         worker.start(fresh)
