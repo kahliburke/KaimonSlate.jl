@@ -796,16 +796,38 @@ end
 function _tree_digest(dir::AbstractString, excludes::Vector{String}; region::AbstractString = "")
     keep = Sweep.transfer_keep(dir; region, excludes)
     ctx = _SHA.SHA1_CTX()
-    for (root, dirs, files) in walkdir(dir)
-        filter!(d -> d != ".git" && keep(relpath(joinpath(root, d), dir)), dirs)
-        for f in sort(files)
-            p = joinpath(root, f); rel = relpath(p, dir)
-            keep(rel) || continue
-            st = stat(p)
-            _SHA.update!(ctx, codeunits(string(rel, " ", st.size, " ", st.mtime, "\n")))
-        end
+    for rel in _files_under(dir; descend = r -> basename(r) != ".git" && keep(r))
+        keep(rel) || continue
+        st = stat(joinpath(dir, rel))
+        _SHA.update!(ctx, codeunits(string(rel, " ", st.size, " ", st.mtime, "\n")))
     end
     return bytes2hex(_SHA.digest!(ctx))
+end
+
+"""
+    _files_under(dir; descend = _ -> true) -> Vector{String}
+
+Every file under `dir`, as a path relative to it with `/` separators, in sorted order, without
+entering a directory `descend(rel)` refuses or one that cannot be read. `walkdir` cannot be pruned:
+it iterates the list of directories it hands out while the caller runs, so editing that list races its
+own traversal and can skip a directory, depending on scheduling.
+"""
+function _files_under(dir::AbstractString; descend = _ -> true)
+    out = String[]
+    function visit(rel)
+        names = try; sort!(readdir(isempty(rel) ? dir : joinpath(dir, rel))); catch; return; end
+        for n in names
+            r = isempty(rel) ? n : rel * "/" * n
+            p = joinpath(dir, r)
+            if isdir(p) && !islink(p)
+                descend(r) && visit(r)
+            else
+                push!(out, r)
+            end
+        end
+    end
+    visit("")
+    return out
 end
 _sent_digest_path(dir::AbstractString, key::AbstractString) =
     joinpath(_slate_cache_dir(), "sync", bytes2hex(_SHA.sha1(string(dir, "\n", key)))[1:16] * ".digest")
@@ -1200,14 +1222,10 @@ const _SEB_EXCLUDES  = [".git", "*.cov"]
 function _seb_sha()
     isdir(_LOCAL_SEB) || return ""
     ctx = _SHA.SHA1_CTX()
-    for (root, dirs, files) in walkdir(_LOCAL_SEB)
-        filter!(!=(".git"), dirs); sort!(dirs)
-        for f in sort(files)
-            endswith(f, ".cov") && continue
-            p = joinpath(root, f)
-            _SHA.update!(ctx, codeunits(relpath(p, _LOCAL_SEB)))
-            _SHA.update!(ctx, read(p))
-        end
+    for rel in _files_under(_LOCAL_SEB; descend = r -> basename(r) != ".git")
+        endswith(rel, ".cov") && continue
+        _SHA.update!(ctx, codeunits(rel))
+        _SHA.update!(ctx, read(joinpath(_LOCAL_SEB, rel)))
     end
     return bytes2hex(_SHA.digest!(ctx))[1:16]
 end

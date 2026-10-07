@@ -2097,6 +2097,21 @@ end
         end
     end
 
+    @testset "a directory walk is complete and the same every time" begin
+        # `walkdir` cannot be pruned: editing the list it hands out races its traversal and can drop a
+        # sibling of the pruned directory. These walks prune `.git` and must still see `src`.
+        mktempdir() do d
+            mkpath(joinpath(d, ".git", "objects")); write(joinpath(d, ".git", "objects", "x"), "x")
+            mkpath(joinpath(d, "src", "sub")); write(joinpath(d, "src", "A.jl"), "a"); write(joinpath(d, "src", "sub", "B.jl"), "b")
+            write(joinpath(d, "Project.toml"), "")
+            want = ["Project.toml", "src/A.jl", "src/sub/B.jl"]
+            @test all(_ -> RE._files_under(d; descend = r -> basename(r) != ".git") == want, 1:50)
+            @test RE._files_under(d; descend = r -> r != "src/sub") == ["Project.toml", "src/A.jl"]
+            digests = Set(RE._tree_digest(d, [".git"]) for _ = 1:50)
+            @test length(digests) == 1
+        end
+    end
+
     @testset "an unchanged source directory is not sent again" begin
         src, dest, cache = mktempdir(), mktempdir(), mktempdir()
         withenv("KAIMONSLATE_CACHE_HOME" => cache) do

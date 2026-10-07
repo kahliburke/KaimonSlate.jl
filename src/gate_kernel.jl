@@ -491,13 +491,12 @@ end
 # Notebook files under `roots` named one of `names` (`<name>.jl`), skipping hidden and vendored trees.
 function _notebooks_named(roots, names::Set{String})
     found = Dict{String,Vector{String}}()
-    for root in roots, (dir, dirs, files) in walkdir(root; onerror = _ -> nothing)
-        filter!(d -> !startswith(d, '.') && !(d in ("node_modules", "Library", "compiled", "artifacts")), dirs)
-        for f in files
-            endswith(f, ".jl") || continue
-            n = replace(f[1:end-3], r"[^A-Za-z0-9_-]" => "_")
-            n in names && push!(get!(found, n, String[]), joinpath(dir, f))
-        end
+    skip(r) = (b = basename(r); startswith(b, '.') || b in ("node_modules", "Library", "compiled", "artifacts"))
+    for root in roots, rel in _files_under(root; descend = !skip)
+        f = basename(rel)
+        endswith(f, ".jl") || continue
+        n = replace(f[1:end-3], r"[^A-Za-z0-9_-]" => "_")
+        n in names && push!(get!(found, n, String[]), joinpath(root, rel))
     end
     return found
 end

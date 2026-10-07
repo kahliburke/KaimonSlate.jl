@@ -75,17 +75,7 @@ end
 ctx = SHA.SHA1_CTX()
 upd(x) = SHA.update!(ctx, codeunits(string(x, "\n")))
 upd(VERSION)
-function tree_hash(dir)
-    h = SHA.SHA1_CTX()
-    for (root, dirs, files) in walkdir(dir)
-        filter!(d -> d != ".git", dirs)
-        for f in sort(files)
-            p = joinpath(root, f)
-            SHA.update!(h, codeunits(relpath(p, dir))); SHA.update!(h, read(p))
-        end
-    end
-    bytes2hex(SHA.digest!(h))[1:16]
-end
+tree_hash(dir) = bytes2hex(Pkg.GitTools.tree_hash(dir))[1:16]   # git's tree hash, as a Manifest records it
 held = String[]
 for name in sort!(collect(closure))
     e = nbdeps[name]

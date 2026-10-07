@@ -164,14 +164,11 @@ _memo_root() = joinpath(SlateHome.cache_home(), "memo")
 # Copy a directory's contents into `dest`, skipping `.git` (history travels via the git
 # bundle, not as loose objects) — keeps the tarball lean and avoids nested-repo confusion.
 function _copy_tree!(dest::AbstractString, src::AbstractString)
-    for (root, dirs, files) in walkdir(src)
-        filter!(d -> d != ".git", dirs)
-        rel = relpath(root, src)
-        mkpath(joinpath(dest, rel))
-        for f in files
-            from = joinpath(root, f)
-            try; cp(from, joinpath(dest, rel, f); force = true, follow_symlinks = true); catch; end
-        end
+    mkpath(dest)
+    for rel in ReportEngine._files_under(src; descend = r -> basename(r) != ".git")
+        to = joinpath(dest, rel)
+        mkpath(dirname(to))
+        try; cp(joinpath(src, rel), to; force = true, follow_symlinks = true); catch; end
     end
     return dest
 end
