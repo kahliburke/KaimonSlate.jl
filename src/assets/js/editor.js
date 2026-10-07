@@ -969,8 +969,9 @@
   // read as the file's — the whole point is to be able to say "src/ridge.jl:14" and see line 14.
   // ── Profile heat (profiler.js) ───────────────────────────────────────────────
   // Rows `{line, incl, self, d, g, c}` in DOCUMENT lines: `incl`/`self` are shares of the samples,
-  // `d`/`g`/`c` the samples under runtime dispatch, GC and compilation. A margin shows the share and
-  // the marks; the line itself is tinted by it. `hot` outlines lines the flame graph points at.
+  // `d`/`g`/`c` the samples under runtime dispatch, GC and compilation, `j` the static check's
+  // findings on the line (`jt` their descriptions). A margin shows the share and the marks; the line
+  // itself is tinted by it. `hot` outlines lines the flame graph points at.
   const setHeat = StateEffect.define(), setHot = StateEffect.define();
   const heatField = StateField.define({
     create: () => ({ rows: [], hot: [] }),
@@ -988,7 +989,7 @@
     for (const ln of [...new Set([...byLine.keys(), ...hot])].sort((a, b) => a - b)) {
       if (ln < 1 || ln > n) continue;
       const r = byLine.get(ln), x = r ? Math.min(1, Math.pow(r.incl, 0.6)) : 0;
-      rs.push(Decoration.line({ class: 'cm-heat' + (hot.has(ln) ? ' cm-heathot' : ''),
+      rs.push(Decoration.line({ class: 'cm-heat' + (hot.has(ln) ? ' cm-heathot' : '') + (r && r.j ? ' cm-jet' : ''),
                                 attributes: { style: '--heat:' + x.toFixed(3) } }).range(state.doc.line(ln).from));
     }
     return Decoration.set(rs);
@@ -1010,7 +1011,8 @@
       s.className = 'cm-heatm';
       const marks = (r.d > 0 ? '<i class="pfm d" title="runtime dispatch">⤳</i>' : '') +
                     (r.c > 0 ? '<i class="pfm c" title="compilation">⚙</i>' : '') +
-                    (r.g > 0 ? '<i class="pfm g" title="garbage collection">♻</i>' : '');
+                    (r.g > 0 ? '<i class="pfm g" title="garbage collection">♻</i>' : '') +
+                    (r.j > 0 ? '<i class="pfm j" title="' + String((r.jt || []).join('\n')).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]) + '">◆</i>' : '');
       s.innerHTML = '<b style="width:' + Math.round(Math.min(1, r.incl) * 100) + '%"></b><em>' + _pct(r.incl) + '</em>' + marks;
       return s;
     }

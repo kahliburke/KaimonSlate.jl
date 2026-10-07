@@ -40,6 +40,32 @@ end
         @test bad["ok"] === false && occursin("parse", bad["error"])
     end
 
+    @testset "the static check is the notebook's to opt into" begin
+        r = RE.profile_prepare!(ProfNS; cell = "ps1", source = "y = work(n)\n", reads = ["work", "n"])
+        st = r["static"]
+        if Base.locate_package(RE._JET_ID) === nothing
+            @test st["available"] === false && occursin("JET", st["why"]) && isempty(st["findings"])
+        else
+            @test st["available"] === true && st["error"] === nothing
+        end
+        # Findings read in the cell's terms: the module's name dropped, a capture on its assignment.
+        fake = Dict{String,Any}("findings" => Any[Dict{String,Any}("kind" => "captured", "msg" => "captured variable `c` detected",
+                    "sig" => "c = Core.Box()", "file" => "cell:ps1", "line" => 1),
+                Dict{String,Any}("kind" => "dispatch", "msg" => "runtime dispatch detected",
+                    "sig" => "(%1::Any $(ProfNS).:+ 1)::Any", "file" => "cell:ps1", "line" => 3)])
+        RE._static_tidy!(fake, ProfNS, "cell:ps1", "a = 1\nc = 0\nf = () -> (c += 1)\n")
+        @test fake["findings"][1]["line"] == 2 && fake["findings"][2]["sig"] == "(%1::Any :+ 1)::Any"
+    end
+
+    @testset "with JET, the static check finds dispatch and boxed captures on the cell's lines" begin
+        Base.locate_package(RE._JET_ID) === nothing && return
+        src = "t = unstable(xs0)\nc = 0\nbump = () -> (c += 1)\nbump()\nz = t + c\n"
+        Core.eval(ProfNS, :(xs0 = Any[1, 2.5]))
+        st = RE.profile_prepare!(ProfNS; cell = "pj", source = src, reads = ["unstable", "xs0"])["static"]
+        kinds = Set((g["kind"], g["line"]) for g in st["findings"] if g["file"] == "cell:pj")
+        @test ("captured", 2) in kinds && ("dispatch", 5) in kinds
+    end
+
     @testset "an armed run is sampled, rooted at the cell's lines" begin
         src = "a = 1\nr = work(n)\nb = 2\n"
         w, p = profile_cell(ProfNS, "pc", src)

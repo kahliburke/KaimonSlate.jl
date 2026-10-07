@@ -14,7 +14,8 @@ const _PROF_HUB_LOCK = ReentrantLock()
 
 "Drop what the hub holds for notebook `id`'s profiles (kept ones stay on disk); ids are reused on reopen."
 forget_profiles!(id::AbstractString) = lock(_PROF_HUB_LOCK) do
-    filter!(kv -> kv[1][1] != id, _PROF_LAST); filter!(kv -> kv[1][1] != id, _PROF_ASKED); nothing
+    filter!(kv -> kv[1][1] != id, _PROF_LAST); filter!(kv -> kv[1][1] != id, _PROF_ASKED)
+    filter!(kv -> kv[1][1] != id, _PROF_PREP); nothing
 end
 
 _broadcast_profile(nb::LiveNotebook, payload::Dict{String,Any}) =
@@ -51,22 +52,72 @@ Compile cell `cid`'s code where it runs, without running it, in the background. 
 `preparing`, then `prepared` with what was compiled.
 """
 function prepare_profile!(nb::LiveNotebook, cid::AbstractString)
+    _profile_cell(nb, cid) === nothing && return Dict{String,Any}("ok" => false, "error" => "no code cell '$cid'")
+    Threads.@spawn prepare_now!(nb, cid)
+    return Dict{String,Any}("ok" => true)
+end
+
+# The last compile of each cell, with its static check: the specialist reads it, and the dock
+# shows it on reopening.
+const _PROF_PREP = Dict{Tuple{String,String},Dict{String,Any}}()
+
+"""
+    prepare_now!(nb, cid) -> Dict
+
+`prepare_profile!`, waited for: the `prepared` push, or `ok = false` with why.
+"""
+function prepare_now!(nb::LiveNotebook, cid::AbstractString)
     cell = _profile_cell(nb, cid)
     cell === nothing && return Dict{String,Any}("ok" => false, "error" => "no code cell '$cid'")
     side = _region_active(nb) ? _cell_side(nb, cell) : ""   # the side only: the kernel may not exist yet
     src = cell.source; reads = String[String(r) for r in cell.reads]
     _broadcast_profile(nb, Dict{String,Any}("kind" => "preparing", "cell" => String(cid), "side" => side))
-    Threads.@spawn try
+    try
         k, why = _profile_kernel(nb, side)
         k === nothing && return _profile_fail(nb, cid, side, why)
         r = lock(_eval_mutex(nb)) do
             ReportEngine.profile_prepare!(k, nb.report; cell = String(cid), source = src, reads = reads)
         end
-        _broadcast_profile(nb, merge(Dict{String,Any}(r), Dict{String,Any}("kind" => "prepared", "side" => side)))
+        p = merge(Dict{String,Any}(r), Dict{String,Any}("kind" => "prepared", "side" => side, "source" => src))
+        lock(_PROF_HUB_LOCK) do; _PROF_PREP[(nb.id, String(cid))] = p; end
+        _broadcast_profile(nb, p)
+        return p
     catch e
-        _profile_fail(nb, cid, side, first(sprint(showerror, e), 300))
+        return _profile_fail(nb, cid, side, first(sprint(showerror, e), 300))
     end
-    return Dict{String,Any}("ok" => true)
+end
+
+"The last compile of `cid`, or `nothing`."
+last_prepare(nb::LiveNotebook, cid::AbstractString) = lock(_PROF_HUB_LOCK) do; get(_PROF_PREP, (nb.id, String(cid)), nothing); end
+
+"""
+    profile_static_text(nb, cid) -> String
+
+The static check of `cid`'s last compile in words: each finding where it lands in the reader's code,
+and, for one inside a library, the call it ends in.
+"""
+function profile_static_text(nb::LiveNotebook, cid::AbstractString)
+    p = last_prepare(nb, cid)
+    p === nothing && return "Cell `$cid` has not been compiled for profiling yet. `prof_check` does it."
+    st = get(p, "static", nothing)
+    st === nothing && return "Cell `$cid` could not be compiled as a function: $(something(p["error"], "no reason given"))"
+    st["available"] === true || return "No static check: $(get(st, "why", "JET is not available")). Adding JET to the notebook's environment turns it on."
+    st["error"] === nothing || return String(st["error"])
+    fs = st["findings"]
+    isempty(fs) && return "Static check (JET): nothing found. Every call in the cell's code resolves at compile time at the current types."
+    io = IOBuffer()
+    println(io, "Static check (JET, ", st["n"], " report", st["n"] == 1 ? "" : "s", "):")
+    for g in Iterators.take(fs, 40)
+        where = string(_pshort(String(g["file"])), ":", g["line"], (t = _cell_line_text(nb, String(g["file"]), g["line"], p); isempty(t) ? "" : "  " * t))
+        println(io, "  ", rpad(String(g["kind"]), 10), g["count"] > 1 ? "×$(g["count"]) " : "", where)
+        isempty(g["sig"]) || println(io, "      ", g["sig"])
+        if g["mine"] !== true && !isempty(g["frames"])
+            l = g["frames"][end]
+            println(io, "      inside ", l[3], "  ", _pshort(String(l[1])), ":", l[2], " (", l[4], ")")
+        end
+    end
+    length(fs) > 40 && println(io, "  … and ", length(fs) - 40, " more")
+    return String(take!(io))
 end
 
 # Profiles asked for, waiting for the cell's next run. Armed on whichever kernel that run lands on,
@@ -272,8 +323,11 @@ function _register_profile_routes!(router, h::Hub)
     end))
     HTTP.register!(router, "GET", "/api/{id}/profile/last", req -> _withnb(h, req, nb -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
-        p = last_profile(nb, String(get(q, "cell", "")))
-        _json(_json_finite(p === nothing ? Dict{String,Any}("kind" => "none") : p))
+        cid = String(get(q, "cell", ""))
+        p = last_profile(nb, cid)
+        r = p === nothing ? Dict{String,Any}("kind" => "none") : copy(p)
+        r["prepared"] = last_prepare(nb, cid)          # the last compile and its static check, if any
+        _json(_json_finite(r))
     end))
     HTTP.register!(router, "POST", "/api/{id}/profile/agent", req -> _withnb(h, req, nb -> begin
         b = _body(req)
@@ -415,6 +469,10 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
             end
         end
     end
+    pp = last_prepare(nb, cid)
+    if pp !== nothing && get(pp, "static", nothing) isa AbstractDict && pp["static"]["available"] === true
+        println(io); println(io, profile_static_text(nb, cid))
+    end
     nodes, kids = _pnodes(P)
     println(io, "\nHot paths, from the cell's heaviest lines:")
     tops = sort(kids[1]; by = i -> -nodes[i].total)
@@ -533,7 +591,7 @@ const PROFILE_ROLE = "profiler"
 
 # Its own verbs, plus reading cells, changing one once the person has agreed, and the conversation
 # every specialist has.
-const PROFILE_VERBS = String["prof_run", "prof_summary", "prof_tree", "prof_source", "prof_eval",
+const PROFILE_VERBS = String["prof_run", "prof_check", "prof_summary", "prof_tree", "prof_source", "prof_eval",
                              "read", "edit_cell", "spec_ask", "spec_done"]
 
 const PROFILE_BRIEF = """
@@ -542,7 +600,9 @@ you in. You have one job: find where a cell's time goes and what would make it f
 
 Your tools profile the cell where it runs (a `region=` cell on its cluster node) and read the
 result: `prof_run` runs the cell under the profiler and returns a summary compared with the run
-before; `prof_summary` repeats it; `prof_tree` shows the call tree under a line or function, keyed
+before; `prof_check` compiles the cell without running it and, when the notebook has JET, lists
+where its code dispatches at runtime or boxes a captured variable, found statically;
+`prof_summary` repeats the last profile; `prof_tree` shows the call tree under a line or function, keyed
 by source line; `prof_source` shows any file with each line's share of the run; `prof_eval` runs
 Julia on the cell's own kernel, in the notebook's namespace, which is where you check a hypothesis:
 `@code_warntype f(args)`, `@allocated f(args)`, `@time`, `typeof(x)`, at the values the cell uses.

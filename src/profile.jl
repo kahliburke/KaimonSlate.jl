@@ -835,6 +835,7 @@ function profile_prepare!(mod::Module; cell::AbstractString, source::AbstractStr
     fdef = Expr(:function, Expr(:call, fname, names...), Expr(:block, body..., nothing))
     Base.cumulative_compile_timing(true)
     c0 = Base.cumulative_compile_time_ns()[1]
+    f = nothing; tt = ()
     try
         Core.eval(mod, fdef)
         f = Base.invokelatest(getfield, mod, fname)
@@ -847,6 +848,92 @@ function profile_prepare!(mod::Module; cell::AbstractString, source::AbstractStr
         out["compile_ms"] = round((Base.cumulative_compile_time_ns()[1] - c0) / 1e6; digits = 1)
         Base.cumulative_compile_timing(false)
     end
+    if f !== nothing
+        st = _static_check(f, tt, "cell:" * String(cell))
+        _static_tidy!(st, mod, "cell:" * String(cell), String(source))
+        out["static"] = st
+    end
+    return out
+end
+
+# Findings read in the cell's terms: without the notebook module's name in front of every function,
+# and a captured variable on the line that first assigns it (JET places it on the function's first).
+function _static_tidy!(st::Dict{String,Any}, mod::Module, cellfile::AbstractString, source::AbstractString)
+    pre = string(mod) * "."
+    lines = split(source, '\n')
+    for g in st["findings"]
+        g["sig"] = replace(g["sig"], pre => "")
+        g["kind"] == "captured" && g["file"] == cellfile || continue
+        m = match(r"`([^`]+)`", g["msg"]); m === nothing && continue
+        v = Regex("(?<![\\w.])" * replace(m.captures[1], r"([^\w])" => s"\\\1") * "\\s*[-+*/^]?=(?!=)")
+        k = findfirst(l -> occursin(v, l), lines)
+        k === nothing || (g["line"] = k)
+    end
+    return st
+end
+
+# ── the static check ────────────────────────────────────────────────────────────────────────────
+# JET's optimization analysis of the same function at the same types: where a call has to be
+# dispatched at runtime, and which variables a closure captures in a box, found without running
+# anything. Only when the notebook's environment has JET: it is the notebook's to opt into, so it
+# is never added for it, and its version is the one the notebook resolved.
+const _JET_ID = Base.PkgId(Base.UUID("c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"), "JET")
+
+function _jet_module()
+    m = get(Base.loaded_modules, _JET_ID, nothing)
+    m === nothing || return m
+    Base.locate_package(_JET_ID) === nothing && return nothing
+    return try; Base.require(_JET_ID); catch; nothing; end
+end
+
+const _JET_KIND = Dict("RuntimeDispatchReport" => "dispatch", "CapturedVariableReport" => "captured",
+                       "OptimizationFailureReport" => "not optimized")
+
+_mi_name(mi) = try; string(mi.def.name); catch; ""; end
+
+"""
+    _static_check(f, tt, cellfile) -> Dict
+
+JET's `report_opt` of `f` at `tt`. A finding is placed at the innermost frame of its call chain in
+the reader's own code (this cell, another cell, a package being worked on), which is where a fix
+would go; `mine` says whether the problem is in that code itself or in a library it calls. The same
+finding reached along several paths is one entry with a count.
+"""
+function _static_check(f, tt, cellfile::AbstractString)
+    out = Dict{String,Any}("available" => false, "findings" => Any[], "n" => 0, "error" => nothing)
+    J = _jet_module()
+    J === nothing && (out["why"] = "JET is not in this notebook's environment"; return out)
+    out["available"] = true
+    t0 = time_ns()
+    try
+        reps = Base.invokelatest(J.get_reports, Base.invokelatest(J.report_opt, f, tt))
+        groups = Dict{Tuple{String,String,String,Int},Dict{String,Any}}()
+        for r in reps
+            kind = get(_JET_KIND, string(nameof(typeof(r))), string(nameof(typeof(r))))
+            msg = try; Base.invokelatest(sprint, J.print_report_message, r); catch; kind; end
+            sig = try
+                Base.invokelatest(sprint, (io, x) -> J.print_signature(io, x, J.PrintConfig()), r.sig)
+            catch
+                ""
+            end
+            frames = [(_ffile(fr), Int(fr.line), _mi_name(fr.linfo), _frame_pkg(fr, cellfile)) for fr in r.vst]
+            isempty(frames) && continue
+            k = something(findlast(x -> x[4] in ("cell", "notebook") || _user_pkg(x[4], x[1]), frames), 1)
+            at = frames[k]
+            g = get!(groups, (kind, sig, at[1], at[2])) do
+                Dict{String,Any}("kind" => kind, "msg" => msg, "sig" => sig, "file" => at[1], "line" => at[2],
+                                 "func" => at[3], "mine" => k == length(frames), "count" => 0,
+                                 "frames" => [[x[1], x[2], x[3], x[4]] for x in frames[1:min(end, 16)]])
+            end
+            g["count"] += 1
+        end
+        found = sort!(collect(values(groups)); by = g -> (!g["mine"], -g["count"], g["file"], g["line"]))
+        out["n"] = length(reps)
+        out["findings"] = found[1:min(end, 200)]
+    catch e
+        out["error"] = "JET could not check the cell: " * first(sprint(showerror, e), 300)
+    end
+    out["ms"] = round((time_ns() - t0) / 1e6; digits = 1)
     return out
 end
 

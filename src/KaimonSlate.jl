@@ -1776,6 +1776,22 @@ function create_tools(GateTool::Type)
     end
 
     """
+        prof_check(notebook, cell) -> String
+
+    Compile `cell`'s code where it runs, without running it, and check it statically. When the
+    notebook's environment has JET, lists each place the code dispatches at runtime (a type
+    instability) or captures a variable in a box, at the line in the notebook's code it comes from
+    and, for one inside a library, the call it ends in. Without JET it says so; JET is the
+    notebook's to add.
+    """
+    function prof_check(notebook::String, cell::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = NotebookServer.prepare_now!(nb, strip(cell))
+        get(r, "kind", "") == "prepared" || return "⛔ " * String(something(get(r, "error", nothing), "the compile did not complete"))
+        return NotebookServer.profile_static_text(nb, strip(cell))
+    end
+
+    """
         prof_summary(notebook, cell) -> String
 
     The last profile of `cell`: how long it ran, the lines that took the most time of their own
@@ -3910,6 +3926,7 @@ function create_tools(GateTool::Type)
         GateTool("dbg_watch", dbg_watch),
         # Cell profiler: a run waits for the cell, so it gets the cell-run budget, as does an eval.
         GateTool("prof_run", prof_run; timeout_ms = CELL_RUN_MS),
+        GateTool("prof_check", prof_check; timeout_ms = CELL_RUN_MS),
         GateTool("prof_summary", prof_summary),
         GateTool("prof_tree", prof_tree),
         GateTool("prof_source", prof_source),

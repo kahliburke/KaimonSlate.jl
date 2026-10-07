@@ -264,6 +264,7 @@ export async function openProfile(cellId, kept = '') {
     if (kept) await showKept(kept);
     else {
       const r = await A('GET', '/api/profile/last?cell=' + encodeURIComponent(cellId));
+      if (r && r.prepared && pf.value && pf.value.cell === cellId) pf.value = { ...pf.value, prepared: r.prepared };
       if (r && r.kind === 'result') apply(r);
     }
   } catch (_) {}
@@ -926,6 +927,24 @@ function Functions() {
   </div>`;
 }
 
+// ── the static check (Compile, with JET in the notebook's environment) ─────────────────────────────
+function StaticCheck() {
+  const P = pf.value, st = P && P.prepared && P.prepared.static;
+  if (!st) return null;
+  const head = html`<div class="pfrelhead">Static check${st.available && !st.error ? ' · JET · ' + staticCount(st) + ' found' : ''}</div>`;
+  if (!st.available) return html`<div class="pfdet">${head}<div class="pfdim">${st.why}</div></div>`;
+  if (st.error) return html`<div class="pfdet">${head}<div class="pfwarn">${st.error}</div></div>`;
+  if (!st.findings.length) return html`<div class="pfdet">${head}<div class="pfdim">nothing found</div></div>`;
+  const where = (g) => g.file.startsWith('cell:') ? html`<b>${g.file.slice(5)}</b>:${g.line}` : shortFile(g.file) + ':' + g.line;
+  return html`<div class="pfdet">${head}
+    ${st.findings.map(g => html`<div class="pfjet" onClick=${() => showCode(g.file, g.line)}
+        title=${g.frames.map(f => f[2] + '  ' + shortFile(f[0]) + ':' + f[1]).join('\n')}>
+      <span class=${'pfjk ' + g.kind.replace(/\s+/g, '-')}>${g.kind === 'dispatch' ? 'dispatch' : g.kind === 'captured' ? 'boxed' : g.kind}${g.count > 1 ? ' ×' + g.count : ''}</span>
+      <span class="pfloc">${where(g)}<span class="pfsnip">${cellLine(g.file, g.line)}</span></span>
+      <span class="pfsig" title=${g.sig}>${g.sig}${g.mine ? '' : html`<span class="pfdim">  inside ${g.frames[g.frames.length - 1][2]}</span>`}</span>
+    </div>`)}</div>`;
+}
+
 // ── details: compiling, dispatch, allocation types, the GPU ─────────────────────────────────────────
 function Details() {
   const P = pf.value && pf.value.profile;
@@ -947,6 +966,7 @@ function Details() {
     ...(P.buffer_full ? [['buffer', 'full: the end of the run is missing']] : []),
     ...(P.error ? [['threw', String(P.error).split('\n')[0]]] : [])];
   return html`<div class="pfdetails">
+    <${StaticCheck} />
     <div class="pfdet"><div class="pfrelhead">The run</div>
       ${facts.map(([k, v]) => html`<div class="pfdetkv"><span>${k}</span><span>${v}</span></div>`)}</div>
     ${P.types ? tbl('Allocated, by type (scaled from the ' + pct(P.alloc_rate) + ' recorded)', ['bytes', 'count', 'type'],
@@ -1005,9 +1025,10 @@ function Code() {
   useEffect(() => {
     const v = vw.current; if (!v) return;
     v.setDoc(text, 1);
-    const rows = M && M.lines.get(at.file);
-    v.setHeat(rows ? [...rows.values()] : []);
-  }, [text, at.file, M]);
+    const rows = new Map(M && M.lines.get(at.file) ? [...M.lines.get(at.file).values()].map(r => [r.line, { ...r }]) : []);
+    for (const s of staticRows(at.file)) rows.set(s.line, { incl: 0, self: 0, d: 0, g: 0, c: 0, ...(rows.get(s.line) || {}), ...s });
+    v.setHeat([...rows.values()]);
+  }, [text, at.file, M, pf.value && pf.value.prepared]);
   useEffect(() => { const v = vw.current; if (v && at.line) v.setLine(at.line); }, [text, at.file, at.line]);
   useEffect(() => {
     const v = vw.current; if (!v) return;
@@ -1074,9 +1095,30 @@ function Facts() {
       ${pr.buffer_full ? html`<span class="pfwarn" title="the end of the run is missing: profile again with a larger buffer or a longer interval">buffer full</span>` : null}
       ${pr.error ? html`<span class="pfwarn" title=${pr.error}>threw ${String(pr.error).split('\n')[0]}</span>` : null}` : null}
     <span class="pfsp"></span>
+    ${pp && pp.static ? html`<button class="pffigbtn" onClick=${() => setTabTo('details')} title=${pp.static.why || pp.static.error || 'found by JET without running the cell'}>${
+        !pp.static.available ? fig('—', 'no static check (JET)', 'dim')
+        : pp.static.error ? fig('!', 'static check failed', 'g')
+        : fig(staticCount(pp.static), 'static ' + (staticCount(pp.static) === 1 ? 'finding' : 'findings'), staticCount(pp.static) ? 'j' : 'dim')}</button>` : null}
     ${pp ? (pp.ok ? fig(ms(pp.compile_ms), 'to compile ahead', 'dim')
                   : html`<span class="pfwarn" title=${pp.error}>${String(pp.error).split('\n')[0]}</span>`) : null}
   </div>`;
+}
+
+const staticCount = (st) => (st.findings || []).reduce((t, g) => t + g.count, 0);
+const setTabTo = (t) => { tab.value = t; lsSet('slateProfTab', t); };
+// The static check's findings on `file`'s lines, for the code pane's margin.
+function staticRows(file) {
+  const st = pf.value && pf.value.prepared && pf.value.prepared.static;
+  if (!st || !st.findings) return [];
+  const by = new Map();
+  for (const g of st.findings) {
+    if (g.file !== file) continue;
+    const r = by.get(g.line) || { line: g.line, j: 0, jt: [] };
+    r.j += g.count; r.jt.push((g.kind === 'dispatch' ? 'runtime dispatch' : g.kind === 'captured' ? 'boxed capture' : g.kind) +
+                              (g.sig ? ': ' + g.sig : '') + (g.mine ? '' : ' (inside ' + g.frames[g.frames.length - 1][2] + ')'));
+    by.set(g.line, r);
+  }
+  return [...by.values()];
 }
 
 // ── run options, history, comparison, export ───────────────────────────────────────────────────────
@@ -1437,6 +1479,17 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfbar i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg, #c8742a, #f0a54a); }
 .pfdetails { flex:1 1 auto; overflow:auto; padding:8px 10px; display:flex; flex-direction:column; gap:14px; font-size:.74rem; }
 .pfdetrow { display:grid; grid-template-columns:80px 80px minmax(0,1fr); gap:8px; padding:2px 0; }
+.pfjet { display:grid; grid-template-columns:92px minmax(0, 1fr) minmax(0, 1.2fr); gap:10px; align-items:center;
+  padding:3px 6px; border-radius:4px; cursor:pointer; }
+.pfjet:hover { background:color-mix(in srgb, #e8933a 10%, transparent); }
+.pfjk { justify-self:start; padding:0 7px; border-radius:9px; font-size:.68rem; color:#ffd27a;
+  border:1px solid color-mix(in srgb, #ffd27a 45%, transparent); background:color-mix(in srgb, #ffd27a 10%, transparent); }
+.pfjk.captured { color:#7fd4ff; border-color:color-mix(in srgb, #7fd4ff 45%, transparent); background:color-mix(in srgb, #7fd4ff 10%, transparent); }
+.pffigbtn { font:inherit; background:none; border:none; padding:0; cursor:pointer; color:inherit; }
+.pffigbtn:hover i { color:var(--text); }
+.pffacts .j b { color:#ffd27a; }
+.cm-heatm .pfm.j { color:#ffd27a; }
+.cm-jet { text-decoration:underline wavy color-mix(in srgb, #ffd27a 70%, transparent); text-underline-offset:3px; }
 .pfdetkv { display:grid; grid-template-columns:90px minmax(0,1fr); gap:8px; padding:2px 0; }
 .pfdetkv > span:first-child { color:var(--dim); }
 .pfdet { max-width:1100px; }
