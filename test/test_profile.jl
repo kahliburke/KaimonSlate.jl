@@ -206,6 +206,14 @@ end
         @test sort(unique(tl["thread"])) == [1, 2] && length(tl["t"]) <= RE._TL_MAX + 2
     end
 
+    @testset "pauses with no sample from any thread are reported" begin
+        smp(c) = RE._Sample(1:0, UInt(1), UInt(1), UInt(c), true)
+        # One clock unit per ms: steady 1 ms ticks with two one-second gaps.
+        clocks = [0:99; 1100:1199; 2200:2299]
+        @test RE._stalls(smp.(clocks), (UInt(0), UInt(2299)), 2299.0) == (2, 2002.0)
+        @test RE._stalls(smp.(0:999), (UInt(0), UInt(999)), 999.0) == (0, 0.0)
+    end
+
     @testset "GPU mode keeps the cell's own error and runs the cell if the profiler cannot" begin
         broken = Module(:BrokenCUDA)
         Core.eval(broken, :(macro profile(ex) :(error("no driver")) end))

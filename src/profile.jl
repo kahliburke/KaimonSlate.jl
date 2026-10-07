@@ -703,6 +703,7 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
     r["compile_ms_process"] = round(facts.compile_ms; digits = 1)
     r["dropped"] = dropped; r["threads"] = length(threads)
     r["buffer_full"] = try; Profile.is_buffer_full(); catch; false; end
+    r["stalls"], r["stalled_ms"] = _stalls(samples, cspan, facts.ms)
     r["timeline"] = _timeline(tl_thread, tl_clock, tl_node, tree.map, facts.ms, facts.opts.delay_ms, cspan)
     return r
 end
@@ -771,6 +772,23 @@ function _profile_result(a::_Acc, cid::String, facts, total::Int; error = nothin
             "incl" => [v[1] for v in values(L)], "self" => [v[2] for v in values(L)],
             "dispatch" => [v[3] for v in values(L)], "gc" => [v[4] for v in values(L)],
             "compile" => [v[5] for v in values(L)])), tree
+end
+
+# Pauses of half a second or more with no sample from any thread. On Linux the sampler signals
+# each thread in turn and waits up to a second for an answer; a thread that never answers (one a C
+# library started and Julia adopted, with signals blocked) ends that round, so most of the run goes
+# unsampled. Returns the number of pauses and the time they cover.
+function _stalls(samples, cspan, ms)
+    c0, c1 = cspan
+    (c1 > c0 && ms > 0) || return (0, 0.0)
+    per_ms = (c1 - c0) / ms
+    clocks = sort!([s.clock for s in samples])
+    n = 0; lost = 0.0
+    for i in 2:length(clocks)
+        g = (clocks[i] - clocks[i-1]) / per_ms
+        g >= 500 && (n += 1; lost += g)
+    end
+    return n, round(lost; digits = 1)
 end
 
 # Every kept sample in time order, for the timeline: its thread (numbered from 1), when (ms from the

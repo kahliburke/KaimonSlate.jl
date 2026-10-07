@@ -503,19 +503,29 @@ const _colors = new Map();
 function selfOf(dn, M) {
   const n = dn.n || dn;
   if (!dn.folded && n.kind === K.line) {
-    const row = M.lines.get(n.file) && M.lines.get(n.file).get(n.line);
-    if (row) return row.self * M.total;
+    const s = lineSelf(n, M);
+    if (s != null) return s * M.total;
   }
   return dn.self;
 }
+// A line's self share as the hot lines table counts it: with library code folded, a line of the
+// reader's own code also carries the library calls, GC and waiting under it.
+function lineSelf(n, M) {
+  const own = fold.value && !isLib(n, M) && ownTime.value;
+  if (own) { const r = own.lines.get(n.file + '\x1f' + n.line); return r ? r.self : 0; }
+  const row = M.lines.get(n.file) && M.lines.get(n.file).get(n.line);
+  return row ? row.self : null;
+}
 function heatColor(self, M) {
-  if (M.maxSelf == null) {
+  const key = fold.value ? 'maxOwn' : 'maxSelf';
+  if (M[key] == null) {
     let m = 1;
     for (const rows of M.lines.values()) for (const r of rows.values()) m = Math.max(m, r.self * M.total);
+    if (fold.value && ownTime.value) for (const r of ownTime.value.lines.values()) m = Math.max(m, r.self * M.total);
     for (const x of M.nodes) if (x && x.kind !== K.line && x.self > m) m = x.self;
-    M.maxSelf = m;
+    M[key] = m;
   }
-  const f = Math.sqrt(Math.min(1, Math.max(0, self) / M.maxSelf));
+  const f = Math.sqrt(Math.min(1, Math.max(0, self) / M[key]));
   if (f < 0.04) return 'hsl(222, 22%, 30%)';
   // Blue through violet to red-orange: one direction round the wheel, never through green.
   return `hsl(${Math.round(212 + 160 * f) % 360}, ${Math.round(48 + 32 * f)}%, ${Math.round(36 + 16 * f)}%)`;
@@ -870,7 +880,7 @@ const timeline = computed(() => {
 
 function Timeline() {
   const M = model.value, TL = timeline.value;
-  void [sel.value, hover.value, matches.value, fnSel.value, baseShare.value, tview.value, srcs.value, colorBy.value];
+  void [sel.value, hover.value, matches.value, fnSel.value, baseShare.value, tview.value, srcs.value, colorBy.value, fold.value];
   const box = useRef(null), cv = useRef(null), tip = useRef(null), drawn = useRef([]), drag = useRef(null), draw = useRef(null);
   draw.current = () => {
     const el = box.current, c = cv.current; if (!el || !c || !TL) return;
@@ -1072,6 +1082,7 @@ function Details() {
     ['compiling', ms(P.compile_ms) || '0 ms'], ['GC', ms(P.gc_ms) || '0 ms'],
     ...(dr.length ? [['left out', dr.map(([k, v]) => v.toLocaleString() + ' ' + k).join(', ')]] : []),
     ...(P.buffer_full ? [['buffer', 'full: the end of the run is missing']] : []),
+    ...(P.stalls ? [['stalled', ms(P.stalled_ms) + ' unsampled, in ' + P.stalls + ' pauses']] : []),
     ...(P.error ? [['threw', String(P.error).split('\n')[0]]] : [])];
   return html`<div class="pfdetails">
     <${StaticCheck} />
@@ -1179,9 +1190,13 @@ function Code() {
     const v = vw.current; if (!v) return;
     v.setDoc(text, 1);
     const rows = new Map(M && M.lines.get(at.file) ? [...M.lines.get(at.file).values()].map(r => [r.line, { ...r }]) : []);
+    // With library code folded, the gutter shows the same time per line as the hot lines table.
+    const own = M && fold.value && ownTime.value;
+    if (own && [...own.lines.values()].some(o => o.file === at.file))
+      for (const r of rows.values()) { const o = own.lines.get(at.file + '\x1f' + r.line); r.self = o ? o.self : 0; }
     for (const s of staticRows(at.file)) rows.set(s.line, { incl: 0, self: 0, d: 0, g: 0, c: 0, ...(rows.get(s.line) || {}), ...s });
     v.setHeat([...rows.values()]);
-  }, [text, at.file, M, pf.value && pf.value.prepared]);
+  }, [text, at.file, M, pf.value && pf.value.prepared, fold.value]);
   useEffect(() => { const v = vw.current; if (v && at.line) v.setLine(at.line); }, [text, at.file, at.line]);
   useEffect(() => {
     const v = vw.current; if (!v) return;
@@ -1287,6 +1302,7 @@ function Facts() {
       ${pr.compile_ms > 0.5 ? fig(ms(pr.compile_ms), 'compiling' + share(pr.compile_ms), 'c') : null}
       ${pr.gc_ms > 0.5 ? fig(ms(pr.gc_ms), 'GC' + share(pr.gc_ms), 'g') : null}
       ${left ? fig(left.toLocaleString(), 'left out', 'dim', dr.map(([k, v]) => v + ' ' + k).join(', ')) : null}
+      ${pr.stalls ? html`<span class="pfwarn" title=${'The sampler took nothing for ' + ms(pr.stalled_ms) + ' of the run. A thread in this process did not answer the sampler. On Linux this happens when Julia adopts a thread that a C library started with signals blocked.'}>sampling stalled · ${pct(pr.stalled_ms / pr.duration_ms)} of the run</span>` : null}
       ${pr.buffer_full ? html`<span class="pfwarn" title="the end of the run is missing: profile again with a larger buffer or a longer interval">buffer full</span>` : null}
       ${pr.error ? html`<span class="pfwarn" title=${pr.error}>threw ${String(pr.error).split('\n')[0]}</span>` : null}` : null}
     <span class="pfsp"></span>
