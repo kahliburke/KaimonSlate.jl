@@ -1001,6 +1001,7 @@ function Crumbs() {
         ${i === 0 ? 'cell ' + M.P.cell : (n.kind === K.line ? n.func + ':' + n.line : n.func)}</button>`) : null}
     <span class="pfsp"></span>
     <span class="pfkey"><span><i style="color:#ffd27a">⤳</i>dispatch</span><span><i style="color:#c9b4ff">⚙</i>compiling</span><span><i style="color:#ff8a8a">♻</i>GC</span>
+      ${staticFound() ? html`<span title="lines JET flagged when the cell was compiled: hover one for what it found"><i style="color:#ffd27a">◆</i>JET</span>` : null}
       ${baseShare.value ? html`<span><i style="color:#e05a5a">■</i>grew</span><span><i style="color:#5a8fe0">■</i>shrank</span>` : null}</span>
     ${tab.value === 'flame' || tab.value === 'timeline' ? html`<span class="pfzoom">
       <button onClick=${() => zoomAt(sig, mid, 2)} disabled=${x <= 1.0001} title="zoom out (-)">−</button>
@@ -1131,6 +1132,7 @@ function JetStatus() {
   return html`<button class="pfbtn pfjetadd" onClick=${add} title="add JET to this notebook's environment, so Compile also checks the cell statically">＋ JET</button>`;
 }
 const staticCount = (st) => (st.findings || []).length;     // lines of the notebook's code flagged
+const staticFound = () => { const st = pf.value && pf.value.prepared && pf.value.prepared.static; return !!(st && st.findings && st.findings.length); };
 const kindName = (k) => k === 'dispatch' ? 'runtime dispatch' : k === 'captured' ? 'boxed capture' : k;
 const setTabTo = (t) => { tab.value = t; lsSet('slateProfTab', t); };
 // The static check's findings on `file`'s lines, for the code pane's margin.
