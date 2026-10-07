@@ -469,8 +469,9 @@
   // Any open dialog owns the keyboard: its own handlers drive it, and a command-mode key firing
   // behind it would act on a cell the reader can't see. Global chords still work — ⌘K has to be able
   // to dismiss the palette it opened.
-  // The profiler's dock covers the notebook too, so the notebook's command keys are not live under it.
-  const _modalOpen = () => !!document.querySelector('.modal-bg.show, .modal-bg.shown, .pfbg');
+  // The profiler's dock and the debugger's workspace cover the notebook too, so the notebook's
+  // command keys are not live under them (the debugger's own keys are global ones).
+  const _modalOpen = () => !!document.querySelector('.modal-bg.show, .modal-bg.shown, .pfbg, .dbgfocusbg');
 
   // Try one context's index for this event. Returns true when the key was consumed — which a command
   // can decline (see `slateCmd.run`), leaving the key for whatever else is listening.
