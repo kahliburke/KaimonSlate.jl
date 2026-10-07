@@ -467,13 +467,10 @@ function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
 end
 
 const _PARKED_FNS = (:wait, :_wait, :_wait2, :try_yieldto, :yieldto, :poptask, :wait_forever, :task_get_next)
-# From `j` on, nothing but the scheduler's waiting and the runtime under it, and in it at the end.
+# From `j` on, nothing but the scheduler's waiting and the runtime under it. A parked task's stack
+# ends inside its `wait`, so that is enough.
 _parked_tail(frames, j) =
-    frames[j].func in _PARKED_FNS &&
-    all(k -> frames[k].from_c || frames[k].func in _PARKED_FNS, j:length(frames)) &&
-    any(k -> frames[k].func in (:try_yieldto, :yieldto, :poptask, :wait_forever, :task_get_next) ||
-             (frames[k].from_c && occursin("task_get_next", string(frames[k].func))) ||
-             (frames[k].func === :wait && endswith(string(frames[k].file), "task.jl")), j:length(frames))
+    frames[j].func in _PARKED_FNS && all(k -> frames[k].from_c || frames[k].func in _PARKED_FNS, j:length(frames))
 
 # Only the runtime and Base's scheduler from `start` on, waiting in it: a task with nothing to do.
 const _SCHED_FNS = (:wait, :poptask, :task_get_next, :try_yieldto, :wait_forever, :yield)
