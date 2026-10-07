@@ -92,7 +92,7 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
             return v
         end
         # CUDA is loaded before the clock starts, so its loading is not counted as the cell's.
-        cuda = o.mode == "gpu" ? _cuda_module() : nothing
+        cupti = o.mode == "gpu" ? _cupti_prepare(_cuda_module()) : nothing
         gpu = Dict{String,Any}()
         saved = _profile_settings()
         Base.cumulative_compile_timing(true)
@@ -130,7 +130,7 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
                 # GPU work is mostly the host waiting on the device, which a CPU-time sampler barely
                 # sees (on Linux it ticks with the process's CPU time), so GPU mode samples wall time.
                 v = o.mode == "wall" ? Profile.@profile_walltime(run()) :
-                    o.mode == "gpu" ? _with_cupti(() -> Profile.@profile_walltime(run()), gpu, cuda, t0) : Profile.@profile(run())
+                    o.mode == "gpu" ? _with_cupti(() -> Profile.@profile_walltime(run()), gpu, cupti, t0) : Profile.@profile(run())
             end
         catch e
             fx = facts(); done()
@@ -316,6 +316,11 @@ end
 _CuptiCalls() = _CuptiCalls(Threads.SpinLock(), UInt32[], UInt32[], Int64[], Int32[], Any[],
                             Dict{UInt64,Int32}(), Dict{UInt32,Int64}())
 
+function _clear!(c::_CuptiCalls)
+    empty!(c.corr); empty!(c.cbid); empty!(c.t); empty!(c.sid); empty!(c.stacks); empty!(c.ids); empty!(c.ends)
+    return c
+end
+
 # Records one call's stack: the fingerprint is taken without allocating, and only a stack not seen
 # before is walked again and kept. Called from the CUPTI callback, so both walks start in the frame
 # that called this, and the chain below it is the call's.
@@ -343,20 +348,24 @@ end
 # Driver calls are timed by the callback rather than recorded as activity: a CUDA.jl program makes
 # hundreds of driver calls per array operation, almost all of them queries, and recording each one
 # costs more than the run.
-function _with_cupti(f, out::Dict{String,Any}, m, t0::Integer)
-    m === nothing && (out["error"] = "CUDA is not in this notebook's environment"; return f())
+# Everything a GPU-mode run needs, done before its clock starts: CUPTI's call names (looked up once
+# per process), the configurations, and one empty collection that compiles the callback and CUPTI's
+# own paths. A string says why there is no CUPTI.
+const _CUPTI_NAMES = Ref{Any}(nothing)
+
+function _cupti_prepare(m)
+    m === nothing && return "CUDA is not in this notebook's environment"
     CU = try; getproperty(m, :CUPTI); catch; nothing; end
-    CU === nothing && (out["error"] = "this CUDA.jl has no CUPTI bindings"; return f())
+    CU === nothing && return "this CUDA.jl has no CUPTI bindings"
     il = Base.invokelatest
     K(k) = il(getproperty, CU, k)
-    calls = _CuptiCalls()
-    recs = Tuple{Symbol,String,Int64,Int64,UInt32,Int,Int}[]
-    val = Ref{Any}(nothing); started = Ref(false); finished = Ref(false)
     try
         drv = K(:CUPTI_CB_DOMAIN_DRIVER_API)
         enter, exit_ = K(:CUPTI_API_ENTER), K(:CUPTI_API_EXIT)
-        names = _cupti_names(CU, drv)
+        _CUPTI_NAMES[] === nothing && (_CUPTI_NAMES[] = _cupti_names(CU, drv))
+        names = _CUPTI_NAMES[]
         want = Set{UInt32}(id for (id, n) in names if occursin(_CUPTI_CALLS, n))
+        calls = _CuptiCalls()
         cb = (domain, id, data) -> begin
             UInt32(id) in want || return
             if data.callbackSite == enter
@@ -374,19 +383,33 @@ function _with_cupti(f, out::Dict{String,Any}, m, t0::Integer)
         end
         kinds = (kernel = K(:CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL), copy = K(:CUPTI_ACTIVITY_KIND_MEMCPY),
                  set = K(:CUPTI_ACTIVITY_KIND_MEMSET))
-        ccfg = il(K(:CallbackConfig), cb, [drv])
-        acfg = il(K(:ActivityConfig), collect(values(kinds)))
         sync = getproperty(m, :synchronize)
-        il(sync)
+        ccfg = il(K(:CallbackConfig), cb, [drv])
+        il(K(:enable!), () -> il(K(:enable!), () -> il(sync), il(K(:ActivityConfig), collect(values(kinds)))), ccfg)
+        _clear!(calls)
+        return (; CU, calls, names, kinds, sync, ccfg, acfg = il(K(:ActivityConfig), collect(values(kinds))))
+    catch e
+        return "CUPTI: " * first(sprint(showerror, e), 300)
+    end
+end
+
+function _with_cupti(f, out::Dict{String,Any}, cx, t0::Integer)
+    cx isa AbstractString && (out["error"] = cx; return f())
+    il = Base.invokelatest
+    K(k) = il(getproperty, cx.CU, k)
+    recs = Tuple{Symbol,String,Int64,Int64,UInt32,Int,Int}[]
+    val = Ref{Any}(nothing); started = Ref(false); finished = Ref(false)
+    try
+        il(cx.sync)
         ts = Ref{UInt64}(0); il(K(:cuptiGetTimestamp), ts); off = Int64(ts[]) - Int64(time_ns())
         body = () -> begin
             started[] = true; val[] = f(); finished[] = true
-            il(sync)                     # every launch's activity is in before collection ends
+            il(cx.sync)                  # every launch's activity is in before collection ends
             nothing
         end
-        il(K(:enable!), () -> il(K(:enable!), body, acfg), ccfg)
-        il(K(:process), (ctx, sid, r) -> (x = _cupti_record(r, kinds); x === nothing || push!(recs, x)), acfg)
-        _cupti_summary!(out, calls, names, recs, off, Int64(t0))
+        il(K(:enable!), () -> il(K(:enable!), body, cx.acfg), cx.ccfg)
+        il(K(:process), (ctx, sid, r) -> (x = _cupti_record(r, cx.kinds); x === nothing || push!(recs, x)), cx.acfg)
+        _cupti_summary!(out, cx.calls, cx.names, recs, off, Int64(t0))
         out["source"] = "cupti"
     catch e
         started[] && !finished[] && rethrow()

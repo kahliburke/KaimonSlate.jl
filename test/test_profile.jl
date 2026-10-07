@@ -232,7 +232,7 @@ end
     @testset "GPU mode keeps the cell's own error and runs the cell if the profiler cannot" begin
         # Without CUPTI bindings the cell still runs, and the profile says why.
         out = Dict{String,Any}()
-        @test RE._with_cupti(() -> 42, out, Module(:NoCUPTI), time_ns()) == 42 && occursin("CUPTI", out["error"])
+        @test RE._with_cupti(() -> 42, out, RE._cupti_prepare(Module(:NoCUPTI)), time_ns()) == 42 && occursin("CUPTI", out["error"])
         # A stand-in CUDA whose CUPTI records nothing: the run goes through, and the cell's error is its own.
         fake = Module(:FakeCUDA)
         Core.eval(fake, :(synchronize() = nothing))
@@ -248,8 +248,10 @@ end
                 process(f, cfg) = nothing
             end))
         g = Dict{String,Any}()
-        @test RE._with_cupti(() -> 42, g, fake, time_ns()) == 42 && g["source"] == "cupti" && isempty(g["kernels"])
-        @test_throws ErrorException("boom") RE._with_cupti(() -> error("boom"), Dict{String,Any}(), fake, time_ns())
+        RE._CUPTI_NAMES[] = nothing
+        @test RE._with_cupti(() -> 42, g, RE._cupti_prepare(fake), time_ns()) == 42 && g["source"] == "cupti" && isempty(g["kernels"])
+        @test_throws ErrorException("boom") RE._with_cupti(() -> error("boom"), Dict{String,Any}(), RE._cupti_prepare(fake), time_ns())
+        RE._CUPTI_NAMES[] = nothing
     end
 
     @testset "a CUDA call lands on the notebook line whose stack made it" begin
