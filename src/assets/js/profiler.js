@@ -876,8 +876,72 @@ const timeline = computed(() => {
     for (const r of L.rects) L.rows[r.d].push(r);         // each row in time order
     y += L.depth * TL_ROW + TL_LANEGAP + 12;
   }
-  return { lanes, end, height: y };
+  // The GPU's side, on the same clock: the CUDA calls the program made, then each stream's kernels and
+  // copies. Every bar knows the notebook line that made it.
+  let tend = end;
+  const G = P.gpu && P.gpu.timeline;
+  if (G && (G.gpu.length || G.calls.length)) {
+    const line = (i) => (i ? G.lines[i - 1] : null);
+    const lane = (label, rects, unit) => {
+      rects.sort((a, b) => a.t0 - b.t0);
+      for (const r of rects) if (r.t1 > tend) tend = r.t1;
+      lanes.push({ gpu: true, label, unit, y, depth: 1, rows: [rects], n: rects.length });
+      y += TL_ROW + TL_LANEGAP + 12;
+    };
+    if (G.calls.length) lane('CUDA calls', G.calls.map(c => ({ t0: c[0], t1: c[1], g: { kind: 'call', name: G.names[c[2] - 1], line: line(c[3]) } })), 'calls');
+    const streams = new Map();
+    for (const k of G.gpu) {
+      if (!streams.has(k[2])) streams.set(k[2], []);
+      const name = G.names[k[3] - 1];
+      streams.get(k[2]).push({ t0: k[0], t1: k[1], g: { kind: name.startsWith('[CUDA') ? 'copy' : 'kernel', name, line: line(k[4]) } });
+    }
+    for (const [sid, rects] of [...streams].sort((a, b) => a[0] - b[0])) lane('GPU · stream ' + sid, rects, 'kernels and copies');
+  }
+  return { lanes, end: tend, height: y };
 });
+
+// One GPU lane's bars. Bars too narrow to see are gathered into one, in the colour of what took most
+// of it, as the thread lanes do.
+function drawGpuRow(g, row, y, t0, kx, W, yOff, out, hv, M) {
+  const S = sel.value && M.nodes[sel.value], H = hv && hv.n;
+  let run = null;
+  const flush = () => {
+    if (!run) return;
+    let best = null, most = -1;
+    for (const [k, v] of run.cover) if (v > most) { most = v; best = k; }
+    const cw = run.x1 - run.x0, mixed = run.cover.size > 1;
+    g.fillStyle = gpuColor(best); g.globalAlpha = mixed ? 0.85 : 1;
+    if (cw > 4 && g.roundRect) { g.beginPath(); g.roundRect(run.x0, y, cw - 0.5, TL_ROW - 1, 2); g.fill(); }
+    else g.fillRect(run.x0, y, Math.max(0.5, cw - 0.5), TL_ROW - 1);
+    g.globalAlpha = 1;
+    const hit = [...run.cover.keys()].some(k => gpuOf(k, S) || gpuOf(k, H));
+    if (hit) { g.strokeStyle = [...run.cover.keys()].some(k => gpuOf(k, S)) ? '#fff' : '#ff6fd8'; g.lineWidth = 1.5; g.strokeRect(run.x0 + 0.5, y + 0.5, Math.max(1, cw - 1), TL_ROW - 2); }
+    if (cw > 40 && !mixed) { g.fillStyle = '#f4f5fb'; g.textBaseline = 'middle'; g.fillText(fit(g, best.name, cw - 6), run.x0 + 3, y + TL_ROW / 2); g.textBaseline = 'top'; }
+    out.push({ x: run.x0, w: cw, y: y - yOff, h: TL_ROW, g: best, t0: run.t0, t1: run.t1, mixed: mixed ? run.cover.size : 0 });
+    run = null;
+  };
+  for (const r of row) {
+    const x = (r.t0 - t0) * kx, w = Math.max(0.5, (r.t1 - r.t0) * kx);
+    if (x + w < 0 || x > W) continue;
+    const cx = Math.max(0, x), ce = Math.min(W, x + w);
+    if (run && cx <= run.x1 + 1 && (ce - cx < 2 || run.x1 - run.x0 < 2)) {
+      run.x1 = Math.max(run.x1, ce); run.t1 = Math.max(run.t1, r.t1);
+      run.cover.set(r.g, (run.cover.get(r.g) || 0) + (ce - cx));
+    } else { flush(); run = { x0: cx, x1: ce, t0: r.t0, t1: r.t1, cover: new Map([[r.g, ce - cx]]) }; }
+  }
+  flush();
+}
+
+// A GPU bar's colour: cool throughout, since warm means hot here. Kernels a shade each by name, copies
+// grey-green, waits a muted violet, other calls slate.
+function gpuColor(g) {
+  if (g.kind === 'copy') return 'hsl(150, 18%, 40%)';
+  if (g.kind === 'call') return /Synchronize/.test(g.name) ? 'hsl(265, 22%, 46%)' : /Launch/.test(g.name) ? 'hsl(222, 20%, 42%)' : 'hsl(200, 16%, 38%)';
+  return 'hsl(' + (205 + hue(g.name) % 50) + ', 42%, 44%)';
+}
+const gpuWhere = (g, P) => !g.line ? 'no notebook line on the stack' : lineLabel(g.line[0], g.line[1], P);
+// Whether a GPU bar comes from the notebook line `k` is at.
+const gpuOf = (g, k) => k && g.line && k.kind === K.line && k.file === g.line[0] && k.line === g.line[1];
 
 function Timeline() {
   const M = model.value, TL = timeline.value;
@@ -893,14 +957,22 @@ function Timeline() {
     // The time axis.
     g.fillStyle = 'rgba(200,205,225,.55)'; g.font = '10px system-ui, sans-serif'; g.textBaseline = 'top';
     const stepT = Math.pow(10, Math.floor(Math.log10(span / 6))) * ([1, 2, 5].find(m => span / (Math.pow(10, Math.floor(Math.log10(span / 6))) * m) <= 8) || 10);
+    // Labels carry as many digits as the ticks are apart, so neighbours never read the same.
+    const tdig = Math.max(0, Math.min(6, Math.ceil(-Math.log10(stepT / 1000))));
+    const tlabel = (t) => stepT >= 1000 || t >= 1000 ? (t / 1000).toFixed(tdig) + ' s' : ms(t);
     for (let t = Math.ceil(t0 / stepT) * stepT; t <= t0 + span; t += stepT) {
       const x = (t - t0) * kx;
-      g.fillRect(x, TL_AXIS - 5, 1, 4); g.fillText(ms(t), x + 2, 2);
+      g.fillRect(x, TL_AXIS - 5, 1, 4); g.fillText(tlabel(t), x + 2, 2);
     }
     const hv = hover.value, mt = matches.value, fsel = fnSel.value;
     for (const L of TL.lanes) {
       if (L.y > yOff + viewH || L.y + 12 + L.depth * TL_ROW < yOff) continue;    // off screen
       g.fillStyle = 'rgba(200,205,225,.7)'; g.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      if (L.gpu) {
+        g.fillText(L.label + '  ·  ' + L.n.toLocaleString() + ' ' + L.unit, 2, L.y);
+        drawGpuRow(g, L.rows[0], L.y + 12, t0, kx, W, yOff, out, hv, M);
+        continue;
+      }
       g.fillText('thread ' + L.thread + '  ·  ' + L.n.toLocaleString() + ' samples', 2, L.y);
       L.rows.forEach((row, d) => {
         const y = L.y + 12 + d * TL_ROW;
@@ -963,9 +1035,18 @@ function Timeline() {
   const move = (ev) => {
     if (dragPan(ev, drag.current, cv.current, tview)) { if (tip.current) tip.current.style.display = 'none'; return; }
     const r = at(ev), t = tip.current;
-    hover.value = r ? { n: r.n } : null;
+    hover.value = r && r.n ? { n: r.n } : null;
     if (!t) return;
     if (!r) { t.style.display = 'none'; return; }
+    if (r.g) {
+      const P = M.P;
+      t.innerHTML = '<b>' + escapeHtml(r.g.name) + '</b><div>' + ms(r.t1 - r.t0) + ' · ' +
+        (r.g.kind === 'call' ? 'CUDA call' : r.g.kind === 'copy' ? 'on the GPU, a copy' : 'on the GPU') + '</div>' +
+        '<div class="pfsnip">' + escapeHtml(gpuWhere(r.g, P)) + '</div>' +
+        (r.mixed ? '<div class="pftw">and ' + (r.mixed - 1) + ' more here; double-click to open</div>' : '');
+      placeTip(t, ev);
+      return;
+    }
     t.innerHTML = tipHtml({ n: r.n, total: r.n.total, self: r.n.self, d: r.n.d, g: r.n.g, c: r.n.c, folded: false }, false, M) +
       (r.mixed ? '<div class="pftw">and ' + (r.mixed - 1) + ' more here; double-click to open</div>' : '');
     placeTip(t, ev);
@@ -976,7 +1057,15 @@ function Timeline() {
     if (ev.shiftKey && cv.current) { ev.preventDefault(); drag.current = { range: true, moved: true }; rangeDrag(ev, cv.current, tview, band.current, box.current); return; }
     drag.current = { x: ev.clientX, ...tview.value, moved: false };
   };
-  const click = (ev) => { const dr = drag.current; drag.current = null; if (dr && dr.moved) return; const r = at(ev); if (r) select(r.n); };
+  // A GPU bar shows the line that made it, and selects that line's heaviest frame.
+  const click = (ev) => {
+    const dr = drag.current; drag.current = null; if (dr && dr.moved) return;
+    const r = at(ev); if (!r) return;
+    if (!r.g) return select(r.n);
+    if (!r.g.line) return;
+    const best = heaviestAt(r.g.line[0], r.g.line[1]);
+    if (best) select(best); else showCode(r.g.line[0], r.g.line[1]);
+  };
   // Double-click a bar: zoom to that stretch of time. On nothing: back out.
   const dbl = (ev) => {
     const r = at(ev);
