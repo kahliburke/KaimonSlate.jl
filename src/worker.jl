@@ -2982,45 +2982,47 @@ function _dir_bytes(d::AbstractString)
 end
 
 # ── Garbage collections ────────────────────────────────────────────────────────────────────────
-# Each collection, from Julia's post-GC callback (`jl_gc_set_cb_post_gc`): when it ended, its pause,
-# whether it swept the whole heap, and the live heap after. The callback runs on the collecting thread
-# once the world has resumed and finalizers have run, so it is as safe as a finalizer, and it does no
-# more than one: it allocates nothing, takes no lock and never yields. Callbacks never overlap (one
-# collection at a time), and the telemetry loop reads what was written before `_GC_COUNT` moved.
+# Each collection: when it ended, its pause, whether it swept the whole heap, and the live heap after.
+# A task polls Julia's GC counters for them. A post-GC callback would see every collection, but it
+# runs inside the collection on whichever thread triggered it, and a Julia function called from there
+# has to take a runtime lock that thread may already be waiting behind (a package load activating its
+# methods), which deadlocks the process. Collections closer together than the poll read as one.
 const _GC_N = 4096
 const _GC_T = zeros(Float64, _GC_N)
 const _GC_PAUSE = zeros(Int64, _GC_N)
 const _GC_FULL = zeros(Bool, _GC_N)
 const _GC_LIVE = zeros(Int64, _GC_N)
 const _GC_COUNT = Threads.Atomic{Int}(0)
-const _GC_LAST = Ref{NTuple{2,Int64}}((0, 0))     # total GC time and full sweeps, at the last one
+const _GC_LAST = Ref{NTuple{3,Int64}}((0, 0, 0))  # collections, total GC time and full sweeps, at the last poll
 const _GC_HOOKED = Threads.Atomic{Bool}(false)
+const _GC_POLL_S = 0.02
 
-function _gc_after(::Cint)::Cvoid
-    g = Base.gc_num()
-    tt, fs = _GC_LAST[]
+_gc_counts(g = Base.gc_num()) = (Int64(g.pause), Int64(g.total_time), Int64(g.full_sweep))
+
+# Records the collections since the last poll as one event. Returns whether there were any.
+function _gc_poll!()
+    now = _gc_counts()
+    np, tt, fs = _GC_LAST[]
+    now[1] == np && return false
     n = _GC_COUNT[]; i = n % _GC_N + 1
     @inbounds begin
         _GC_T[i] = time()
-        _GC_PAUSE[i] = Int64(g.total_time) - tt
-        _GC_FULL[i] = Int64(g.full_sweep) > fs
+        _GC_PAUSE[i] = now[2] - tt
+        _GC_FULL[i] = now[3] > fs
         _GC_LIVE[i] = Base.gc_live_bytes()
     end
-    _GC_LAST[] = (Int64(g.total_time), Int64(g.full_sweep))
+    _GC_LAST[] = now
     _GC_COUNT[] = n + 1
-    return nothing
+    return true
 end
 
-# The callback is part of Julia's embedding interface, which can change between versions: without it
-# the view falls back to what the cumulative counts in each sample say.
 function _gc_hook!()
     _GC_HOOKED[] && return
-    try
-        g = Base.gc_num(); _GC_LAST[] = (Int64(g.total_time), Int64(g.full_sweep))
-        ccall(:jl_gc_set_cb_post_gc, Cvoid, (Ptr{Cvoid}, Cint), @cfunction(_gc_after, Cvoid, (Cint,)), 1)
-        _GC_HOOKED[] = true
-    catch e
-        @warn "slate telemetry: no per-collection GC events" exception = e
+    _GC_LAST[] = _gc_counts()
+    _GC_HOOKED[] = true
+    Threads.@spawn :interactive while true
+        try; _gc_poll!(); catch; end
+        sleep(_GC_POLL_S)
     end
     return
 end
@@ -3557,7 +3559,7 @@ function _precompile_start()
     precompile(_toplevel_only, (Expr,))
     precompile(_prof_mark, (Int,))
     precompile(_read_trace!, (Dict{String,Any}, String))
-    precompile(_gc_after, (Cint,))
+    precompile(_gc_poll!, ())
     precompile(_gc_events, (Int, Float64))
     precompile(_worker_logger, (_LogTee,))
     precompile(Tuple{typeof(Base.CoreLogging.shouldlog), Logging.ConsoleLogger, Logging.LogLevel, Module, Symbol, Symbol})
