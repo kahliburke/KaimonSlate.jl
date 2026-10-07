@@ -577,11 +577,16 @@ function tipHtml(dn, band, M) {
     (mk ? '<div class="pftm">' + mk + '</div>' : '') +
     (dn.folded ? '<div class="pftw">click to open</div>' : '');
 }
-function placeTip(t, ev, box) {
-  const b = box.getBoundingClientRect();
+// Placed in the window, beside the pointer and flipped away from an edge. Inside the scrolling pane
+// it would lengthen the pane near the bottom, move it under the pointer, and lose the hover.
+function placeTip(t, ev) {
   t.style.display = 'block';
-  t.style.left = Math.min(ev.clientX - b.left + 14, b.width - 260) + 'px';
-  t.style.top = (ev.clientY - b.top + box.scrollTop + 16) + 'px';
+  const w = t.offsetWidth, h = t.offsetHeight, pad = 8;
+  let x = ev.clientX + 14, y = ev.clientY + 16;
+  if (x + w > window.innerWidth - pad) x = ev.clientX - w - 14;
+  if (y + h > window.innerHeight - pad) y = ev.clientY - h - 12;
+  t.style.left = Math.max(pad, x) + 'px';
+  t.style.top = Math.max(pad, y) + 'px';
 }
 
 // ── the flame graph ───────────────────────────────────────────────────────────────────────────────
@@ -750,7 +755,7 @@ function Flame() {
     if (!t) return;
     if (!r) { t.style.display = 'none'; return; }
     t.innerHTML = tipHtml(r.dn, r.band, M);
-    placeTip(t, ev, box.current);
+    placeTip(t, ev);
   };
   const band = useRef(null);
   const down = (ev) => {
@@ -952,7 +957,7 @@ function Timeline() {
     if (!r) { t.style.display = 'none'; return; }
     t.innerHTML = tipHtml({ n: r.n, total: r.n.total, self: r.n.self, d: r.n.d, g: r.n.g, c: r.n.c, folded: false }, false, M) +
       (r.mixed ? '<div class="pftw">and ' + (r.mixed - 1) + ' more here; double-click to open</div>' : '');
-    placeTip(t, ev, box.current);
+    placeTip(t, ev);
   };
   const band = useRef(null);
   const down = (ev) => {
@@ -1732,7 +1737,7 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
   border-left:1px solid #e8933a; border-right:1px solid #e8933a; }
 .pfbtn.pfbig { font-size:.86rem; padding:8px 20px; }
 .pfempty { display:flex; align-items:center; justify-content:center; gap:8px; color:var(--dim); font-size:.82rem; }
-.pftip { display:none; position:absolute; z-index:2; max-width:250px; pointer-events:none; padding:6px 8px;
+.pftip { display:none; position:fixed; z-index:80; max-width:250px; pointer-events:none; padding:6px 8px;
   border-radius:6px; background:var(--bg2); border:1px solid var(--border); box-shadow:0 6px 20px rgba(0,0,0,.4);
   font-size:.72rem; color:var(--text); }
 .pftip b { font-family:var(--mono,ui-monospace,monospace); font-weight:600; }
