@@ -58,12 +58,14 @@ end
     end
 
     @testset "with JET, the static check finds dispatch and boxed captures on the cell's lines" begin
-        Base.locate_package(RE._JET_ID) === nothing && return
-        src = "t = unstable(xs0)\nc = 0\nbump = () -> (c += 1)\nbump()\nz = t + c\n"
-        Core.eval(ProfNS, :(xs0 = Any[1, 2.5]))
-        st = RE.profile_prepare!(ProfNS; cell = "pj", source = src, reads = ["unstable", "xs0"])["static"]
-        kinds = Set((g["kind"], g["line"]) for g in st["findings"] if g["file"] == "cell:pj")
-        @test ("captured", 2) in kinds && ("dispatch", 5) in kinds
+        # (`if`, not an early `return`: under Test.jl a `return` leaves the enclosing testset too.)
+        if Base.locate_package(RE._JET_ID) !== nothing
+            src = "t = unstable(xs0)\nc = 0\nbump = () -> (c += 1)\nbump()\nz = t + c\n"
+            Core.eval(ProfNS, :(xs0 = Any[1, 2.5]))
+            st = RE.profile_prepare!(ProfNS; cell = "pj", source = src, reads = ["unstable", "xs0"])["static"]
+            kinds = Set((g["kind"], g["line"]) for g in st["findings"] if g["file"] == "cell:pj")
+            @test ("captured", 2) in kinds && ("dispatch", 5) in kinds
+        end
     end
 
     @testset "an armed run is sampled, rooted at the cell's lines" begin
@@ -104,20 +106,21 @@ end
     end
 
     @testset "work handed to other threads hangs under the line that handed it out" begin
-        Threads.nthreads() > 1 || return
-        # The threaded function is defined by another cell, as in a notebook.
-        RE.run_capture(ProfNS, "function spread(m)\n    acc = zeros(Threads.nthreads())\n    Threads.@threads for k in 1:4Threads.nthreads()\n        acc[Threads.threadid()] += work(m)\n    end\n    sum(acc)\nend\n", "cell:defs")
-        _, p = profile_cell(ProfNS, "pt", "a = 1\ns = spread(n ÷ 8)\n")
-        @test p["threads"] >= 2
-        nd = nodes(p)
-        @test !any(i -> str(p, nd["func"][i]) == "other threads", eachindex(nd["func"]))
-        l2 = only(i for i in eachindex(nd["parent"]) if nd["parent"][i] == 1 && nd["line"][i] == 2)
-        @test nd["total"][l2] >= 0.8 * p["samples"]
-        # `work` is reached from the threads' tasks, beneath the cell's line, through `spread`.
-        under(i, a) = (while i > 0; i == a && return true; i = nd["parent"][i]; end; false)
-        w = [i for i in eachindex(nd["func"]) if str(p, nd["func"][i]) == "work" && under(i, l2)]
-        @test sum(nd["total"][w]) >= 0.5 * p["samples"]
-        @test p["dropped"]["other cells"] == 0
+        if Threads.nthreads() > 1
+            # The threaded function is defined by another cell, as in a notebook.
+            RE.run_capture(ProfNS, "function spread(m)\n    acc = zeros(Threads.nthreads())\n    Threads.@threads for k in 1:4Threads.nthreads()\n        acc[Threads.threadid()] += work(m)\n    end\n    sum(acc)\nend\n", "cell:defs")
+            _, p = profile_cell(ProfNS, "pt", "a = 1\ns = spread(n ÷ 8)\n")
+            @test p["threads"] >= 2
+            nd = nodes(p)
+            @test !any(i -> str(p, nd["func"][i]) == "other threads", eachindex(nd["func"]))
+            l2 = only(i for i in eachindex(nd["parent"]) if nd["parent"][i] == 1 && nd["line"][i] == 2)
+            @test nd["total"][l2] >= 0.8 * p["samples"]
+            # `work` is reached from the threads' tasks, beneath the cell's line, through `spread`.
+            under(i, a) = (while i > 0; i == a && return true; i = nd["parent"][i]; end; false)
+            w = [i for i in eachindex(nd["func"]) if str(p, nd["func"][i]) == "work" && under(i, l2)]
+            @test sum(nd["total"][w]) >= 0.5 * p["samples"]
+            @test p["dropped"]["other cells"] == 0
+        end
     end
 
     @testset "allocations are profiled by bytes, with what was allocated" begin
