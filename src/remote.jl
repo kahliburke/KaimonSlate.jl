@@ -105,15 +105,20 @@ end
 region_trace_reset!(name::AbstractString) =
     lock(_REGION_TRACE_LOCK) do; delete!(_REGION_TRACE, String(name)); nothing; end
 
+# A remote program's colours (`_ssh_julia!` asks Julia for them) are kept for the prepare dialog's
+# activity, which shows them, and dropped everywhere text is read: the log file, the logger, a parser.
+_strip_ansi(s::AbstractString) = replace(String(s), r"\e\[[0-9;:]*[A-Za-z]" => "")
+
 function _rlog(msg::AbstractString)
     path = _remote_log_path()
     t = Dates.now()
+    plain = occursin('\e', msg) ? _strip_ansi(msg) : String(msg)
     try
         mkpath(dirname(path))
         open(path, "a") do io
             # ms resolution: the reattach path is timed in tens of ms now — whole-second
             # timestamps couldn't distinguish "instant" from "1.9s" (both printed as :01→:02).
-            println(io, "[", Dates.format(t, "yyyy-mm-dd HH:MM:SS.sss"), "] ", msg)
+            println(io, "[", Dates.format(t, "yyyy-mm-dd HH:MM:SS.sss"), "] ", plain)
         end
     catch
     end
@@ -121,7 +126,7 @@ function _rlog(msg::AbstractString)
     # with a bare HH:MM:SS so the panel renders it the way a worker's own log lines read.
     reg = _current_rlog_region()
     isempty(reg) || _region_trace_append!(reg, Dates.format(t, "HH:MM:SS") * "  " * String(msg))
-    @info "slate remote: $msg"   # also to the host logger (message string survives kwarg-stripping)
+    @info "slate remote: $plain"   # also to the host logger (message string survives kwarg-stripping)
     return nothing
 end
 
@@ -525,7 +530,7 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
         (_rlog("FAILED: sending provisioning script → $host ($what)"); return (false, ""))
     # `jopt`: Julia takes the options `setup` left in `$JOPT`, the worker's sysimage (`_sysimage_jopt_sh`).
     script = "trap " * Sweep.shq("rm -f " * Sweep.shq(remote)) * " EXIT; " * setup *
-             _julia_sh("julia " * (jopt ? "\$JOPT " : "") * "--startup-file=no $remote")
+             _julia_sh("julia " * (jopt ? "\$JOPT " : "") * "--color=yes --startup-file=no $remote")
     # Pkg work runs for minutes, so it gets its own deadline rather than the default command's. With
     # `stream`, each line is logged as it arrives (tagged to the region whose bring-up asked, which the
     # session's task cannot know by itself) and handed to `online` for the banner.
@@ -533,9 +538,10 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
     tap = !stream ? nothing : function (line)
         t = strip(line); isempty(t) && return
         with_rlog_region(() -> _rlog("  ⟨$what⟩ $t"), reg)
-        online === nothing || online(String(t))
+        online === nothing || online(_strip_ansi(t))
     end
     ok, out = _run_on(String(host), script; timeout = _JULIA_SCRIPT_TIMEOUT, online = tap)
+    out = _strip_ansi(out)                 # callers parse it and show it in a step's detail
     ok || _rlog("FAILED: $what\n    out: $(first(strip(out), 1200))")
     return (ok, out)
 end

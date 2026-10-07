@@ -2065,6 +2065,11 @@ end
         end
     end
 
+    @testset "a remote program's colours reach the activity only" begin
+        @test RE._strip_ansi("\e[32m  ✓ \e[39mJSON \e[90m[682c06a0]\e[39m") == "  ✓ JSON [682c06a0]"
+        @test RE._strip_ansi("no colour here") == "no colour here"
+    end
+
     @testset "an unchanged source directory is not sent again" begin
         src, dest, cache = mktempdir(), mktempdir(), mktempdir()
         withenv("KAIMONSLATE_CACHE_HOME" => cache) do

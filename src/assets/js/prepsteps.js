@@ -31,13 +31,15 @@ const atBottom = el => el.scrollHeight - el.scrollTop - el.clientHeight < 8;
 export const follow = el => { if (el && el._follow !== false) el.scrollTop = el.scrollHeight; };
 export const noteScroll = e => { e.currentTarget._follow = atBottom(e.currentTarget); };
 const shortTime = l => String(l).replace(/^\[\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+\] /, '$1  ');
+// The lines as HTML, in a program's own colours (Julia runs with them on the cluster).
+const logHtml = lines => lines.map(l => window.slateAnsiHtml(shortTime(l))).join('\n');
 export function Activity(lines, key) {
   if (!lines || !lines.length) return null;
   const open = !!openActs.value[key];
   const flip = () => { openActs.value = { ...openActs.value, [key]: !open }; };
   return html`<div class="rpplog">
     <button type="button" class="rpplogbtn" onClick=${flip}>${open ? '▾' : '▸'} Activity <span class="pddim">${lines.length} lines</span></button>
-    ${open ? html`<pre class="rpplogtext" ref=${el => follow(el)} onScroll=${noteScroll}>${lines.map(shortTime).join('\n')}</pre>` : null}
+    ${open ? html`<pre class="rpplogtext" ref=${el => follow(el)} onScroll=${noteScroll} dangerouslySetInnerHTML=${{ __html: logHtml(lines) }}></pre>` : null}
   </div>`;
 }
 
@@ -87,7 +89,7 @@ export function History(name, key) {
 export function ActivityPane(lines) {
   if (!lines || !lines.length) return html`<div class="pddim rppanempty">nothing yet</div>`;
   const out = []; let tag = null, run = [];
-  const flush = () => { if (run.length) { out.push(run.join('\n') + '\n'); run = []; } };
+  const flush = () => { if (run.length) { out.push(html`<span dangerouslySetInnerHTML=${{ __html: logHtml(run) + '\n' }}></span>`); run = []; } };
   for (const l of lines) {
     const t = shortTime(l), m = /^(\S+\s+)⟨([^⟩]+)⟩\s?(.*)$/.exec(t);
     const here = m ? m[2] : null;
