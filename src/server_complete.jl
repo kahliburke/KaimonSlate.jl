@@ -3715,9 +3715,12 @@ const TELEMETRY_KEEP_DAYS = Ref(14)
 const _TEL_LOG_LOCK = ReentrantLock()
 const _TEL_LOG_DAY = Dict{String,String}()          # notebook's log dir → the day it last wrote
 
-telemetry_dir(nb::LiveNotebook) = joinpath(SlateHome.cache_home(), "telemetry",
-    replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_-]" => "_") * "-" *
-    string(hash(abspath(nb.path)) % 0xffffffff; base = 16, pad = 8))
+# A notebook's directory name under the cache home: its file's name, and a digest of its path that
+# stays the same across Julia versions (`hash` does not).
+_nb_cache_name(nb::LiveNotebook) = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_-]" => "_") * "-" *
+    string(Base._crc32c(abspath(nb.path)); base = 16, pad = 8)
+
+telemetry_dir(nb::LiveNotebook) = joinpath(SlateHome.cache_home(), "telemetry", _nb_cache_name(nb))
 
 function _telemetry_line(side::AbstractString, sample)
     d = _sample_full(sample)
@@ -4305,7 +4308,7 @@ function close_notebook!(h::Hub, id::AbstractString)
     # Before the region detaches: a warm worker outlives this notebook, and a live debug
     # session leaves its interpreter scoped to our modules for whoever adopts it next.
     try; stop_debug!(nb; serialize = false, force = true); catch; end
-    forget_debug!(id); forget_specialists!(id); forget_findings!(id)   # ids are reused when the file reopens
+    forget_debug!(id); forget_specialists!(id); forget_findings!(id); forget_profiles!(id)   # ids are reused when the file reopens
     # Not waiting on a worker still starting: it is ended when it is up (`shutdown!`).
     try; shutdown!(nb.kernel; wait = false); catch; end
     _teardown_region!(nb; wait = false)    # detach — a remote region idles warm like the main kernel

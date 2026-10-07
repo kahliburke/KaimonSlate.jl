@@ -12,6 +12,11 @@
 const _PROF_LAST = Dict{Tuple{String,String},Dict{String,Any}}()   # (nb, cell) → last pushed result
 const _PROF_HUB_LOCK = ReentrantLock()
 
+"Drop what the hub holds for notebook `id`'s profiles (kept ones stay on disk); ids are reused on reopen."
+forget_profiles!(id::AbstractString) = lock(_PROF_HUB_LOCK) do
+    filter!(kv -> kv[1][1] != id, _PROF_LAST); filter!(kv -> kv[1][1] != id, _PROF_ASKED); nothing
+end
+
 _broadcast_profile(nb::LiveNotebook, payload::Dict{String,Any}) =
     (try; _broadcast(nb, "profile:" * JSON.json(_json_finite(payload))); catch; end; nothing)
 
@@ -78,18 +83,20 @@ function _arm_requested_profile!(nb::LiveNotebook, cell, kernel, side::AbstractS
         _profile_fail(nb, cell.id, side, "could not arm the profile: " * first(sprint(showerror, e), 200))
         return nothing
     end
-    return time()
+    return cell.source
 end
 
-function _collect_requested_profile!(nb::LiveNotebook, cell, kernel, side::AbstractString, t0::Float64)
+# Arming clears the kernel's last result for the cell, so any result now is this run's.
+function _collect_requested_profile!(nb::LiveNotebook, cell, kernel, side::AbstractString, src::AbstractString)
     r = try; ReportEngine.profile_result(kernel, nb.report; cell = String(cell.id)); catch; nothing; end
-    if r === nothing || Float64(get(r, "at", 0.0)) < t0
+    if r === nothing || !haskey(r, "nodes")
         try; ReportEngine.profile_disarm!(kernel, nb.report; cell = String(cell.id)); catch; end
-        _profile_fail(nb, cell.id, side, "the run did not reach the cell's code (restored, or held)")
+        why = r === nothing ? "the run did not reach the cell's code (restored, or held)" : String(r["error"])
+        _profile_fail(nb, cell.id, side, why)
         return nothing
     end
     payload = Dict{String,Any}("kind" => "result", "cell" => String(cell.id), "side" => String(side),
-                               "source" => cell.source, "profile" => r)
+                               "source" => String(src), "profile" => r, "hub_at" => time())
     lock(_PROF_HUB_LOCK) do; _PROF_LAST[(nb.id, String(cell.id))] = payload; end
     try; _profile_save!(nb, cell.id, payload); catch e; @warn "slate: could not keep a profile" cell = cell.id exception = e; end
     _broadcast_profile(nb, payload)
@@ -110,27 +117,33 @@ function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractStrin
     side = _region_active(nb) ? _cell_side(nb, cell) : ""   # the side only: the kernel may not exist yet
     _broadcast_profile(nb, Dict{String,Any}("kind" => "running", "cell" => String(cid), "side" => side,
                                             "mode" => String(mode)))
-    lock(_PROF_HUB_LOCK) do; _PROF_ASKED[(nb.id, String(cid))] = (; mode = String(mode), opts...); end
+    key = (nb.id, String(cid))
     t0 = time()
     try
-        lock(nb.lock) do; _force_cell!(nb, cid); end
+        # A run already under way is not the profiled one: it finishes first.
+        lock(nb.lock) do; cell.state == RUNNING; end && _eval!(nb; wait_for = cid, fresh = false)
+        lock(_PROF_HUB_LOCK) do; _PROF_ASKED[key] = (; mode = String(mode), opts...); end
+        lock(nb.lock) do; _force_cell!(nb, cid); end || error("the cell is running; profile it again once it is done")
         _eval!(nb; wait_for = cid)
     catch e
-        lock(_PROF_HUB_LOCK) do; delete!(_PROF_ASKED, (nb.id, String(cid))); end
+        lock(_PROF_HUB_LOCK) do; delete!(_PROF_ASKED, key); end
         return Dict{String,Any}("kind" => "error", "cell" => String(cid),
                                 "error" => _profile_fail(nb, cid, side, first(sprint(showerror, e), 300))["error"])
     end
     p = last_profile(nb, cid)
-    p !== nothing && Float64(get(p["profile"], "at", 0.0)) >= t0 && return p
+    p !== nothing && Float64(get(p, "hub_at", 0.0)) >= t0 && return p
+    # Taken by a run that failed to arm or collect, which has said why.
+    asked = lock(_PROF_HUB_LOCK) do; haskey(_PROF_ASKED, key); end
+    asked || return Dict{String,Any}("kind" => "error", "cell" => String(cid), "error" => "the profile failed")
     c = _profile_cell(nb, cid)
     if c !== nothing && c.state == BLOCKED
         why = "the cell is waiting ($(c.blocked)); it is profiled when it runs"
         _broadcast_profile(nb, Dict{String,Any}("kind" => "waiting", "cell" => String(cid), "side" => side, "why" => why))
         return Dict{String,Any}("kind" => "waiting", "cell" => String(cid), "why" => why)
     end
-    lock(_PROF_HUB_LOCK) do; delete!(_PROF_ASKED, (nb.id, String(cid))); end
+    lock(_PROF_HUB_LOCK) do; delete!(_PROF_ASKED, key); end
     return Dict{String,Any}("kind" => "error", "cell" => String(cid),
-                            "error" => _profile_fail(nb, cid, side, "the cell did not run")["error"])
+                            "error" => _profile_fail(nb, cid, side, nb.closed ? "the notebook was closed" : "the cell did not run")["error"])
 end
 
 "Profile cell `cid` in the background; the page follows the pushes (`profile_now!`)."
@@ -147,10 +160,7 @@ end
 const _PROF_KEEP_N = 30
 
 _profile_dir(nb::LiveNotebook, cid::AbstractString) =
-    joinpath(SlateHome.cache_home(), "profiles",
-             replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_-]" => "_") * "-" *
-             string(hash(abspath(nb.path)) % 0xffffffff; base = 16, pad = 8),
-             replace(String(cid), r"[^A-Za-z0-9_-]" => "_"))
+    joinpath(SlateHome.cache_home(), "profiles", _nb_cache_name(nb), replace(String(cid), r"[^A-Za-z0-9_-]" => "_"))
 
 function _profile_save!(nb::LiveNotebook, cid::AbstractString, payload::Dict{String,Any})
     dir = _profile_dir(nb, cid); mkpath(dir)
@@ -214,6 +224,16 @@ function previous_profile(nb::LiveNotebook, cid::AbstractString)
     return length(h) < 2 ? nothing : profile_load(nb, cid, String(h[2]["id"]))
 end
 
+# Only a file some profile of the cell went through is read: the route takes any path otherwise.
+function _profiled_file(nb::LiveNotebook, cid::AbstractString, f::AbstractString)
+    has(p) = p !== nothing && any(==(f), p["profile"]["strings"])
+    has(last_profile(nb, cid)) && return true
+    return any(e -> has(profile_load(nb, cid, String(e["id"]))), profile_history(nb, cid))
+end
+
+# A file named back by the specialist: the whole name, or its last parts (`src/solver.jl`).
+_file_is(f::AbstractString, want::AbstractString) = f == want || endswith(f, "/" * want)
+
 """
     profile_source(nb, cid, file) -> Dict
 
@@ -229,6 +249,7 @@ function profile_source(nb::LiveNotebook, cid::AbstractString, file::AbstractStr
     end
     cell = _profile_cell(nb, cid)
     cell === nothing && return Dict{String,Any}("file" => f, "text" => "", "error" => "no code cell '$cid'")
+    _profiled_file(nb, cid, f) || return Dict{String,Any}("file" => f, "text" => "", "error" => "not a file of this cell's profiles")
     side = _region_active(nb) ? _cell_side(nb, cell) : ""   # the side only: the kernel may not exist yet
     k, why = _profile_kernel(nb, side)
     k === nothing && return Dict{String,Any}("file" => f, "text" => "", "error" => why)
@@ -317,10 +338,16 @@ end
 _pwhere(n::_PNode) = n.kind != 0 ? n.func : string(n.func, "  ", _pshort(n.file), ":", n.line,
                                                      n.pkg in ("cell", "notebook", "") ? "" : "  (" * n.pkg * ")")
 
-function _cell_line_text(nb::LiveNotebook, file::AbstractString, line::Integer)
+# The text of a cell's line: the profiled cell's as it was when profiled, another's as it is now.
+function _cell_line_text(nb::LiveNotebook, file::AbstractString, line::Integer, p = nothing)
     startswith(file, "cell:") || return ""
-    c = _profile_cell(nb, file[6:end]); c === nothing && return ""
-    ls = split(c.source, '\n')
+    src = if p !== nothing && file == "cell:" * String(p["cell"]) && haskey(p, "source")
+        String(p["source"])
+    else
+        c = _profile_cell(nb, file[6:end]); c === nothing && return ""
+        c.source
+    end
+    ls = split(src, '\n')
     return 1 <= line <= length(ls) ? strip(ls[line]) : ""
 end
 
@@ -356,7 +383,7 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
     println(io, bytes ? "\nLines by what they allocate themselves (self / total):" : "\nLines by their own time (self / total):")
     for r in Iterators.take(filter(r -> r.self > 0, rows), 12)
         println(io, "  ", lpad(_ppct(r.self / T), 6), " / ", lpad(_ppct(r.incl / T), 5), "  ",
-                _pshort(r.file), ":", r.line, (t = _cell_line_text(nb, r.file, r.line); isempty(t) ? "" : "  " * t),
+                _pshort(r.file), ":", r.line, (t = _cell_line_text(nb, r.file, r.line, p); isempty(t) ? "" : "  " * t),
                 _pmarks(r.d, r.g, r.c, T))
     end
     if haskey(P, "types") && !isempty(P["types"])
@@ -424,7 +451,7 @@ function profile_tree_text(nb::LiveNotebook, cid::AbstractString; at::AbstractSt
         # A function's name also finds its closures (`#f##2`), which is how a `@threads` body shows.
         cand = m === nothing ? (c = [n for n in nodes if n.func == a];
                                 isempty(c) ? [n for n in nodes if occursin("#" * a * "#", n.func)] : c) :
-               [n for n in nodes if n.line == parse(Int, m.captures[2]) && endswith(n.file, m.captures[1])]
+               [n for n in nodes if n.line == parse(Int, m.captures[2]) && _file_is(n.file, m.captures[1])]
         isempty(cand) && return "Nothing in the profile at `$a`. Name a `file:line` or a function from the summary or the tree."
         start = cand[argmax([n.total for n in cand])].id
     end
@@ -453,7 +480,7 @@ function profile_source_text(nb::LiveNotebook, cid::AbstractString, file::Abstra
     p === nothing && return "No profile of cell `$cid` yet. `prof_run` takes one."
     P = p["profile"]; T = max(1, P["samples"]); S = P["strings"]; L = P["lines"]
     want = strip(String(file))
-    full = something(findfirst(f -> endswith(f, want), [String(f) for f in S]), 0)
+    full = something(findfirst(f -> _file_is(String(f), want), S), 0)
     path = full == 0 ? want : String(S[full])
     src = profile_source(nb, cid, path)
     src["error"] === nothing || return "Could not read `$path`: $(src["error"])"
@@ -665,8 +692,9 @@ function _profile_export_response(nb::LiveNotebook, cid::AbstractString, id::Abs
     p = isempty(id) ? last_profile(nb, cid) : profile_load(nb, cid, id)
     p === nothing && return HTTP.Response(404, "no such profile")
     P = p["profile"]
-    stem = string(splitext(basename(nb.path))[1], "-", cid, "-", get(P, "mode", "cpu"), "-",
-                  Dates.format(Dates.unix2datetime(Float64(P["at"])), "yyyymmdd-HHMMSS"))
+    stem = replace(string(splitext(basename(nb.path))[1], "-", cid, "-", get(P, "mode", "cpu"), "-",
+                          Dates.format(Dates.unix2datetime(Float64(P["at"])), "yyyymmdd-HHMMSS")),
+                   r"[^A-Za-z0-9._-]" => "_")
     if format == "pprof"
         return HTTP.Response(200, ["Content-Type" => "application/octet-stream",
                                    "Content-Disposition" => "attachment; filename=\"$stem.pb\""], profile_pprof(P))

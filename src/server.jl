@@ -5203,6 +5203,7 @@ function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool 
     t0 = time()
     last_note = t0
     while true
+        nb.closed && return nb                 # nothing will settle its cells now
         done = lock(nb.lock) do
             if !isempty(wait_for)
                 i = _index_of(nb.report.cells, wait_for)

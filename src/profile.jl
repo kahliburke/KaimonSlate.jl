@@ -48,7 +48,8 @@ function profile_arm!(cell::AbstractString, mode::AbstractString = "cpu"; delay_
     o = ProfOpts(String(mode) in ("cpu", "wall", "alloc", "gpu") ? String(mode) : "cpu",
                  clamp(Float64(delay_ms), 0.1, 100.0), clamp(Int(buffer), 100_000, 100_000_000), trace,
                  clamp(Float64(alloc_rate), 1e-4, 1.0))
-    lock(_PROF_STATE_LOCK) do; _PROF_ARMED[String(cell)] = o; end
+    # The last result goes now, so whatever `profile_result` returns after this run is this run's.
+    lock(_PROF_STATE_LOCK) do; _PROF_ARMED[String(cell)] = o; delete!(_PROF_RESULT, String(cell)); end
     return true
 end
 
@@ -80,6 +81,19 @@ function _profiled(f, cid::AbstractString)
     o = _profile_take(cid)
     o === nothing && return f()
     return lock(_PROF_LOCK) do
+        # The sample buffer is the process's: one a cell's own code started is not cleared from
+        # under it. The cell runs unprofiled and the profile says why.
+        if o.mode != "alloc" && ccall(:jl_profile_is_running, Cint, ()) != 0
+            v = f()
+            lock(_PROF_STATE_LOCK) do
+                _PROF_RESULT[String(cid)] = Dict{String,Any}("cell" => String(cid), "mode" => o.mode, "at" => time(),
+                    "error" => "a profile was already running in this process (the cell's own?); this run was not profiled")
+            end
+            return v
+        end
+        # CUDA is loaded before the clock starts, so its loading is not counted as the cell's.
+        cuda = o.mode == "gpu" ? _cuda_module() : nothing
+        saved = _profile_settings()
         Base.cumulative_compile_timing(true)
         c0 = Base.cumulative_compile_time_ns()[1]; g0 = Base.gc_num().total_time; t0 = time_ns()
         task = UInt(pointer_from_objref(current_task()))
@@ -113,12 +127,12 @@ function _profiled(f, cid::AbstractString)
                 # GPU work is mostly the host waiting on the device, which a CPU-time sampler barely
                 # sees (on Linux it ticks with the process's CPU time), so GPU mode samples wall time.
                 v = o.mode == "wall" ? Profile.@profile_walltime(run()) :
-                    o.mode == "gpu" ? _with_gpu(() -> Profile.@profile_walltime(run()), gpu) : Profile.@profile(run())
+                    o.mode == "gpu" ? _with_gpu(() -> Profile.@profile_walltime(run()), gpu, cuda) : Profile.@profile(run())
             end
         catch e
             fx = facts(); done()
             try; store!(fx, sprint(showerror, e)); catch; end
-            _profile_release!()
+            _profile_release!(saved)
             rethrow()
         end
         fx = facts(); done()
@@ -127,15 +141,30 @@ function _profiled(f, cid::AbstractString)
         catch e
             @warn "slate profile: could not build the profile" cell = cid exception = (e, catch_backtrace())
         end
-        _profile_release!()
+        _profile_release!(saved)
         v
     end
 end
 
-# The sample buffer is only needed while a profile runs: shrunk back afterwards, so a worker that
-# was profiled once does not keep it.
-_profile_release!() = (Profile.clear(); Profile.init(n = 1000, delay = _PROF_DELAY);
-                       try; Profile.Allocs.clear(); catch; end; nothing)
+# The sampler's settings before a profile, read without allocating a buffer: 0 entries means
+# `Profile` has not set one up yet.
+_profile_settings() = (Int(ccall(:jl_profile_maxlen_data, Csize_t, ())), ccall(:jl_profile_delay_nsec, UInt64, ()) / 1e9)
+
+# Afterwards the samples go and the sampler is set back as it was, so the cell's own `@profile`
+# later gets the buffer it would have had. Never set up before: `Profile`'s default.
+function _profile_release!(saved)
+    Profile.clear()
+    n, delay = saved
+    if n > 0
+        Profile.init(n = n, delay = delay)
+    elseif isdefined(Profile, :default_init)
+        Profile.default_init()
+    else
+        Profile.init(n = 10_000_000, delay = _PROF_DELAY)
+    end
+    try; Profile.Allocs.clear(); catch; end
+    return nothing
+end
 
 # ── what compiled, and what dispatched at runtime ───────────────────────────────────────────────
 # Julia reports both when asked (`@trace_compile`, `@trace_dispatch`): a compiled method with how
@@ -192,7 +221,8 @@ function _traced(f, out::Dict{String,Any})
     end
 end
 
-const _OWN_SIG = r"\b(?:SlateWorker|ReportEngine|KaimonSlate|KaimonGate)\."
+# A method of the profiler or the worker: its signature starts with its function's type.
+const _OWN_SIG = r"^Tuple\{(?:typeof\()?(?:Core\.)?(?:SlateWorker|ReportEngine|KaimonSlate|KaimonGate)\."
 
 function _read_trace!(out::Dict{String,Any}, path::AbstractString)
     compiled = Dict{String,Vector{Float64}}(); dispatched = Dict{String,Int}()   # signature → [count, ms]
@@ -200,12 +230,13 @@ function _read_trace!(out::Dict{String,Any}, path::AbstractString)
         m = match(r"^#=\s*([\d.]+)\s*ms\s*=#\s*precompile\((.*)\)(?:\s*#.*)?$", l)
         # The profiler's and the worker's own calls are not the cell's, and a line two threads wrote
         # into at once is not a signature.
-        occursin(_OWN_SIG, l) && continue
         count(==('{'), l) == count(==('}'), l) && count(==('('), l) == count(==(')'), l) || continue
         if m !== nothing
+            occursin(_OWN_SIG, m.captures[2]) && continue
             c = get!(() -> [0.0, 0.0], compiled, String(m.captures[2]))
             c[1] += 1; c[2] += parse(Float64, m.captures[1])
         elseif (m2 = match(r"^precompile\((.*)\)(?:\s*#.*)?$", l)) !== nothing
+            occursin(_OWN_SIG, m2.captures[1]) && continue
             dispatched[String(m2.captures[1])] = get(dispatched, String(m2.captures[1]), 0) + 1
         end
     end
@@ -221,21 +252,28 @@ end
 # ── the GPU ─────────────────────────────────────────────────────────────────────────────────────
 const _CUDA_ID = Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b64840ba"), "CUDA")
 
-# `f` under CUDA.jl's own profiler, when the notebook has loaded CUDA: the device's kernels and
-# copies, summed by name, land in `out`. Without CUDA it is `f`, and `out` says why.
-function _with_gpu(f, out::Dict{String,Any})
+# CUDA.jl, loaded if it is not yet (a fresh worker, before the cell's own `using CUDA`) and the
+# notebook's environment has it, so its profiler can wrap the whole run. `nothing` without it.
+function _cuda_module()
     m = get(Base.loaded_modules, _CUDA_ID, nothing)
-    # Not loaded yet (a fresh worker, before the cell's own `using CUDA`): loaded now, when the
-    # notebook's environment has it, so its profiler can wrap the whole run.
-    m === nothing && (m = try; Base.require(_CUDA_ID); catch; nothing; end)
+    m === nothing || return m
+    return try; Base.require(_CUDA_ID); catch; nothing; end
+end
+
+# `f` under CUDA.jl's own profiler: the device's kernels and copies, summed by name, land in `out`.
+# Without CUDA it is `f`, and `out` says why. The cell's own error is the run's; if the profiler
+# fails before the cell starts, the cell runs without it.
+function _with_gpu(f, out::Dict{String,Any}, m)
     m === nothing && (out["error"] = "CUDA is not in this notebook's environment"; return f())
-    val = Ref{Any}(nothing)
+    val = Ref{Any}(nothing); started = Ref(false); finished = Ref(false)
+    body = () -> (started[] = true; val[] = f(); finished[] = true; nothing)
     res = try
         Base.invokelatest(Core.eval, Main,
-            Expr(:macrocall, GlobalRef(m, Symbol("@profile")), LineNumberNode(0), Expr(:call, () -> (val[] = f()))))
+            Expr(:macrocall, GlobalRef(m, Symbol("@profile")), LineNumberNode(0), Expr(:call, body)))
     catch e
+        started[] && !finished[] && rethrow()
         out["error"] = first(sprint(showerror, e), 300)
-        return val[]
+        return started[] ? val[] : f()
     end
     try
         # CUDA.jl hands its device trace back as columns by name (a NamedTuple of vectors).
@@ -479,6 +517,16 @@ _scheduling(frames, start, cellfile) =
                                            !(_frame_pkg(fr, cellfile) in ("Base", "Compiler"))), start:length(frames)) &&
     any(j -> frames[j].func in _SCHED_FNS || occursin("task_get_next", string(frames[j].func)), start:length(frames))
 
+# A task another cell started: its outermost notebook code (`frames` root first) is another cell's.
+# A helper from another cell called by this one is further in. Only a parked one is left out (a
+# background loop a cell left behind, which wall time samples every tick): a running one may be
+# this cell's work handed to a function another cell defined, which looks the same.
+function _other_cells(frames, cellfile)
+    i = findfirst(fr -> startswith(_ffile(fr), "cell:"), frames)
+    return i !== nothing && _ffile(frames[i]) != cellfile
+end
+_parked(frames) = !isempty(frames) && (j = findlast(fr -> !fr.from_c, frames); j !== nothing && _parked_tail(frames, j))
+
 # Where work running now belongs in the cell: the call its task last waited in during this
 # statement, else the statement's line, else the cell.
 function _statement_node(t, root, cellfile, graft, graftat, stmt0, marks, mi)
@@ -492,6 +540,8 @@ end
 # The runtime's frames stay, so compiling and collecting are recognised.
 function _outside_start(frames, cellfile)
     ev = findlast(fr -> fr.func === :_eval_cell_source, frames)
+    # Not evaluating yet (parsing the cell, say): past the last of the worker's own frames.
+    ev === nothing && (ev = findlast(fr -> !fr.from_c && _frame_pkg(fr, cellfile) in _INFRA_PKGS, frames))
     s = ev === nothing ? 1 : ev + 1
     while s <= length(frames) && !frames[s].from_c &&
           (frames[s].func === :eval || _frame_pkg(frames[s], cellfile) in _INFRA_PKGS)
@@ -516,7 +566,7 @@ its waiting is time like any other.
 function _profile_build(cid::String, task::UInt, facts; error = nothing, others::Set{UInt} = Set{UInt}(),
                         marks::Vector{Tuple{Int,Int}} = Tuple{Int,Int}[])
     wall = facts.opts.mode in ("wall", "gpu")
-    data = Profile.fetch(include_meta = true)
+    data = Profile.fetch(include_meta = true, limitwarn = false)   # a full buffer is reported as `buffer_full`
     lidict = Profile.getdict(data)
     cellfile = "cell:" * cid
     t = _ProfTree(); a = _Acc(t, cellfile)
@@ -527,7 +577,10 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
     tl_thread = UInt[]; tl_clock = UInt[]; tl_node = Int[]
     frames = Base.StackTraces.StackFrame[]
     graft = 0; graftat = 0; mi = 0
-    for s in _profile_samples(data)
+    samples = _profile_samples(data)
+    # The run's span on the sampler's clock, from every sample (idle ones too), for the timeline.
+    cspan = isempty(samples) ? (UInt(0), UInt(0)) : extrema(s -> s.clock, samples)
+    for s in samples
         while mi < length(marks) && marks[mi + 1][1] < first(s.ips); mi += 1; end
         stmt0 = mi == 0 ? 0 : marks[mi][1]
         (s.awake || wall) || (dropped["idle"] += 1; continue)
@@ -567,6 +620,7 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
         else
             any(fr -> !fr.from_c && _frame_pkg(fr, cellfile) in _INFRA_PKGS, frames) &&
                 (dropped["worker"] += 1; continue)
+            _other_cells(frames, cellfile) && _parked(frames) && (dropped["other cells"] += 1; continue)
             # From the first frame of real work: past the task entry and Base's scheduling. A thread
             # with nothing else on it is waiting for work.
             start = findfirst(fr -> !fr.from_c && !(_frame_pkg(fr, cellfile) in ("Base", "Compiler")), frames)
@@ -592,7 +646,7 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
     r, tree = _profile_result(a, cid, facts, kept; error, unit = "samples")
     r["dropped"] = dropped; r["threads"] = length(threads)
     r["buffer_full"] = try; Profile.is_buffer_full(); catch; false; end
-    r["timeline"] = _timeline(tl_thread, tl_clock, tl_node, tree.map, facts.ms, facts.opts.delay_ms)
+    r["timeline"] = _timeline(tl_thread, tl_clock, tl_node, tree.map, facts.ms, facts.opts.delay_ms, cspan)
     return r
 end
 
@@ -664,14 +718,15 @@ end
 
 # Every kept sample in time order, for the timeline: its thread (numbered from 1), when (ms from the
 # first sample, scaled from the sampler's clock to the run's length) and the node it ended in. A
-# long run is thinned to `_TL_MAX` samples.
+# long run is thinned to about `_TL_MAX` samples, every `step`-th of each thread's.
 const _TL_MAX = 150_000
-function _timeline(thread, clock, node, map, ms, delay)
+function _timeline(thread, clock, node, map, ms, delay, cspan = (minimum(clock; init = UInt(0)), maximum(clock; init = UInt(0))))
     n = length(node)
     n == 0 && return Dict{String,Any}("thread" => Int[], "t" => Float64[], "node" => Int[], "step_ms" => delay)
     step = max(1, cld(n, _TL_MAX))
-    ix = 1:step:n
-    c0, c1 = minimum(clock), maximum(clock)
+    seen = Dict{UInt,Int}()
+    ix = [i for i in 1:n if (seen[thread[i]] = get(seen, thread[i], -1) + 1) % step == 0]
+    c0, c1 = cspan
     span = c1 > c0 ? Float64(c1 - c0) : 1.0
     tids = sort!(unique(thread)); tnum = Dict(t => i for (i, t) in enumerate(tids))
     return Dict{String,Any}(

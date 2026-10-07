@@ -136,6 +136,39 @@ end
         @test length(b) > 100 && b[1] == 0x0a          # field 1 (sample_type), length-delimited
     end
 
+    @testset "arming clears the last result, and the sampler is set back afterwards" begin
+        before = RE._profile_settings()
+        _, p = profile_cell(ProfNS, "ps", "r = work(n ÷ 4)\n")
+        @test p !== nothing && RE._profile_settings() == before
+        RE.profile_arm!("ps", "cpu")
+        @test RE.profile_result("ps") === nothing
+        RE.profile_disarm!("ps")
+    end
+
+    @testset "another cell's tasks are not this cell's" begin
+        sf(file) = Base.StackTraces.StackFrame(:f, Symbol(file), 1)
+        @test RE._other_cells([sf("task.jl"), sf("cell:b"), sf("cell:a")], "cell:a")
+        @test !RE._other_cells([sf("task.jl"), sf("cell:a"), sf("cell:b")], "cell:a")   # a helper from cell b
+        @test !RE._other_cells([sf("task.jl"), sf("array.jl")], "cell:a")
+    end
+
+    @testset "a thinned timeline keeps every thread" begin
+        n = 2RE._TL_MAX + 2
+        th = UInt[isodd(i) ? 1 : 2 for i in 1:n]
+        tl = RE._timeline(th, UInt.(1:n), fill(1, n), [1], 100.0, 1.0)
+        @test sort(unique(tl["thread"])) == [1, 2] && length(tl["t"]) <= RE._TL_MAX + 2
+    end
+
+    @testset "GPU mode keeps the cell's own error and runs the cell if the profiler cannot" begin
+        broken = Module(:BrokenCUDA)
+        Core.eval(broken, :(macro profile(ex) :(error("no driver")) end))
+        out = Dict{String,Any}()
+        @test RE._with_gpu(() -> 42, out, broken) == 42 && occursin("no driver", out["error"])
+        passing = Module(:PassingCUDA)
+        Core.eval(passing, :(macro profile(ex) esc(:(($ex); nothing)) end))
+        @test_throws ErrorException("boom") RE._with_gpu(() -> error("boom"), Dict{String,Any}(), passing)
+    end
+
     @testset "source for a frame is read on the kernel's machine" begin
         s = RE.profile_source("./array.jl")
         @test s["error"] === nothing && occursin("function", s["text"]) && isfile(s["path"])
