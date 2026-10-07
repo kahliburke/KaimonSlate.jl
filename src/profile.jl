@@ -73,7 +73,7 @@ function _profiled(f, cid::AbstractString)
             fx = facts(); Base.cumulative_compile_timing(false)
             delete!(task_local_storage(), :slate_profiling); delete!(task_local_storage(), :slate_prof_marks)
             try; store!(fx, sprint(showerror, e)); catch; end
-            Profile.clear()
+            _profile_release!()
             rethrow()
         end
         fx = facts(); Base.cumulative_compile_timing(false)
@@ -83,10 +83,14 @@ function _profiled(f, cid::AbstractString)
         catch e
             @warn "slate profile: could not build the profile" cell = cid exception = (e, catch_backtrace())
         end
-        Profile.clear()
+        _profile_release!()
         v
     end
 end
+
+# The sample buffer is only needed while a profile runs: shrunk back afterwards, so a worker that
+# was profiled once does not keep it.
+_profile_release!() = (Profile.clear(); Profile.init(n = 1000, delay = _PROF_DELAY); nothing)
 
 # ── samples ─────────────────────────────────────────────────────────────────────────────────────
 # `Profile.fetch(include_meta = true)` is a flat buffer of blocks: a sample's instruction pointers,

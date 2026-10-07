@@ -10,7 +10,6 @@
 # the pushes rather than a request held open.
 
 const _PROF_LAST = Dict{Tuple{String,String},Dict{String,Any}}()   # (nb, cell) → last pushed result
-const _PROF_PREV = Dict{Tuple{String,String},Dict{String,Any}}()   # (nb, cell) → the one before it
 const _PROF_HUB_LOCK = ReentrantLock()
 
 _broadcast_profile(nb::LiveNotebook, payload::Dict{String,Any}) =
@@ -98,11 +97,8 @@ function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractStrin
         end
         payload = Dict{String,Any}("kind" => "result", "cell" => String(cid), "side" => side,
                                    "source" => _profile_cell(nb, cid).source, "profile" => r)
-        lock(_PROF_HUB_LOCK) do
-            old = get(_PROF_LAST, (nb.id, String(cid)), nothing)
-            old === nothing || (_PROF_PREV[(nb.id, String(cid))] = old)
-            _PROF_LAST[(nb.id, String(cid))] = payload
-        end
+        lock(_PROF_HUB_LOCK) do; _PROF_LAST[(nb.id, String(cid))] = payload; end
+        try; _profile_save!(nb, cid, payload); catch e; @warn "slate: could not keep a profile" cell = cid exception = e; end
         _broadcast_profile(nb, payload)
         return payload
     catch e
@@ -117,9 +113,79 @@ function run_profile!(nb::LiveNotebook, cid::AbstractString; mode::AbstractStrin
     return Dict{String,Any}("ok" => true)
 end
 
-"The last profile pushed for `cid`, for a dock opened after it was taken."
-last_profile(nb::LiveNotebook, cid::AbstractString) =
-    lock(_PROF_HUB_LOCK) do; get(_PROF_LAST, (nb.id, String(cid)), nothing); end
+# ── profiles kept on disk ──────────────────────────────────────────────────────────────────────
+# Every profile of a cell is kept, newest `_PROF_KEEP_N`, under the cache home beside the notebook's
+# telemetry: they outlive a hub restart, and an earlier one is what a profile is compared with.
+# `index.jsonl` holds a line of facts per profile, so a history is listed without reading them all.
+const _PROF_KEEP_N = 30
+
+_profile_dir(nb::LiveNotebook, cid::AbstractString) =
+    joinpath(SlateHome.cache_home(), "profiles",
+             replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_-]" => "_") * "-" *
+             string(hash(abspath(nb.path)) % 0xffffffff; base = 16, pad = 8),
+             replace(String(cid), r"[^A-Za-z0-9_-]" => "_"))
+
+function _profile_save!(nb::LiveNotebook, cid::AbstractString, payload::Dict{String,Any})
+    dir = _profile_dir(nb, cid); mkpath(dir)
+    P = payload["profile"]
+    id = string(round(Int, Float64(P["at"]) * 1000))
+    write(joinpath(dir, id * ".json"), JSON.json(_json_finite(payload)))
+    entry = Dict{String,Any}("id" => id, "at" => P["at"], "mode" => P["mode"], "duration_ms" => P["duration_ms"],
+                             "samples" => P["samples"], "threads" => P["threads"], "threw" => P["error"] !== nothing,
+                             "side" => payload["side"])
+    lock(_PROF_HUB_LOCK) do
+        es = push!(_profile_index(dir), entry)
+        if length(es) > _PROF_KEEP_N
+            for e in es[1:end-_PROF_KEEP_N]
+                rm(joinpath(dir, String(e["id"]) * ".json"); force = true)
+            end
+            es = es[end-_PROF_KEEP_N+1:end]
+        end
+        tmp = joinpath(dir, "index.jsonl.tmp")
+        open(tmp, "w") do io; foreach(e -> println(io, JSON.json(_json_finite(e))), es); end
+        mv(tmp, joinpath(dir, "index.jsonl"); force = true)
+    end
+    return id
+end
+
+# Oldest first; an entry whose profile is gone is left out.
+function _profile_index(dir::AbstractString)
+    f = joinpath(dir, "index.jsonl")
+    isfile(f) || return Dict{String,Any}[]
+    out = Dict{String,Any}[]
+    for l in eachline(f)
+        e = try; JSON.parse(l); catch; nothing; end
+        (e isa AbstractDict && isfile(joinpath(dir, String(e["id"]) * ".json"))) && push!(out, Dict{String,Any}(e))
+    end
+    return out
+end
+
+"The profiles kept of `cid`, newest first, as their facts."
+profile_history(nb::LiveNotebook, cid::AbstractString) = reverse(_profile_index(_profile_dir(nb, cid)))
+
+"A kept profile of `cid` by its id, or `nothing`."
+function profile_load(nb::LiveNotebook, cid::AbstractString, id::AbstractString)
+    f = joinpath(_profile_dir(nb, cid), replace(String(id), r"[^0-9]" => "") * ".json")
+    isfile(f) || return nothing
+    return try; Dict{String,Any}(JSON.parse(read(f, String))); catch; nothing; end
+end
+
+"The latest profile of `cid`: the one taken since the hub started, else the newest kept."
+function last_profile(nb::LiveNotebook, cid::AbstractString)
+    p = lock(_PROF_HUB_LOCK) do; get(_PROF_LAST, (nb.id, String(cid)), nothing); end
+    p === nothing || return p
+    h = profile_history(nb, cid)
+    isempty(h) && return nothing
+    p = profile_load(nb, cid, String(h[1]["id"]))
+    p === nothing || lock(_PROF_HUB_LOCK) do; _PROF_LAST[(nb.id, String(cid))] = p; end
+    return p
+end
+
+"The profile of `cid` before the latest, or `nothing`."
+function previous_profile(nb::LiveNotebook, cid::AbstractString)
+    h = profile_history(nb, cid)
+    return length(h) < 2 ? nothing : profile_load(nb, cid, String(h[2]["id"]))
+end
 
 """
     profile_source(nb, cid, file) -> Dict
@@ -168,6 +234,15 @@ function _register_profile_routes!(router, h::Hub)
         catch e
             _json(Dict{String,Any}("ok" => false, "error" => first(sprint(showerror, e), 300)))
         end
+    end))
+    HTTP.register!(router, "GET", "/api/{id}/profile/history", req -> _withnb(h, req, nb -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        _json(Dict{String,Any}("profiles" => profile_history(nb, String(get(q, "cell", "")))))
+    end))
+    HTTP.register!(router, "GET", "/api/{id}/profile/load", req -> _withnb(h, req, nb -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        p = profile_load(nb, String(get(q, "cell", "")), String(get(q, "id", "")))
+        _json(p === nothing ? Dict{String,Any}("kind" => "none") : p)
     end))
     HTTP.register!(router, "GET", "/api/{id}/profile/source", req -> _withnb(h, req, nb -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
@@ -231,7 +306,7 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
             ", ", P["samples"], " samples", P["threads"] > 1 ? " on $(P["threads"]) threads" : "",
             ", compiling ", _pms(P["compile_ms"]), ", GC ", _pms(P["gc_ms"]), ".")
     P["error"] === nothing || println(io, "The run threw: ", first(split(String(P["error"]), '\n')))
-    prev = lock(_PROF_HUB_LOCK) do; get(_PROF_PREV, (nb.id, String(cid)), nothing); end
+    prev = previous_profile(nb, cid)
     if prev !== nothing
         Q = prev["profile"]
         println(io, "The run before took ", _pms(Q["duration_ms"]), " (", round(P["duration_ms"] / max(1e-9, Q["duration_ms"]); digits = 2), "× now).")
