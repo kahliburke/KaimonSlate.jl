@@ -2070,12 +2070,16 @@ end
         @test RE._strip_ansi("no colour here") == "no colour here"
         # Slate's own lines are coloured for the activity, and read the same once the colour is gone.
         for l in ("prepare[pm]: Precompile x — ok: compiled already", "prepare[pm]: Get a node — fail: refused",
-                  "provision [3/3] environment unchanged", "FAILED: sending x", "a line of no kind")
+                  "provision [3/3] environment unchanged", "FAILED: sending x", "a line of no kind",
+                  "provision START host=perlmutter transport=tunnel project=~/.cache/x parent=/Users/me/p",
+                  "env: dev dep 'Pkg' → perlmutter:.cache/kaimonslate/devsrc/-Users-me-Pkg.jl")
             @test RE._strip_ansi(RE._activity_line(l)) == l
         end
         @test occursin("\e[32mok", RE._activity_line("prepare[pm]: Precompile x — ok: compiled already"))
         @test occursin("\e[31mfail", RE._activity_line("prepare[pm]: Get a node — fail: refused"))
         @test RE._activity_line("a line of no kind") == "a line of no kind"
+        @test occursin("\e[36mperlmutter", RE._activity_line("provision START host=perlmutter transport=tunnel"))
+        @test occursin("\e[36mpm_gpu1", RE._activity_line("prepare[pm_gpu1]: Precompile x — ok: done"))
         @test RE._activity_line("\e[32m✓\e[39m JSON") == "\e[32m✓\e[39m JSON"     # its own colours kept
     end
 

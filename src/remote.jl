@@ -109,21 +109,53 @@ region_trace_reset!(name::AbstractString) =
 # activity, which shows them, and dropped everywhere text is read: the log file, the logger, a parser.
 _strip_ansi(s::AbstractString) = replace(String(s), r"\e\[[0-9;:]*[A-Za-z]" => "")
 
-# Slate's own activity lines in colour, as the dialog shows a program's: a step's outcome green, yellow
-# or red, its name bold, the prefix saying which part of Slate spoke subdued. A line that already
-# carries colours is left as it is.
+# Slate's own activity lines in colour, as the dialog shows a program's: names (regions, hosts) cyan, a
+# step's name and outcome marked, and what is long and rarely read (paths, the keys of `key=value`)
+# subdued. A line that already carries colours is left as it is.
+const _ACT_DIM, _ACT_UNDIM, _ACT_NAME, _ACT_BOLD, _ACT_PLAIN = "\e[2m", "\e[22m", "\e[36m", "\e[1m", "\e[39m"
+_act_dim(x) = _ACT_DIM * x * _ACT_UNDIM
+_act_name(x) = _ACT_NAME * x * _ACT_PLAIN
+_act_bold(x) = _ACT_BOLD * x * _ACT_UNDIM
+_act_ispath(v) = startswith(v, "/") || startswith(v, "~")
+
+# Within a line: `key=value` (a host value as a name, a path value subdued), `host:path`, a lone path,
+# a quoted name.
+const _ACT_TOKEN = r"(\b[a-z_]+=)(\S+)|(\b[\w.-]+):((?:~|\.|/)[^\s,;)]+)|((?<![\w=:])(?:~/|/)[^\s,;)]+)|('[^'\s][^']*')"
+function _activity_tokens(s::AbstractString)
+    io = IOBuffer(); pos = 1
+    for m in eachmatch(_ACT_TOKEN, s)
+        print(io, SubString(s, pos, prevind(s, m.offset)))
+        if m[1] !== nothing
+            print(io, _act_dim(m[1]), m[1] == "host=" ? _act_name(m[2]) : _act_ispath(m[2]) ? _act_dim(m[2]) : m[2])
+        elseif m[3] !== nothing
+            print(io, _act_name(m[3]), ":", _act_dim(m[4]))
+        elseif m[5] !== nothing
+            print(io, _act_dim(m[5]))
+        else
+            print(io, _act_bold(m[6]))
+        end
+        pos = m.offset + ncodeunits(m.match)
+    end
+    print(io, SubString(s, pos))
+    return String(take!(io))
+end
+
 function _activity_line(msg::AbstractString)
     occursin('\e', msg) && return String(msg)
-    dim(x) = "\e[2m" * x * "\e[22m"
-    m = match(r"^(prepare\[[^\]]*\]: )(.*?) — (ok|warn|fail)\b(.*)$"s, msg)
+    m = match(r"^prepare\[([^\]]*)\]: (.*?) — (ok|warn|fail)\b(.*)$"s, msg)
     if m !== nothing
-        c = m[3] == "ok" ? "32" : m[3] == "warn" ? "33" : "31"
-        return dim(m[1]) * "\e[1m" * m[2] * "\e[22m — \e[" * c * "m" * m[3] * "\e[39m" * m[4]
+        c = m[3] == "ok" ? "\e[32m" : m[3] == "warn" ? "\e[33m" : "\e[31m"
+        return _act_dim("prepare[") * _act_name(m[1]) * _act_dim("]: ") * _act_bold(m[2]) * " — " *
+               c * m[3] * _ACT_PLAIN * _activity_tokens(m[4])
     end
-    m = match(r"^((?:provision \[\d/\d\]|region\[[^\]]*\]:|env:|transfer:|sync:|spawn:|connect(?: OK)?:))(.*)$"s, msg)
-    m === nothing || return dim(m[1]) * m[2]
-    startswith(msg, "FAILED") && return "\e[31mFAILED\e[39m" * msg[7:end]
-    return String(msg)
+    m = match(r"^(prepare|region)\[([^\]]*)\]:(.*)$"s, msg)
+    m === nothing || return _act_dim(m[1] * "[") * _act_name(m[2]) * _act_dim("]:") * _activity_tokens(m[3])
+    m = match(r"^provision (START|DONE)\b(.*)$"s, msg)
+    m === nothing || return _act_dim("provision ") * _act_bold(m[1]) * _activity_tokens(m[2])
+    m = match(r"^(provision \[\d/\d\]|env:|transfer:|sync:|spawn:|connect(?: OK)?:|sysimg:)(.*)$"s, msg)
+    m === nothing || return _act_dim(m[1]) * _activity_tokens(m[2])
+    startswith(msg, "FAILED") && return "\e[31mFAILED" * _ACT_PLAIN * _activity_tokens(msg[7:end])
+    return _activity_tokens(msg)
 end
 
 function _rlog(msg::AbstractString)
