@@ -161,6 +161,19 @@ end
                 RE.route!("c9", "")
             end
         end
+
+        @testset "a worker listed under its login host is reaped on its node" begin
+            man = "{\"notebook\":\"nb.jl\",\"node\":\"c7\",\"port\":\"9117\"}"
+            RE.route!("c7", "login", "88")
+            try
+                @test RE._manifest_node(man, "login") == "c7"
+            finally
+                RE.route!("c7", "")
+            end
+            # A node no longer routed has no process left to kill; a plain host is its own node.
+            @test RE._manifest_node(man, "login") == "login"
+            @test RE._manifest_node("{\"node\":\"box\"}", "box") == "box" && RE._manifest_node("", "box") == "box"
+        end
     end
 
     @testset "a sign-in that failed is not one under way" begin

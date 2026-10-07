@@ -2844,7 +2844,9 @@ function _drop_kernels_for_worker!(h, host::AbstractString, port::Integer)
         k isa ReportEngine.GateKernel && k.conn !== nothing || continue
         k.target isa ReportEngine.RemoteTarget || continue
         push!(seen, "$(nb.id)/$(_kernel_side_label(nb, k))@$(k.target.ssh_host):$(k.port)")
-        (k.target.ssh_host == host && k.port == Int(port)) || continue
+        # Named by the node it runs on, or by the login host it is reached through.
+        (k.port == Int(port) && (k.target.ssh_host == host ||
+            (v = ReportEngine.via(k.target.ssh_host); v !== nothing && v.host == host))) || continue
         try
             if ReportEngine._drop_kernel_conn!(k)
                 n += 1

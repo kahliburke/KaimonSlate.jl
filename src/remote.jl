@@ -5687,7 +5687,29 @@ which exists for a local worker (spawned inline with `-e` and owned by the hub a
 Returns whether the kill reached something, so the caller can report the outcome rather than
 assume it.
 """
+# The machine a worker named by `host` runs on. A worker on a compute node is listed under the login
+# host it is reached through, since its manifest is on the shared filesystem there, but its process is
+# on the node its manifest names. That node is used while it is still routed; once the allocation is
+# gone, so is the process.
+function _manifest_node(manifest::AbstractString, host::AbstractString)
+    m = match(r"\"node\":\"([^\"]*)\"", manifest)
+    n = m === nothing ? "" : String(m.captures[1])
+    return (isempty(n) || n == host || via(n) === nothing) ? String(host) : n
+end
+
+function _worker_node(host::AbstractString, port::Int)
+    ok, out = try
+        _run_on(String(host), "cat $(Sweep.shq(_REMOTE_WORKER))/worker-$port.json 2>/dev/null")
+    catch
+        (false, "")
+    end
+    return ok ? _manifest_node(out, host) : String(host)
+end
+
 function reap_remote_worker(host, port::Int)
+    node = _worker_node(String(host), port)
+    node == host || _rlog("reap: worker-$port is listed on $host and runs on $node")
+    host = node
     _rlog("reap: killing worker-$port on $host (manual)")
     try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
     try; _evict_worker_conn!(host, port); catch; end          # …and any non-parked hub wire (warm/reconnect) — else a respawn on this port hits "Already connected"
