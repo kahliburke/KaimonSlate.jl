@@ -39,7 +39,8 @@ under the module name "Slate". The agent also has `slate_inspect`, `slate_eval`,
 
 `slate_eval` runs code in the notebook's worker **without adding a cell**, and its result lands in
 the [scratchpad](notebook-basics.md#The-scratchpad) behind the 🧪 pill, which badges in-flight and
-unread runs. Scratch output is read-only text, values and static images, and the panel's 🧹 button
+unread runs. With `region="name"` it runs on that [region](regions.md)'s worker instead, where the
+region's cells keep their bindings and packages. Scratch output is read-only text, values and static images, and the panel's 🧹 button
 empties it.
 
 Tool calls are shown in the chat with friendly labels (e.g. `➕ add cell`, `🖼 view

@@ -152,6 +152,10 @@ Under [Kaimon](agent.md), define a region with `slate_region(name; host, warm, p
 choose which regions a notebook uses with `slate_region_on(notebook, "name1,name2")`, and list the
 registry with `slate_regions()`.
 
+`slate_eval(notebook, code; region = "name")` runs a scratch evaluation on a region's worker, in the
+namespace its cells see. Without `region` it runs on the notebook's local worker, which does not
+have a region cell's bindings or packages.
+
 For cross-region work there are four more, the agent-side equivalents of the
 [DAG pane's](dag.md#Steering-regions-from-the-DAG) region toolbar:
 

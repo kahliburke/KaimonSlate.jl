@@ -304,6 +304,8 @@ const NS = KaimonSlate.NotebookServer
             # errors are CAPTURED, not thrown; still no cells added
             @test occursin("ERROR", NS.agent_scratch_eval!(nb, "sqrt(-1.0)"))
             @test length(nb.report.cells) == n0
+            # a region with no definition is reported as the eval's error
+            @test occursin("not defined", NS.agent_scratch_eval!(nb, "1 + 1"; region = "no_such_region"))
         end
 
         @testset "surface @bind controls onto a cell" begin

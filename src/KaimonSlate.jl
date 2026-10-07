@@ -3180,9 +3180,10 @@ function create_tools(GateTool::Type)
     end
 
     """
-        eval(notebook, source; ephemeral="0", memo_key="", memo_threshold="0") -> String
+        eval(notebook, source; ephemeral="0", region="", memo_key="", memo_threshold="0") -> String
 
-    Run `source` as Julia in the notebook's LIVE kernel and return its captured output — a
+    Run `source` as Julia in the notebook's LIVE kernel (its LOCAL worker; a cell tagged
+    `region=<name>` lives on that region's worker, so pass `region`) and return its captured output — a
     throwaway diagnostic scratchpad that does NOT create a cell or touch the `.jl`. Use it for
     one-off checks against the notebook's state (inspect a variable, a quick parameter scan, a
     sanity plot you save to a file with `Read`) WITHOUT littering the notebook with diagnostic
@@ -3200,14 +3201,18 @@ function create_tools(GateTool::Type)
     flag here and you don't need one — promotion is automatic. While a job runs, keep working or
     poll: never sleep or idle to pass the time, since the worker computes at the same rate either
     way and holds your result until you ask.
+
+    `region="name"` runs it on that region's worker instead, in the namespace its cells see (the
+    local worker does not have a region cell's bindings or packages). Starts the region's worker
+    if it has none, as running one of its cells would.
     """
-    function scratch_eval(notebook::String, source::String; ephemeral::String = "0",
+    function scratch_eval(notebook::String, source::String; ephemeral::String = "0", region::String = "",
                           memo_key::String = "", memo_threshold::String = "0")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        r = agent_scratch_eval_bg!(nb, source;
+        r = agent_scratch_eval_bg!(nb, source; region = strip(region),
             ephemeral = lowercase(ephemeral) in ("1", "true", "yes", "on"),
             memo_key = memo_key, memo_threshold = something(tryparse(Float64, memo_threshold), 0.0))
-        return _surfaced(nb, "eval", Dict{String,Any}("source" => source, "ephemeral" => ephemeral), r.text)
+        return _surfaced(nb, "eval", Dict{String,Any}("source" => source, "ephemeral" => ephemeral, "region" => region), r.text)
     end
     """
         check_eval(notebook, job) -> String

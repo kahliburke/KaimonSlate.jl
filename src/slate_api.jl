@@ -1112,7 +1112,7 @@ See also `save_asset`, `FileUpload`."""),
     SlateApiEntry("regions", "Remote & regions",
         "Run SOME cells on another kernel/host; boundary values cross as content-addressed blobs.",
         ["distributed", "warm pool", "offload", "per cell", "second kernel", "hybrid"],
-        "slate.region · slate.region_on · slate.regions  ·  cell tag `region=<name>`",
+        "slate.region · slate.region_on · slate.regions · slate.eval(…; region)  ·  cell tag `region=<name>`",
         """Run SOME of a notebook's cells on a second kernel (another host) while the rest stay local —
         boundary values cross automatically as content-addressed blobs (a DataFrame crosses as Arrow IPC;
         unchanged values dedup to nothing). AGENT TOOLS define the compute; cell TAGS assign the work:
@@ -1127,6 +1127,9 @@ See also `save_asset`, `FileUpload`."""),
             region what it asks for and the allocation this hub holds.
           • Tag a cell `region=<name>` (the 🏷 tag editor's "Run on") to run it there. Keep the main kernel
             and `@bind` cells local; a region cell should PRODUCE values, not mutate main-kernel state (v1).
+          • `slate.eval(notebook, code; region = "name")` — a scratch eval on that region's worker, where
+            its cells' bindings and packages live. A plain `slate.eval` runs on the LOCAL worker, which
+            has none of them.
         A SHARED KERNEL cell — `using X` plus the functions the region cells call — needs no annotation:
         its imports and DEFINITIONS (functions, types, literal `const`s) are re-established on every
         worker, while data-dependent compute in the same cell stays behind. Its own upstream data reads

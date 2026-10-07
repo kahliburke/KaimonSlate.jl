@@ -541,7 +541,7 @@ function clear_scratch!(nb::LiveNotebook)
 end
 
 function agent_scratch_eval!(nb::LiveNotebook, source::AbstractString;
-                             ephemeral::Bool = false, memo_key::AbstractString = "",
+                             ephemeral::Bool = false, region::AbstractString = "", memo_key::AbstractString = "",
                              memo_names = String[], memo_threshold::Real = 0.0)
     src = ephemeral ? "let\n" * String(source) * "\nend" : String(source)
     memo = isempty(memo_key) ? nothing :
@@ -549,8 +549,14 @@ function agent_scratch_eval!(nb::LiveNotebook, source::AbstractString;
     cell = Cell(_scratch_id(), CODE, String(source))   # display the ORIGINAL source, not the let-wrap
     ReportEngine.mark_running!(cell)
     _push_scratch!(nb, cell)                            # surface it immediately (running) in the panel
-    out = lock(_eval_mutex(nb)) do
-        ReportEngine.eval_capture(nb.kernel, nb.report, src, "scratch", memo)
+    out = try
+        lock(_eval_mutex(nb)) do
+            ReportEngine.eval_capture(_side_kernel!(nb, region), nb.report, src, "scratch", memo; region = region)
+        end
+    catch e
+        why = e isa RegionWaiting ? "the $(region) region has no worker yet: run one of its cells, or start it from its worker panel" :
+                                    first(sprint(showerror, e), 300)
+        ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[], "", why, nothing, 0.0)
     end
     ReportEngine.mark_result!(cell, out)
     _broadcast_scratch(nb, cell)                        # push the finished cell (result / error)
@@ -588,14 +594,14 @@ jobid=<id>, text=<hint>)`, the eval continuing on the worker (poll `slate.check_
 call thus never blocks past `grace`, so it can't hit the session-tool timeout.
 """
 function agent_scratch_eval_bg!(nb::LiveNotebook, source::AbstractString;
-                                ephemeral::Bool = false, grace::Real = _scratch_grace(),
+                                ephemeral::Bool = false, region::AbstractString = "", grace::Real = _scratch_grace(),
                                 memo_key::AbstractString = "", memo_names = String[],
                                 memo_threshold::Real = 0.0)
     resultref = Ref{Union{Nothing,String}}(nothing)
     doneref = Ref(false)
     task = @async begin
         r = try
-            agent_scratch_eval!(nb, source; ephemeral = ephemeral, memo_key = memo_key,
+            agent_scratch_eval!(nb, source; ephemeral = ephemeral, region = region, memo_key = memo_key,
                                 memo_names = memo_names, memo_threshold = memo_threshold)
         catch e
             "Scratch eval errored: " * sprint(showerror, e)
