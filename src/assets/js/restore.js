@@ -7,7 +7,7 @@
 // review. Backups self-clear as cells are saved (mine === server) and on explicit discard.
 
 const _BK_KEY = () => 'slate:backup:' + NB_ID;
-// Is this text the same EDIT as that one? Trailing whitespace is never an edit (`srcEq`, store.js —
+// Is this text the same EDIT as that one? Blank lines around a cell are never an edit (`srcEq`, store.js —
 // the one definition, since private copies of it drifted before). For a WEB cell there's a second,
 // sharper way for two texts to mean the same thing: the page holds three panes and reassembles them
 // with `_webSkin`, so an equivalent-but-non-canonical stored skin (`js"""x"""` vs `js"""\nx\n"""`)
@@ -16,7 +16,8 @@ const _BK_KEY = () => 'slate:backup:' + NB_ID;
 // cells report a phantom edit on every load, forever, for a difference the page invented itself.
 function _sameEdit(a, b) {
   const store = window.slateStore || {};
-  const eq = store.srcEq || ((x, y) => (x || '').replace(/\s+$/, '') === (y || '').replace(/\s+$/, ''));
+  const core = x => (x || '').replace(/^(?:[ \t]*\r?\n)+/, '').replace(/\s+$/, '');
+  const eq = store.srcEq || ((x, y) => core(x) === core(y));
   if (eq(a, b)) return true;
   if (!window._webSkin || !window._webSections) return false;
   const canon = s => { try { return window._webSkin(window._webSections(s || '')); } catch (_) { return s || ''; } };

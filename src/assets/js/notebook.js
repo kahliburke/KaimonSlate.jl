@@ -464,9 +464,11 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // it can be unit-tested — see test/js/reconcile_verdict.mjs.
     const _hasEd = !!window.editors[c.id];
     const _mine = _hasEd ? window.edText(c.id) : null;
+    const _sent = (window._sentSrc || {})[c.id];
+    if (_sent != null && _eq(c.source, _sent)) delete window._sentSrc[c.id];   // answered
     switch (window.slateReconcileVerdict({ prevSrc: _prevSrc, prevHash: _prevHash,
                                            source: c.source, hash: c.hash,
-                                           mine: _mine, hasEditor: _hasEd, eq: _eq })) {
+                                           mine: _mine, hasEditor: _hasEd, eq: _eq, sent: _sent })) {
       case 'forward':  window.edSetText(c.id, c.source); break;                          // no local edits → adopt it
       case 'conflict': window.slateLiveConflict && window.slateLiveConflict(c.id, _mine, c.source); break;
       case 'placeholder': {

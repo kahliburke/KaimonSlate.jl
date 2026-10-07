@@ -12,7 +12,12 @@ async function runCell(id, force = false) {
   // it. Automatic/reactive renders keep the marker, so an unchanged output still doesn't double-run.
   const _out = document.querySelector('#cell-' + id + ' .output');
   if (_out) _out.__slateOut = undefined;
-  const ack = await api('POST', '/api/cell/' + id, { source: editors[id] ? edText(id) : (srcMap[id] || ''), force: !!force });
+  const sent = editors[id] ? edText(id) : (srcMap[id] || '');
+  // What a run sends is what the cell now is: the editor's baseline, and the text that identifies the
+  // push answering it as this tab's own change (`reconcileVerdict`).
+  srcMap[id] = sent;
+  (window._sentSrc || (window._sentSrc = {}))[id] = sent;
+  const ack = await api('POST', '/api/cell/' + id, { source: sent, force: !!force });
   // The run answers with a receipt; the RESULT arrives over the live push, which also handles the
   // structural case (a cell gaining or losing `@bind` widgets makes `patchCells` fall back to a full
   // publish).
@@ -151,15 +156,18 @@ window.slateRebaselineAll = rebaselineAll;
 //   placeholder  it moved, but no editor is mounted — only the preview text needs refreshing
 //   forward      it moved and the editor has no local edits → adopt the new source
 //   settled      it moved and the editor already holds exactly it → nothing to do
+//   (idle too)   it is the answer to this tab's own run (`sent`), so typing since then is kept
 //   conflict     it moved, the editor has local edits, and they differ from it → ask the user
 //
 // `hash` is the server's per-cell content hash and is authoritative when both sides have one; the
 // string compare is the fallback for a state that predates it.
-function reconcileVerdict({ prevSrc, prevHash, source, hash, mine, hasEditor, eq }) {
+function reconcileVerdict({ prevSrc, prevHash, source, hash, mine, hasEditor, eq, sent }) {
   const same = eq || ((a, b) => a === b);
   const moved = (hash != null && prevHash != null) ? hash !== prevHash : !same(source, prevSrc);
   if (!moved) return 'idle';
   if (!hasEditor) return 'placeholder';
+  // The answer to this tab's own run: what it sent, whatever was typed since.
+  if (sent != null && same(source, sent)) return 'idle';
   if (same(mine, prevSrc)) return 'forward';
   return same(mine, source) ? 'settled' : 'conflict';
 }

@@ -46,7 +46,8 @@ const is = (what, got, want) => {
 };
 // Trailing-whitespace-insensitive, the way the real caller compares: CM6 and the server disagree about
 // a lone trailing newline, and that is not an edit.
-const eq = (a, b) => String(a == null ? '' : a).replace(/\s+$/, '') === String(b == null ? '' : b).replace(/\s+$/, '');
+const core = x => String(x == null ? '' : x).replace(/^(?:[ \t]*\r?\n)+/, '').replace(/\s+$/, '');
+const eq = (a, b) => core(a) === core(b);
 const V = o => verdict({ eq, ...o });
 
 // ── The server's source did not move ──────────────────────────────────────────
@@ -127,6 +128,19 @@ is('only the incoming side has a hash',
    V({ prevSrc: 'a', prevHash: null, source: 'b', hash: 'h2', mine: 'a', hasEditor: true }), 'forward');
 // A brand-new cell has no baseline at all.
 is('no baseline yet', V({ prevSrc: undefined, source: 'new', mine: '', hasEditor: true }), 'forward');
+
+// A run's own answer. The run makes what it sent the baseline; the server stores the cell without the
+// blank lines around it, and the user may have typed on while it ran. Neither is someone else's edit.
+is('a run comes back without its leading blank line',
+   V({ prevSrc: '\n@bind x Slider(1:3)\n', prevHash: 'h1', source: '@bind x Slider(1:3)', hash: 'h2',
+       mine: '\n@bind x Slider(1:3)\n', sent: '\n@bind x Slider(1:3)\n', hasEditor: true }), 'idle');
+is('typing during the run is kept',
+   V({ prevSrc: '@bind x Slider(1:3)', prevHash: 'h1', source: '@bind x Slider(1:3)', hash: 'h2',
+       mine: '@bind x Slider(1:3)\ny = x', sent: '@bind x Slider(1:3)', hasEditor: true }), 'idle');
+// An edit from elsewhere landing on unsaved work is still a conflict.
+is('external edit while typing, after a run',
+   V({ prevSrc: '@bind x Slider(1:3)', prevHash: 'h1', source: '@bind x Slider(1:9)', hash: 'h2',
+       mine: '@bind x Slider(1:3)\ny = x', sent: '@bind x Slider(1:3)', hasEditor: true }), 'conflict');
 
 if (bad) process.exit(1);
 console.log('reconcile_verdict: ok');

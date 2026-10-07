@@ -104,7 +104,10 @@ export function setLiveState(id, s) {
 // Source comparison, shared by every caller — trailing whitespace is not an edit. Defined once
 // here because two private copies drifted (one exact `!==`, one tolerant), and the strict copy
 // painted cells `edited` over a trailing newline the other considered clean.
-export const srcEq = (a, b) => (a || '').replace(/\s+$/, '') === (b || '').replace(/\s+$/, '');
+// Blank lines before a cell's first line and whitespace after its last are not part of it: the server
+// stores a cell without them, so text that differs only there is the same cell.
+const _srcCore = s => (s || '').replace(/^(?:[ \t]*\r?\n)+/, '').replace(/\s+$/, '');
+export const srcEq = (a, b) => _srcCore(a) === _srcCore(b);
 export function markDirty(id) { if (!localDirty.value[id]) localDirty.value = { ...localDirty.value, [id]: true }; }
 // Typing back to the saved source is no longer an edit — drop BOTH marks. Called ONLY from an
 // editor's own input handler, once its text agrees with the source again: the transient `edited`
