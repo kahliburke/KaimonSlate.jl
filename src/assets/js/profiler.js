@@ -931,7 +931,8 @@ function Functions() {
   const M = model.value, fs = functions.value;
   if (!M || !fs) return html`<div class="pfflame pfempty">not profiled yet</div>`;
   const q = query.value.trim().toLowerCase();
-  const rows = (q ? fs.filter(f => f.func.toLowerCase().includes(q) || f.file.toLowerCase().includes(q)) : fs).slice(0, 300);
+  const rows = sortRows(q ? fs.filter(f => f.func.toLowerCase().includes(q) || f.file.toLowerCase().includes(q)) : fs, fnSort,
+                        { self: f => f.self, total: f => f.total, name: f => fnName(f).toLowerCase(), file: f => shortFile(f.file).toLowerCase() }).slice(0, 300);
   // Nothing picked: the heaviest by its own time, so the callers and callees always show something.
   const pickedFk = fnSel.value || (rows[0] && rows[0].fk) || '';
   const R = pickedFk ? relatives(pickedFk) : null;
@@ -944,7 +945,11 @@ function Functions() {
       : html`<div class="pfdim pfrelrow">none</div>`}</div>`;
   return html`<div class="pffuncs" style=${'grid-template-rows:minmax(0,1fr) 0 minmax(0,' + pctOf('sandwich') + ')'}>
     <div class="pftable">
-      <div class="pfthead"><span class="pfnum">self</span><span></span><span class="pfnum">total</span><span>function</span><span>file</span><span></span></div>
+      <div class="pfthead">
+        <${SortHead} sig=${fnSort} k="self" label="self" title="time spent in the function itself" /><span></span>
+        <${SortHead} sig=${fnSort} k="total" label="total" title="time in the function and everything it called" />
+        <${SortHead} sig=${fnSort} k="name" label="function" num=${false} />
+        <${SortHead} sig=${fnSort} k="file" label="file" num=${false} /><span></span></div>
       ${rows.map(f => html`<div class=${'pftrow' + (pickedFk === f.fk ? ' on' : '')} onClick=${() => pick(f)}>
         <span class="pfnum">${fmt(f.self, M)}</span>${bar(f.self)}<span class="pfnum dim">${fmt(f.total, M)}</span>
         <span class="pffn">${fnName(f)}</span><span class="pfdim pffile">${f.kind === K.line ? shortFile(f.file) : ''}</span>
@@ -1104,21 +1109,54 @@ function Code() {
   </div>`;
 }
 
+// ── sortable tables ───────────────────────────────────────────────────────────────────────────────
+// A table's sort: the column and its direction, kept across sessions. A header click sorts by its
+// column, and a second click reverses it. Figures sort largest first, names A to Z.
+function sortSignal(name, key) {
+  const saved = ls('slateProfSort.' + name, '');
+  const [k, d] = saved ? saved.split(':') : [key, 'desc'];
+  const sig = signal({ key: k, desc: d !== 'asc' });
+  sig.save = () => lsSet('slateProfSort.' + name, sig.value.key + ':' + (sig.value.desc ? 'desc' : 'asc'));
+  return sig;
+}
+function SortHead({ sig, k, label, num = true, title = null }) {
+  const on = sig.value.key === k;
+  const click = () => { sig.value = on ? { key: k, desc: !sig.value.desc } : { key: k, desc: num }; sig.save(); };
+  return html`<span class=${'pfsort' + (num ? ' pfnum' : '') + (on ? ' on' : '')} onClick=${click} title=${title}>${label}${on ? (sig.value.desc ? ' ↓' : ' ↑') : ''}</span>`;
+}
+function sortRows(rows, sig, val) {
+  const { key, desc } = sig.value, v = val[key];
+  if (!v) return rows;
+  return rows.slice().sort((a, b) => {
+    const x = v(a), y = v(b);
+    const c = typeof x === 'string' ? x.localeCompare(y) : x - y;
+    return desc ? -c : c;
+  });
+}
+const hotSort = sortSignal('hot', 'self');
+const fnSort = sortSignal('functions', 'self');
+
 // ── the hot lines ─────────────────────────────────────────────────────────────────────────────────
 function Hot() {
   const M = model.value; if (!M) return null;
   const B = baseModel.value;
   const rows = [];
   for (const [file, m] of M.lines) for (const r of m.values()) rows.push({ file, ...r });
-  rows.sort((a, b) => b.self - a.self || b.incl - a.incl);
-  const top = rows.filter(r => r.self > 0).slice(0, 14);
   const wasOf = (r) => { const m = B && B.lines.get(r.file); const w = m && m.get(r.line); return w ? w.self : 0; };
+  const where = (r) => (r.file.startsWith('cell:') ? r.file.slice(5) : shortFile(r.file)) + ':' + String(r.line).padStart(6, '0');
+  rows.sort((a, b) => b.self - a.self || b.incl - a.incl);
+  const top = sortRows(hotSort.value.key === 'self' ? rows.filter(r => r.self > 0) : rows, hotSort,
+                       { self: r => r.self, incl: r => r.incl, before: wasOf, line: where }).slice(0, 60);
   const go = (r) => { select(heaviestAt(r.file, r.line)); showCode(r.file, r.line); };
   // Another cell's lines are named by their text too, which the hub has.
   for (const r of top) if (r.file.startsWith('cell:') && !srcText(r.file)) loadSource(r.file);
-  const lead = top.length ? top[0].self : 1;
+  const lead = Math.max(1e-9, ...top.slice(0, 200).map(r => r.self));
   return html`<div class="pfhot" style=${'flex-basis:' + pctOf('hot')}>
-    <div class=${'pfhothead' + (B ? ' cmp' : '')}><span>self</span><span></span><span>total</span>${B ? html`<span>before</span>` : null}<span>line</span></div>
+    <div class=${'pfhothead' + (B ? ' cmp' : '')}>
+      <${SortHead} sig=${hotSort} k="self" label="self" title="time spent on the line itself" /><span></span>
+      <${SortHead} sig=${hotSort} k="incl" label="total" title="time on the line and in everything it called" />
+      ${B ? html`<${SortHead} sig=${hotSort} k="before" label="before" title="the line's own time in the profile compared with" />` : null}
+      <${SortHead} sig=${hotSort} k="line" label="line" num=${false} /></div>
     ${top.map(r => html`<div class=${'pfhotrow' + (B ? ' cmp' : '')} onClick=${() => go(r)}
         onMouseEnter=${() => { hotLine.value = { file: r.file, line: r.line }; }}
         onMouseLeave=${() => { hotLine.value = null; }}>
@@ -1572,6 +1610,9 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfhotrow .pfmk { display:inline-block; min-width:0; margin-right:4px; }
 .pfhotrow .pfbar { width:100%; }
 .pfhotrow:hover { background:color-mix(in srgb, #e8933a 12%, transparent); }
+.pfsort { cursor:pointer; user-select:none; }
+.pfsort:hover { color:var(--text); }
+.pfsort.on { color:#e8933a; }
 .pfnum { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .pfnum.dim { color:var(--dim); }
 .pfloc { font-family:var(--mono,ui-monospace,monospace); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
