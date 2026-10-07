@@ -362,14 +362,15 @@ function Telemetry() {
 
   const spanKey = html`<span class="tm-key">${[...Object.entries({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })
       .map(([k, l]) => [SPAN_COLOR[k], l]), [GC_COLOR, 'GC'], [GC_FULL, 'full GC']]
-    .map(([c, l]) => html`<span><i style=${'background:' + c}></i>${l}</span>`)}</span>`;
-  // A run clicked here brings its cell into view in the notebook behind, so it is there on closing.
+    .map(([c, l]) => html`<span><i style=${'background:' + c}></i>${l}</span>`)}${
+    spans.some(x => x.profile) ? html`<span><i style=${'border:2px solid ' + PROFILED + ';box-sizing:border-box'}></i>profiled</span>` : null}</span>`;
   // A profiled run opens its own profile, in place of this view.
   const openRunProfile = (id, prof) => {
     if (v.nb !== (window.__slateState || {}).id || typeof window.slateProfileCell !== 'function') return reveal(id);
     close();
     window.slateProfileCell(id, prof);
   };
+  // A run clicked here brings its cell into view in the notebook behind, so it is there on closing.
   const reveal = (id) => {
     const el = document.getElementById('cell-' + id);
     if (!el || v.nb !== (window.__slateState || {}).id) return;
