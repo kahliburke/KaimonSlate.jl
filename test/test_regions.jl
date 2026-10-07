@@ -162,6 +162,16 @@ end
             end
         end
 
+        @testset "a node another of the user's jobs holds is launched into by a step" begin
+            # `squeue -h -u $USER -w node -o %i`: the region's own job alone, or with its array and
+            # het-job parts, is not shared; any other job is.
+            @test !RE._other_jobs("88\n", "88") && !RE._other_jobs("88\n88_3\n88+1\n", "88") && !RE._other_jobs("", "88")
+            @test RE._other_jobs("88\n91\n", "88") && RE._other_jobs("880\n", "88")
+            v = (host = "login", job = "88", kind = :slurm)
+            @test occursin("srun --jobid=88 --overlap", RE._srun_step(v, "true"))
+            @test !RE._node_shared((host = "login", job = "7", kind = :pbs), "n1")
+        end
+
         @testset "a worker listed under its login host is reaped on its node" begin
             man = "{\"notebook\":\"nb.jl\",\"node\":\"c7\",\"port\":\"9117\"}"
             RE.route!("c7", "login", "88")

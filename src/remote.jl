@@ -651,12 +651,29 @@ function _in_allocation(v, node, script)
         var = v.kind === :pbs ? "PBS_JOBID" : "SLURM_JOB_ID"
         return _ssh_into(node, (isempty(v.job) ? "" : "export $var=" * Sweep.shq(v.job) * "; ") * script)
     end
-    # A step inherits the allocation's task count, so without `--ntasks=1` a job asking for N tasks
-    # runs this command N times. Everything routed here is one command on one node. `--immediate`
-    # bounds the wait for the step to start: a step the job cannot take now says why within that
-    # time instead of holding the login session until it can.
-    return "srun --jobid=" * v.job * " --overlap --immediate=$(_STEP_START_S) --ntasks=1 bash -c " * Sweep.shq(script)
+    return _srun_step(v, script)
 end
+
+# `script` as a step of `v`'s job. A step inherits the allocation's task count, so without `--ntasks=1`
+# a job asking for N tasks runs this command N times. Everything routed here is one command on one
+# node. `--immediate` bounds the wait for the step to start: a step the job cannot take now says why
+# within that time instead of holding the login session until it can.
+_srun_step(v, script) =
+    "srun --jobid=" * v.job * " --overlap --immediate=$(_STEP_START_S) --ntasks=1 bash -c " * Sweep.shq(script)
+
+# Whether another of the user's SLURM jobs runs on `node` beside `v`'s. Asked of the scheduler at each
+# launch; an answer that cannot be had counts as shared, which only costs the launch its ssh.
+function _node_shared(v, node::AbstractString)
+    v.kind === :slurm || return false
+    ok, out = Sweep.run_there(v.host, "squeue -h -u \$USER -w " * Sweep.shq(node) * " -o %i"; timeout = 20.0)
+    ok || return true
+    return _other_jobs(out, String(v.job))
+end
+
+# Whether `squeue -o %i` output names a job other than `job` (array and het-job suffixes included).
+_other_jobs(out::AbstractString, job::AbstractString) =
+    any(l -> (j = strip(l); !isempty(j) && j != job && !startswith(j, job * "_") && !startswith(j, job * "+")),
+        split(out, '\n'))
 
 # Seconds a command routed into an allocation waits for its step to start.
 const _STEP_START_S = 30
@@ -2113,6 +2130,10 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         # on nothing at the login node: losing that login node, or the hub's session through it, leaves
         # the worker running, to be re-attached over a new forward. It still ends with the job.
         #
+        # Not when another of the user's jobs holds the same node: SLURM puts an ssh session into one of
+        # the user's jobs there, which need not be this region's, and a worker in another job outlives
+        # this one's allocation and uses that job's devices. A step names its job, so it goes there.
+        #
         # Reached by a `srun --overlap` step: a worker detached inside the step dies the instant the step
         # exits, since the node runs `proctrack/cgroup` and the step's cgroup is torn down with every
         # process in it (`setsid` escapes the process GROUP, not the cgroup). So the worker runs in the
@@ -2123,10 +2144,10 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         # cluster the login host IS the routed node (`via(v.host)` is set), so `_run_on(v.host, …)` would
         # wrap this in ANOTHER `srun --overlap` step and the launcher would die with THAT step's cgroup.
         worker = "$setup && " * (v.kind === :pbs ? _pbs_attached(jl) : "exec $jl")
-        launch = if v.kind === :pbs || _node_by_ssh(host)
+        launch = if v.kind === :pbs || (_node_by_ssh(host) && !_node_shared(v, host))
             _in_allocation(v, host, "cd \$HOME && " * _detach_on_node("bash -c " * Sweep.shq(worker), logf))
         else
-            inner = _in_allocation(v, host, worker)
+            inner = _srun_step(v, worker)
             "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $inner > $logf 2>&1 & else nohup $inner > $logf 2>&1 & fi"
         end
         first(Sweep.run_there(v.host, launch; timeout = 60)) ||
