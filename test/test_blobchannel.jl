@@ -32,8 +32,12 @@ end
                 h, n = MemoStore.put_blob(io -> write(io, data), a)
                 port, stop = serve(a)
                 try
+                    nthreads0 = Threads.maxthreadid()
                     moved = pull_blob_into!(ZMQ, "127.0.0.1", port, b, h; chunk = 65_536)   # ~5 chunks
                     @test moved == n == 300_000
+                    # No libzmq thread got adopted by Julia (a zero-copy payload's free callback does that).
+                    sleep(0.2)
+                    @test Threads.maxthreadid() == nthreads0
                     @test MemoStore.has_blob(b, h)
                     _, back = MemoStore.with_blob(io -> read(io), b, h)
                     @test back == data                                                      # sha-addressed, exact

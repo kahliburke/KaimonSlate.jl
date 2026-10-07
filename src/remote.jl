@@ -3094,7 +3094,7 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
     sock = _open_data_req(kg, Z, host_ip, data_port; server_key = server_key, timeout_ms = timeout_ms)
     try
         req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
-        # Framing probe: v2 servers answer "2" and take multipart zero-copy 'p'; a v1 server
+        # Framing probe: v2 servers answer "2" and take the multipart 'p'; a v1 server
         # answers "err: unknown cmd" (single-frame command — safe) and keeps the copy path.
         # This matters for WARM workers: a reattached worker may still RUN v1 code even though
         # its on-disk payload was re-provisioned.
@@ -3119,7 +3119,7 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         # Feed the cost gate: remember this host's measured upstream rate (only from pushes big
         # enough that chunk round-trips, not RTT, dominated the clock).
         nbytes > 4 << 20 && elapsed > 0 && _bw_note!(bw_key, nbytes / elapsed)
-        msg = "pushed $(sent) blobs ($(nbytes) bytes in $(round(elapsed; digits = 1))s$rate, $(v2 ? "v2 zero-copy" : "v1 copy")) + $(length(picked)) manifests, $(deduped) blobs deduped" *
+        msg = "pushed $(sent) blobs ($(nbytes) bytes in $(round(elapsed; digits = 1))s$rate, $(v2 ? "v2" : "v1")) + $(length(picked)) manifests, $(deduped) blobs deduped" *
               (isempty(skipped) ? "" : "; $(length(skipped)) skipped (recompute cheaper)")
         _rlog("memo push → $host_ip:$data_port ($(isempty(server_key) ? "plaintext" : "CURVE")) — $msg")
         return msg
@@ -3134,13 +3134,11 @@ want_hashes(req, hashes) =
     split(req(vcat(UInt8['H'], Vector{UInt8}(codeunits(join(hashes, ","))))), ","; keepempty = false)
 
 # Ship ONE blob file over an already-connected data-channel REQ socket — v2 = multipart 'p'
-# with a zero-copy payload frame over an mmap (libzmq sends straight out of the page cache;
-# the Message's origin keeps the mmap alive until the frame is out — REQ/REP: by the reply);
-# v1 = single-frame copy-chunk 'P'. Returns the bytes sent. Shared by the memo push and the
+# with the payload frame copied from an mmap; v1 = single-frame copy-chunk 'P'. Returns the bytes sent. Shared by the memo push and the
 # region runner's single-binding transfers.
 # Does this data channel understand the 0x02 first-chunk put flag? Asked once per connection, off the
 # 'C' capability reply — NOT off 'V', whose "2" every sender compares for equality to pick the
-# zero-copy framing. An older server answers "err: unknown cmd", which is simply not a match.
+# two-frame 'p' framing. An older server answers "err: unknown cmd", which is simply not a match.
 _blob_can_restart(req) = try; occursin("restart", req(UInt8['C'])); catch; false; end
 
 # `restart` marks the FIRST chunk so a receiver can drop the partial left by an attempt that died
@@ -3162,7 +3160,10 @@ function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool;
             last = off + n >= sz
             hdr = vcat(UInt8['p'], Vector{UInt8}(codeunits(h)), UInt8[flags(off == 0, last)])
             Z.send(sock, hdr; more = true)
-            Z.send(sock, Z.Message(mm, pointer(mm) + off, n))
+            # Copied into a libzmq-owned buffer, never zero-copy: see `_zmq_copy_message` in blobchannel.jl.
+            payload = Z.Message(n)
+            GC.@preserve mm payload unsafe_copyto!(pointer(payload), pointer(mm) + off, n)
+            Z.send(sock, payload)
             r = String(copy(Z.recv(sock)))
             startswith(r, "err") && error("blob push $h: $r")
             nbytes += n; off += n

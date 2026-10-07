@@ -31,7 +31,7 @@
 #                                      into a tmp, sha256-verified on the last, atomic-renamed into
 #                                      the CAS: a corrupt/truncated transfer never lands.
 #   'p' <64-hex><u8 flags> ‖ <chunk> → same put, TWO frames: 66-byte header + a raw payload frame
-#                                      (the sender may zero-copy it over an mmap).
+#                                      (the sender copies it straight from an mmap).
 #
 # Put flags (the byte after the hash) are a BITFIELD: 0x01 = last chunk, 0x02 = first chunk
 # ("restart" capability). Older code wrote 0x00/0x01 and tested the byte with `== 0x01`, so the low
@@ -41,8 +41,8 @@
 # for that hash forever. A sender only sets it after seeing "restart" in the 'C' reply, so a new
 # sender never hands an old server a flag byte it would misread as "not last".
 #   'G' <64-hex>:<offset>:<len>      → PULL one chunk (the reverse direction). TWO reply frames:
-#                                      "ok <total>" (or "err: …" alone) + the payload, sent
-#                                      zero-copy over an mmap of the blob. RANGE-ADDRESSED — the
+#                                      "ok <total>" (or "err: …" alone) + the payload, copied
+#                                      from an mmap of the blob. RANGE-ADDRESSED — the
 #                                      primitive a lazy/partial fetch would build on.
 #   'M' <fullkey>\n<toml…>           → reply "ok" — manifest written; senders order it LAST so a
 #                                      manifest can never reference blobs that aren't there yet.
@@ -55,7 +55,17 @@ import Mmap
 _default_blob_chunk() = max(65_536, round(Int, 2^20 *
     something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_CHUNK_MB", "")), 8.0)))
 
-_is_zmq_timeout(Z, e) = (T = try; Z.TimeoutError; catch; nothing; end; T !== nothing && e isa T)
+# A payload frame in a buffer libzmq owns. Never use the zero-copy `Message(origin, ptr, n)`:
+# libzmq frees it by calling a Julia @cfunction on its own I/O thread, Julia adopts that thread,
+# and it blocks every signal. From then on each profiler tick that reaches it waits out a
+# one-second timeout, so a profile of the process collects almost nothing.
+function _zmq_copy_message(Z, src::Ptr{UInt8}, n::Integer)
+    m = Z.Message(n)
+    GC.@preserve m unsafe_copyto!(pointer(m), src, n)
+    m
+end
+
+_is_zmq_timeout(Z, e) =(T = try; Z.TimeoutError; catch; nothing; end; T !== nothing && e isa T)
 
 """
     blob_server!(Z, host, port, root; ctx=nothing, configure!=nothing,
@@ -154,8 +164,8 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
                         if n <= 0 || sz == 0
                             ("ok $sz", Z.Message())              # empty tail (or zero-size blob)
                         else
-                            mm = Mmap.mmap(p, Vector{UInt8}, sz) # Message(origin=mm,…) keeps it alive till sent
-                            ("ok $sz", Z.Message(mm, pointer(mm) + off, n))
+                            mm = Mmap.mmap(p, Vector{UInt8}, sz)
+                            ("ok $sz", GC.@preserve mm _zmq_copy_message(Z, pointer(mm) + off, n))
                         end
                     end
                 elseif cmd == 'P'
