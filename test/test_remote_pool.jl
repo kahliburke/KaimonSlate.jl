@@ -106,11 +106,12 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
             @test length(roster) == 1 && roster[1]["port"] == 9300 && roster[1]["alive"] == false
 
             # A start asks for its provisioning state in the same command.
-            write(joinpath(wd, ".slate-payload"), "abc123")
+            rdir = mkpath(joinpath(home, RE._runtime_dir()))
+            write(joinpath(rdir, RE._RUNTIME_READY), "k")
             # No julia on PATH: a launcher started under a fresh HOME sets itself up first, which is slow.
             survey(script) = read(setenv(`sh -c $script`, merge(ENV, Dict("HOME" => home, "PATH" => "/usr/bin:/bin")); dir = home), String)
             sv = RE._parse_start_survey(survey(RE._host_state_script("x") * "echo '" * RE._SURVEY_SPLIT * "'\n" * script))
-            @test sv.state["payload"] == "abc123" && haskey(sv.state, "env")
+            @test sv.state["runtime"] == "1" && haskey(sv.state, "env")
             @test issubset(9300:9302, sv.busy) && only(sv.roster)["port"] == 9300
             @test !haskey(sv.state, "alive")                     # the roster stays out of the state
         end
