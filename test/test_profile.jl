@@ -110,6 +110,10 @@ end
         p = RE.profile_result("pc2")
         @test p["compiled_n"] >= 1 && any(c -> occursin("fresh_f", c[1]), p["compiled"])
         @test p["dispatched_n"] >= 1
+        # Again: the runtime keeps the stream it first traced to, so a second run must still capture.
+        RE.profile_arm!("pc3", "cpu")
+        RE.run_capture(ProfNS, "fresh_g(x) = x * 2\nw = Any[1, 2.5]\nu = sum(fresh_g, w)\n", "cell:pc3")
+        @test any(c -> occursin("fresh_g", c[1]), RE.profile_result("pc3")["compiled"])
     end
 
     @testset "wall time samples a waiting task" begin
@@ -122,7 +126,7 @@ end
 
     @testset "a profile exports to speedscope and pprof" begin
         NS = KaimonSlate.NotebookServer
-        p = RE.profile_result("pc")
+        _, p = profile_cell(ProfNS, "px", "a = 1\nr = work(n)\n")
         ss = NS.profile_speedscope(p, "cell pc")
         prof = only(ss["profiles"])
         @test prof["type"] == "sampled" && length(prof["samples"]) == length(prof["weights"]) > 0

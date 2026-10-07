@@ -127,56 +127,76 @@ _profile_release!() = (Profile.clear(); Profile.init(n = 1000, delay = _PROF_DEL
                        try; Profile.Allocs.clear(); catch; end; nothing)
 
 # ── what compiled, and what dispatched at runtime ───────────────────────────────────────────────
-# Julia reports both on stderr when asked (`@trace_compile`, `@trace_dispatch`): a compiled method
-# with how long it took, and each signature a call had to be dispatched on at runtime. The runtime
-# writes them through its own stderr handle, so stderr is redirected to a file (not a pipe, which
-# nothing would read while the cell holds this task) the way `redirect_stderr` does it, and put back
-# by hand: the worker's `stderr` is its own stream, which `redirect_stderr` cannot restore. Anything
-# else that reached stderr meanwhile goes on to the process's real stderr.
-function _traced(f, out::Dict{String,Any})
+# Julia reports both when asked (`@trace_compile`, `@trace_dispatch`): a compiled method with how
+# long it took, and each signature a call had to be dispatched on at runtime.
+#
+# The runtime writes them to whatever its stderr was the first time it traced, kept in a static for
+# the life of the process. So the first trace is taken with that stderr pointed at a file this
+# process keeps open, and the real stderr is put back at once: from then on tracing writes only
+# there, only while a profiled run has it on, and a run reads what was added during it. Nothing is
+# redirected while the cell runs. If something traced before the profiler did, the static holds the
+# real stderr and the lists come back empty.
+const _TRACE_PRIMED = Threads.Atomic{Bool}(false)
+const _TRACE_IO = Ref{Any}(nothing)
+const _TRACE_PATH = Ref("")
+
+_trace_on() = (ccall(:jl_force_trace_compile_timing_enable, Cvoid, ()); ccall(:jl_force_trace_dispatch_enable, Cvoid, ()))
+_trace_off() = (ccall(:jl_force_trace_dispatch_disable, Cvoid, ()); ccall(:jl_force_trace_compile_timing_disable, Cvoid, ()))
+
+function _prime_trace!()
+    _TRACE_PRIMED[] && return
     path, io = mktemp()
     uv = cglobal(:jl_uv_stderr, Ptr{Cvoid})
-    old_uv = unsafe_load(uv); old_stream = stderr
-    saved = Base.Libc.dup(RawFD(2))
-    redirect_stderr(io)
-    ccall(:jl_force_trace_compile_timing_enable, Cvoid, ())
-    ccall(:jl_force_trace_dispatch_enable, Cvoid, ())
+    old = unsafe_load(uv)
+    unsafe_store!(uv, io.handle)
+    try
+        _trace_on()
+        # A fresh function, called through the runtime: one compile and one dispatch, so both
+        # statics are set while the runtime's stderr is the file.
+        Base.invokelatest(Core.eval(@__MODULE__, :(x -> x + 1)), 1)
+    finally
+        _trace_off()
+        unsafe_store!(uv, old)
+    end
+    flush(io); truncate(io, 0); seekstart(io)
+    _TRACE_IO[] = io; _TRACE_PATH[] = path
+    _TRACE_PRIMED[] = true
+    return
+end
+
+function _traced(f, out::Dict{String,Any})
+    _prime_trace!()
+    io = _TRACE_IO[]
+    flush(io); truncate(io, 0); seekstart(io)
+    _trace_on()
     try
         return f()
     finally
-        ccall(:jl_force_trace_dispatch_disable, Cvoid, ())
-        ccall(:jl_force_trace_compile_timing_disable, Cvoid, ())
+        _trace_off()
         flush(io)
-        Base.Libc.dup(saved, RawFD(2))
-        @static if Sys.iswindows()
-            ccall(:SetStdHandle, stdcall, Int32, (Int32, Base.OS_HANDLE), -12, Base.Libc._get_osfhandle(RawFD(2)))
-        end
-        ccall(:close, Cint, (Cint,), saved)
-        unsafe_store!(uv, old_uv)
-        Base._redirect_io_global(old_stream, 2)
-        close(io)
-        _read_trace!(out, path)
-        rm(path; force = true)
+        _read_trace!(out, _TRACE_PATH[])
+        truncate(io, 0); seekstart(io)
     end
 end
 
+const _OWN_SIG = r"\b(?:SlateWorker|ReportEngine|KaimonSlate|KaimonGate)\."
+
 function _read_trace!(out::Dict{String,Any}, path::AbstractString)
-    compiled = Tuple{String,Float64}[]; dispatched = Dict{String,Int}()
-    rest = IOBuffer()
+    compiled = Dict{String,Vector{Float64}}(); dispatched = Dict{String,Int}()   # signature → [count, ms]
     for l in eachline(path)
         m = match(r"^#=\s*([\d.]+)\s*ms\s*=#\s*precompile\((.*)\)(?:\s*#.*)?$", l)
+        # The profiler's and the worker's own calls are not the cell's.
+        occursin(_OWN_SIG, l) && continue
         if m !== nothing
-            push!(compiled, (String(m.captures[2]), parse(Float64, m.captures[1])))
+            c = get!(() -> [0.0, 0.0], compiled, String(m.captures[2]))
+            c[1] += 1; c[2] += parse(Float64, m.captures[1])
         elseif (m2 = match(r"^precompile\((.*)\)(?:\s*#.*)?$", l)) !== nothing
             dispatched[String(m2.captures[1])] = get(dispatched, String(m2.captures[1]), 0) + 1
-        else
-            println(rest, l)
         end
     end
-    r = take!(rest)
-    isempty(r) || ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), 2, r, length(r))
-    sort!(compiled; by = x -> -x[2])
-    out["compiled"] = [[s, ms] for (s, ms) in Iterators.take(compiled, 300)]
+    # The same method compiled on several threads at once is one entry, with how often and how long.
+    rows = sort!(collect(compiled); by = x -> -x[2][2])
+    out["compiled"] = [[s, round(c[2]; digits = 2), Int(c[1])] for (s, c) in Iterators.take(rows, 300)]
     out["compiled_n"] = length(compiled)
     out["dispatched"] = [[s, n] for (s, n) in Iterators.take(sort!(collect(dispatched); by = x -> -x[2]), 300)]
     out["dispatched_n"] = length(dispatched)

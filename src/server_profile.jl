@@ -339,8 +339,8 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
     end
     if haskey(P, "compiled") && !isempty(P["compiled"])
         println(io, "\nCompiled during the run (", P["compiled_n"], " methods), the slowest:")
-        for (sig, t) in Iterators.take(P["compiled"], 8)
-            println(io, "  ", lpad(_pms(t), 8), "  ", sig)
+        for c in Iterators.take(P["compiled"], 8)
+            println(io, "  ", lpad(_pms(c[2]), 8), length(c) > 2 && c[3] > 1 ? "  ×$(c[3])" : "", "  ", c[1])
         end
     end
     if haskey(P, "dispatched") && !isempty(P["dispatched"])

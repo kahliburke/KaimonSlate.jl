@@ -736,18 +736,22 @@ function Functions() {
 function Details() {
   const P = pf.value && pf.value.profile;
   if (!P) return html`<div class="pfflame pfempty">not profiled yet</div>`;
-  const tbl = (title, head, rows, empty) => html`<div class="pfdet"><div class="pfrelhead">${title}</div>
-    ${rows && rows.length ? html`<div class="pfdetrow pfdethead">${head.map(h => html`<span>${h}</span>`)}</div>
-      ${rows.map(r => html`<div class="pfdetrow">${r.map((c, i) => html`<span class=${i === r.length - 1 ? 'pfsig' : 'pfnum'}>${c}</span>`)}</div>`)}`
+  // Every column but the last is a figure; the last (a type, a signature, a kernel) takes the rest.
+  const tbl = (title, head, rows, empty) => {
+    const cols = 'grid-template-columns:repeat(' + (head.length - 1) + ', 80px) minmax(0,1fr)';
+    return html`<div class="pfdet"><div class="pfrelhead">${title}</div>
+    ${rows && rows.length ? html`<div class="pfdetrow pfdethead" style=${cols}>${head.map(h => html`<span>${h}</span>`)}</div>
+      ${rows.map(r => html`<div class="pfdetrow" style=${cols}>${r.map((c, i) => html`<span class=${i === r.length - 1 ? 'pfsig' : 'pfnum'} title=${i === r.length - 1 ? c : null}>${c}</span>`)}</div>`)}`
       : html`<div class="pfdim pfdetrow">${empty}</div>`}</div>`;
+  };
   const g = P.gpu;
   return html`<div class="pfdetails">
     ${P.types ? tbl('Allocated, by type (scaled from the ' + pct(P.alloc_rate) + ' recorded)', ['bytes', 'count', 'type'],
                     P.types.map(([t, c, b]) => [bytes(b), c.toLocaleString(), t]), 'nothing recorded') : null}
     ${g ? tbl('On the GPU' + (g.device_ms ? ' · ' + ms(g.device_ms) + ' of device time' : ''), ['time', 'calls', 'kernel or copy'],
               (g.kernels || []).map(([n, c, t]) => [ms(t), c, n]), g.error || 'no device work recorded') : null}
-    ${P.compiled ? tbl('Compiled during the run · ' + P.compiled_n, ['time', 'method'],
-                       P.compiled.map(([s, t]) => [ms(t), s]), 'nothing compiled') : null}
+    ${P.compiled ? tbl('Compiled during the run · ' + P.compiled_n, ['time', 'times', 'method'],
+                       P.compiled.map(([s, t, n]) => [ms(t), n || 1, s]), 'nothing compiled') : null}
     ${P.dispatched ? tbl('Dispatched at runtime · ' + P.dispatched_n + ' signatures', ['calls', 'signature'],
                          P.dispatched.map(([s, n]) => [n, s]), 'no runtime dispatch') : null}
     ${!P.types && !g && !P.compiled ? html`<div class="pfempty">no details recorded for this run</div>` : null}
