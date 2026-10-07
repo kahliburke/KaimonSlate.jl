@@ -1878,9 +1878,22 @@ function _replicate_env!(t::RemoteTarget; precompile::Bool = true, stamp::Abstra
     #    `send_sources!` reads too), then its environment's files: combined, or as resolved here.
     _send_tree!(host, origin, t.project; excludes = _PROJECT_SEND_EXCLUDES, region = t.region) ||
         error("env: could not send the origin project → $host")
-    _put_texts(host, t.project, merged === nothing ? [f => read(joinpath(origin, f), String) for f in envfiles] :
-                                                     collect(zip(envfiles, merged))) ||
-        error("env: could not send the environment's files → $host")
+    # The environment's files as resolved here. One it does not have yet (no Manifest before the first
+    # resolve) is removed from the copy, so the host resolves rather than using an older one.
+    put_own! = function ()
+        have = filter(f -> isfile(joinpath(origin, f)), envfiles)
+        _put_texts(host, t.project, [f => read(joinpath(origin, f), String) for f in have]) ||
+            error("env: could not send the environment's files → $host")
+        gone = setdiff(envfiles, have)
+        isempty(gone) || _run_on(_host_for_files(host), "rm -f " * join((Sweep.shq_path(t.project * "/" * f) for f in gone), ' '))
+        return nothing
+    end
+    if merged === nothing
+        put_own!()
+    else
+        _put_texts(host, t.project, collect(zip(envfiles, merged))) ||
+            error("env: could not send the environment's files → $host")
+    end
     # 2. dev'd deps: send each local source into its copy; collect (name → $HOME-relative remote path).
     rewrites = _send_dev_deps!(t, origin)
     # 3. rewrite the remote Manifest's dev paths to the shipped locations, then instantiate.
@@ -1893,8 +1906,7 @@ function _replicate_env!(t::RemoteTarget; precompile::Bool = true, stamp::Abstra
     ok, out = inst(merged !== nothing)
     if !ok && merged !== nothing
         _rlog("env: instantiating the combined environment on $host failed, resolving: " * first(strip(out), 300))
-        _put_texts(host, t.project, [f => read(joinpath(origin, f), String) for f in envfiles]) ||
-            error("env: could not send the environment's files → $host")
+        put_own!()
         ok, out = inst(false)
     end
     ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
