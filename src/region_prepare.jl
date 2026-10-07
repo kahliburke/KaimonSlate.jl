@@ -295,7 +295,8 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
         if r.scheduler !== :none && !isempty(ref[1])
             step("Download $(basename(ref[1]))'s packages") do
                 t = _region_target(r; origin_env = ref[1], at = (String(host), ""))
-                # Rebuilt every prepare: the stamp says what was built, not that the depot still holds it.
+                # `rebuild` also tests that the depot still holds what the stamp says was built, and
+                # fetches only what it lost (`_env_action`).
                 provision_remote!(t, ref[2]; precompile = false, rebuild = true)
                 measured["downloaded"] = true
                 ("ok", "")

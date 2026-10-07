@@ -1972,6 +1972,44 @@ end
             @test haskey(bare, "julia") && haskey(bare, "modules")
         end
         @test occursin("'/abs/env/Manifest.toml'", RE._host_state_script("/abs/env"))   # not under \$HOME
+    end
+
+    @testset "a prepare keeps an environment whose depot still holds it" begin
+        mktempdir() do home
+            rel = ".cache/kaimonslate/remote/nb-1"
+            sh(script) = read(setenv(`sh -c $script`, merge(ENV, Dict("HOME" => home, "PATH" => "/usr/bin:/bin")); dir = home), String)
+            held = rel * "/" * RE._ENV_STAMP * ".held"
+            probe() = RE._parse_probe(sh(RE._host_state_script(rel; held)))
+            a, b = mkpath(joinpath(home, "depot", "A")), mkpath(joinpath(home, "depot", "B"))
+            @test get(probe(), "held", "?") == ""                          # nothing recorded
+            mkpath(joinpath(home, rel)); write(joinpath(home, held), "fp0\n$a\n$b\n")
+            st = probe()
+            @test (st["heldfor"], st["held"]) == ("fp0", "1")
+            rm(b)
+            @test probe()["held"] == ""                                     # the depot lost one
+            @test !haskey(RE._parse_probe(sh(RE._host_state_script(rel))), "held")   # a start does not ask
+
+            # The decision: a start keeps a matching environment; a prepare keeps it only when the
+            # depot holds what was recorded for that same stamp, and otherwise fetches what is missing.
+            s = "fp1"
+            act(env; rebuild, h = "", hf = "") = RE._env_action(Dict("env" => env, "held" => h, "heldfor" => hf), s; rebuild)
+            @test act(""; rebuild = false) === :build && act("other"; rebuild = true, h = "1", hf = "other") === :build
+            @test act(s; rebuild = false) === :keep
+            @test act(s; rebuild = true, h = "1", hf = s) === :held
+            @test act(s; rebuild = true) === :repair
+            @test act(s; rebuild = true, h = "1", hf = "fp0") === :repair      # a list from an earlier build
+            @test act(s * "+pc"; rebuild = true, h = "1", hf = s * "+pc") === :held
+
+            # The list a build writes: its stamp, then directories that exist.
+            f = joinpath(home, "list.held")
+            Core.eval(Module(), Meta.parseall("import Pkg\n" * RE._held_record_snippet(f, "fp9")))
+            lines = readlines(f)
+            @test first(lines) == "fp9" && length(lines) > 1 && all(ispath, lines[2:end])
+        end
+        # Fetching what a depot lost adds nothing to the environment, so nothing resolves.
+        r = RE._env_repair_script("x"; precompile = false, held_file = "x.held", stamp = "fp")
+        @test occursin("Pkg.instantiate()", r) && !occursin("Pkg.add", r) && !occursin("develop", r)
+        @test occursin("x.held", RE._env_instantiate_script("x", Tuple{String,String}[], false; held_file = "x.held"))
         @test RE._seb_sha() == RE._seb_sha() && length(RE._seb_sha()) == 16
     end
 

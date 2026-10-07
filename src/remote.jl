@@ -958,6 +958,54 @@ _env_stamp_path(t) = isempty(t.depot) ? _projrel(t.project) * "/" * _ENV_STAMP :
                                         rstrip(t.depot, '/') * "/slate/envs/" * basename(_projrel(t.project))
 _projrel(p::AbstractString) = startswith(p, "~/") ? String(p[3:end]) : String(p)
 
+# What a provision does with the environment the host holds, from its state (`_host_state`):
+# `:build` when the host has none or one built from other inputs; else `:keep` it as it is, except
+# that a prepare (`rebuild`) tests the depot first: `:held` when it still holds every directory the
+# build recorded, `:repair` (instantiate it as it is) when one is gone or nothing was recorded.
+function _env_action(st, stamp::AbstractString; rebuild::Bool)
+    had = strip(get(st, "env", ""))
+    _env_stamp_serves(had, stamp) || return :build
+    rebuild || return :keep
+    held = get(st, "held", "") == "1" && strip(get(st, "heldfor", "")) == had
+    return held ? :held : :repair
+end
+
+# Beside the stamp: the directories in the depot that `t`'s environment uses, which a prepare tests
+# instead of instantiating again, since a depot on a purged filesystem can lose them under a stamp.
+_env_held_path(t) = _env_stamp_path(t) * ".held"
+
+# Written by every script that builds or repairs an environment, after its instantiate: the stamp the
+# environment was built for, then each package's directory and each artifact of it present in the
+# depot, one per line. Best-effort: a missing list only means the next prepare instantiates.
+function _held_record_snippet(file::AbstractString, stamp::AbstractString)
+    isempty(file) && return ""
+    """
+    try
+        import TOML, Artifacts
+        _f = raw"$file"
+        _f = startswith(_f, "/") ? _f : joinpath(homedir(), startswith(_f, "~/") ? _f[3:end] : _f)
+        _held = String[]
+        for (_, _info) in Pkg.dependencies()
+            _src = _info.source
+            (_src === nothing || !isdir(_src)) && continue
+            push!(_held, _src)
+            for _name in ("Artifacts.toml", "JuliaArtifacts.toml")
+                _toml = joinpath(_src, _name)
+                isfile(_toml) || continue
+                for (_, _e) in TOML.parsefile(_toml), _m in (_e isa AbstractVector ? _e : [_e])
+                    (_m isa AbstractDict && haskey(_m, "git-tree-sha1")) || continue
+                    _p = Artifacts.artifact_path(Base.SHA1(_m["git-tree-sha1"]))
+                    isdir(_p) && push!(_held, _p)
+                end
+            end
+        end
+        mkpath(dirname(_f))
+        write(_f, join([raw"$stamp"; unique(_held)], '\\n') * '\\n')
+    catch
+    end
+    """
+end
+
 # The local environment a target's worker env is built from: the origin env, else the parent project.
 _env_source_dir(t, parent_project::AbstractString) =
     !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml")) ? String(t.origin_env) :
@@ -1049,7 +1097,8 @@ end
 # Everything a start needs to know about the host, read in ONE command. On a scheduler node each
 # command is a job step, and a step costs seconds to create, so asking piecemeal cost more than most
 # of what it asked about. `projrel` is the worker env ($HOME-relative); "" leaves the env lines out.
-function _host_state_script(projrel::AbstractString = ""; stamp::AbstractString = "$projrel/$_ENV_STAMP")
+function _host_state_script(projrel::AbstractString = ""; stamp::AbstractString = "$projrel/$_ENV_STAMP",
+                            held::AbstractString = "")
     q(p) = (startswith(p, "/") || startswith(p, "~/")) ? Sweep.shq_path(p) : "\"\$HOME/\"" * Sweep.shq(p)
     io = IOBuffer()
     print(io, _STAMP_SCRIPT)
@@ -1060,12 +1109,21 @@ function _host_state_script(projrel::AbstractString = ""; stamp::AbstractString 
         println(io, "echo \"env=\$(test -f ", q("$projrel/Manifest.toml"), " && cat ", q(stamp), " 2>/dev/null)\"")
         println(io, "echo \"rg=\$(R=\$(cat ", q(_RG_PATH_FILE), " 2>/dev/null); test -n \"\$R\" && test -x \"\$R\" && echo 1)\"")
     end
+    # Whether the depot still holds what the environment was built with (`_held_record_snippet`): the
+    # stamp the list was written for, and 1 when every directory on it exists. One test per directory.
+    if !isempty(held)
+        println(io, "H=", q(held))
+        println(io, "echo \"heldfor=\$(head -n 1 \"\$H\" 2>/dev/null)\"")
+        println(io, "echo \"held=\$(test -s \"\$H\" && test -z \"\$(tail -n +2 \"\$H\" | while IFS= read -r p; ",
+                "do test -e \"\$p\" || { echo x; break; }; done)\" && echo 1)\"")
+    end
     return String(take!(io))
 end
 
 # `nothing` when the host did not answer.
-function _host_state(host::AbstractString, projrel::AbstractString = ""; stamp::AbstractString = "$projrel/$_ENV_STAMP")
-    ok, out = _run_on(String(host), _host_state_script(projrel; stamp))
+function _host_state(host::AbstractString, projrel::AbstractString = ""; stamp::AbstractString = "$projrel/$_ENV_STAMP",
+                     held::AbstractString = "")
+    ok, out = _run_on(String(host), _host_state_script(projrel; stamp, held))
     ok || return nothing
     return _parse_probe(out)
 end
@@ -1155,7 +1213,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # Reachability precheck FIRST — a clear message beats a cryptic transfer failure ten steps in when the
     # host is a typo or your ssh config/key isn't set up.
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    st = seen === nothing ? _host_state(host, rel; stamp = _env_stamp_path(t)) : seen
+    st = seen === nothing ? _host_state(host, rel; stamp = _env_stamp_path(t), held = rebuild ? _env_held_path(t) : "") : seen
     st === nothing && error(_unreachable(host))
     # A prepared region notices here when its site has changed since (Julia, default modules).
     try; readiness_check!(t; seen = st); catch e; _rlog("readiness check on $host failed: $(sprint(showerror, e))"); end
@@ -1173,7 +1231,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     infra = _infra_spec()
     build_env! = function ()
         if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
-            _replicate_env!(t; precompile)                    # notebook env + worker infra
+            _replicate_env!(t; precompile, stamp)             # notebook env + worker infra
         elseif !isempty(parent_project) && isdir(parent_project)
             _rlog("provision [3/3] send parent project → $host:$(t.project) + instantiate (no resolved origin env)")
             _send_dir!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"],
@@ -1191,26 +1249,29 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             build = Sweep.devpaths_script(rel, rewrites) *
                 "\nimport Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
                 "Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _WORKER_DEVELOP * "; Pkg.instantiate()\n" *
-                _RG_RECORD_SNIPPET * _PREP_DONE_SNIPPET * "\n"
+                _held_record_snippet(_env_held_path(t), stamp) * _RG_RECORD_SNIPPET * _PREP_DONE_SNIPPET * "\n"
             first(_ssh_julia!(host, build, "instantiate parent project on $host"; setup = t.setup,
                               stream = true, online = _bringup_note)) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
             first(_ssh_julia!(host, "import Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
                               "Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _WORKER_DEVELOP * "; Pkg.instantiate()\n" *
-                              _RG_RECORD_SNIPPET,
+                              _held_record_snippet(_env_held_path(t), stamp) * _RG_RECORD_SNIPPET,
                               "bare worker env on $host"; setup = t.setup)) || error("provision: could not build the worker env on $host")
         end
     end
     # Resolving and instantiating is minutes on a cluster filesystem, and it is the same work every
     # time nothing changed. The host keeps the fingerprint of what it last built; when it matches, only
     # the sources travel. The environment files stay as they are, since the ones there were rewritten
-    # for the host's own paths. `rebuild` builds regardless, for a prepare: a stamp says what was built,
-    # not that the depot still holds it.
+    # for the host's own paths.
+    # A stamp says what was built, not that the depot still holds it, so a prepare (`rebuild`) also
+    # tests the directories the build recorded. When one is gone, the environment there is instantiated
+    # as it is, which fetches only what is missing; it is built again only when that fails.
     envdir = _env_source_dir(t, parent_project)
     stamp = _env_stamp_for(t, parent_project, get(st, "julia", ""); precompiled = precompile)
     had = strip(get(st, "env", ""))
-    built = rebuild || !_env_stamp_serves(had, stamp)
+    action = _env_action(st, stamp; rebuild)
+    repair, built = action === :repair, action === :build
     scripted = false   # whether a build script ran, which also records ripgrep's path
     # The environment's sources without its resolved files, which hold the host's own paths.
     send_sources! = function ()
@@ -1220,11 +1281,21 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
                                "JuliaProject.toml", "JuliaManifest.toml"])
         _send_dev_deps!(t, envdir)
     end
-    if !built
-        _rlog("provision [3/3] environment unchanged on $host (skip resolve) — sending sources only")
+    if repair
+        _rlog("provision [3/3] environment unchanged on $host but its depot lacks some of it — instantiating it as it is")
+        _prep_stage("Fetching missing packages on $host")
         send_sources!()
+        ok, out = _ssh_julia!(host, _env_repair_script(rel; precompile, held_file = _env_held_path(t), stamp = had),
+                              "instantiate on $host"; stream = true, online = _bringup_note, setup = t.setup)
+        scripted = ok
+        ok || (_rlog("provision [3/3] instantiating on $host failed, building: " * first(strip(out), 140)); built = true)
+    end
+    if !built
+        repair || (_rlog("provision [3/3] environment unchanged on $host" *
+                         (action === :held ? ", and its depot holds all of it" : "") * " (skip resolve) — sending sources only");
+                   send_sources!())
     else
-        _rlog("provision [3/3] " * (rebuild ? "rebuilding the environment on $host" :
+        _rlog("provision [3/3] " * (repair ? "rebuilding the environment on $host" :
                                     isempty(had) ? "no environment recorded on $host" :
                                     "environment on $host differs (recorded $(first(had, 12)), now $(first(stamp, 12)))") *
               " — building")
@@ -1593,7 +1664,7 @@ from their recorded urls; sending the dev sources makes local checkouts resolve 
 """
 const _NO_AUTO_PRECOMPILE = "ENV[\"JULIA_PKG_PRECOMPILE_AUTO\"] = \"0\""
 
-function _replicate_env!(t::RemoteTarget; precompile::Bool = true)
+function _replicate_env!(t::RemoteTarget; precompile::Bool = true, stamp::AbstractString = "")
     host = t.ssh_host
     origin = t.origin_env
     _rlog("env: replicating origin env → $host:$(t.project)  (from $origin)")
@@ -1607,7 +1678,8 @@ function _replicate_env!(t::RemoteTarget; precompile::Bool = true)
     projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     # STREAM the instantiate/precompile — the long, otherwise-silent step — into the remote log live, so a
     # multi-minute bring-up narrates its progress (resolve, install, Precompiling …) instead of going dark.
-    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise(); precompile),
+    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise(); precompile,
+                                                        held_file = _env_held_path(t), stamp),
                           "instantiate on $host"; stream = true, online = _bringup_note, setup = t.setup)
     ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
     return nothing
@@ -1678,8 +1750,24 @@ end
 
 # The remote script: rewrite each dev dep's Manifest `path` to its shipped remote source, then instantiate
 # the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
+# An environment the host already built, whose depot lost some of what it used: instantiate fetches
+# only the missing packages and artifacts. Nothing is sent or added, so nothing resolves.
+function _env_repair_script(projrel::AbstractString; precompile::Bool = true, held_file::AbstractString = "",
+                            stamp::AbstractString = "")
+    io = IOBuffer()
+    println(io, "import Pkg")
+    precompile || println(io, _NO_AUTO_PRECOMPILE)
+    println(io, "Pkg.activate(joinpath(homedir(), raw\"$projrel\"))")
+    print(io, _PREP_TOTAL_SNIPPET)
+    println(io, "Pkg.instantiate()")
+    print(io, _held_record_snippet(held_file, stamp))
+    print(io, _RG_RECORD_SNIPPET)
+    println(io, _PREP_DONE_SNIPPET)
+    return String(take!(io))
+end
+
 function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool;
-                                 precompile::Bool = true)
+                                 precompile::Bool = true, held_file::AbstractString = "", stamp::AbstractString = "")
     # `ripgrep_jll` mirrors src/worker_infra: the log viewer searches whole files, which for a job's
     # output means gigabytes, and rg does that in one pass over a range rather than a transfer.
     base = "Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), " *
@@ -1709,6 +1797,7 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     # auto-precompile → the banner reads a real "Precompiling k/N · <pkg>", same as a local cold open.
     print(io, _PREP_TOTAL_SNIPPET)
     println(io, "Pkg.instantiate()")
+    print(io, _held_record_snippet(held_file, stamp))
     print(io, _RG_RECORD_SNIPPET)
     println(io, _PREP_DONE_SNIPPET)
     return String(take!(io))
