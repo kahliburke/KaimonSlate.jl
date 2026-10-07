@@ -79,6 +79,7 @@ function prepare_now!(nb::LiveNotebook, cid::AbstractString)
             ReportEngine.profile_prepare!(k, nb.report; cell = String(cid), source = src, reads = reads)
         end
         p = merge(Dict{String,Any}(r), Dict{String,Any}("kind" => "prepared", "side" => side, "source" => src))
+        _place_captures!(nb, p)
         lock(_PROF_HUB_LOCK) do; _PROF_PREP[(nb.id, String(cid))] = p; end
         _broadcast_profile(nb, p)
         return p
@@ -97,6 +98,20 @@ function jet_in_env(nb::LiveNotebook)
     e = try; _notebook_adds(nb); catch; return nothing; end
     e.ok || return nothing
     return any(d -> string(get(d, "name", "")) == "JET", Iterators.flatten((e.adds, e.parent)))
+end
+
+# A boxed capture in another cell is moved to the line that assigns the variable, as the worker does
+# for the compiled cell: only the hub has every cell's source.
+function _place_captures!(nb::LiveNotebook, p::AbstractDict)
+    st = get(p, "static", nothing)
+    st isa AbstractDict && st["available"] === true || return p
+    for g in st["findings"]
+        haskey(g["kinds"], "captured") && startswith(String(g["file"]), "cell:") || continue
+        c = _profile_cell(nb, String(g["file"])[6:end]); c === nothing && continue
+        vars = String[m.captures[1] for m in (match(r"^([^\s=]+) = Core\.Box", String(s)) for s in g["sigs"]) if m !== nothing]
+        g["line"] = ReportEngine._capture_line(split(c.source, '\n'), Int(g["line"]), vars)
+    end
+    return p
 end
 
 "The last compile of `cid`, or `nothing`."

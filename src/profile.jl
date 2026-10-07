@@ -947,11 +947,21 @@ function _static_tidy!(raw::Vector, mod::Module, cellfile::AbstractString, sourc
         g["sig"] = replace(replace(g["sig"], pre => ""), r"([^\s(),:]+)::typeof\(\1\)\(" => s"\1(")
         g["kind"] == "captured" && g["file"] == cellfile || continue
         m = match(r"`([^`]+)`", g["msg"]); m === nothing && continue
-        v = Regex("(?<![\\w.])" * replace(m.captures[1], r"([^\w])" => s"\\\1") * "\\s*[-+*/^]?=(?!=)")
-        k = findfirst(l -> occursin(v, l), lines)
-        k === nothing || (g["line"] = k)
+        g["line"] = _capture_line(lines, g["line"], (m.captures[1],))
     end
     return raw
+end
+
+# Where a captured variable is assigned: the first line from `from` on that assigns one of `vars`,
+# else `from`. JET reports a capture on the first line of the function that boxes it.
+function _capture_line(lines, from::Integer, vars)
+    for v in vars
+        isempty(v) && continue
+        re = Regex("(?<![\\w.])" * replace(String(v), r"([^\w])" => s"\\\1") * "\\s*[-+*/^]?=(?!=)")
+        k = findnext(l -> occursin(re, l), lines, max(1, from))
+        k === nothing || return k
+    end
+    return from
 end
 
 # One finding per line: what kinds were found there, the distinct signatures (the line's own first),
