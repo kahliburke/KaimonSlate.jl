@@ -509,7 +509,14 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
             cur = root; start = cidx
         elseif own
             start = _outside_start(frames, cellfile)
-            if _scheduling(frames, start, cellfile)
+            if all(fr -> fr.from_c, frames)
+                # Interrupted inside the runtime where the stack cannot be unwound (thread-local
+                # lookups, memory copies): only the innermost frame or two were recorded. Which
+                # statement was running is still known.
+                cur = _node!(t, _statement_node(t, root, cellfile, graft, graftat, stmt0, marks, mi),
+                             "", 0, "runtime (stack not recorded)", "", _K_SYNTH)
+                start = length(frames) + 1
+            elseif _scheduling(frames, start, cellfile)
                 # The cell's task waiting on work it handed out: its thread runs the scheduler
                 # meanwhile, as the same task. Shown as waiting, under the call that waits.
                 cur = _node!(t, _statement_node(t, root, cellfile, graft, graftat, stmt0, marks, mi),
