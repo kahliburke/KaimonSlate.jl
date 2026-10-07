@@ -1853,6 +1853,8 @@ mutable struct SyncDest
     failing::Bool
 end
 
+_sync_key(d::SyncDest) = string(d.host, ":", d.remotedir)
+
 mutable struct SyncSource
     dir::String
     dests::Dict{String,SyncDest}            # "host:remotedir" => copy
@@ -1900,6 +1902,34 @@ dev'd package (into `devsrc/<name>`) current, telling `kernel` which files chang
 copies were just sent whole (a provision), so only later changes travel; otherwise the first check
 sends whatever differs.
 """
+# What each copy was last sent, kept in the hub's cache by source directory and copy, so a copy taken up
+# again (a notebook reattaching to its worker, the hub restarted) sends only what changed since, and its
+# worker reloads only that.
+_sync_record_path(dir::AbstractString, key::AbstractString) =
+    joinpath(_slate_cache_dir(), "sync", bytes2hex(_SHA.sha1(string(dir, "\n", key)))[1:16] * ".toml")
+function _sync_record_load(dir::AbstractString, key::AbstractString)
+    out = Dict{String,Tuple{Int,Float64}}()
+    f = _sync_record_path(dir, key)
+    isfile(f) || return out
+    try
+        for (rel, v) in Sweep.TOML.parsefile(f)
+            out[String(rel)] = (Int(v[1]), Float64(v[2]))
+        end
+    catch
+        empty!(out)                            # unreadable: everything is sent, as before
+    end
+    return out
+end
+function _sync_record_save(dir::AbstractString, key::AbstractString, sent)
+    f = _sync_record_path(dir, key)
+    try
+        mkpath(dirname(f))
+        open(io -> Sweep.TOML.print(io, Dict(rel => [v[1], v[2]] for (rel, v) in sent)), f, "w")
+    catch
+    end
+    return nothing
+end
+
 function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = nothing, sent::Bool = false)
     (isempty(parent_project) || !isdir(parent_project)) && return
     owner = _sync_base(t)
@@ -1917,10 +1947,12 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = n
     lock(_SYNC_LOCK) do
         for (dir, remotedir, excludes) in pairs
             src = get!(() -> SyncSource(dir), _SYNC_SOURCES, dir)
-            d = get!(src.dests, string(t.ssh_host, ":", remotedir)) do
-                SyncDest(String(t.ssh_host), remotedir, excludes, String(t.region),
-                         sent ? _sync_files(dir, excludes) : Dict{String,Tuple{Int,Float64}}(),
-                         Dict{String,Any}(), false)
+            key = string(t.ssh_host, ":", remotedir)
+            # Just sent whole by a provision, or as recorded the last time it was sent.
+            d = get!(src.dests, key) do
+                had = sent ? _sync_files(dir, excludes) : _sync_record_load(dir, key)
+                sent && _sync_record_save(dir, key, had)
+                SyncDest(String(t.ssh_host), remotedir, excludes, String(t.region), had, Dict{String,Any}(), false)
             end
             d.kernels[owner] = kernel
             (src.task === nothing || istaskdone(src.task)) && (src.task = Threads.@spawn _sync_poll(src))
@@ -1943,7 +1975,7 @@ function _sync_dest!(src::SyncSource, d::SyncDest, now::Dict{String,Tuple{Int,Fl
     # nothing.
     keep = Sweep.transfer_keep(src.dir; region = d.region, excludes = d.excludes)
     filter!(keep, changed)
-    (isempty(changed) && isempty(gone)) && (d.sent = now; return true)
+    (isempty(changed) && isempty(gone)) && (d.sent = now; _sync_record_save(src.dir, _sync_key(d), now); return true)
     ok = try
         if length(changed) > _SYNC_FILEWISE_MAX
             _send_dir!(d.host, src.dir, d.remotedir; excludes = d.excludes, region = d.region, filter = true)
@@ -1964,6 +1996,7 @@ function _sync_dest!(src::SyncSource, d::SyncDest, now::Dict{String,Tuple{Int,Fl
     d.failing && _rlog("sync: $(basename(src.dir)) → $(d.host):$(d.remotedir) caught up")
     d.failing = false
     d.sent = now
+    _sync_record_save(src.dir, _sync_key(d), now)
     _rlog("sync: $(basename(src.dir)) → $(d.host): " *
           join(vcat(changed, ["−" * g for g in gone])[1:min(end, 6)], ", ") *
           (length(changed) + length(gone) > 6 ? ", …" : ""))

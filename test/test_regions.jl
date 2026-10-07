@@ -612,6 +612,27 @@ end
                 @test d.sent == RE._sync_files(srcdir, ex)
             end
 
+            @testset "a copy taken up again sends only what changed since" begin
+                # What a copy was sent is kept on disk, so after a reattach or a hub restart its first
+                # comparison starts from that record rather than from nothing.
+                srcdir, dest, cache = mktempdir(), mktempdir(), mktempdir()
+                withenv("KAIMONSLATE_CACHE_HOME" => cache) do
+                    mkpath(joinpath(srcdir, "src"))
+                    write(joinpath(srcdir, "src", "A.jl"), "a"); write(joinpath(srcdir, "src", "B.jl"), "b")
+                    ex = [".git"]; key = ":" * dest
+                    s = RE.SyncSource(srcdir)
+                    d = RE.SyncDest("", dest, ex, "", Dict{String,Tuple{Int,Float64}}(), Dict{String,Any}(), false)
+                    @test RE._sync_dest!(s, d, RE._sync_files(srcdir, ex))          # all of it, the first time
+                    @test RE._sync_record_load(srcdir, key) == d.sent
+                    d2 = RE.SyncDest("", dest, ex, "", RE._sync_record_load(srcdir, key), Dict{String,Any}(), false)
+                    rm(joinpath(dest, "src", "A.jl"))            # would come back if it were sent again
+                    @test RE._sync_dest!(s, d2, RE._sync_files(srcdir, ex)) && !isfile(joinpath(dest, "src", "A.jl"))
+                    write(joinpath(srcdir, "src", "B.jl"), "b2")  # edited meanwhile
+                    @test RE._sync_dest!(s, d2, RE._sync_files(srcdir, ex)) && read(joinpath(dest, "src", "B.jl"), String) == "b2"
+                    @test isempty(RE._sync_record_load(srcdir, ":/elsewhere"))     # another copy has its own
+                end
+            end
+
             @testset "a file removed in a git project is removed from its host copy" begin
                 # git's verdict is read off the files that exist, so a deleted one must not be judged by it.
                 srcdir, dest = mktempdir(), mktempdir()
