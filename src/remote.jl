@@ -957,6 +957,8 @@ function _env_fingerprint(envdir::AbstractString, infra::AbstractString; depot::
         for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? envdir : dirname(abspath(mf)))
             p = joinpath(lpath, "Project.toml")
             isfile(p) && (add(name); add(read(p, String)))
+            # Where its copy is on the host, which the environment's Manifest is rewritten to name.
+            add(_devsrc_path(lpath))
         end
     end
     return bytes2hex(_SHA.digest!(ctx))
@@ -1796,7 +1798,7 @@ function _env_repair_script(projrel::AbstractString; precompile::Bool = true, he
     println(io, "import Pkg")
     precompile || println(io, _NO_AUTO_PRECOMPILE)
     println(io, "Pkg.activate(joinpath(homedir(), raw\"$projrel\"))")
-    print(io, _PREP_TOTAL_SNIPPET)
+    precompile && print(io, _PREP_TOTAL_SNIPPET)   # a count for the compile's progress bar; costly on a cluster filesystem
     println(io, "Pkg.instantiate()")
     print(io, _held_record_snippet(held_file, stamp))
     print(io, _RG_RECORD_SNIPPET)
@@ -1833,7 +1835,7 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     println(io, _WORKER_DEVELOP)   # the extension SDK and the worker package, dev'd from their shipped sources
     # The Manifest is resolved (shipped), so count what still needs precompiling BEFORE instantiate's
     # auto-precompile → the banner reads a real "Precompiling k/N · <pkg>", same as a local cold open.
-    print(io, _PREP_TOTAL_SNIPPET)
+    precompile && print(io, _PREP_TOTAL_SNIPPET)   # a count for the compile's progress bar; costly on a cluster filesystem
     println(io, "Pkg.instantiate()")
     print(io, _held_record_snippet(held_file, stamp))
     print(io, _RG_RECORD_SNIPPET)

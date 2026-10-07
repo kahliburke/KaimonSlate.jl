@@ -1950,6 +1950,10 @@ end
             @test fp3 != fp2                                              # the Manifest
             write(joinpath(env, "notebook.jl"), "1\n")
             @test RE._env_fingerprint(env, "[infra]") == fp3              # sources are not the environment
+            # The same files somewhere else: the developed package's copy on a host moves, and the
+            # Manifest there must be rewritten to name it.
+            moved = mktempdir(); cp(env, joinpath(moved, basename(env))); cp(dep, joinpath(moved, basename(dep)))
+            @test RE._env_fingerprint(joinpath(moved, basename(env)), "[infra]") != fp3
 
             # What the host records adds its own Julia, and whether the build precompiled.
             s(j, pc) = RE._env_stamp(fp3, j, pc)
@@ -2124,6 +2128,10 @@ end
         # Fetching what a depot lost adds nothing to the environment, so nothing resolves.
         r = RE._env_repair_script("x"; precompile = false, held_file = "x.held", stamp = "fp")
         @test occursin("Pkg.instantiate()", r) && !occursin("Pkg.add", r) && !occursin("develop", r)
+        # Nothing compiles there, so no count of what would (a check per package on a cluster filesystem).
+        @test !occursin("SLATE_PREP total", r) &&
+              !occursin("SLATE_PREP total", RE._env_instantiate_script("x", Tuple{String,String}[], false; precompile = false))
+        @test occursin("SLATE_PREP total", RE._env_instantiate_script("x", Tuple{String,String}[], false))
         @test occursin("x.held", RE._env_instantiate_script("x", Tuple{String,String}[], false; held_file = "x.held"))
         @test RE._seb_sha() == RE._seb_sha() && length(RE._seb_sha()) == 16
     end
