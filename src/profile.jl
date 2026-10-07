@@ -63,8 +63,17 @@ _profile_take(cid::AbstractString) = lock(_PROF_STATE_LOCK) do; pop!(_PROF_ARMED
 # Where in the sample buffer each statement of a profiled cell began, with its line. The buffer
 # fills in the order samples are taken, so its length is a clock every thread's samples share: a
 # sample on any thread falls in the statement running when it was taken.
-_prof_mark(line::Int) = (m = get(task_local_storage(), :slate_prof_marks, nothing);
-                         m === nothing || push!(m, (Int(ccall(:jl_profile_len_data, Csize_t, ())), line)); nothing)
+function _prof_mark(line::Int)
+    tls = task_local_storage()
+    m = get(tls, :slate_prof_marks, nothing)
+    m === nothing || push!(m, (Int(ccall(:jl_profile_len_data, Csize_t, ())), line))
+    # Tracing waits for the first statement, so the cell's own parsing and printing are not in it.
+    if get(tls, :slate_prof_trace, false) === true
+        tls[:slate_prof_trace] = :on
+        _trace_on()
+    end
+    return nothing
+end
 
 # Called by `run_capture` around a cell's evaluation. Unarmed, it is the evaluation.
 function _profiled(f, cid::AbstractString)
@@ -170,11 +179,13 @@ function _traced(f, out::Dict{String,Any})
     _prime_trace!()
     io = _TRACE_IO[]
     flush(io); truncate(io, 0); seekstart(io)
-    _trace_on()
+    tls = task_local_storage()
+    tls[:slate_prof_trace] = true          # turned on by the first statement (`_prof_mark`)
     try
         return f()
     finally
-        _trace_off()
+        get(tls, :slate_prof_trace, false) === :on && _trace_off()
+        delete!(tls, :slate_prof_trace)
         flush(io)
         _read_trace!(out, _TRACE_PATH[])
         truncate(io, 0); seekstart(io)
@@ -432,8 +443,8 @@ function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
         pkg = _frame_pkg(fr, a.cellfile)
         haskey(a.pkgfile, pkg) || (a.pkgfile[pkg] = _ffile(fr))
         # A task switched out in the scheduler is waiting (a wall-time sample of one): the path
-        # ends there, under the call that waits.
-        if pkg == "Base" && fr.func in _PARKED_FNS
+        # ends where the scheduler's own frames begin, under the call that waits.
+        if pkg == "Base" && _parked_tail(frames, j)
             cur = _node!(t, cur, "", 0, "waiting", "", _K_SYNTH); t.total[cur] += w
             break
         end
@@ -455,7 +466,14 @@ function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
     return cur
 end
 
-const _PARKED_FNS = (:try_yieldto, :poptask, :wait_forever, :task_get_next)
+const _PARKED_FNS = (:wait, :_wait, :_wait2, :try_yieldto, :yieldto, :poptask, :wait_forever, :task_get_next)
+# From `j` on, nothing but the scheduler's waiting and the runtime under it, and in it at the end.
+_parked_tail(frames, j) =
+    frames[j].func in _PARKED_FNS &&
+    all(k -> frames[k].from_c || frames[k].func in _PARKED_FNS, j:length(frames)) &&
+    any(k -> frames[k].func in (:try_yieldto, :yieldto, :poptask, :wait_forever, :task_get_next) ||
+             (frames[k].from_c && occursin("task_get_next", string(frames[k].func))) ||
+             (frames[k].func === :wait && endswith(string(frames[k].file), "task.jl")), j:length(frames))
 
 # Only the runtime and Base's scheduler from `start` on, waiting in it: a task with nothing to do.
 const _SCHED_FNS = (:wait, :poptask, :task_get_next, :try_yieldto, :wait_forever, :yield)
