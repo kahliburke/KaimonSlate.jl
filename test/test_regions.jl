@@ -699,7 +699,9 @@ end
                 @test RE._payload_sha() != RE._src_sha()          # hub-only edits leave workers current
                 # It arrives as the SlateWorker package, which the worker env develops and the boot loads.
                 @test all(in(files), RE._WORKER_PKG_FILES)
-                @test occursin(RE._REMOTE_WORKER_PKG, RE._WORKER_DEVELOP)
+                @test occursin(RE._remote_worker_pkg(), RE._worker_develop())
+                # One directory per version of the worker code, so hubs on different versions keep theirs.
+                @test startswith(RE._remote_worker_pkg(), RE._runtime_dir()) && occursin(RE._runtime_key(), RE._runtime_dir())
                 s = RE._remote_worker_script(RE.RemoteTarget("h"; transport = :tunnel), 9100, 9101, "/p", "PUB")
                 @test occursin("using SlateWorker", s) && !occursin("include(", s)
                 @test findfirst("using SlateWorker", s)[1] < findfirst("using Revise", s)[1]
@@ -1995,16 +1997,15 @@ end
             # No julia on PATH: a launcher started under a fresh HOME sets itself up first, which is slow.
             sh(script) = read(setenv(`sh -c $script`, merge(ENV, Dict("HOME" => home, "PATH" => "/usr/bin:/bin")); dir = home), String)
             fresh = RE._parse_probe(sh(RE._host_state_script(rel)))
-            @test all(k -> get(fresh, k, "?") == "", ("payload", "seb", "kgate", "env", "rg"))
+            @test all(k -> get(fresh, k, "?") == "", ("runtime", "kgate", "env", "rg"))
 
             put(p, s) = (mkpath(dirname(joinpath(home, p))); write(joinpath(home, p), s))
-            put(RE._PAYLOAD_STAMP, "abc123")
-            put(RE._SEB_STAMP, "def456")
+            put(RE._runtime_dir() * "/" * RE._RUNTIME_READY, "k")
             put(RE._REMOTE_KGATE_ENV * "/.ready", "")
             put(rel * "/" * RE._ENV_STAMP, "fp0")
             put(RE._RG_PATH_FILE, "/bin/sh")
             st = RE._parse_probe(sh(RE._host_state_script(rel)))
-            @test st["payload"] == "abc123" && st["seb"] == "def456" && st["kgate"] == "1"
+            @test st["runtime"] == "1" && st["kgate"] == "1"
             @test st["rg"] == "1"
             @test st["env"] == ""                         # a stamp without a Manifest is no environment
             put(rel * "/Manifest.toml", "")
@@ -2014,7 +2015,7 @@ end
 
             # Without a project the env lines are left out; the runtime ones remain.
             bare = RE._parse_probe(sh(RE._host_state_script()))
-            @test !haskey(bare, "env") && !haskey(bare, "rg") && bare["payload"] == "abc123"
+            @test !haskey(bare, "env") && !haskey(bare, "rg") && bare["runtime"] == "1"
             @test haskey(bare, "julia") && haskey(bare, "modules")
         end
         @test occursin("'/abs/env/Manifest.toml'", RE._host_state_script("/abs/env"))   # not under \$HOME
@@ -2180,6 +2181,18 @@ end
         end
     end
 
+    @testset "old versions of the worker code are removed gently" begin
+        mktempdir() do home
+            pay = joinpath(home, RE._REMOTE_WORKER, "payload")
+            old = [mkpath(joinpath(pay, "v$i")) for i = 1:8]
+            for (i, d) in enumerate(old); run(`touch -t $(string(202501010000 + i)) $d`); end
+            run(`touch $(old[1])`)                                          # in use just now
+            read(setenv(`sh -c $(RE._runtime_prune_sh("v2"))`, merge(ENV, Dict("HOME" => home, "PATH" => "/usr/bin:/bin")); dir = home), String)
+            # The newest five stay (v1 touched now, v8–v5), and `keep`; v3 and v4 go.
+            @test sort(readdir(pay)) == sort(["v1", "v2", "v5", "v6", "v7", "v8"])
+        end
+    end
+
     @testset "a prepare keeps an environment whose depot still holds it" begin
         mktempdir() do home
             rel = ".cache/kaimonslate/remote/nb-1"
@@ -2327,12 +2340,12 @@ end
     @testset "both worker paths provision the worker package" begin
         # What the worker may import is SlateWorker's `[deps]` (test_shared_includes.jl holds them to
         # its imports). Each path has to provision the package itself: `src/worker_infra` for a local
-        # worker, `_WORKER_DEVELOP` for a remote one. Provisioned in only one, every worker on the
+        # worker, `_worker_develop()` for a remote one. Provisioned in only one, every worker on the
         # other path dies at boot.
         src = dirname(pathof(KaimonSlate))
         infra = read(joinpath(src, "worker_infra", "Project.toml"), String)
         @test occursin("SlateWorker", infra) && occursin("SlateExtensionsBase", infra)
-        @test occursin(RE._REMOTE_WORKER_PKG, RE._WORKER_DEVELOP) && occursin(RE._REMOTE_SEB, RE._WORKER_DEVELOP)
+        @test occursin(RE._remote_worker_pkg(), RE._worker_develop()) && occursin(RE._remote_seb(), RE._worker_develop())
         # `ripgrep_jll` is resolved softly at load (`BatchLauncher._resolve_rg`), so a host that cannot
         # see it loses log search rather than the batch fabric. It is still provisioned both ways.
         @test occursin("ripgrep_jll", infra) && occursin("ripgrep_jll", RE._infra_spec())

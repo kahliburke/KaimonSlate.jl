@@ -258,15 +258,22 @@ const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
 # The extension SDK (Widget/Choice/WebPage/slate_context) is path-dev'd from the monorepo and NOT yet
 # registered, so a registry `Pkg.add` can't find it on a remote host. Ship its source and `Pkg.develop`
 # it into the worker env — the remote counterpart of the local `src/worker_infra` LOAD_PATH stack.
-const _REMOTE_SEB = "$_REMOTE_ROOT/devsrc/SlateExtensionsBase"
 const _LOCAL_SEB  = normpath(joinpath(@__DIR__, "..", "lib", "SlateExtensionsBase"))
-# The SDK and the worker package (sent with the payload) are dev'd into the worker env together. The
-# worker cannot load without them, so a failure here fails the provision (which resets the env and
-# retries once) rather than starting a worker that dies on its first `using`.
-const _REMOTE_WORKER_PKG = "$_REMOTE_WORKER/SlateWorker"
-const _WORKER_DEVELOP = let specs = "[Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\")), " *
-                                    "Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_WORKER_PKG\"))]"
-    "try; Pkg.develop($specs; preserve=Pkg.PRESERVE_ALL); catch; Pkg.develop($specs); end"
+# Slate's worker code on a host, one directory per version (`_runtime_key`): the worker's files, its
+# package and the SDK side by side, as `SlateWorker` includes `../../worker.jl`. Hubs on different
+# versions keep a copy each, and a running worker's code is never replaced under it. A worker's own
+# files (its script, log, manifest and state) stay in `_REMOTE_WORKER`, where the roster finds them.
+_runtime_key() = bytes2hex(_SHA.sha1(string(_payload_sha(), "\n", _seb_sha())))[1:16]
+_runtime_dir(key::AbstractString = _runtime_key()) = "$_REMOTE_WORKER/payload/$key"
+_remote_seb(key::AbstractString = _runtime_key()) = _runtime_dir(key) * "/SlateExtensionsBase"
+_remote_worker_pkg(key::AbstractString = _runtime_key()) = _runtime_dir(key) * "/SlateWorker"
+# The SDK and the worker package are dev'd into the worker env together. The worker cannot load without
+# them, so a failure here fails the provision (which resets the env and retries once) rather than
+# starting a worker that dies on its first `using`.
+function _worker_develop(key::AbstractString = _runtime_key())
+    specs = "[Pkg.PackageSpec(path=joinpath(homedir(), raw\"$(_remote_seb(key))\")), " *
+            "Pkg.PackageSpec(path=joinpath(homedir(), raw\"$(_remote_worker_pkg(key))\"))]"
+    return "try; Pkg.develop($specs; preserve=Pkg.PRESERVE_ALL); catch; Pkg.develop($specs); end"
 end
 
 # ── Remote timing knobs ───────────────────────────────────────────────────────────────────────
@@ -1067,7 +1074,7 @@ end
 function _env_fingerprint(envdir::AbstractString, infra::AbstractString; depot::AbstractString = "")
     ctx = _SHA.SHA1_CTX()
     add(s) = _SHA.update!(ctx, codeunits(String(s)))
-    add("julia $VERSION\n"); add(infra); add(_WORKER_DEVELOP)
+    add("julia $VERSION\n"); add(infra); add(_worker_develop())
     # Where it is installed: a different depot holds none of it.
     isempty(depot) || add("depot $depot\n")
     for p in (joinpath(_LOCAL_SEB, "Project.toml"), joinpath(@__DIR__, "SlateWorker", "Project.toml"))
@@ -1212,10 +1219,15 @@ function _adopt_twin_env!(t, stamp::AbstractString)
     _rlog("provision [3/3] same environment already built on $(t.ssh_host) in $(basename(m.captures[1])) — copied it")
     return true
 end
-# What the host last received of the worker payload and of the extension SDK, as their content SHAs.
-# Written after a send succeeds, so a matching stamp means that exact content is already there.
-const _PAYLOAD_STAMP = "$_REMOTE_WORKER/.slate-payload"
-const _SEB_STAMP     = "$_REMOTE_SEB/.slate-seb"
+# A runtime directory is complete once this is in it, written after everything else arrived.
+const _RUNTIME_READY = ".ready"
+
+# Removes old runtime directories, for disk space only: the newest five are always kept, and so is any
+# version touched in the last 14 days, and never `keep`.
+_runtime_prune_sh(keep::AbstractString) =
+    "cd " * Sweep.shq_path(_REMOTE_WORKER * "/payload") * " 2>/dev/null && ls -1dt -- */ 2>/dev/null | tail -n +6 | " *
+    "while IFS= read -r d; do d=\${d%/}; [ \"\$d\" = " * Sweep.shq(keep) * " ] && continue; " *
+    "[ -n \"\$(find \"\$d\" -maxdepth 0 -mtime +14)\" ] && rm -rf -- \"\$d\"; done; true"
 const _SEB_EXCLUDES  = [".git", "*.cov"]
 
 # The SDK source as it is sent, hashed by path and content.
@@ -1238,8 +1250,9 @@ function _host_state_script(projrel::AbstractString = ""; stamp::AbstractString 
     q(p) = (startswith(p, "/") || startswith(p, "~/")) ? Sweep.shq_path(p) : "\"\$HOME/\"" * Sweep.shq(p)
     io = IOBuffer()
     print(io, _STAMP_SCRIPT)
-    println(io, "echo \"payload=\$(cat ", q(_PAYLOAD_STAMP), " 2>/dev/null)\"")
-    println(io, "echo \"seb=\$(cat ", q(_SEB_STAMP), " 2>/dev/null)\"")
+    # Touched as it is read, so the version in use is never the one an old-version prune removes.
+    println(io, "echo \"runtime=\$(test -f ", q(_runtime_dir() * "/" * _RUNTIME_READY), " && touch -c ",
+            q(_runtime_dir()), " && echo 1)\"")
     println(io, "echo \"kgate=\$(test -f ", q("$_REMOTE_KGATE_ENV/.ready"), " && echo 1)\"")
     if !isempty(projrel)
         println(io, "echo \"env=\$(test -f ", q("$projrel/Manifest.toml"), " && cat ", q(stamp), " 2>/dev/null)\"")
@@ -1277,10 +1290,11 @@ function _provision_runtime!(host; seen = nothing, setup::AbstractString = "", n
     #    needs `julia`, so this gates the rest.
     _ensure_julia!(host; version = get(st, "julia", ""), setup) ||
         error("provision: no usable `julia` on '$host' (auto-install skipped/failed — Windows, or juliaup install error). Install Julia (juliaup) manually and retry.")
-    # 1. worker payload, unless the host already holds this exact one
-    sha = _payload_sha()
-    if get(st, "payload", "") == sha
-        _rlog(pfx(1) * "worker payload on $host is current ($sha)")
+    # 1. Slate's worker code: the payload and the SDK, into this version's own directory unless the host
+    #    has it complete. The SDK is not registered, so it travels as source; the env build develops it.
+    key = _runtime_key(); rdir = _runtime_dir(key)
+    if get(st, "runtime", "") == "1"
+        _rlog(pfx(1) * "worker code on $host is current ($key)")
         push!(did, "worker files current")
     else
         srcdir = @__DIR__
@@ -1290,31 +1304,25 @@ function _provision_runtime!(host; seen = nothing, setup::AbstractString = "", n
                 mkpath(dirname(joinpath(tmp, f)))
                 cp(joinpath(srcdir, f), joinpath(tmp, f))
             end
-            had = get(st, "payload", "")
-            _rlog(pfx(1) * "send worker payload → $host:$_REMOTE_WORKER " *
-                  "(host has $(isempty(had) ? "none" : had), sending $sha)")
+            if isdir(_LOCAL_SEB)
+                for rel in _files_under(_LOCAL_SEB; descend = r -> basename(r) != ".git")
+                    endswith(rel, ".cov") && continue
+                    to = joinpath(tmp, "SlateExtensionsBase", rel)
+                    mkpath(dirname(to)); cp(joinpath(_LOCAL_SEB, rel), to)
+                end
+            else
+                _rlog("provision: local SlateExtensionsBase source not found at $_LOCAL_SEB — remote worker may miss it")
+            end
+            _rlog(pfx(1) * "send worker code → $host:$rdir")
             _prep_stage("Syncing worker files → $host")
-            _send_dir!(host, tmp, _REMOTE_WORKER) || error("provision: could not send the worker payload → $host")
+            _send_dir!(host, tmp, rdir) || error("provision: could not send the worker code → $host")
         finally
             rm(tmp; recursive = true, force = true)
         end
-        _put_file(host, Vector{UInt8}(codeunits(sha)), _PAYLOAD_STAMP)
+        _put_file(host, Vector{UInt8}(codeunits(key)), rdir * "/" * _RUNTIME_READY) ||
+            error("provision: could not mark the worker code complete on $host")
+        _run_on(host, _runtime_prune_sh(key))
         push!(did, "worker files sent")
-    end
-    # 1b. Ship the unregistered extension SDK's source (a registry add can't find it); the env build
-    #     below `Pkg.develop`s it into the worker env so `worker.jl`'s `using SlateExtensionsBase` resolves.
-    if isdir(_LOCAL_SEB)
-        ssha = _seb_sha()
-        if get(st, "seb", "") == ssha
-            push!(did, "SDK current")
-        elseif _send_dir!(host, _LOCAL_SEB, _REMOTE_SEB; excludes = _SEB_EXCLUDES)
-            _put_file(host, Vector{UInt8}(codeunits(ssha)), _SEB_STAMP)
-            push!(did, "SDK sent")
-        else
-            _rlog("provision: could not send SlateExtensionsBase → $host (worker will miss the extension SDK)")
-        end
-    else
-        _rlog("provision: local SlateExtensionsBase source not found at $_LOCAL_SEB — remote worker may miss it")
     end
     # 2. KaimonGate worker env (from the registry) — instantiate once
     if get(st, "kgate", "") != "1"
@@ -1388,14 +1396,14 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             # still shows live progress + the current package instead of going dark.
             build = Sweep.devpaths_script(rel, rewrites) *
                 "\nimport Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
-                "Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _WORKER_DEVELOP * "; Pkg.instantiate()\n" *
+                "Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _worker_develop() * "; Pkg.instantiate()\n" *
                 _held_record_snippet(_env_held_path(t), stamp) * _RG_RECORD_SNIPPET * _PREP_DONE_SNIPPET * "\n"
             first(_ssh_julia!(host, build, "instantiate parent project on $host"; setup = t.setup,
                               stream = true, online = _bringup_note)) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
             first(_ssh_julia!(host, "import Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
-                              "Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _WORKER_DEVELOP * "; Pkg.instantiate()\n" *
+                              "Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _worker_develop() * "; Pkg.instantiate()\n" *
                               _held_record_snippet(_env_held_path(t), stamp) * _RG_RECORD_SNIPPET,
                               "bare worker env on $host"; setup = t.setup)) || error("provision: could not build the worker env on $host")
         end
@@ -1962,7 +1970,7 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     # invalidate the notebook's (very expensive, e.g. Makie) precompile cache — that doubles the build.
     # Fall back to a normal add only if the infra genuinely can't be satisfied against those pins.
     println(io, "try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end")
-    println(io, _WORKER_DEVELOP)   # the extension SDK and the worker package, dev'd from their shipped sources
+    println(io, _worker_develop())   # the extension SDK and the worker package, dev'd from their shipped sources
     # The Manifest is resolved (shipped), so count what still needs precompiling BEFORE instantiate's
     # auto-precompile → the banner reads a real "Precompiling k/N · <pkg>", same as a local cold open.
     precompile && print(io, _PREP_TOTAL_SNIPPET)   # a count for the compile's progress bar; costly on a cluster filesystem
