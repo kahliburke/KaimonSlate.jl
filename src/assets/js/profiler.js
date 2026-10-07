@@ -368,26 +368,58 @@ function useRedrawOnResize(boxRef, draw, live) {
     return () => { cancelAnimationFrame(raf); ro.disconnect(); };
   }, [live]);
 }
-// Wheel and drag for a canvas showing `sig`'s window.
-function useZoomPan(boxRef, canvasRef, sig) {
+// Wheel and drag for a canvas showing `sig`'s window. The wheel zooms about the pointer, and a
+// sideways scroll (or shift + wheel) pans. Where the pane has rows to scroll to (`scrolls`: a deep
+// graph), the wheel scrolls them and ⌘/Ctrl + wheel zooms; ⌥ + wheel always scrolls.
+function useZoomPan(boxRef, canvasRef, sig, { scrolls = () => false } = {}) {
   useEffect(() => {
     const el = boxRef.current; if (!el) return;
     const wheel = (ev) => {
       const b = canvasRef.current && canvasRef.current.getBoundingClientRect(); if (!b) return;
       const { v0, v1 } = sig.value, f = v0 + clamp((ev.clientX - b.left) / b.width, 0, 1) * (v1 - v0);
-      if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); zoomAt(sig, f, Math.exp(ev.deltaY * 0.0025)); }
-      else if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY) || ev.shiftKey) {
+      const px = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? b.height : 1;
+      const dx = ev.deltaX * px, dy = ev.deltaY * px;
+      if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); zoomAt(sig, f, Math.exp(dy * 0.0025)); }
+      else if (Math.abs(dx) > Math.abs(dy) || ev.shiftKey) {
         ev.preventDefault();
-        const d = (Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY) / b.width * (v1 - v0);
+        const d = (Math.abs(dx) > Math.abs(dy) ? dx : dy) / b.width * (v1 - v0);
         setV(sig, v0 + d, v1 + d);
-      }
+      } else if (!ev.altKey && !scrolls(el)) { ev.preventDefault(); zoomAt(sig, f, Math.exp(dy * 0.002)); }
     };
     el.addEventListener('wheel', wheel, { passive: false });
     return () => el.removeEventListener('wheel', wheel);
   });
 }
+const _overflows = (el) => el.scrollHeight > el.clientHeight + 2;
+
+// Shift + drag marks a span, and letting go zooms to it.
+function rangeDrag(ev, canvas, sig, band, box) {
+  const b = canvas.getBoundingClientRect(), { v0, v1 } = sig.value;
+  const x0 = clamp(ev.clientX, b.left, b.right);
+  const show = (x1) => Object.assign(band.style, {
+    display: 'block', left: (canvas.offsetLeft + Math.min(x0, x1) - b.left) + 'px', width: Math.abs(x1 - x0) + 'px',
+    top: box.scrollTop + 'px', height: box.clientHeight + 'px' });
+  const mv = (e) => show(clamp(e.clientX, b.left, b.right));
+  const up = (e) => {
+    window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up);
+    band.style.display = 'none';
+    const x1 = clamp(e.clientX, b.left, b.right);
+    if (Math.abs(x1 - x0) < 4) return;
+    const at = (x) => v0 + (x - b.left) / b.width * (v1 - v0);
+    animateTo(sig, at(Math.min(x0, x1)), at(Math.max(x0, x1)));
+  };
+  window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
+  show(x0);
+}
+// Double-click on nothing: back out, twice as wide, about the pointer.
+function zoomOutAt(ev, canvas, sig) {
+  const b = canvas.getBoundingClientRect(), { v0, v1 } = sig.value;
+  const f = v0 + clamp((ev.clientX - b.left) / b.width, 0, 1) * (v1 - v0), s = Math.min(1, (v1 - v0) * 2);
+  const a = clamp(f - (f - v0) * 2, 0, 1 - s);
+  animateTo(sig, a, a + s);
+}
 function dragPan(ev, dr, canvas, sig) {
-  if (!dr || ev.buttons !== 1) return false;
+  if (!dr || dr.range || ev.buttons !== 1) return false;
   const dx = ev.clientX - dr.x;
   if (Math.abs(dx) > 3) dr.moved = true;
   if (!dr.moved) return false;
@@ -598,7 +630,7 @@ function Flame() {
   };
   useEffect(() => { draw.current && draw.current(); });
   useRedrawOnResize(box, draw, !!(M && root));
-  useZoomPan(box, cv, view);
+  useZoomPan(box, cv, view, { scrolls: _overflows });
   const stt = pf.value && pf.value.status;
   if (!M || !root) return html`<div class="pfflame pfempty">${
     stt === 'loading' ? html`<span class="hydspin"></span>`
@@ -622,7 +654,12 @@ function Flame() {
     t.innerHTML = tipHtml(r.dn, r.band, M);
     placeTip(t, ev, box.current);
   };
-  const down = (ev) => { if (ev.button === 0) drag.current = { x: ev.clientX, ...view.value, moved: false }; };
+  const band = useRef(null);
+  const down = (ev) => {
+    if (ev.button !== 0) return;
+    if (ev.shiftKey && cv.current) { ev.preventDefault(); drag.current = { range: true, moved: true }; rangeDrag(ev, cv.current, view, band.current, box.current); return; }
+    drag.current = { x: ev.clientX, ...view.value, moved: false };
+  };
   const scrolled = () => requestAnimationFrame(() => draw.current && draw.current());
   const click = (ev) => {
     const dr = drag.current; drag.current = null;
@@ -632,7 +669,7 @@ function Flame() {
     if (dn.folded) { opened.value = new Set([...opened.value, n.id]); return; }
     select(n);
   };
-  const dbl = (ev) => { const r = at(ev); if (r && !r.dn.folded) focusOn(r.dn.n.id); };
+  const dbl = (ev) => { const r = at(ev); if (r && !r.dn.folded) focusOn(r.dn.n.id); else if (!r) zoomOutAt(ev, cv.current, view); };
   const miniDown = (ev) => {
     const go = (e) => {
       if (!mini.current) return up();      // the minimap went away mid-drag (zoomed back out)
@@ -652,6 +689,7 @@ function Flame() {
       <div class="pfscroll" style=${'height:' + (_lay ? _lay.height : 0) + 'px'}>
         <canvas ref=${cv} onClick=${click} onDblClick=${dbl}></canvas>
       </div>
+      <div class="pfrange" ref=${band}></div>
       <div class="pftip" ref=${tip}></div>
     </div>
   </div>`;
@@ -682,17 +720,19 @@ const timeline = computed(() => {
     if (!byThread.has(th)) byThread.set(th, []);
     byThread.get(th).push(i);
   }
+  for (const ix of byThread.values()) ix.sort((a, b) => T.t[a] - T.t[b]);
+  // The real sampling interval, which is longer than the one asked for (the sampler's own cost, and
+  // on Linux it ticks with CPU time): the typical gap between samples of the busiest thread. A sample
+  // is drawn that wide, so a stretch in one frame is one bar.
+  const busiest = [...byThread.values()].reduce((a, b) => (b.length > a.length ? b : a));
+  const gaps = [];
+  for (let k = 1; k < busiest.length; k++) { const g = T.t[busiest[k]] - T.t[busiest[k - 1]]; if (g > 0) gaps.push(g); }
+  gaps.sort((a, b) => a - b);
+  const lstep = gaps.length ? Math.max(step, gaps[Math.floor(gaps.length * 0.75)]) : step;
   const lanes = [];
   let y = TL_AXIS;
   for (const th of [...byThread.keys()].sort((a, b) => a - b)) {
-    const ix = byThread.get(th).sort((a, b) => T.t[a] - T.t[b]);
-    // The thread's real sampling interval, which is longer than the one asked for (the sampler's own
-    // cost, and on Linux it ticks with CPU time): the typical gap between its samples. A sample is
-    // drawn that wide, so a stretch in one frame is one bar, and only a real pause leaves a gap.
-    const gaps = [];
-    for (let k = 1; k < ix.length; k++) { const g = T.t[ix[k]] - T.t[ix[k - 1]]; if (g > 0) gaps.push(g); }
-    gaps.sort((a, b) => a - b);
-    const lstep = gaps.length ? Math.max(step, gaps[Math.floor(gaps.length * 0.75)]) : step;
+    const ix = byThread.get(th);
     const rects = [];
     let depth = 0;
     const open = [];                     // per depth: the bar being extended
@@ -701,13 +741,24 @@ const timeline = computed(() => {
       depth = Math.max(depth, Math.min(TL_DEPTH, c.length));
       for (let d = 0; d < Math.min(TL_DEPTH, c.length); d++) {
         const o = open[d];
-        if (o && o.n === c[d] && t0 - o.t1 <= lstep * 1.5) o.t1 = t1;
+        // A short gap is time this thread went unsampled (it waited on a collection, say), not time
+        // in something else: the cell's line it was on runs on across one, and a frame below it
+        // across a shorter one.
+        if (o && o.n === c[d] && t0 - o.t1 <= lstep * (d === 0 ? 40 : 4)) o.t1 = t1;
         else { const r = { n: c[d], d, t0, t1 }; rects.push(r); open[d] = r; }
       }
       for (let d = Math.min(TL_DEPTH, c.length); d < open.length; d++) open[d] = null;
     }
     lanes.push({ thread: th, y, depth, rects, n: ix.length });
     y += depth * TL_ROW + TL_LANEGAP + 12;
+  }
+  // A thread with a handful of samples gets a few rows, so the busy ones stay in view.
+  const most = Math.max(...lanes.map(L => L.n));
+  y = TL_AXIS;
+  for (const L of lanes) {
+    L.y = y;
+    if (L.n < most * 0.02) { L.depth = Math.min(L.depth, 4); L.rects = L.rects.filter(r => r.d < 4); }
+    y += L.depth * TL_ROW + TL_LANEGAP + 12;
   }
   return { lanes, end, height: y };
 });
@@ -753,7 +804,7 @@ function Timeline() {
           g.fillText(fit(g, n.kind === K.line ? (n.func === 'top-level scope' ? n.line + '  ' + cellLine(n.file, n.line) : n.func + ':' + n.line) : n.func, cw - 6), cx + 3, y + TL_ROW / 2);
           g.textBaseline = 'top';
         }
-        out.push({ x: cx, w: cw, y: y - yOff, h: TL_ROW, n });
+        out.push({ x: cx, w: cw, y: y - yOff, h: TL_ROW, n, t0: r.t0, t1: r.t1 });
       }
     }
     g0.restore();
@@ -779,12 +830,25 @@ function Timeline() {
     t.innerHTML = tipHtml({ n: r.n, total: r.n.total, self: r.n.self, d: r.n.d, g: r.n.g, c: r.n.c, folded: false }, false, M);
     placeTip(t, ev, box.current);
   };
-  const down = (ev) => { if (ev.button === 0) drag.current = { x: ev.clientX, ...tview.value, moved: false }; };
+  const band = useRef(null);
+  const down = (ev) => {
+    if (ev.button !== 0) return;
+    if (ev.shiftKey && cv.current) { ev.preventDefault(); drag.current = { range: true, moved: true }; rangeDrag(ev, cv.current, tview, band.current, box.current); return; }
+    drag.current = { x: ev.clientX, ...tview.value, moved: false };
+  };
   const click = (ev) => { const dr = drag.current; drag.current = null; if (dr && dr.moved) return; const r = at(ev); if (r) select(r.n); };
+  // Double-click a bar: zoom to that stretch of time. On nothing: back out.
+  const dbl = (ev) => {
+    const r = at(ev);
+    if (!r) return zoomOutAt(ev, cv.current, tview);
+    const pad = (r.t1 - r.t0) * 0.08;
+    animateTo(tview, clamp((r.t0 - pad) / TL.end, 0, 1), clamp((r.t1 + pad) / TL.end, 0, 1));
+  };
   const scrolled = () => requestAnimationFrame(() => draw.current && draw.current());
   return html`<div class="pfflame" ref=${box} onMouseMove=${move} onMouseDown=${down} onScroll=${scrolled}
       onMouseLeave=${() => { hover.value = null; drag.current = null; if (tip.current) tip.current.style.display = 'none'; }}>
-    <div class="pfscroll" style=${'height:' + TL.height + 'px'}><canvas ref=${cv} onClick=${click}></canvas></div>
+    <div class="pfscroll" style=${'height:' + TL.height + 'px'}><canvas ref=${cv} onClick=${click} onDblClick=${dbl}></canvas></div>
+    <div class="pfrange" ref=${band}></div>
     <div class="pftip" ref=${tip}></div>
   </div>`;
 }
@@ -863,7 +927,7 @@ function Crumbs() {
       ${baseShare.value ? html`<span><i style="color:#e05a5a">■</i>grew</span><span><i style="color:#5a8fe0">■</i>shrank</span>` : null}</span>
     ${tab.value === 'flame' || tab.value === 'timeline' ? html`<span class="pfzoom">
       <button onClick=${() => zoomAt(sig, mid, 2)} disabled=${x <= 1.0001} title="zoom out (-)">−</button>
-      <span class="pfzx" title="⌘/Ctrl + scroll to zoom, drag to pan">${x < 10 ? x.toFixed(1) : Math.round(x)}×</span>
+      <span class="pfzx" title="scroll to zoom (⌘ + scroll on a graph taller than its pane) · drag to pan · shift + drag to zoom to a span · double-click a bar to zoom to it, empty space to zoom out">${x < 10 ? x.toFixed(1) : Math.round(x)}×</span>
       <button onClick=${() => zoomAt(sig, mid, 0.5)} title="zoom in (+)">+</button>
       <button onClick=${() => { zoom.value = 1; animateTo(sig, 0, 1); }} disabled=${x <= 1.0001} title="show the whole run (0)">Fit</button>
     </span>` : null}
@@ -1267,6 +1331,8 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfflame { position:relative; flex:1 1 60%; min-height:0; overflow:auto; padding:6px 8px; }
 .pfflame canvas { display:block; cursor:pointer; position:sticky; top:0; }
 .pfflame:active canvas { cursor:grabbing; }
+.pfrange { display:none; position:absolute; z-index:2; pointer-events:none; background:color-mix(in srgb, #e8933a 16%, transparent);
+  border-left:1px solid #e8933a; border-right:1px solid #e8933a; }
 .pfempty { display:flex; align-items:center; justify-content:center; gap:8px; color:var(--dim); font-size:.82rem; }
 .pftip { display:none; position:absolute; z-index:2; max-width:250px; pointer-events:none; padding:6px 8px;
   border-radius:6px; background:var(--bg2); border:1px solid var(--border); box-shadow:0 6px 20px rgba(0,0,0,.4);
