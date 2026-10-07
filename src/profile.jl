@@ -952,16 +952,17 @@ function _static_tidy!(raw::Vector, mod::Module, cellfile::AbstractString, sourc
     return raw
 end
 
-# Where a captured variable is assigned: the first line from `from` on that assigns one of `vars`,
+# Where a captured variable is assigned: the earliest line from `from` on that assigns one of `vars`,
 # else `from`. JET reports a capture on the first line of the function that boxes it.
 function _capture_line(lines, from::Integer, vars)
+    best = typemax(Int)
     for v in vars
         isempty(v) && continue
         re = Regex("(?<![\\w.])" * replace(String(v), r"([^\w])" => s"\\\1") * "\\s*[-+*/^]?=(?!=)")
         k = findnext(l -> occursin(re, l), lines, max(1, from))
-        k === nothing || return k
+        k === nothing || (best = min(best, k))
     end
-    return from
+    return best == typemax(Int) ? from : best
 end
 
 # One finding per line: what kinds were found there, the distinct signatures (the line's own first),

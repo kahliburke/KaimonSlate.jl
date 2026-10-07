@@ -56,7 +56,8 @@ end
         RE._static_tidy!(fake["findings"], ProfNS, "cell:ps1", "a = 1\nc = 0\nf = () -> (c += 1)\n")
         # A capture reported on a function's first line moves to the assignment that follows it.
         @test RE._capture_line(["best = 0", "function f()", "  rng = 1", "  best = Inf", "end"], 3, ["best"]) == 4 &&
-              RE._capture_line(["x = 1"], 1, ["nope"]) == 1
+              RE._capture_line(["x = 1"], 1, ["nope"]) == 1 &&
+              RE._capture_line(["f() = 0", "  a = 1", "  b = 2"], 1, ["b", "a"]) == 2
         # One finding per line, with what came from inside library calls counted there.
         lines = RE._static_lines(Any[
             Dict{String,Any}("kind" => "dispatch", "sig" => "a", "file" => "cell:x", "line" => 4, "func" => "f", "mine" => true, "call" => "f", "frames" => Any[]),
