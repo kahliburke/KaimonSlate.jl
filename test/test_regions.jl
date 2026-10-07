@@ -612,6 +612,18 @@ end
                 @test d.sent == RE._sync_files(srcdir, ex)
             end
 
+            @testset "each checkout of a package has its own copy on a host" begin
+                # Named by the local path, so two worktrees of one package do not share a copy, and one
+                # checkout keeps its copy whichever branch it is on.
+                mktempdir() do d
+                    a = mkpath(joinpath(d, "feature-a", "Pkg.jl")); b = mkpath(joinpath(d, "feature-b", "Pkg.jl"))
+                    pa, pb = RE._devsrc_path(a), RE._devsrc_path(b)
+                    @test pa != pb && startswith(pa, RE._REMOTE_DEVSRC * "/") && endswith(pa, "-feature-a-Pkg.jl")
+                    symlink(a, joinpath(d, "link"))
+                    @test RE._devsrc_path(joinpath(d, "link")) == pa && RE._devsrc_path(a * "/") == pa
+                end
+            end
+
             @testset "a copy taken up again sends only what changed since" begin
                 # What a copy was sent is kept on disk, so after a reattach or a hub restart its first
                 # comparison starts from that record rather than from nothing.

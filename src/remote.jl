@@ -1642,7 +1642,20 @@ worker_stats_history(host::AbstractString, port::Integer) =
 
 const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # shipped sources for dev'd deps (Pkg.develop targets)
 
-# Rsync each dev'd (path) dependency of the project at `local_env` into `devsrc/<name>` on the remote and
+# Where a package developed from the local checkout at `lpath` is copied on a host: named by that path,
+# its separators made dashes (`/Users/me/dev/Foo.jl` → `devsrc/-Users-me-dev-Foo.jl`). Two checkouts
+# of one package (worktrees, clones) get a copy each, and a checkout that moves between branches keeps
+# its one copy, which the sync keeps on whatever is checked out. A link is followed first, so two paths
+# to one checkout share a copy; a very long path keeps its end and a short hash.
+function _devsrc_path(lpath::AbstractString)
+    p = rstrip(normpath(try; realpath(lpath); catch; abspath(lpath); end), ('/', '\\'))
+    slug = replace(p, r"[/\\:]" => "-")
+    length(slug) > 160 &&
+        (slug = last(slug, 140) * "-" * bytes2hex(_SHA.sha1(p))[1:8])
+    return "$_REMOTE_DEVSRC/$slug"
+end
+
+# Rsync each dev'd (path) dependency of the project at `local_env` into its copy (`_devsrc_path`) and
 # return the (name → $HOME-relative remote path) rewrites — the local checkouts (`Pkg.develop` targets)
 # that must resolve on the host. Skips the project itself (it appears in its own Manifest as `path="."`
 # and IS the remote's active project) and any dep whose local source has vanished. Shared by
@@ -1668,7 +1681,7 @@ function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString)
             _rlog("env: dev dep '$name' source missing locally ($lpath) — skipping (its path will dangle)")
             continue
         end
-        rp = "$_REMOTE_DEVSRC/$name"
+        rp = _devsrc_path(lpath)
         _send_dir!(host, lpath, rp; excludes = [".git", "*.cov"], region = t.region, filter = true) ||
             (_rlog("env: could not send dev dep '$name' → $host"); continue)
         push!(rewrites, (name, rp))
@@ -1682,7 +1695,7 @@ end
     _replicate_env!(t::RemoteTarget) -> nothing
 
 Reproduce `t.origin_env` (the notebook's local project) on the remote at `t.project`: send it wholesale
-(Project.toml + Manifest.toml + any /src), send each dev'd dep's source into `devsrc/<name>` and rewrite
+(Project.toml + Manifest.toml + any /src), send each dev'd dep's source into its copy (`_devsrc_path`) and rewrite
 BOTH the Manifest `path` and Project.toml's `[sources]` path (Julia ≥1.11 resolves dev deps from the
 latter) to point there, then instantiate. The Manifest makes registry versions exact and clones git deps
 from their recorded urls; sending the dev sources makes local checkouts resolve on the host.
@@ -1697,7 +1710,7 @@ function _replicate_env!(t::RemoteTarget; precompile::Bool = true, stamp::Abstra
     _send_dir!(host, origin, t.project; excludes = [".git", "*.cov", ".ready"],
                      region = t.region, filter = true) ||
         error("env: could not send the origin project → $host")
-    # 2. dev'd deps: send each local source into devsrc/<name>; collect (name → $HOME-relative remote path).
+    # 2. dev'd deps: send each local source into its copy; collect (name → $HOME-relative remote path).
     rewrites = _send_dev_deps!(t, origin)
     # 3. rewrite the remote Manifest's dev paths to the shipped locations, then instantiate.
     projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
@@ -1898,7 +1911,7 @@ end
     start_sync!(t, parent_project; kernel = nothing, sent = false)
 
 Keep `t`'s host copies of the notebook's parent project (its `src/`, into the worker env) and of each
-dev'd package (into `devsrc/<name>`) current, telling `kernel` which files changed. `sent` says the
+dev'd package (into its copy, `_devsrc_path`) current, telling `kernel` which files changed. `sent` says the
 copies were just sent whole (a provision), so only later changes travel; otherwise the first check
 sends whatever differs.
 """
@@ -1942,7 +1955,7 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = n
     for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? env : dirname(abspath(mf)))
         rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
         isdir(lpath) || continue
-        push!(pairs, (String(lpath), "$_REMOTE_DEVSRC/$name", [".git", "*.cov"]))
+        push!(pairs, (String(lpath), _devsrc_path(lpath), [".git", "*.cov"]))
     end
     lock(_SYNC_LOCK) do
         for (dir, remotedir, excludes) in pairs
