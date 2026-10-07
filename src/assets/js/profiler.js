@@ -18,7 +18,8 @@
 // Nothing here is remote-aware. The hub runs the profile on whichever kernel the cell runs on
 // (server_profile.jl) and pushes the result; source for a frame comes from that machine too.
 import { html, render } from 'htm/preact';
-import { signal, computed } from '@preact/signals';
+import { signal, computed, effect } from '@preact/signals';
+import { lockScroll } from './scrolllock.js';
 import { useRef, useEffect } from 'preact/hooks';
 
 const A = (m, p, b) => window.api(m, p, b);
@@ -319,6 +320,7 @@ function apply(p) {
 window.onProfilePush = (p) => apply(p);
 window.slateProfileCell = (id, kept) => openProfile(id, kept || '');
 window.slateProfileOpen = () => !!pf.value;
+effect(() => lockScroll('profiler', !!pf.value));   // the notebook stays still under the dock
 
 // ── zooming a span ────────────────────────────────────────────────────────────────────────────────
 // The graph and the timeline each show a window onto their whole, as fractions [v0, v1]. Double-click
@@ -1435,7 +1437,7 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pffile { color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pfback { font:inherit; font-size:.7rem; padding:1px 7px; border-radius:5px; background:transparent; border:1px solid var(--border); color:var(--dim); cursor:pointer; }
 .pfback:hover { color:var(--text); }
-.pfcodebody { flex:1 1 auto; min-height:0; overflow:auto; }
+.pfcodebody { flex:1 1 auto; min-height:0; overflow:auto; overscroll-behavior:contain; }
 .pfcodebody .cm-editor { height:100%; }
 .pfright { display:flex; flex-direction:column; min-width:0; min-height:0; }
 .pfcrumbs { display:flex; flex-wrap:wrap; align-items:center; gap:3px; padding:5px 10px; border-bottom:1px solid var(--border); font-size:.72rem; }
@@ -1453,7 +1455,7 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfzx { min-width:38px; text-align:center; color:var(--dim); font-variant-numeric:tabular-nums; }
 .pfgraph { display:flex; flex-direction:column; flex:1 1 60%; min-height:0; }
 .pfmini { display:block; margin:4px 8px 0; cursor:pointer; border-bottom:1px solid var(--border); }
-.pfflame { position:relative; flex:1 1 60%; min-height:0; overflow:auto; padding:6px 8px; }
+.pfflame { position:relative; flex:1 1 60%; min-height:0; overflow:auto; padding:6px 8px; overscroll-behavior:contain; }
 .pfflame canvas { display:block; cursor:pointer; position:sticky; top:0; }
 .pfflame:active canvas { cursor:grabbing; }
 .pfrange { display:none; position:absolute; z-index:2; pointer-events:none; background:color-mix(in srgb, #e8933a 16%, transparent);
@@ -1466,7 +1468,7 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pftip b { font-family:var(--mono,ui-monospace,monospace); font-weight:600; }
 .pftw { color:var(--dim); font-family:var(--mono,ui-monospace,monospace); }
 .pftm { color:#ffd27a; }
-.pfhot { flex:0 0 28%; min-height:0; overflow:auto; border-top:1px solid var(--border); font-size:.74rem; }
+.pfhot { flex:0 0 28%; min-height:0; overflow:auto; overscroll-behavior:contain; border-top:1px solid var(--border); font-size:.74rem; }
 .pfhothead, .pfhotrow { display:grid; grid-template-columns:56px 90px 56px minmax(0,1fr); gap:8px; align-items:center; padding:3px 12px; }
 .pfhothead > span:nth-child(1), .pfhothead > span:nth-child(3), .pfhothead.cmp > span:nth-child(4) { text-align:right; }
 .pfhothead.cmp, .pfhotrow.cmp { grid-template-columns:56px 90px 56px 56px minmax(0,1fr); }
@@ -1482,7 +1484,7 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfsnip { color:var(--dim); margin-left:8px; }
 .pfmk { color:#ffd27a; }
 .pffuncs { flex:1 1 auto; min-height:0; display:grid; }
-.pftable { overflow:auto; font-size:.74rem; }
+.pftable { overflow:auto; overscroll-behavior:contain; font-size:.74rem; }
 .pfthead, .pftrow { display:grid; grid-template-columns:56px 80px 56px minmax(0, 1.3fr) minmax(0, 1fr) 44px; gap:8px; align-items:center; padding:3px 12px; }
 .pfthead { color:var(--dim); font-size:.66rem; text-transform:uppercase; letter-spacing:.05em; position:sticky; top:0; z-index:1;
   background:var(--bg); border-bottom:1px solid var(--border); padding-top:5px; padding-bottom:4px; }
@@ -1502,7 +1504,7 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfrelmid .pfdim { display:block; }
 .pfbar { display:inline-block; height:6px; background:color-mix(in srgb, var(--bg3) 70%, transparent); border-radius:3px; overflow:hidden; }
 .pfbar i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg, #c8742a, #f0a54a); }
-.pfdetails { flex:1 1 auto; overflow:auto; padding:8px 10px; display:flex; flex-direction:column; gap:14px; font-size:.74rem; }
+.pfdetails { flex:1 1 auto; overflow:auto; overscroll-behavior:contain; padding:8px 10px; display:flex; flex-direction:column; gap:14px; font-size:.74rem; }
 .pfdetrow { display:grid; grid-template-columns:80px 80px minmax(0,1fr); gap:8px; padding:2px 0; }
 .pfjetpill { align-self:center; padding:1px 8px; border-radius:10px; font-size:.68rem; letter-spacing:.04em; color:#ffd27a;
   border:1px solid color-mix(in srgb, #ffd27a 45%, transparent); background:color-mix(in srgb, #ffd27a 10%, transparent); cursor:default; }

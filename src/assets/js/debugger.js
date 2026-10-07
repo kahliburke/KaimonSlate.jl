@@ -15,7 +15,8 @@
 // values: a frame on a compute node can hold far more than a viewer wants, so what arrives is a
 // summary (type, size, a clipped repr) and never the value.
 import { html, render } from 'htm/preact';
-import { signal, computed } from '@preact/signals';
+import { signal, computed, effect } from '@preact/signals';
+import { lockScroll } from './scrolllock.js';
 import { useRef, useEffect } from 'preact/hooks';
 
 // ── state ─────────────────────────────────────────────────────────────────────────────────────────
@@ -41,6 +42,8 @@ const selFrame = signal(null);
 const asks = signal([]);
 
 const live = computed(() => st.value && !st.value.finished);
+// The notebook stays still under the workspace while it is up.
+effect(() => lockScroll('debugger', !!(focus.value && (starting.value || live.value))));
 export const debugCell = computed(() => (st.value ? st.value.cell : ''));
 
 const A = (m, p, b) => window.api(m, p, b);
