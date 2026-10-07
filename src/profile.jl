@@ -128,38 +128,59 @@ _profile_release!() = (Profile.clear(); Profile.init(n = 1000, delay = _PROF_DEL
 
 # ── what compiled, and what dispatched at runtime ───────────────────────────────────────────────
 # Julia reports both on stderr when asked (`@trace_compile`, `@trace_dispatch`): a compiled method
-# with how long it took, and each signature a call had to be dispatched on at runtime. Written to a
-# file rather than a pipe, since nothing would read a pipe while the cell holds this task. What
-# else reached stderr meanwhile is passed on to where it was going.
+# with how long it took, and each signature a call had to be dispatched on at runtime. The runtime
+# writes them through its own stderr handle, so stderr is redirected to a file (not a pipe, which
+# nothing would read while the cell holds this task) the way `redirect_stderr` does it, and put back
+# by hand: the worker's `stderr` is its own stream, which `redirect_stderr` cannot restore. Anything
+# else that reached stderr meanwhile goes on to the process's real stderr.
 function _traced(f, out::Dict{String,Any})
     path, io = mktemp()
-    orig = stderr
+    uv = cglobal(:jl_uv_stderr, Ptr{Cvoid})
+    old_uv = unsafe_load(uv); old_stream = stderr
+    saved = Base.Libc.dup(RawFD(2))
+    redirect_stderr(io)
     ccall(:jl_force_trace_compile_timing_enable, Cvoid, ())
     ccall(:jl_force_trace_dispatch_enable, Cvoid, ())
     try
-        return redirect_stderr(f, io)
+        return f()
     finally
         ccall(:jl_force_trace_dispatch_disable, Cvoid, ())
         ccall(:jl_force_trace_compile_timing_disable, Cvoid, ())
-        close(io)
-        compiled = Tuple{String,Float64}[]; dispatched = Dict{String,Int}()
-        for l in eachline(path)
-            m = match(r"^#=\s*([\d.]+)\s*ms\s*=#\s*precompile\((.*)\)(?:\s*#.*)?$", l)
-            if m !== nothing
-                push!(compiled, (String(m.captures[2]), parse(Float64, m.captures[1])))
-            elseif (m2 = match(r"^precompile\((.*)\)(?:\s*#.*)?$", l)) !== nothing
-                dispatched[String(m2.captures[1])] = get(dispatched, String(m2.captures[1]), 0) + 1
-            else
-                try; println(orig, l); catch; end
-            end
+        flush(io)
+        Base.Libc.dup(saved, RawFD(2))
+        @static if Sys.iswindows()
+            ccall(:SetStdHandle, stdcall, Int32, (Int32, Base.OS_HANDLE), -12, Base.Libc._get_osfhandle(RawFD(2)))
         end
+        ccall(:close, Cint, (Cint,), saved)
+        unsafe_store!(uv, old_uv)
+        Base._redirect_io_global(old_stream, 2)
+        close(io)
+        _read_trace!(out, path)
         rm(path; force = true)
-        sort!(compiled; by = x -> -x[2])
-        out["compiled"] = [[s, ms] for (s, ms) in Iterators.take(compiled, 300)]
-        out["compiled_n"] = length(compiled)
-        out["dispatched"] = [[s, n] for (s, n) in Iterators.take(sort!(collect(dispatched); by = x -> -x[2]), 300)]
-        out["dispatched_n"] = length(dispatched)
     end
+end
+
+function _read_trace!(out::Dict{String,Any}, path::AbstractString)
+    compiled = Tuple{String,Float64}[]; dispatched = Dict{String,Int}()
+    rest = IOBuffer()
+    for l in eachline(path)
+        m = match(r"^#=\s*([\d.]+)\s*ms\s*=#\s*precompile\((.*)\)(?:\s*#.*)?$", l)
+        if m !== nothing
+            push!(compiled, (String(m.captures[2]), parse(Float64, m.captures[1])))
+        elseif (m2 = match(r"^precompile\((.*)\)(?:\s*#.*)?$", l)) !== nothing
+            dispatched[String(m2.captures[1])] = get(dispatched, String(m2.captures[1]), 0) + 1
+        else
+            println(rest, l)
+        end
+    end
+    r = take!(rest)
+    isempty(r) || ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), 2, r, length(r))
+    sort!(compiled; by = x -> -x[2])
+    out["compiled"] = [[s, ms] for (s, ms) in Iterators.take(compiled, 300)]
+    out["compiled_n"] = length(compiled)
+    out["dispatched"] = [[s, n] for (s, n) in Iterators.take(sort!(collect(dispatched); by = x -> -x[2]), 300)]
+    out["dispatched_n"] = length(dispatched)
+    return out
 end
 
 # ── the GPU ─────────────────────────────────────────────────────────────────────────────────────
