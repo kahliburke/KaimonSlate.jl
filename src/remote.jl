@@ -516,15 +516,16 @@ const _JULIA_SCRIPT_TIMEOUT = 4 * 3600.0   # a Pkg resolve + precompile on a slo
 
 # `setup` is the shell to start Julia in: a target's machine setup (depot, module fixes, prologue).
 function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::Bool = false, online = nothing,
-                     setup::AbstractString = "")
+                     setup::AbstractString = "", jopt::Bool = false)
     # The script travels through the login session (`put_file` makes its directory), and is removed by
     # the same command that runs it, even when Julia fails: on a compute node every separate command
     # is another hop from the login node.
     remote = "$_REMOTE_ROOT/$(basename(tempname())).jl"
     _put_file(host, Vector{UInt8}(codeunits(code)), remote) ||
         (_rlog("FAILED: sending provisioning script → $host ($what)"); return (false, ""))
+    # `jopt`: Julia takes the options `setup` left in `$JOPT`, the worker's sysimage (`_sysimage_jopt_sh`).
     script = "trap " * Sweep.shq("rm -f " * Sweep.shq(remote)) * " EXIT; " * setup *
-             _julia_sh("julia --startup-file=no $remote")
+             _julia_sh("julia " * (jopt ? "\$JOPT " : "") * "--startup-file=no $remote")
     # Pkg work runs for minutes, so it gets its own deadline rather than the default command's. With
     # `stream`, each line is logged as it arrives (tagged to the region whose bring-up asked, which the
     # session's task cannot know by itself) and handed to `online` for the banner.

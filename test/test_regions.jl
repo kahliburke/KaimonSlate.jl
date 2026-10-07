@@ -1974,6 +1974,34 @@ end
         @test occursin("'/abs/env/Manifest.toml'", RE._host_state_script("/abs/env"))   # not under \$HOME
     end
 
+    @testset "a prepare compiles again only for a new environment, node type or image" begin
+        mktempdir() do home
+            t = RE.RemoteTarget("h"; project = "~/.cache/kaimonslate/remote/nb-1")
+            stamp = RE._env_stamp_path(t); mark = stamp * ".pc"
+            mkpath(joinpath(home, dirname(stamp)))
+            # What the step's shell does: the check, then (when it did not stop) a compile that writes
+            # the mark as the Julia snippet would.
+            run_step(jopt = "") = read(setenv(`sh -c $("JOPT='$jopt'; " * RE._precompiled_check_sh(t, mark) *
+                                                       "echo compiled; printf '%s' \"\$SLATE_PC\" > \"\$HOME/$mark\"")`,
+                                              merge(ENV, Dict("HOME" => home, "PATH" => "/usr/bin:/bin"))), String)
+            compiled(jopt = "") = occursin("compiled", run_step(jopt))
+            @test compiled()                                           # no environment recorded
+            write(joinpath(home, stamp), "fp1")
+            @test compiled()                                           # first compile for it
+            @test !compiled()                                          # the same again: stops
+            write(joinpath(home, stamp), "fp1+pc")
+            @test !compiled()                                          # the suffix a compile adds
+            @test compiled("--sysimage=/x/cpu.so")                     # booted from an image now
+            write(joinpath(home, stamp), "fp2")
+            @test compiled("--sysimage=/x/cpu.so")                     # another environment
+            f = joinpath(home, "m.pc")
+            withenv("SLATE_PC" => "fp2|cpu|") do
+                Core.eval(Module(), Meta.parseall(RE._precompiled_mark_snippet(f)))
+            end
+            @test read(f, String) == "fp2|cpu|"
+        end
+    end
+
     @testset "a prepare keeps an environment whose depot still holds it" begin
         mktempdir() do home
             rel = ".cache/kaimonslate/remote/nb-1"

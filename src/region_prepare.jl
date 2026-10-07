@@ -591,6 +591,24 @@ if isdefined(Main, :CUDA)
 end
 """
 
+# What a prepare's compile was for, kept beside the environment's stamp (`mark`): the environment (its
+# stamp without the "compiled" suffix a compile adds), the node's CPU, and the options its workers boot
+# with, the sysimage among them. Before Julia starts, the shell compares them and stops when they match;
+# after a compile, Julia writes them. Both read `$SLATE_PC`, which the check sets.
+function _precompiled_check_sh(t, mark::AbstractString)
+    q(p) = (startswith(p, "/") || startswith(p, "~/")) ? Sweep.shq_path(p) : "\"\$HOME/\"" * Sweep.shq(p)
+    return _SYSIMAGE_CPU_SH * "; S=\$(cat " * q(_env_stamp_path(t)) * " 2>/dev/null); S=\${S%+pc}; " *
+           "export SLATE_PC=\"\$S|\$CPU|\$JOPT\"; " *
+           "if [ -n \"\$S\" ] && [ \"\$(cat " * q(mark) * " 2>/dev/null)\" = \"\$SLATE_PC\" ]; then " *
+           "echo '@@PRECOMPILED current'; exit 0; fi; "
+end
+_precompiled_mark_snippet(mark::AbstractString) = """
+    let f = raw"$mark"
+        f = startswith(f, "/") ? f : joinpath(homedir(), startswith(f, "~/") ? f[3:end] : f)
+        write(f, get(ENV, "SLATE_PC", ""))
+    end
+    """
+
 # Install the reference project's environment where its workers will run, load every package in it
 # with timing, and check CUDA when it is among them. On a scheduler region `host` is the granted node;
 # elsewhere it is the host itself. The environment stays installed, stamped, for the project's start.
@@ -600,33 +618,39 @@ function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothi
     name = basename(ref[1])
     t = _region_target(r; origin_env = ref[1])
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    # Installed without compiling: the step below compiles it, once, where the workers run.
+    # Installed without compiling: the step below compiles it, once, where the workers run. A node that
+    # shares the login node's home finds it there already, sources included.
     got = step("Install $name") do
+        rebuild || return ("ok", "downloaded on the login node, which shares its home")
         provision_remote!(t, ref[2]; rebuild, precompile = false)
-        ("ok", rebuild ? "" : "downloaded on the login node, which shares its home")
+        ("ok", "")
     end
     got == "fail" && return nothing
-    # Compiled here, where the workers run, and timed apart from loading: the load time below is what
-    # every start pays, which is what the liveness grace is made from; this is paid once.
+    # A region that boots its workers from a sysimage gets it built here, on the node type its workers
+    # run on and in their shell, before the packages are compiled against it and the worker starts.
+    (r.sysimage || rebuild_sysimage) && step("Build the sysimage") do
+        status, detail, m = build_sysimage!(r, t, host; prologue = pro, force = rebuild_sysimage)
+        measured["sysimage"] = m
+        # Recorded now, not when the prepare ends: the compile, the load and the worker start boot from it.
+        get(m, "result", "") in ("built", "current") && _record_sysimage!(r.name, m)
+        (status, detail * (r.sysimage ? "" : " · the region does not boot from it until sysimage is on"))
+    end
+    # Compiled here, where the workers run, against the image they boot, and timed apart from loading:
+    # the load time below is what every start pays, which is what the liveness grace is made from. Not
+    # run again for the node type, image and environment it last compiled.
     step("Precompile $name") do
+        mark = _env_stamp_path(t) * ".pc"
         ok, out = _ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.precompile(); " *
-                                    "println(\"@@JULIA julia version \", VERSION)",
-                              "precompile $name on $host"; stream = true, setup = t.setup)
+                                    "println(\"@@JULIA julia version \", VERSION)\n" * _precompiled_mark_snippet(mark),
+                              "precompile $name on $host"; stream = true, jopt = true,
+                              setup = t.setup * pro * _sysimage_jopt_sh(t) * "; " * _precompiled_check_sh(t, mark))
         ok || return ("fail", first(strip(out), 400))   # the step shows its own time
+        occursin("@@PRECOMPILED current", out) && return ("ok", "compiled already for this node, image and environment")
         # Compiled now, so a start finds the environment complete and builds nothing.
         m = match(r"@@JULIA (julia version \S+)", out)
         m === nothing || stamp_env_precompiled!(t, ref[2], m.captures[1]) ||
             _rlog("prepare[$(r.name)]: could not record the environment as compiled on $host")
         ("ok", "")
-    end
-    # A region that boots its workers from a sysimage gets it built here, on the node type its workers
-    # run on and in their shell, before the worker below starts, so that start is the one it speeds up.
-    (r.sysimage || rebuild_sysimage) && step("Build the sysimage") do
-        status, detail, m = build_sysimage!(r, t, host; prologue = pro, force = rebuild_sysimage)
-        measured["sysimage"] = m
-        # Recorded now, not when the prepare ends: the load and the worker start below boot from it.
-        get(m, "result", "") in ("built", "current") && _record_sysimage!(r.name, m)
-        (status, detail * (r.sysimage ? "" : " · the region does not boot from it until sysimage is on"))
     end
     worker === nothing || return _prepare_in_worker!(step, measured, name, worker)
     step("Load $name") do
