@@ -2080,6 +2080,7 @@ end
         @test RE._activity_line("a line of no kind") == "a line of no kind"
         @test occursin("\e[36mperlmutter", RE._activity_line("provision START host=perlmutter transport=tunnel"))
         @test occursin("\e[36mpm_gpu1", RE._activity_line("prepare[pm_gpu1]: Precompile x — ok: done"))
+        @test occursin("\e[1;34m[2/3]", RE._activity_line("provision [2/3] KaimonGate env already built"))
         @test RE._activity_line("\e[32m✓\e[39m JSON") == "\e[32m✓\e[39m JSON"     # its own colours kept
     end
 
