@@ -732,6 +732,38 @@ end
 
 # Send a local dir to the host as a tar over the shared session. Replaced rather than merged
 # when `delete`; `excludes` are matched per path component (see `Sweep.put_dir`).
+# The files a send of `dir` carries (the transfer rules applied), by name, size and modification time,
+# digested. What was last sent to each copy is kept as this in the hub's cache, so a directory nothing
+# changed in is not sent again.
+function _tree_digest(dir::AbstractString, excludes::Vector{String}; region::AbstractString = "")
+    keep = Sweep.transfer_keep(dir; region, excludes)
+    ctx = _SHA.SHA1_CTX()
+    for (root, dirs, files) in walkdir(dir)
+        filter!(d -> d != ".git" && keep(relpath(joinpath(root, d), dir)), dirs)
+        for f in sort(files)
+            p = joinpath(root, f); rel = relpath(p, dir)
+            keep(rel) || continue
+            st = stat(p)
+            _SHA.update!(ctx, codeunits(string(rel, " ", st.size, " ", st.mtime, "\n")))
+        end
+    end
+    return bytes2hex(_SHA.digest!(ctx))
+end
+_sent_digest_path(dir::AbstractString, key::AbstractString) =
+    joinpath(_slate_cache_dir(), "sync", bytes2hex(_SHA.sha1(string(dir, "\n", key)))[1:16] * ".digest")
+
+# `_send_dir!` with the transfer rules, skipped when the directory's files are what was last sent to
+# this copy, unless `force`.
+function _send_tree!(host, dir::AbstractString, remote::AbstractString; excludes::Vector{String} = String[],
+                     region::AbstractString = "", force::Bool = false)
+    f = _sent_digest_path(dir, string(host, ":", remote))
+    dg = _tree_digest(dir, excludes; region)
+    (!force && isfile(f) && strip(read(f, String)) == dg) && return true
+    ok = _send_dir!(host, dir, remote; excludes, region, filter = true)
+    ok && (try; mkpath(dirname(f)); write(f, dg); catch; end)
+    return ok
+end
+
 function _send_dir!(host, localdir::AbstractString, remotedir::AbstractString; delete::Bool = false,
                  excludes::Vector{String} = String[], region::AbstractString = "",
                  filter::Bool = false)
@@ -980,7 +1012,9 @@ function _env_action(st, stamp::AbstractString; rebuild::Bool)
     had = strip(get(st, "env", ""))
     _env_stamp_serves(had, stamp) || return :build
     rebuild || return :keep
-    held = get(st, "held", "") == "1" && strip(get(st, "heldfor", "")) == had
+    # A compile marks the stamp `+pc` after the list was written for it; the list still belongs to it.
+    base(x) = (x = strip(x); endswith(x, "+pc") ? x[1:end-3] : x)
+    held = get(st, "held", "") == "1" && base(get(st, "heldfor", "")) == base(had)
     return held ? :held : :repair
 end
 
@@ -1288,18 +1322,20 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     repair, built = action === :repair, action === :build
     scripted = false   # whether a build script ran, which also records ripgrep's path
     # The environment's sources without its resolved files, which hold the host's own paths.
-    send_sources! = function ()
+    # Each directory only when its files differ from what was last sent there (`_send_tree!`), unless
+    # `force`, as a repair sends them.
+    send_sources! = function (; force::Bool = false)
         isempty(envdir) && return
-        _send_dir!(host, envdir, t.project; region = t.region, filter = true,
-                   excludes = [".git", "*.cov", ".ready", "Project.toml", "Manifest.toml",
-                               "JuliaProject.toml", "JuliaManifest.toml"])
-        _send_dev_deps!(t, envdir)
+        _send_tree!(host, envdir, t.project; region = t.region, force,
+                    excludes = [".git", "*.cov", ".ready", "Project.toml", "Manifest.toml",
+                                "JuliaProject.toml", "JuliaManifest.toml"])
+        _send_dev_deps!(t, envdir; force)
     end
     (repair || built) && _forget_env_deps!(t.project)
     if repair
         _rlog("provision [3/3] environment unchanged on $host but its depot lacks some of it — instantiating it as it is")
         _prep_stage("Fetching missing packages on $host")
-        send_sources!()
+        send_sources!(; force = true)
         ok, out = _ssh_julia!(host, _env_repair_script(rel; precompile, held_file = _env_held_path(t), stamp = had),
                               "instantiate on $host"; stream = true, online = _bringup_note, setup = t.setup)
         scripted = ok
@@ -1665,7 +1701,7 @@ end
 # dev sources instead of leaving a `[sources]` `path="../dep"` dangling on the remote. `_dev_deps` reads
 # the LOCAL Manifest to discover which deps are dev'd — so this works even when the remote Manifest isn't
 # shipped (a fresh-resolve provision).
-function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString)
+function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString; force::Bool = true)
     host = t.ssh_host
     rewrites = Tuple{String,String}[]
     # `parent_manifest` resolves the manifest the way the loader does — for a workspace member that is
@@ -1684,7 +1720,7 @@ function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString)
             continue
         end
         rp = _devsrc_path(lpath)
-        _send_dir!(host, lpath, rp; excludes = [".git", "*.cov"], region = t.region, filter = true) ||
+        _send_tree!(host, lpath, rp; excludes = [".git", "*.cov"], region = t.region, force) ||
             (_rlog("env: could not send dev dep '$name' → $host"); continue)
         push!(rewrites, (name, rp))
         _rlog("env: dev dep '$name' → $host:$rp")

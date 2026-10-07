@@ -2065,6 +2065,21 @@ end
         end
     end
 
+    @testset "an unchanged source directory is not sent again" begin
+        src, dest, cache = mktempdir(), mktempdir(), mktempdir()
+        withenv("KAIMONSLATE_CACHE_HOME" => cache) do
+            mkpath(joinpath(src, "src")); write(joinpath(src, "src", "A.jl"), "a")
+            to = joinpath(dest, "copy")
+            @test RE._send_tree!("", src, to; excludes = [".git"]) && isfile(joinpath(to, "src", "A.jl"))
+            rm(to; recursive = true)                                   # would come back if sent again
+            @test RE._send_tree!("", src, to; excludes = [".git"]) && !isdir(to)
+            write(joinpath(src, "src", "A.jl"), "a2")
+            @test RE._send_tree!("", src, to; excludes = [".git"]) && read(joinpath(to, "src", "A.jl"), String) == "a2"
+            rm(to; recursive = true)
+            @test RE._send_tree!("", src, to; excludes = [".git"], force = true) && isfile(joinpath(to, "src", "A.jl"))
+        end
+    end
+
     @testset "a prepare compiles again only for a new environment, node type or image" begin
         mktempdir() do home
             t = RE.RemoteTarget("h"; project = "~/.cache/kaimonslate/remote/nb-1")
@@ -2118,6 +2133,7 @@ end
             @test act(s; rebuild = true) === :repair
             @test act(s; rebuild = true, h = "1", hf = "fp0") === :repair      # a list from an earlier build
             @test act(s * "+pc"; rebuild = true, h = "1", hf = s * "+pc") === :held
+            @test act(s * "+pc"; rebuild = true, h = "1", hf = s) === :held       # compiled after the list
 
             # The list a build writes: its stamp, then directories that exist.
             f = joinpath(home, "list.held")
