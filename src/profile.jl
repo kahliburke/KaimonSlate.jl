@@ -96,11 +96,13 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
         gpu = Dict{String,Any}()
         saved = _profile_settings()
         Base.cumulative_compile_timing(true)
-        c0 = Base.cumulative_compile_time_ns()[1]; g0 = Base.gc_num().total_time; t0 = time_ns()
+        c0 = Base.cumulative_compile_time_ns()[1]; g0 = Base.gc_num().total_time; t0 = time_ns(); cy0 = _cycles()
         task = UInt(pointer_from_objref(current_task()))
         others = delete!(Set{UInt}(_PROF_OTHER_TASKS[]()), task)
         traced = Dict{String,Any}()
-        facts() = (; opts = o, ms = (time_ns() - t0) / 1e6,
+        # `clock` reads the sampler's clock beside `time_ns()` at the start and now: the samples go on the
+        # same clock as everything else timed from `t0` (the GPU's work, for one).
+        facts() = (; opts = o, ms = (time_ns() - t0) / 1e6, clock = (cy0, Int64(t0), _cycles(), Int64(time_ns())),
                      compile_ms = (Base.cumulative_compile_time_ns()[1] - c0) / 1e6,
                      gc_ms = (Base.gc_num().total_time - g0) / 1e6)
         marks = Tuple{Int,Int}[]
@@ -951,7 +953,8 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
     r["dropped"] = dropped; r["threads"] = length(threads)
     r["buffer_full"] = try; Profile.is_buffer_full(); catch; false; end
     r["stalls"], r["stalled_ms"] = _stalls(samples, cspan, facts.ms)
-    r["timeline"] = _timeline(tl_thread, tl_clock, tl_node, tree.map, facts.ms, facts.opts.delay_ms, cspan)
+    r["timeline"] = _timeline(tl_thread, tl_clock, tl_node, tree.map, facts.ms, facts.opts.delay_ms, cspan;
+                              toms = _clock_ms(facts.clock))
     return r
 end
 
@@ -1038,11 +1041,30 @@ function _stalls(samples, cspan, ms)
     return n, round(lost; digits = 1)
 end
 
+# The clock `Profile` stamps each sample with: the time-stamp counter on x86-64, the virtual counter
+# on aarch64.
+@static if Sys.ARCH === :aarch64
+    _cycles() = Base.llvmcall("""%1 = call i64 asm sideeffect "mrs \$0, cntvct_el0", "=r"()
+        ret i64 %1""", UInt64, Tuple{})
+else
+    _cycles() = ccall("llvm.readcyclecounter", llvmcall, UInt64, ())
+end
+
+# A sample's clock as ms from the run's start, from two readings of both clocks `(c0, t0, c1, t1)`;
+# `nothing` when they do not give a rate.
+function _clock_ms(r)
+    c0, t0, c1, t1 = r
+    c1 > c0 || return nothing
+    k = (t1 - t0) / (Float64(c1) - Float64(c0)) / 1e6
+    return c -> (Float64(c) - Float64(c0)) * k
+end
+
 # Every kept sample in time order, for the timeline: its thread (numbered from 1), when (ms from the
 # first sample, scaled from the sampler's clock to the run's length) and the node it ended in. A
 # long run is thinned to about `_TL_MAX` samples, every `step`-th of each thread's.
 const _TL_MAX = 150_000
-function _timeline(thread, clock, node, map, ms, delay, cspan = (minimum(clock; init = UInt(0)), maximum(clock; init = UInt(0))))
+function _timeline(thread, clock, node, map, ms, delay, cspan = (minimum(clock; init = UInt(0)), maximum(clock; init = UInt(0)));
+                   toms = nothing)
     n = length(node)
     n == 0 && return Dict{String,Any}("thread" => Int[], "t" => Float64[], "node" => Int[], "step_ms" => delay)
     step = max(1, cld(n, _TL_MAX))
@@ -1053,7 +1075,7 @@ function _timeline(thread, clock, node, map, ms, delay, cspan = (minimum(clock; 
     tids = sort!(unique(thread)); tnum = Dict(t => i for (i, t) in enumerate(tids))
     return Dict{String,Any}(
         "thread" => [tnum[thread[i]] for i in ix],
-        "t" => [round((clock[i] - c0) / span * ms; digits = 2) for i in ix],
+        "t" => [round(toms === nothing ? (clock[i] - c0) / span * ms : toms(clock[i]); digits = 2) for i in ix],
         "node" => [map[node[i]] for i in ix],
         "step_ms" => delay * step)
 end

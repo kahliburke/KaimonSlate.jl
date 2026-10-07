@@ -206,6 +206,21 @@ end
         @test sort(unique(tl["thread"])) == [1, 2] && length(tl["t"]) <= RE._TL_MAX + 2
     end
 
+    @testset "samples are placed on the run's own clock" begin
+        # The clock read here is the one the profiler stamps samples with, so a sample maps to ms from
+        # the run's start.
+        RE.Profile.clear(); RE.Profile.init(n = 10^5, delay = 0.001)
+        c0 = RE._cycles(); t0 = time_ns()
+        RE.Profile.@profile (local s = 0.0; for i in 1:20_000_000; s += sin(i); end; s)
+        r = (c0, Int64(t0), RE._cycles(), Int64(time_ns()))
+        data = RE.Profile.fetch(include_meta = true, limitwarn = false)
+        clocks = [data[i - RE.Profile.META_OFFSET_CPUCYCLECLOCK] for i in eachindex(data) if RE.Profile.is_block_end(data, i)]
+        RE.Profile.clear()
+        toms = RE._clock_ms(r); run_ms = (r[4] - r[2]) / 1e6
+        @test !isempty(clocks) && all(c -> 0 <= toms(c) <= run_ms, clocks)
+        @test RE._clock_ms((UInt64(5), 0, UInt64(5), 10)) === nothing
+    end
+
     @testset "pauses with no sample from any thread are reported" begin
         smp(c) = RE._Sample(1:0, UInt(1), UInt(1), UInt(c), true)
         # One clock unit per ms: steady 1 ms ticks with two one-second gaps.
