@@ -492,6 +492,28 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
     if haskey(P, "gpu")
         g = P["gpu"]
         haskey(g, "error") && println(io, "\nGPU: ", g["error"])
+        if haskey(g, "lines")
+            println(io, "\nOn the GPU, by notebook line (each CUDA call placed by its own stack):")
+            for e in g["lines"]
+                ln = e["line"]
+                what = String[]
+                gt = e["kernel_ms"] + e["copy_ms"]
+                gt > 0 && push!(what, _pms(gt) * " on the GPU")
+                e["launches"] > 0 && push!(what, string(e["launches"], " launches"))
+                e["sync"][1] > 0 && push!(what, string(e["sync"][1], " waits for the GPU, ", _pms(e["sync"][2])))
+                e["alloc"][1] > 0 && push!(what, string(e["alloc"][1], " allocations, ", _pms(e["alloc"][2])))
+                e["copy_bytes"] > 0 && push!(what, string(Base.format_bytes(e["copy_bytes"]), " copied"))
+                isempty(what) && continue
+                file = String(e["file"])
+                where_ = ln <= 0 || isempty(file) ? "no notebook line on the stack" :
+                         (file == "cell:" * String(cid) ? "line $ln" : "$(file[6:end]):$ln") * "  " *
+                         _cell_line_text(nb, file, ln, P)
+                println(io, "  ", where_, "\n      ", join(what, "; "))
+                for (n, c, t) in Iterators.take(e["gpu"], 3)
+                    println(io, "      ", lpad(_pms(t), 8), "  ×", c, "  ", n)
+                end
+            end
+        end
         if haskey(g, "kernels")
             println(io, "\nOn the GPU (", _pms(g["device_ms"]), " of device time), by name:")
             for (n, c, t) in Iterators.take(g["kernels"], 10)

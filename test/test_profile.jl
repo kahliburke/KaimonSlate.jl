@@ -215,13 +215,69 @@ end
     end
 
     @testset "GPU mode keeps the cell's own error and runs the cell if the profiler cannot" begin
-        broken = Module(:BrokenCUDA)
-        Core.eval(broken, :(macro profile(ex) :(error("no driver")) end))
+        # Without CUPTI bindings the cell still runs, and the profile says why.
         out = Dict{String,Any}()
-        @test RE._with_gpu(() -> 42, out, broken) == 42 && occursin("no driver", out["error"])
-        passing = Module(:PassingCUDA)
-        Core.eval(passing, :(macro profile(ex) esc(:(($ex); nothing)) end))
-        @test_throws ErrorException("boom") RE._with_gpu(() -> error("boom"), Dict{String,Any}(), passing)
+        @test RE._with_cupti(() -> 42, out, Module(:NoCUPTI), time_ns()) == 42 && occursin("CUPTI", out["error"])
+        # A stand-in CUDA whose CUPTI records nothing: the run goes through, and the cell's error is its own.
+        fake = Module(:FakeCUDA)
+        Core.eval(fake, :(synchronize() = nothing))
+        Core.eval(fake, :(module CUPTI
+                const CUPTI_CB_DOMAIN_DRIVER_API = 1; const CUPTI_API_ENTER = 0; const SUCCESS = 0; const CUPTI_API_EXIT = 1
+                const CUPTI_ACTIVITY_KIND_DRIVER = 1; const CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL = 2
+                const CUPTI_ACTIVITY_KIND_KERNEL = 3; const CUPTI_ACTIVITY_KIND_MEMCPY = 4; const CUPTI_ACTIVITY_KIND_MEMSET = 5
+                unchecked_cuptiGetCallbackName(d, id, ref) = 1
+                CallbackConfig(cb, kinds) = (cb, kinds)
+                ActivityConfig(kinds) = kinds
+                cuptiGetTimestamp(r) = (r[] = 0; nothing)
+                enable!(f, cfg) = f()
+                process(f, cfg) = nothing
+            end))
+        g = Dict{String,Any}()
+        @test RE._with_cupti(() -> 42, g, fake, time_ns()) == 42 && g["source"] == "cupti" && isempty(g["kernels"])
+        @test_throws ErrorException("boom") RE._with_cupti(() -> error("boom"), Dict{String,Any}(), fake, time_ns())
+    end
+
+    @testset "a CUDA call lands on the notebook line whose stack made it" begin
+        # A real stack: a function defined as cell `k1` would define it, called from here.
+        m = Module(:CuptiStack)
+        Core.eval(m, Meta.parseall("f() = backtrace()\n"; filename = "cell:k1"))
+        bt = Base.invokelatest(m.f)
+        @test RE._notebook_frame(bt, Dict{Any,Tuple{String,Int}}()) == ("cell:k1", 1)
+        @test RE._notebook_frame(backtrace(), Dict{Any,Tuple{String,Int}}()) == ("", 0)
+        # The frame-pointer chain finds the same line, from the same place.
+        Core.eval(m, Meta.parseall("g(h) = h()\n"; filename = "cell:k2"))
+        chain = UInt64[]
+        h = Base.invokelatest(m.g, () -> RE._fp_walk(chain))
+        @test h != 0 && RE._notebook_frame(chain, Dict{Any,Tuple{String,Int}}()) == ("cell:k2", 1)
+        # Recording the same call site twice keeps one stack.
+        calls0 = RE._CuptiCalls()
+        site() = RE._record_stack!(calls0)
+        ids = Int32[]
+        for _ in 1:3; push!(ids, Base.invokelatest(m.g, site)); end
+        @test allequal(ids) && length(calls0.stacks) == 1
+        # Stacks stand in as symbols: a call with no notebook frame (a sync on CUDA.jl's own task)
+        # takes the line of the call after it, the line that waited for it.
+        ms = 1_000_000
+        calls = RE._CuptiCalls()
+        append!(calls.corr, UInt32[1, 2, 3]); append!(calls.cbid, UInt32[10, 11, 12])
+        append!(calls.t, Int64[10ms, 62ms, 99ms]); append!(calls.sid, Int32[1, 2, 3]); append!(calls.stacks, Any[:launch, :sync, :copy])
+        calls.ends[1] = 11ms; calls.ends[2] = 100ms; calls.ends[3] = 103ms
+        frame(bt, _) = bt === :launch ? ("cell:draft", 3) : bt === :copy ? ("cell:draft", 15) : ("", 0)
+        at = RE._cupti_lines(calls; frame = frame)
+        @test at[1] == ("cell:draft", 3) && at[2] == ("cell:draft", 15) && at[3] == ("cell:draft", 15)
+        # Kernels and copies join their launching call by correlation id; times are ms on the run's clock.
+        names = Dict(UInt32(10) => "cuLaunchKernel", UInt32(11) => "cuStreamSynchronize", UInt32(12) => "cuMemcpyDtoHAsync_v2")
+        recs = [(:kernel, "stencil", 12ms, 62ms, UInt32(1), 14, 0), (:copy, "[CUDA memcpy DtoH]", 100ms, 102ms, UInt32(3), 14, 4096)]
+        g = RE._cupti_summary!(Dict{String,Any}(), calls, names, recs, Int64(0), Int64(10ms); at = at)
+        L = Dict((d["file"], d["line"]) => d for d in g["lines"])
+        @test L[("cell:draft", 3)]["launches"] == 1 && L[("cell:draft", 3)]["kernel_ms"] == 50.0 &&
+              L[("cell:draft", 15)]["sync"] == [1, 38.0] && L[("cell:draft", 15)]["copy_bytes"] == 4096 &&
+              g["kernels"][1] == ["stencil", 1, 50.0] && g["device_ms"] == 52.0
+        tl = g["timeline"]
+        @test length(tl["calls"]) == 3 && tl["gpu"][1][1:3] == [2.0, 52.0, 14] &&
+              tl["lines"][tl["gpu"][1][5]] == ["cell:draft", 3]
+        @test RE._kernel_name("_Z19gpu_getindex_kernel16CompilerMetadataI11DynamicSize") == "gpu_getindex_kernel" &&
+              RE._kernel_name("my_kernel") == "my_kernel"
     end
 
     @testset "source for a frame is read on the kernel's machine" begin

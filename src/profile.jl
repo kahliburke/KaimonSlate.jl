@@ -93,13 +93,13 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
         end
         # CUDA is loaded before the clock starts, so its loading is not counted as the cell's.
         cuda = o.mode == "gpu" ? _cuda_module() : nothing
+        gpu = Dict{String,Any}()
         saved = _profile_settings()
         Base.cumulative_compile_timing(true)
         c0 = Base.cumulative_compile_time_ns()[1]; g0 = Base.gc_num().total_time; t0 = time_ns()
         task = UInt(pointer_from_objref(current_task()))
         others = delete!(Set{UInt}(_PROF_OTHER_TASKS[]()), task)
         traced = Dict{String,Any}()
-        gpu = Dict{String,Any}()
         facts() = (; opts = o, ms = (time_ns() - t0) / 1e6,
                      compile_ms = (Base.cumulative_compile_time_ns()[1] - c0) / 1e6,
                      gc_ms = (Base.gc_num().total_time - g0) / 1e6)
@@ -128,7 +128,7 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
                 # GPU work is mostly the host waiting on the device, which a CPU-time sampler barely
                 # sees (on Linux it ticks with the process's CPU time), so GPU mode samples wall time.
                 v = o.mode == "wall" ? Profile.@profile_walltime(run()) :
-                    o.mode == "gpu" ? _with_gpu(() -> Profile.@profile_walltime(run()), gpu, cuda) : Profile.@profile(run())
+                    o.mode == "gpu" ? _with_cupti(() -> Profile.@profile_walltime(run()), gpu, cuda, t0) : Profile.@profile(run())
             end
         catch e
             fx = facts(); done()
@@ -278,38 +278,285 @@ function _cuda_module()
     return try; Base.require(_CUDA_ID); catch; nothing; end
 end
 
-# `f` under CUDA.jl's own profiler: the device's kernels and copies, summed by name, land in `out`.
-# Without CUDA it is `f`, and `out` says why. The cell's own error is the run's; if the profiler
-# fails before the cell starts, the cell runs without it.
-function _with_gpu(f, out::Dict{String,Any}, m)
+# ── the GPU, through CUPTI ──────────────────────────────────────────────────────────────────────
+# CUDA.jl's CUPTI bindings give two things at once. Activity records: every kernel, copy and driver
+# call, timed by the device. And a callback on the thread making each driver call, where the Julia
+# stack is taken: each call, and through its correlation id the kernel or copy it started, lands on
+# the notebook line that made it. Stacks are kept as raw addresses during the run and looked up after.
+
+# The driver calls whose stacks are taken: what starts work on the device, moves or allocates memory,
+# or waits for the device.
+const _CUPTI_CALLS = r"^cu(Launch|Memcpy|Memset|MemAlloc|MemFree|MemHostAlloc|StreamSynchronize|CtxSynchronize|EventSynchronize|StreamWaitEvent)"
+
+# One recorded driver call, kernel or copy: when it started (`time_ns()`), what, and how long.
+struct _GpuEvent
+    t::Int64
+    kind::Symbol   # :api, :kernel, :copy
+    name::String
+    ns::Int64
+    bytes::Int64
+end
+
+# What the callback collects, per driver call it takes a stack for, in call order: its correlation
+# id, callback id, entry time and stack id, and its exit time by correlation id. Times are
+# `time_ns()`. A loop makes the same call from the same place over and over, so each distinct stack
+# is kept once (`stacks`), found again by a fingerprint of its return addresses (`ids`).
+struct _CuptiCalls
+    lock::Threads.SpinLock
+    corr::Vector{UInt32}
+    cbid::Vector{UInt32}
+    t::Vector{Int64}
+    sid::Vector{Int32}
+    stacks::Vector{Any}
+    ids::Dict{UInt64,Int32}
+    ends::Dict{UInt32,Int64}
+end
+_CuptiCalls() = _CuptiCalls(Threads.SpinLock(), UInt32[], UInt32[], Int64[], Int32[], Any[],
+                            Dict{UInt64,Int32}(), Dict{UInt32,Int64}())
+
+# Records one call's stack: the fingerprint is taken without allocating, and only a stack not seen
+# before is walked again and kept. Called from the CUPTI callback, so both walks start in the frame
+# that called this, and the chain below it is the call's.
+function _record_stack!(calls::_CuptiCalls)
+    h = _fp_walk(nothing)
+    if h == 0
+        bt = backtrace()                                    # no stack bounds: no fingerprint either
+        lock(calls.lock); push!(calls.stacks, bt); id = Int32(length(calls.stacks)); unlock(calls.lock)
+        return id
+    end
+    lock(calls.lock)
+    id = get(calls.ids, h, Int32(0))
+    unlock(calls.lock)
+    id == 0 || return id
+    chain = UInt64[]; _fp_walk(chain)
+    lock(calls.lock)
+    id = get(calls.ids, h, Int32(0))
+    if id == 0
+        push!(calls.stacks, chain); id = Int32(length(calls.stacks)); calls.ids[h] = id
+    end
+    unlock(calls.lock)
+    return id
+end
+
+# Driver calls are timed by the callback rather than recorded as activity: a CUDA.jl program makes
+# hundreds of driver calls per array operation, almost all of them queries, and recording each one
+# costs more than the run.
+function _with_cupti(f, out::Dict{String,Any}, m, t0::Integer)
     m === nothing && (out["error"] = "CUDA is not in this notebook's environment"; return f())
+    CU = try; getproperty(m, :CUPTI); catch; nothing; end
+    CU === nothing && (out["error"] = "this CUDA.jl has no CUPTI bindings"; return f())
+    il = Base.invokelatest
+    K(k) = il(getproperty, CU, k)
+    calls = _CuptiCalls()
+    recs = Tuple{Symbol,String,Int64,Int64,UInt32,Int,Int}[]
     val = Ref{Any}(nothing); started = Ref(false); finished = Ref(false)
-    body = () -> (started[] = true; val[] = f(); finished[] = true; nothing)
-    res = try
-        Base.invokelatest(Core.eval, Main,
-            Expr(:macrocall, GlobalRef(m, Symbol("@profile")), LineNumberNode(0), Expr(:call, body)))
+    try
+        drv = K(:CUPTI_CB_DOMAIN_DRIVER_API)
+        enter, exit_ = K(:CUPTI_API_ENTER), K(:CUPTI_API_EXIT)
+        names = _cupti_names(CU, drv)
+        want = Set{UInt32}(id for (id, n) in names if occursin(_CUPTI_CALLS, n))
+        cb = (domain, id, data) -> begin
+            UInt32(id) in want || return
+            if data.callbackSite == enter
+                t = Int64(time_ns())
+                sid = _record_stack!(calls)
+                lock(calls.lock)
+                push!(calls.corr, data.correlationId); push!(calls.cbid, UInt32(id))
+                push!(calls.t, t); push!(calls.sid, sid)
+                unlock(calls.lock)
+            elseif data.callbackSite == exit_
+                t = Int64(time_ns())
+                lock(calls.lock); calls.ends[data.correlationId] = t; unlock(calls.lock)
+            end
+            return
+        end
+        kinds = (kernel = K(:CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL), copy = K(:CUPTI_ACTIVITY_KIND_MEMCPY),
+                 set = K(:CUPTI_ACTIVITY_KIND_MEMSET))
+        ccfg = il(K(:CallbackConfig), cb, [drv])
+        acfg = il(K(:ActivityConfig), collect(values(kinds)))
+        sync = getproperty(m, :synchronize)
+        il(sync)
+        ts = Ref{UInt64}(0); il(K(:cuptiGetTimestamp), ts); off = Int64(ts[]) - Int64(time_ns())
+        body = () -> begin
+            started[] = true; val[] = f(); finished[] = true
+            il(sync)                     # every launch's activity is in before collection ends
+            nothing
+        end
+        il(K(:enable!), () -> il(K(:enable!), body, acfg), ccfg)
+        il(K(:process), (ctx, sid, r) -> (x = _cupti_record(r, kinds); x === nothing || push!(recs, x)), acfg)
+        _cupti_summary!(out, calls, names, recs, off, Int64(t0))
+        out["source"] = "cupti"
     catch e
         started[] && !finished[] && rethrow()
-        out["error"] = first(sprint(showerror, e), 300)
+        out["error"] = "CUPTI: " * first(sprint(showerror, e), 300)
         return started[] ? val[] : f()
     end
-    try
-        # CUDA.jl hands its device trace back as columns by name (a NamedTuple of vectors).
-        dev = Base.invokelatest(getproperty, res, :device)
-        col(k) = Base.invokelatest(getproperty, dev, k)
-        names = String.(col(:name))
-        dur = Float64.(col(:stop)) .- Float64.(col(:start))
-        agg = Dict{String,Vector{Float64}}()
-        for (n, d) in zip(names, dur)
-            a = get!(() -> [0.0, 0.0], agg, n); a[1] += 1; a[2] += d
-        end
-        rows = sort!([(n, a[1], a[2]) for (n, a) in agg]; by = x -> -x[3])
-        out["kernels"] = [[n, Int(c), round(t * 1000; digits = 3)] for (n, c, t) in Iterators.take(rows, 200)]
-        out["device_ms"] = round(sum(dur; init = 0.0) * 1000; digits = 3)
-    catch e
-        out["error"] = "could not read CUDA's profile: " * first(sprint(showerror, e), 200)
-    end
     return val[]
+end
+
+# Driver call names by callback id, from CUPTI's own table.
+function _cupti_names(CU, drv)
+    il = Base.invokelatest
+    ok = il(getproperty, CU, :SUCCESS)
+    get_name = il(getproperty, CU, :unchecked_cuptiGetCallbackName)
+    out = Dict{UInt32,String}()
+    ref = Ref{Cstring}(C_NULL)
+    for id in UInt32(1):UInt32(1500)
+        il(get_name, drv, id, ref) == ok && ref[] != C_NULL && (out[id] = unsafe_string(ref[]))
+    end
+    return out
+end
+
+const _COPY_KINDS = Dict(1 => "HtoD", 2 => "DtoH", 3 => "HtoA", 4 => "AtoH", 5 => "AtoA", 6 => "AtoD",
+                         7 => "DtoA", 8 => "DtoD", 9 => "HtoH", 10 => "PtoP")
+
+# One activity record as a tuple: (kind, name, start, end, correlation id, stream, bytes), on CUPTI's
+# clock. `kinds` holds the record kinds' values, looked up once.
+function _cupti_record(r, kinds)
+    k = r.kind
+    if k == kinds.kernel
+        return (:kernel, r.name == C_NULL ? "kernel" : _kernel_name(unsafe_string(r.name)), Int64(r.start),
+                Int64(r._end), UInt32(r.correlationId), Int(r.streamId), 0)
+    elseif k == kinds.copy
+        return (:copy, "[CUDA memcpy " * get(_COPY_KINDS, Int(r.copyKind), string(Int(r.copyKind))) * "]",
+                Int64(r.start), Int64(r._end), UInt32(r.correlationId), Int(r.streamId), Int(r.bytes))
+    elseif k == kinds.set
+        return (:copy, "[CUDA memset]", Int64(r.start), Int64(r._end), UInt32(r.correlationId),
+                Int(r.streamId), Int(r.bytes))
+    end
+    return nothing
+end
+
+# A kernel's name as written: the function in a mangled `_Z<length><name>…` symbol, else the name.
+function _kernel_name(s::AbstractString)
+    m = match(r"^_Z(\d+)", s)
+    m === nothing && return String(s)
+    n = parse(Int, m.captures[1]); a = length(m.match) + 1
+    return a + n - 1 <= ncodeunits(s) ? String(s[a:a+n-1]) : String(s)
+end
+
+# The frame-pointer chain above the caller of this function: its fingerprint, and when `out` is a
+# vector, its return addresses, innermost first, pushed onto it. Julia's compiled code keeps frame
+# pointers, and so do the CUDA driver's frames the chain passes through from a CUPTI callback:
+# following them costs a few microseconds where `backtrace()`, which unwinds the driver's frames
+# from their tables, costs tens. The walk never leaves the running task's stack, and returns 0 when
+# that stack's bounds are not known.
+@noinline function _fp_walk(out::Union{Nothing,Vector{UInt64}})
+    a0 = Ref{Ptr{Cvoid}}(C_NULL); a1 = Ref{Ptr{Cvoid}}(C_NULL); b0 = Ref{Ptr{Cvoid}}(C_NULL); b1 = Ref{Ptr{Cvoid}}(C_NULL)
+    ccall(:jl_active_task_stack, Cvoid, (Any, Ptr{Ptr{Cvoid}}, Ptr{Ptr{Cvoid}}, Ptr{Ptr{Cvoid}}, Ptr{Ptr{Cvoid}}),
+          current_task(), a0, a1, b0, b1)
+    hi = UInt64(a1[])
+    fp = UInt64(ccall("llvm.frameaddress", llvmcall, Ptr{Cvoid}, (Int32,), 0))
+    (hi == 0 || fp == 0 || fp >= hi) && return UInt64(0)
+    h = UInt64(0xcbf29ce484222325); n = 0
+    while n < 4096 && fp & 7 == 0 && fp + 16 <= hi
+        nxt = unsafe_load(Ptr{UInt64}(fp)); ret = unsafe_load(Ptr{UInt64}(fp + 8))
+        h = (h ⊻ ret) * 0x100000001b3; n += 1
+        out === nothing || push!(out, ret)
+        nxt <= fp && break
+        fp = nxt
+    end
+    return h == 0 ? UInt64(1) : h
+end
+
+# The deepest notebook frame on a stack, each address looked up once: ("", 0) for a stack with none.
+# A frame-pointer chain holds return addresses, looked up one byte back so they land in the call;
+# a `backtrace()` already holds the calls.
+function _notebook_frame(bt, cache::Dict{Any,Tuple{String,Int}})
+    for ip in bt
+        r = get!(cache, ip) do
+            fr = Base.StackTraces.lookup(ip isa UInt64 ? Ptr{Cvoid}(ip - 1) : ip)
+            k = findfirst(x -> startswith(_ffile(x), "cell:"), fr)
+            k === nothing ? ("", 0) : (_ffile(fr[k]), Int(fr[k].line))
+        end
+        isempty(r[1]) || return r
+    end
+    return ("", 0)
+end
+
+# Each correlation id's notebook line. A call made where no notebook frame is on the stack is CUDA.jl
+# waiting for a stream on a task of its own, on behalf of a line that is blocked until it returns:
+# that line's next call is the first one after it, so the wait takes the line of the next call that
+# has one (the previous one at the end of a run).
+function _cupti_lines(calls::_CuptiCalls; frame = _notebook_frame)
+    cache = Dict{Any,Tuple{String,Int}}()
+    bystack = [frame(bt, cache) for bt in calls.stacks]
+    own = [bystack[s] for s in calls.sid]
+    next = ("", 0)
+    for i in length(own):-1:1
+        isempty(own[i][1]) ? (own[i] = next) : (next = own[i])
+    end
+    last = ("", 0)
+    for i in eachindex(own)
+        isempty(own[i][1]) ? (own[i] = last) : (last = own[i])
+    end
+    return Dict{UInt32,Tuple{String,Int}}(zip(calls.corr, own))
+end
+
+# The GPU's work for `out`: by name, by notebook line, and as a timeline on the run's clock (ms from
+# `t0`). The calls are on `time_ns()`; `off` takes CUPTI's timestamps there.
+function _cupti_summary!(out::Dict{String,Any}, calls::_CuptiCalls, names, recs, off::Int64, t0::Int64;
+                         at = _cupti_lines(calls))
+    ev = _GpuEvent[]; files = String[]; lns = Int[]
+    tl = Dict{String,Any}("names" => String[], "lines" => Any[], "gpu" => Any[], "calls" => Any[])
+    nid = Dict{String,Int}(); lid = Dict{Tuple{String,Int},Int}()
+    ni(n) = get!(() -> (push!(tl["names"], n); length(tl["names"])), nid, n)
+    li(l) = isempty(l[1]) ? 0 : get!(() -> (push!(tl["lines"], [l[1], l[2]]); length(tl["lines"])), lid, l)
+    ms(t) = round((t - t0) / 1e6; digits = 3)
+    for (c, id, a) in zip(calls.corr, calls.cbid, calls.t)
+        name = get(names, id, "cbid $id"); b = get(calls.ends, c, a); l = get(at, c, ("", 0))
+        push!(tl["calls"], Any[ms(a), ms(b), ni(name), li(l)])
+        push!(ev, _GpuEvent(a, :api, name, b - a, 0)); push!(files, l[1]); push!(lns, l[2])
+    end
+    dev = 0
+    tot = Dict{String,Vector{Float64}}()
+    for (kind, name, a, b, corr, stream, bytes) in recs
+        l = get(at, corr, ("", 0))
+        dev += b - a
+        t = get!(() -> [0.0, 0.0], tot, name); t[1] += 1; t[2] += (b - a) / 1e6
+        push!(tl["gpu"], Any[ms(a - off), ms(b - off), stream, ni(name), li(l)])
+        push!(ev, _GpuEvent(a - off, kind, name, b - a, bytes)); push!(files, l[1]); push!(lns, l[2])
+    end
+    rows = sort!([(n, Int(t[1]), t[2]) for (n, t) in tot]; by = x -> -x[3])
+    out["kernels"] = [[n, c, round(t; digits = 3)] for (n, c, t) in Iterators.take(rows, 200)]
+    out["device_ms"] = round(dev / 1e6; digits = 3)
+    out["timeline"] = tl
+    return _gpu_lines!(out, ev, files, lns)
+end
+
+# Events summed by the notebook line each belongs to (`files`, `lines` alongside `ev`; "" for none).
+function _gpu_lines!(out::Dict{String,Any}, ev::Vector{_GpuEvent}, files::Vector{String}, lns::Vector{Int})
+    acc = Dict{Tuple{String,Int},Dict{String,Any}}()
+    entry(file, ln) = get!(acc, (file, ln)) do
+        Dict{String,Any}("file" => file, "line" => ln, "api_ms" => 0.0, "sync" => [0, 0.0], "alloc" => [0, 0.0],
+                         "launches" => 0, "kernel_ms" => 0.0, "copy_ms" => 0.0, "copy_bytes" => 0,
+                         "api" => Dict{String,Vector{Float64}}(), "gpu" => Dict{String,Vector{Float64}}())
+    end
+    for (e, file, ln) in zip(ev, files, lns)
+        d = entry(file, ln); ms = e.ns / 1e6
+        if e.kind === :api
+            d["api_ms"] += ms
+            a = get!(() -> [0.0, 0.0], d["api"], e.name); a[1] += 1; a[2] += ms
+            occursin("Synchronize", e.name) && (d["sync"][1] += 1; d["sync"][2] += ms)
+            occursin("MemAlloc", e.name) && (d["alloc"][1] += 1; d["alloc"][2] += ms)
+            occursin("Launch", e.name) && (d["launches"] += 1)
+        else
+            e.kind === :copy ? (d["copy_ms"] += ms; d["copy_bytes"] += e.bytes) : (d["kernel_ms"] += ms)
+            a = get!(() -> [0.0, 0.0], d["gpu"], e.name); a[1] += 1; a[2] += ms
+        end
+    end
+    r3(x) = round(x; digits = 3)
+    for d in values(acc)
+        for k in ("api", "gpu")
+            rows = sort!([(n, Int(a[1]), a[2]) for (n, a) in d[k]]; by = x -> -x[3])
+            d[k] = [[n, c, r3(t)] for (n, c, t) in Iterators.take(rows, 20)]
+        end
+        d["sync"] = Any[Int(d["sync"][1]), r3(d["sync"][2])]; d["alloc"] = Any[Int(d["alloc"][1]), r3(d["alloc"][2])]
+        for k in ("api_ms", "kernel_ms", "copy_ms"); d[k] = r3(d[k]); end
+    end
+    # Heaviest on the GPU first; work no notebook line made (before the first, or CUDA.jl's own) last.
+    out["lines"] = sort!(collect(values(acc)); by = d -> (isempty(d["file"]), -(d["kernel_ms"] + d["copy_ms"] + d["sync"][2])))
+    return out
 end
 
 # ── samples ─────────────────────────────────────────────────────────────────────────────────────

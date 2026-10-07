@@ -1060,6 +1060,10 @@ function StaticCheck() {
     </div>`)}</div>`;
 }
 
+// A notebook line as the GPU table names it: the line alone in the profiled cell, `cell:line` in another.
+const lineLabel = (file, line, P) =>
+  (file === 'cell:' + P.cell ? line : file.slice(5) + ':' + line) + '  ' + (cellLine(file, line) || '').trim();
+
 // ── details: compiling, dispatch, allocation types, the GPU ─────────────────────────────────────────
 function Details() {
   const P = pf.value && pf.value.profile;
@@ -1084,12 +1088,19 @@ function Details() {
     ...(P.buffer_full ? [['buffer', 'full: the end of the run is missing']] : []),
     ...(P.stalls ? [['stalled', ms(P.stalled_ms) + ' unsampled, in ' + P.stalls + ' pauses']] : []),
     ...(P.error ? [['threw', String(P.error).split('\n')[0]]] : [])];
+  // Per notebook line: what the GPU ran for it, and what it spent waiting on the GPU, allocating its
+  // memory and copying. Each CUDA call is placed by its own stack.
+  const nl = (n, t) => n ? n.toLocaleString() + ' · ' + ms(t) : '';
+  const byLine = g && g.lines ? g.lines.map(e => [ms(e.kernel_ms + e.copy_ms), e.launches || '', nl(e.sync[0], e.sync[1]),
+      nl(e.alloc[0], e.alloc[1]), e.copy_bytes ? bytes(e.copy_bytes) : '',
+      e.line > 0 && e.file ? lineLabel(e.file, e.line, P) : 'no notebook line on the stack']) : null;
   return html`<div class="pfdetails">
     <${StaticCheck} />
     <div class="pfdet"><div class="pfrelhead">The run</div>
       ${facts.map(([k, v]) => html`<div class="pfdetkv"><span>${k}</span><span>${v}</span></div>`)}</div>
     ${P.types ? tbl('Allocated, by type (scaled from the ' + pct(P.alloc_rate) + ' recorded)', ['bytes', 'count', 'type'],
                     P.types.map(([t, c, b]) => [bytes(b), c.toLocaleString(), t]), 'nothing recorded') : null}
+    ${byLine ? tbl('On the GPU, by line', ['GPU time', 'launches', 'waits', 'allocations', 'copied', 'line'], byLine, 'no GPU work recorded') : null}
     ${g ? tbl('On the GPU' + (g.device_ms ? ' · ' + ms(g.device_ms) + ' of device time' : ''), ['time', 'calls', 'kernel or copy'],
               (g.kernels || []).map(([n, c, t]) => [ms(t), c, n]), g.error || 'no device work recorded') : null}
     ${P.compiled ? tbl('Compiled during the run · ' + P.compiled_n, ['time', 'times', 'method'],
