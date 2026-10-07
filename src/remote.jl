@@ -1813,8 +1813,9 @@ end
 # `_replicate_env!` (origin-env replication) and `provision_remote!`'s parent-project branch, so BOTH ship
 # dev sources instead of leaving a `[sources]` `path="../dep"` dangling on the remote. `_dev_deps` reads
 # the LOCAL Manifest to discover which deps are dev'd — so this works even when the remote Manifest isn't
-# shipped (a fresh-resolve provision).
-function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString; force::Bool = true)
+# shipped (a fresh-resolve provision). A copy that holds its source already by the shared sent record is
+# not sent again unless `force`.
+function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString; force::Bool = false)
     host = t.ssh_host
     rewrites = Tuple{String,String}[]
     # `parent_manifest` resolves the manifest the way the loader does — for a workspace member that is
