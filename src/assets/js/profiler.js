@@ -264,7 +264,8 @@ export async function openProfile(cellId, kept = '') {
     if (kept) await showKept(kept);
     else {
       const r = await A('GET', '/api/profile/last?cell=' + encodeURIComponent(cellId));
-      if (r && r.prepared && pf.value && pf.value.cell === cellId) pf.value = { ...pf.value, prepared: r.prepared };
+      if (r && pf.value && pf.value.cell === cellId)
+        pf.value = { ...pf.value, prepared: r.prepared || null, jet: r.jet, pkgManageable: r.pkgManageable !== false };
       if (r && r.kind === 'result') apply(r);
     }
   } catch (_) {}
@@ -300,7 +301,7 @@ function apply(p) {
   if (!cur || p.cell !== cur.cell) return;
   const next = { ...cur, side: p.side || cur.side };
   if (p.kind === 'preparing') Object.assign(next, { status: 'preparing', error: null });
-  else if (p.kind === 'prepared') Object.assign(next, { status: 'idle', prepared: p });
+  else if (p.kind === 'prepared') Object.assign(next, { status: 'idle', prepared: p, jet: p.static && p.static.available ? true : cur.jet });
   else if (p.kind === 'running') Object.assign(next, { status: 'running', error: null });
   else if (p.kind === 'waiting') Object.assign(next, { status: 'waiting', error: null, why: p.why });
   else if (p.kind === 'error') Object.assign(next, { status: 'error', error: p.error });
@@ -1107,6 +1108,25 @@ function Facts() {
   </div>`;
 }
 
+// JET in the notebook's environment turns on the static check. It is the notebook's to add, so the
+// dock says whether it is there and offers to add it, through the same install as the package panel.
+function JetStatus() {
+  const P = pf.value; if (!P || P.jet == null) return null;
+  if (P.jet) return html`<span class="pfjetpill" title="JET is in this notebook's environment: Compile also checks the cell statically">JET</span>`;
+  if (!P.pkgManageable) return null;
+  const add = async () => {
+    const ok = window.confirmDark ? await window.confirmDark('Add JET to this notebook’s environment? Compile then also checks a cell statically, without running it. It installs (it may precompile for a minute) and the notebook re-runs.', 'Add JET')
+                                  : window.confirm('Add JET to this notebook’s environment?');
+    if (!ok) return;
+    const stop = window.startPkgInstall ? window.startPkgInstall('Installing <b>JET</b> → notebook') : () => {};
+    const r = await A('POST', '/api/package', { op: 'add', name: 'JET' });
+    stop();
+    if (r && r.ok === false) { window._pkgInstallFail ? window._pkgInstallFail(r.message) : alert('Add failed: ' + (r.message || '?')); return; }
+    window.hidePkgInstalling && window.hidePkgInstalling();
+    if (pf.value) { pf.value = { ...pf.value, jet: true }; prepare(); }
+  };
+  return html`<button class="pfbtn pfjetadd" onClick=${add} title="add JET to this notebook's environment, so Compile also checks the cell statically">＋ JET</button>`;
+}
 const staticCount = (st) => (st.findings || []).reduce((t, g) => t + g.count, 0);
 const setTabTo = (t) => { tab.value = t; lsSet('slateProfTab', t); };
 // The static check's findings on `file`'s lines, for the code pane's margin.
@@ -1251,7 +1271,8 @@ function Dock() {
         <span class="pfsp"></span>
         <${History} />
         <${Specialist} />
-        <button class="pfbtn" disabled=${busy} onClick=${prepare} title="compile the cell's code without running it">Compile</button>
+        <${JetStatus} />
+        <button class="pfbtn" disabled=${busy} onClick=${prepare} title=${P.jet ? "compile the cell's code without running it, and check it with JET" : "compile the cell's code without running it"}>Compile</button>
         <span class="pfrunwrap">
           <button class="pfbtn primary" disabled=${busy} onClick=${run}>▶ Run and profile</button>
           <button class="pfbtn pfmore" onClick=${e => { e.stopPropagation(); optsOpen.value = !optsOpen.value; }} title="what to measure, and how">▾</button>
@@ -1482,6 +1503,10 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfbar i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg, #c8742a, #f0a54a); }
 .pfdetails { flex:1 1 auto; overflow:auto; padding:8px 10px; display:flex; flex-direction:column; gap:14px; font-size:.74rem; }
 .pfdetrow { display:grid; grid-template-columns:80px 80px minmax(0,1fr); gap:8px; padding:2px 0; }
+.pfjetpill { align-self:center; padding:1px 8px; border-radius:10px; font-size:.68rem; letter-spacing:.04em; color:#ffd27a;
+  border:1px solid color-mix(in srgb, #ffd27a 45%, transparent); background:color-mix(in srgb, #ffd27a 10%, transparent); cursor:default; }
+.pfjetadd { color:var(--dim); border-style:dashed; }
+.pfjetadd:hover { color:var(--text); }
 .pfjet { display:grid; grid-template-columns:92px minmax(0, 360px) minmax(0, 1fr); gap:10px; align-items:center;
   padding:3px 6px; border-radius:4px; cursor:pointer; }
 .pfjet:hover { background:color-mix(in srgb, #e8933a 10%, transparent); }

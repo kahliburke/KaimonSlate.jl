@@ -87,6 +87,18 @@ function prepare_now!(nb::LiveNotebook, cid::AbstractString)
     end
 end
 
+"""
+    jet_in_env(nb) -> Union{Bool,Nothing}
+
+Whether the notebook's environment (its own packages or its parent project's) has JET, which turns
+on the static check; `nothing` when the environment could not be read.
+"""
+function jet_in_env(nb::LiveNotebook)
+    e = try; _notebook_adds(nb); catch; return nothing; end
+    e.ok || return nothing
+    return any(d -> string(get(d, "name", "")) == "JET", Iterators.flatten((e.adds, e.parent)))
+end
+
 "The last compile of `cid`, or `nothing`."
 last_prepare(nb::LiveNotebook, cid::AbstractString) = lock(_PROF_HUB_LOCK) do; get(_PROF_PREP, (nb.id, String(cid)), nothing); end
 
@@ -327,6 +339,8 @@ function _register_profile_routes!(router, h::Hub)
         p = last_profile(nb, cid)
         r = p === nothing ? Dict{String,Any}("kind" => "none") : copy(p)
         r["prepared"] = last_prepare(nb, cid)          # the last compile and its static check, if any
+        r["jet"] = jet_in_env(nb)
+        r["pkgManageable"] = _pkg_manageable(nb.kernel)
         _json(_json_finite(r))
     end))
     HTTP.register!(router, "POST", "/api/{id}/profile/agent", req -> _withnb(h, req, nb -> begin
