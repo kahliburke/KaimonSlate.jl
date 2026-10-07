@@ -82,8 +82,16 @@ function buildModel(P) {
   for (let i = 1; i <= n; i++) {
     const x = nodes[i], p = x.parent ? nodes[x.parent] : null;
     if (p) { p.kids.push(x); x.depth = p.depth + 1; }
-    x.fk = x.kind === K.line ? x.func + '\x1f' + x.file : '\x1f' + x.func;
-    x.key = (p ? p.key + '\x1e' : '') + x.func + '@' + x.file + ':' + x.line + '#' + x.kind;
+    // Names the compiler made: `#f#12` is the body of `f` (a function with keyword arguments is a
+    // wrapper and a body), shown and counted as `f`; `#12` is a closure, shown as one.
+    x.rawFunc = x.func;
+    if (x.kind === K.line) {
+      const kw = /^#([^#\d][^#]*)#\d+$/.exec(x.func);
+      if (kw) x.func = kw[1];
+      else if (/^#\d+$/.test(x.func) || /^#[^#]+##\d+/.test(x.func)) { x.closure = true; x.func = 'closure'; }
+    }
+    x.fk = x.kind === K.line ? (x.closure ? x.rawFunc : x.func) + '\x1f' + x.file : '\x1f' + x.func;
+    x.key = (p ? p.key + '\x1e' : '') + x.rawFunc + '@' + x.file + ':' + x.line + '#' + x.kind;
   }
   for (let i = 1; i <= n; i++) {
     const ks = nodes[i].kids;
@@ -189,7 +197,7 @@ const matches = computed(() => {
 const functions = computed(() => {
   const M = model.value; if (!M) return null;
   const by = new Map();
-  const get = (n) => by.get(n.fk) || (by.set(n.fk, { fk: n.fk, func: n.func, file: n.file, pkg: n.pkg, kind: n.kind,
+  const get = (n) => by.get(n.fk) || (by.set(n.fk, { fk: n.fk, func: n.func, file: n.file, pkg: n.pkg, kind: n.kind, closure: n.closure,
     self: 0, total: 0, d: 0, g: 0, c: 0, nodes: [], line: n.line }), by.get(n.fk));
   const walk = (x, on) => {
     let added = null;
@@ -210,13 +218,29 @@ function relatives(fk) {
   const M = model.value, fs = functions.value; if (!M || !fs) return null;
   const f = fs.find(x => x.fk === fk); if (!f) return null;
   const callers = new Map(), callees = new Map();
-  const add = (m, n, v) => { const e = m.get(n.fk) || { fk: n.fk, func: n.func, file: n.file, kind: n.kind, v: 0 }; e.v += v; m.set(n.fk, e); };
+  const add = (m, n, v) => { const e = m.get(n.fk) || { fk: n.fk, func: n.func, file: n.file, kind: n.kind, closure: n.closure, line: n.line, v: 0 };
+                              e.v += v; if (n.line < e.line) e.line = n.line; m.set(n.fk, e); };
+  // Folded, library frames are looked through: a caller is the nearest function of the reader's own
+  // above, a callee their nearest function below, and time spent in library code directly is one
+  // entry per package (GC and compiling keep their own).
+  const own = fold.value, mine = (n) => n.kind === K.line && !isLib(n, M);
+  const libCall = (k, v) => add(callees, k.pkg
+    ? { fk: '\x1flib:' + k.pkg, func: k.pkg + ' (library calls)', file: '', kind: K.synth }
+    : { fk: '\x1flib:' + k.func, func: k.func, file: '', kind: K.synth }, v);
+  const below = (k) => {                   // returns the time in k's subtree accounted for
+    if (mine(k)) { add(callees, k, k.total); return k.total; }
+    let under = 0;
+    for (const c of k.kids) under += below(c);
+    if (k.total - under > 0) libCall(k, k.total - under);
+    return k.total;
+  };
   for (const n of f.nodes) {
     let p = M.nodes[n.parent];
-    while (p && p.fk === n.fk) p = M.nodes[p.parent];        // a function's own lines are not its callers
+    // A function's own lines are not its callers, and folded, neither is library code.
+    while (p && p.id !== 1 && (p.fk === n.fk || (own && !mine(p)))) p = M.nodes[p.parent];
     if (p && p.id !== 1) add(callers, p, n.total);
     else add(callers, { fk: '\x1fcell', func: 'cell ' + M.P.cell, file: M.cellFile, kind: K.synth }, n.total);
-    for (const k of n.kids) if (k.fk !== n.fk) add(callees, k, k.total);
+    for (const k of n.kids) if (k.fk !== n.fk) own ? below(k) : add(callees, k, k.total);
   }
   const sorted = (m) => [...m.values()].sort((a, b) => b.v - a.v);
   return { f, callers: sorted(callers), callees: sorted(callees) };
@@ -954,7 +978,11 @@ function Timeline() {
 }
 
 // ── the functions view ────────────────────────────────────────────────────────────────────────────
-function fnName(f) { return f.kind === K.line ? (f.func === 'top-level scope' ? 'cell ' + f.file.slice(5) : f.func) : f.func; }
+function fnName(f) {
+  if (f.kind !== K.line) return f.func;
+  if (f.func === 'top-level scope') return 'cell ' + f.file.slice(5);
+  return f.closure ? 'closure · line ' + f.line : f.func;
+}
 function Functions() {
   const M = model.value, fs = functions.value;
   if (!M || !fs) return html`<div class="pfflame pfempty">not profiled yet</div>`;
@@ -970,7 +998,7 @@ function Functions() {
   const pick = (f) => { fnSel.value = f.fk; if (f.kind === K.line) showCode(f.file, f.line); };
   const bar = (v) => html`<span class="pfbar"><i style=${'width:' + Math.max(1, Math.round(100 * v / M.total)) + '%'}></i></span>`;
   const rel = (title, list) => html`<div class="pfrel"><div class="pfrelhead">${title}</div>
-    ${list.length ? list.slice(0, 40).map(e => html`<div class="pfrelrow" onClick=${() => e.fk !== '\x1fcell' && pick(e)}>
+    ${list.length ? list.slice(0, 40).map(e => html`<div class="pfrelrow" onClick=${() => e.fk[0] !== '\x1f' && pick(e)}>
       <span class="pfnum">${fmt(e.v, M)}</span>${bar(e.v)}<span class="pffn">${fnName(e)}</span>
       <span class="pfdim">${e.kind === K.line ? shortFile(e.file) : ''}</span></div>`)
       : html`<div class="pfdim pfrelrow">none</div>`}</div>`;
