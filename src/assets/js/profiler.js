@@ -59,7 +59,7 @@ const shortFile = (f) => {
 };
 const K = { line: 0, compile: 1, gc: 2, other: 3, synth: 4 };
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
-const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const escapeHtml = (s) => window.slateEscHtml(s);   // esc.js: the front end's one escaper
 
 // ── the model ─────────────────────────────────────────────────────────────────────────────────────
 // Nodes as the worker sent them (ids 1-based, parents first), with children in reading order: the

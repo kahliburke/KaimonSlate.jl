@@ -23,8 +23,8 @@ const eq = (got, want, m) => {
 };
 
 globalThis.window = globalThis;
-const escSrc = /window\.slateEscHtml\s*=[\s\S]*?;\n/.exec(js('core.js'));
-if (!escSrc) { console.error('pkg_log_tail: could not read slateEscHtml from core.js'); process.exit(2); }
+const escSrc = /window\.slateEscHtml\s*=[\s\S]*?;\n/.exec(js('esc.js'));
+if (!escSrc) { console.error('pkg_log_tail: could not read slateEscHtml from esc.js'); process.exit(2); }
 (0, eval)(escSrc[0]);
 (0, eval)(js('ansi.js'));                       // slateAnsiText + slateAnsiHtml, the real ones
 

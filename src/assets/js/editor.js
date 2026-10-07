@@ -1012,7 +1012,7 @@
       const marks = (r.d > 0 ? '<i class="pfm d" title="runtime dispatch">⤳</i>' : '') +
                     (r.c > 0 ? '<i class="pfm c" title="compilation">⚙</i>' : '') +
                     (r.g > 0 ? '<i class="pfm g" title="garbage collection">♻</i>' : '') +
-                    (r.j > 0 ? '<i class="pfm j" title="' + String((r.jt || []).join('\n')).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]) + '">◆</i>' : '');
+                    (r.j > 0 ? '<i class="pfm j" title="' + window.slateEscHtml((r.jt || []).join('\n')) + '">◆</i>' : '');
       s.innerHTML = '<b style="width:' + Math.round(Math.min(1, r.incl) * 100) + '%"></b><em>' + _pct(r.incl) + '</em>' + marks;
       return s;
     }
