@@ -313,7 +313,8 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
     bytes = get(P, "unit", "samples") == "bytes"
     println(io, "Cell `", cid, "`", isempty(p["side"]) ? "" : " on " * p["side"], " (", get(P, "mode", "cpu"), "): ",
             _pms(P["duration_ms"]), ", ",
-            bytes ? string(Base.format_bytes(P["samples"]), " allocated in ", get(P, "allocs", 0), " sampled allocations") :
+            bytes ? string("about ", Base.format_bytes(round(Int, P["samples"] / get(P, "alloc_rate", 1.0))),
+                           " allocated (from ", get(P, "allocs", 0), " recorded, ", round(100 * get(P, "alloc_rate", 1.0); sigdigits = 2), "% of them)") :
                     string(P["samples"], " samples", get(P, "threads", 0) > 1 ? " on $(P["threads"]) threads" : ""),
             ", compiling ", _pms(P["compile_ms"]), ", GC ", _pms(P["gc_ms"]), ".")
     get(P, "buffer_full", false) === true && println(io, "The sample buffer filled: the end of the run is missing. Profile again with a larger buffer or a longer interval.")
@@ -327,7 +328,7 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
     rows = [(file = String(S[L["file"][i]]), line = L["line"][i], incl = L["incl"][i], self = L["self"][i],
              d = L["dispatch"][i], g = L["gc"][i], c = L["compile"][i]) for i in eachindex(L["file"])]
     sort!(rows; by = r -> -r.self)
-    println(io, "\nLines by their own time (self / total):")
+    println(io, bytes ? "\nLines by what they allocate themselves (self / total):" : "\nLines by their own time (self / total):")
     for r in Iterators.take(filter(r -> r.self > 0, rows), 12)
         println(io, "  ", lpad(_ppct(r.self / T), 6), " / ", lpad(_ppct(r.incl / T), 5), "  ",
                 _pshort(r.file), ":", r.line, (t = _cell_line_text(nb, r.file, r.line); isempty(t) ? "" : "  " * t),

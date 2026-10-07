@@ -92,7 +92,9 @@ function buildModel(P) {
                                   d: L.dispatch[i], g: L.gc[i], c: L.compile[i] });
   }
   return { P, nodes, lines, total: tot, cellFile: 'cell:' + P.cell, mine: new Set(P.mine || []),
-           bytes: P.unit === 'bytes', delay: P.delay_ms || 1 };
+           bytes: P.unit === 'bytes', delay: P.delay_ms || 1,
+           // An allocation profile records a share of the allocations; its bytes stand for 1/rate as many.
+           scale: P.unit === 'bytes' && P.alloc_rate ? 1 / P.alloc_rate : 1 };
 }
 const model = computed(() => buildModel(pf.value && pf.value.profile));
 const baseModel = computed(() => buildModel(base.value && base.value.profile));
@@ -109,7 +111,7 @@ const baseShare = computed(() => {
 function fmt(v, M) {
   if (!M) return '';
   if (unit.value === 'share') return pct(v / M.total);
-  return M.bytes ? bytes(v) : ms(v * M.delay);
+  return M.bytes ? bytes(v * M.scale) : ms(v * M.delay);
 }
 
 const isLib = (n, M) => n.kind === K.line && !(n.pkg === 'cell' || n.pkg === 'notebook' || M.mine.has(n.pkg));
@@ -496,7 +498,7 @@ function drawFlame(g, L, W, vw, M, { mini = false } = {}) {
       }
       g.textAlign = 'left';
     }
-    const label = r.top ? funcLabel(dn) + '  ·  ' + (M.bytes ? bytes(M.total) + ' allocated' : M.P.samples + ' samples')
+    const label = r.top ? funcLabel(dn) + '  ·  ' + (M.bytes ? '≈ ' + bytes(M.total * M.scale) + ' allocated' : M.P.samples + ' samples')
                 : r.band ? funcLabel(dn) + (dn.folded ? '  ▸' : '') : cellLabel(dn);
     const room = cw - 8 - (r.band ? 0 : 14);
     if (room > 14) {
@@ -857,7 +859,7 @@ function Facts() {
     ${pr ? html`
       <span class="pfmode">${pr.mode || 'cpu'}</span>
       <span>${ms(pr.duration_ms)}${B ? html` <span class="pfdim">(was ${ms(B.duration_ms)})</span>` : null}</span>
-      ${pr.unit === 'bytes' ? html`<span>${bytes(pr.samples)} · ${(pr.allocs || 0).toLocaleString()} allocations</span>`
+      ${pr.unit === 'bytes' ? html`<span title=${(pr.allocs || 0).toLocaleString() + ' recorded, ' + pct(pr.alloc_rate) + ' of them'}>≈ ${bytes(pr.samples / (pr.alloc_rate || 1))} allocated</span>`
         : html`<span>${pr.samples} samples</span>${pr.threads > 1 ? html`<span>${pr.threads} threads</span>` : null}`}
       ${pr.compile_ms > 0.5 ? html`<span class="c">⚙ ${ms(pr.compile_ms)}</span>` : null}
       ${pr.gc_ms > 0.5 ? html`<span class="g">♻ ${ms(pr.gc_ms)}</span>` : null}

@@ -374,9 +374,10 @@ mutable struct _Acc
     pkgfile::Dict{String,String}                # package → a file of it, to tell the user's own
     seen::Set{Tuple{Int,Int}}
     path::Vector{Int}; pathfn::Vector{Symbol}   # the line nodes the last path went through
+    alloc::Bool                                 # stacks of allocations, which end in the allocator
 end
-_Acc(t, cellfile) = _Acc(t, cellfile, Dict{Tuple{Int,Int},Vector{Int}}(), Dict{String,String}(),
-                         Set{Tuple{Int,Int}}(), Int[], Symbol[])
+_Acc(t, cellfile; alloc = false) = _Acc(t, cellfile, Dict{Tuple{Int,Int},Vector{Int}}(), Dict{String,String}(),
+                                        Set{Tuple{Int,Int}}(), Int[], Symbol[], alloc)
 _lrow(a::_Acc, key) = get!(() -> zeros(Int, 5), a.lines, key)
 
 """
@@ -408,6 +409,7 @@ function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
             if fn in _DISPATCH_C
                 t.dispatch[cur] += w; mark!(3)
             elseif _gc_c(fn)
+                a.alloc && continue          # the allocation itself, not a collection
                 t.gc[cur] += w; mark!(4)
                 cur = _node!(t, cur, "", 0, "garbage collection", "", _K_GC); t.total[cur] += w
                 break
@@ -567,7 +569,7 @@ by bytes, with a table of what was allocated: type, count and bytes, scaled back
 function _alloc_build(cid::String, task::UInt, facts; error = nothing, others::Set{UInt} = Set{UInt}())
     res = Profile.Allocs.fetch()
     cellfile = "cell:" * cid
-    t = _ProfTree(); a = _Acc(t, cellfile)
+    t = _ProfTree(); a = _Acc(t, cellfile; alloc = true)
     root = _node!(t, 0, cellfile, 0, "cell " * cid, "cell", _K_SYNTH)
     toplevel = 0; spare = 0
     dropped = Dict{String,Int}("other cells" => 0, "worker" => 0)
