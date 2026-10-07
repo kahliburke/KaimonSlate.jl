@@ -127,6 +127,30 @@ function fmt(v, M) {
 
 const isLib = (n, M) => n.kind === K.line && !(n.pkg === 'cell' || n.pkg === 'notebook' || M.mine.has(n.pkg));
 
+// With library code folded, the tables charge each sample to the deepest line of the reader's own
+// code on its stack: a line's share is its own time and that of the library calls it makes (and
+// the GC, compiling and BLAS under them), which is where a fix would go.
+const ownTime = computed(() => {
+  const M = model.value; if (!M) return null;
+  const lines = new Map(), fns = new Map();
+  for (const n of M.nodes) {
+    if (!n || !n.self || n.id === 1) continue;
+    let u = n;
+    while (u && u.id !== 1 && !(u.kind === K.line && !isLib(u, M))) u = M.nodes[u.parent];
+    if (!u || u.id === 1) continue;
+    const k = u.file + '\x1f' + u.line;
+    let r = lines.get(k);
+    if (!r) {
+      const b = (M.lines.get(u.file) || new Map()).get(u.line) || { incl: 0 };
+      r = { line: u.line, incl: b.incl, file: u.file, self: 0, d: 0, g: 0, c: 0 };
+      lines.set(k, r);
+    }
+    r.self += n.self / M.total; r.d += n.d || 0; r.g += n.g || 0; r.c += n.c || 0;
+    fns.set(u.fk, (fns.get(u.fk) || 0) + n.self);
+  }
+  return { lines, fns };
+});
+
 // The graph as drawn: with folding on, a run of library frames becomes one bar named after its
 // package, holding the first frames below it that are not library code.
 function dtree(n, M) {
@@ -935,7 +959,10 @@ function Functions() {
   const M = model.value, fs = functions.value;
   if (!M || !fs) return html`<div class="pfflame pfempty">not profiled yet</div>`;
   const q = query.value.trim().toLowerCase();
-  const rows = sortRows(q ? fs.filter(f => f.func.toLowerCase().includes(q) || f.file.toLowerCase().includes(q)) : fs, fnSort,
+  // Folded: the reader's own functions only, each with the time of the library code it calls.
+  const own = fold.value && ownTime.value;
+  const base = own ? fs.filter(f => f.kind === K.line && !isLib(f, M)).map(f => ({ ...f, self: own.fns.get(f.fk) || 0 })) : fs;
+  const rows = sortRows(q ? base.filter(f => f.func.toLowerCase().includes(q) || f.file.toLowerCase().includes(q)) : base, fnSort,
                         { self: f => f.self, total: f => f.total, name: f => fnName(f).toLowerCase(), file: f => shortFile(f.file).toLowerCase() }).slice(0, 300);
   // Nothing picked: the heaviest by its own time, so the callers and callees always show something.
   const pickedFk = fnSel.value || (rows[0] && rows[0].fk) || '';
@@ -950,9 +977,9 @@ function Functions() {
   return html`<div class="pffuncs" style=${'grid-template-rows:minmax(0,1fr) 0 minmax(0,' + pctOf('sandwich') + ')'}>
     <div class="pftable">
       <div class="pfthead">
-        <${SortHead} sig=${fnSort} k="self" label="self" title="time spent in the function itself" /><span></span>
+        <${SortHead} sig=${fnSort} k="self" label="self" title=${own ? 'time in the function and in the library code it calls (fold libraries is on)' : 'time spent in the function itself'} /><span></span>
         <${SortHead} sig=${fnSort} k="total" label="total" title="time in the function and everything it called" />
-        <${SortHead} sig=${fnSort} k="name" label="function" num=${false} />
+        <${SortHead} sig=${fnSort} k="name" label=${own ? 'your functions' : 'function'} num=${false} />
         <${SortHead} sig=${fnSort} k="file" label="file" num=${false} /><span></span></div>
       ${rows.map(f => html`<div class=${'pftrow' + (pickedFk === f.fk ? ' on' : '')} onClick=${() => pick(f)}>
         <span class="pfnum">${fmt(f.self, M)}</span>${bar(f.self)}<span class="pfnum dim">${fmt(f.total, M)}</span>
@@ -1178,8 +1205,9 @@ const fnSort = sortSignal('functions', 'self');
 function Hot() {
   const M = model.value; if (!M) return null;
   const B = baseModel.value;
-  const rows = [];
-  for (const [file, m] of M.lines) for (const r of m.values()) rows.push({ file, ...r });
+  const rows = [], own = fold.value && ownTime.value;
+  if (own) rows.push(...own.lines.values());
+  else for (const [file, m] of M.lines) for (const r of m.values()) rows.push({ file, ...r });
   const wasOf = (r) => { const m = B && B.lines.get(r.file); const w = m && m.get(r.line); return w ? w.self : 0; };
   const where = (r) => (r.file.startsWith('cell:') ? r.file.slice(5) : shortFile(r.file)) + ':' + String(r.line).padStart(6, '0');
   rows.sort((a, b) => b.self - a.self || b.incl - a.incl);
@@ -1191,10 +1219,10 @@ function Hot() {
   const lead = Math.max(1e-9, ...top.slice(0, 200).map(r => r.self));
   return html`<div class="pfhot" style=${'flex-basis:' + pctOf('hot')}>
     <div class=${'pfhothead' + (B ? ' cmp' : '')}>
-      <${SortHead} sig=${hotSort} k="self" label="self" title="time spent on the line itself" /><span></span>
+      <${SortHead} sig=${hotSort} k="self" label="self" title=${own ? 'time on the line and in the library code it calls (fold libraries is on)' : 'time spent on the line itself'} /><span></span>
       <${SortHead} sig=${hotSort} k="incl" label="total" title="time on the line and in everything it called" />
       ${B ? html`<${SortHead} sig=${hotSort} k="before" label="before" title="the line's own time in the profile compared with" />` : null}
-      <${SortHead} sig=${hotSort} k="line" label="line" num=${false} /></div>
+      <${SortHead} sig=${hotSort} k="line" label=${own ? 'your lines' : 'line'} num=${false} /></div>
     ${top.map(r => html`<div class=${'pfhotrow' + (B ? ' cmp' : '')} onClick=${() => go(r)}
         onMouseEnter=${() => { hotLine.value = { file: r.file, line: r.line }; }}
         onMouseLeave=${() => { hotLine.value = null; }}>
