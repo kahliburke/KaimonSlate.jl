@@ -101,8 +101,10 @@ function _profiled(f, cid::AbstractString)
                 v = Profile.Allocs.@profile sample_rate = o.alloc_rate run()
             else
                 Profile.clear(); Profile.init(n = o.buffer, delay = o.delay_ms / 1000)
+                # GPU work is mostly the host waiting on the device, which a CPU-time sampler barely
+                # sees (on Linux it ticks with the process's CPU time), so GPU mode samples wall time.
                 v = o.mode == "wall" ? Profile.@profile_walltime(run()) :
-                    o.mode == "gpu" ? _with_gpu(() -> Profile.@profile(run()), gpu) : Profile.@profile(run())
+                    o.mode == "gpu" ? _with_gpu(() -> Profile.@profile_walltime(run()), gpu) : Profile.@profile(run())
             end
         catch e
             fx = facts(); done()
@@ -185,8 +187,10 @@ function _read_trace!(out::Dict{String,Any}, path::AbstractString)
     compiled = Dict{String,Vector{Float64}}(); dispatched = Dict{String,Int}()   # signature → [count, ms]
     for l in eachline(path)
         m = match(r"^#=\s*([\d.]+)\s*ms\s*=#\s*precompile\((.*)\)(?:\s*#.*)?$", l)
-        # The profiler's and the worker's own calls are not the cell's.
+        # The profiler's and the worker's own calls are not the cell's, and a line two threads wrote
+        # into at once is not a signature.
         occursin(_OWN_SIG, l) && continue
+        count(==('{'), l) == count(==('}'), l) && count(==('('), l) == count(==(')'), l) || continue
         if m !== nothing
             c = get!(() -> [0.0, 0.0], compiled, String(m.captures[2]))
             c[1] += 1; c[2] += parse(Float64, m.captures[1])
@@ -210,7 +214,10 @@ const _CUDA_ID = Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b64840ba"), "
 # copies, summed by name, land in `out`. Without CUDA it is `f`, and `out` says why.
 function _with_gpu(f, out::Dict{String,Any})
     m = get(Base.loaded_modules, _CUDA_ID, nothing)
-    m === nothing && (out["error"] = "CUDA is not loaded in this notebook"; return f())
+    # Not loaded yet (a fresh worker, before the cell's own `using CUDA`): loaded now, when the
+    # notebook's environment has it, so its profiler can wrap the whole run.
+    m === nothing && (m = try; Base.require(_CUDA_ID); catch; nothing; end)
+    m === nothing && (out["error"] = "CUDA is not in this notebook's environment"; return f())
     val = Ref{Any}(nothing)
     res = try
         Base.invokelatest(Core.eval, Main,
@@ -483,7 +490,7 @@ its waiting is time like any other.
 """
 function _profile_build(cid::String, task::UInt, facts; error = nothing, others::Set{UInt} = Set{UInt}(),
                         marks::Vector{Tuple{Int,Int}} = Tuple{Int,Int}[])
-    wall = facts.opts.mode == "wall"
+    wall = facts.opts.mode in ("wall", "gpu")
     data = Profile.fetch(include_meta = true)
     lidict = Profile.getdict(data)
     cellfile = "cell:" * cid
@@ -524,6 +531,10 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
                 cur = _node!(t, _statement_node(t, root, cellfile, graft, graftat, stmt0, marks, mi),
                              "", 0, "waiting", "", _K_SYNTH)
                 start = length(frames) + 1
+            elseif mi > 0 && marks[mi][2] > 0
+                # A statement the interpreter runs (a `using`, a definition) leaves no frame of its
+                # own, but which one was running is known.
+                cur = _node!(t, root, cellfile, marks[mi][2], "top-level scope", "cell", _K_LINE)
             else
                 toplevel == 0 && (toplevel = _node!(t, root, cellfile, 0, "top level", "cell", _K_SYNTH))
                 cur = toplevel
