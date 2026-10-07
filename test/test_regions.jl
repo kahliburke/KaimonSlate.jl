@@ -392,6 +392,22 @@ end
                 end
             end
 
+            @testset "a region's cells go stale when its worker is replaced" begin
+                # The new process has none of their bindings: the cells that ran there, a locked one
+                # and an untagged mutator of a region value included, run again; the rest are kept.
+                rep = RE.parse_report("#%% code id=v region=gpu\nv = [1]\n" *
+                                      "#%% code id=f region=gpu locked\nf = 2\n" *
+                                      "#%% code id=m\npush!(v, 3)\n" *
+                                      "#%% code id=h\nh = 4\n")
+                RE.build_dependencies!(rep)
+                nb = NS.LiveNotebook("restale", joinpath(mktempdir(), "restale.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                for c in rep.cells; c.state = RE.FRESH; end
+                @test sort(NS._restale_side!(nb, "gpu")) == ["f", "m", "v"]
+                @test [c.state for c in rep.cells] == [RE.STALE, RE.STALE, RE.STALE, RE.FRESH]
+            end
+
             @testset "a new allocation on the same node rebuilds the region kernel" begin
                 rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
                 nb = NS.LiveNotebook("alloc", joinpath(mktempdir(), "alloc.jl"), rep, RE.InProcessKernel(), 1,

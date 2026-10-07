@@ -1295,6 +1295,7 @@ function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString; rebuild_
                           _forget_region_kernel!(nb, String(r.name))
                           try; ReportEngine._drop_kernel_conn!(k0); catch; end
                           try; ReportEngine.reap_remote_worker(host, port); catch; end
+                          _restale_side!(nb, String(r.name))
                           ReportEngine._rlog("prepare[$(r.name)]: replaced worker-$port on $host so it starts from what this prepare built")
                       end
                   end
@@ -2436,14 +2437,10 @@ function restart_region!(nb::LiveNotebook, side::AbstractString)
     k === nothing || try; ReportEngine.shutdown!(k; kill_remote = true); catch e
         @warn "slate region: restart teardown failed" notebook = nb.id side = side exception = e
     end
-    ids = String[]
+    ids = _restale_side!(nb, side)
+    # The re-run below serves no ▶: one still pending on these cells would compute a locked cell
+    # nobody just asked for (see `restart_kernel!`).
     lock(nb.lock) do
-        for cell in nb.report.cells
-            (cell.kind == CODE && _cell_side(nb, cell) == side) || continue
-            cell.state = STALE; push!(ids, cell.id)
-        end
-        # The re-run below serves no ▶: one still pending on these cells would compute a locked cell
-        # nobody just asked for (see `restart_kernel!`).
         frc = get(_FORCE_RUN, nb.id, nothing)
         frc === nothing || setdiff!(frc, ids)
     end
@@ -2457,6 +2454,34 @@ function restart_region!(nb::LiveNotebook, side::AbstractString)
         end
     end
     return nb
+end
+
+# The cells that run on `side` keep their results in that side's worker. A new worker process has
+# none of them, so they go stale, and the next run computes them again in order. Returns their ids.
+function _restale_side!(nb::LiveNotebook, side::AbstractString)
+    ids = String[]
+    lock(nb.lock) do
+        for cell in nb.report.cells
+            (cell.kind == CODE && _cell_side(nb, cell) == side) || continue
+            # Locked cells too: their frozen result restores into the new process, it is not in it.
+            ReportEngine._unblock!(cell); cell.state = STALE; ReportEngine.bump_rev!(cell)
+            push!(ids, cell.id)
+        end
+        isempty(ids) || (nb.version += 1)
+    end
+    isempty(ids) || try; _broadcast(nb, string(nb.version)); catch; end
+    return ids
+end
+
+# The region a kernel serves for `nb`, or `nothing` for the notebook's own kernel or one it no longer holds.
+function _kernel_side(nb::LiveNotebook, k)
+    k === nb.kernel && return nothing
+    return lock(_REGION_LOCK) do
+        for (key, rk) in _REGION_KERNELS
+            key[1] == nb.id && rk === k && return key[2]
+        end
+        nothing
+    end
 end
 
 # ── Run supervisor: eval-level self-healing ──────────────────────────────────────────────────
@@ -2849,9 +2874,11 @@ function _drop_kernels_for_worker!(h, host::AbstractString, port::Integer)
         (k.port == Int(port) && (k.target.ssh_host == host ||
             (v = ReportEngine.via(k.target.ssh_host); v !== nothing && v.host == host))) || continue
         try
+            side = _kernel_side(nb, k)
             if ReportEngine._drop_kernel_conn!(k)
                 n += 1
                 ReportEngine._rlog("reap: dropped live wire on $(nb.id)/$(_kernel_side_label(nb, k)) (worker-$port on $host reaped)")
+                side === nothing || _restale_side!(nb, side)
                 try; facts_changed!(); catch; end   # pill flips to amber "reconnecting" immediately
             end
         catch; end
@@ -2906,16 +2933,7 @@ function restart_worker!(h, host::AbstractString, port::Integer)
             try; restart_kernel!(nb); catch; end
         else
             _forget_region_kernel!(nb, side)
-            n = lock(nb.lock) do
-                m = 0
-                for c in nb.report.cells
-                    _cell_region(c) == side || continue
-                    ReportEngine.restale!(c) && (m += 1)
-                end
-                m > 0 && (nb.version += 1)
-                m
-            end
-            n > 0 && (try; _broadcast(nb, string(nb.version)); catch; end)
+            _restale_side!(nb, side)
             try; _ensure_runner!(nb); catch; end   # the re-armed cells run themselves from here
         end
     end
