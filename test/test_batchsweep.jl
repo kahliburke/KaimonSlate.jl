@@ -640,6 +640,11 @@ end
                 tool("squeue", "echo '41|PENDING||4:00:00|N/A|None'")      # not planned yet
                 a = Sweep.find_allocation(:slurm, "", "hold")
                 @test a.start == "" && a.reason == ""
+                # A job at its time limit is ending, though it still reads as running.
+                tool("squeue", "echo '42|RUNNING|nid1|0:00|N/A|None|32'")
+                @test Sweep.find_allocation(:slurm, "", "hold").state === :none
+                tool("squeue", "echo '42|RUNNING|nid1|0:41|N/A|None|32'")
+                @test Sweep.find_allocation(:slurm, "", "hold").state === :running
                 # Nothing held and the submission refused: the scheduler's reason comes back.
                 tool("squeue", "exit 0")
                 a = Sweep.request_allocation!(:slurm, "", "hold"; cpus = 8, gpus = "1")

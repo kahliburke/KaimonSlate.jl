@@ -198,6 +198,8 @@ qstat -f \$ids 2>/dev/null | awk -v want=$(shq(name)) '
 # SLURM's job states, and PBS's single letters. Both collapse to the three an allocation can be in:
 # ours, queued, or gone. Anything ending (SLURM's COMPLETING, PBS's `E`) is treated as gone, because
 # a node that is being torn down is not one to place a worker on.
+_past_limit(left) = (t = uppercase(strip(String(left))); t == "INVALID" || (!isempty(t) && sched_seconds(t) <= 0))
+
 _slurm_alloc_state(st) =
     st == "RUNNING" ? :running : (st in ("PENDING", "CONFIGURING") ? :pending : :none)
 _pbs_alloc_state(st) =
@@ -222,6 +224,8 @@ function find_allocation(kind::Symbol, host::AbstractString, name::AbstractStrin
         st = uppercase(strip(f[2]))
         state = kind === :slurm ? _slurm_alloc_state(st) : _pbs_alloc_state(st)
         state === :none && continue
+        # A job past its time limit still reads as running while the scheduler ends it.
+        state === :running && kind === :slurm && length(f) >= 4 && _past_limit(f[4]) && continue
         # SLURM's `%N` is a node LIST in its compressed form ("c[1-4]") and PBS's `exec_host` names
         # a cpu on each node ("c1/0*4"); either way the first name is the one a single-node
         # interactive allocation runs on, and expanding the rest is not this layer's job.
