@@ -991,7 +991,7 @@
       const r = byLine.get(ln), x = r ? Math.min(1, Math.pow(r.incl, 0.6)) : 0;
       // A line JET flagged says what it found when hovered, as its ◆ in the margin does.
       const attributes = { style: '--heat:' + x.toFixed(3) };
-      if (r && r.j) attributes.title = 'JET: ' + (r.jt || []).join('\n');
+      if (r && r.j) attributes.title = (r.jt || []).join('\n');
       rs.push(Decoration.line({ class: 'cm-heat' + (hot.has(ln) ? ' cm-heathot' : '') + (r && r.j ? ' cm-jet' : ''),
                                 attributes }).range(state.doc.line(ln).from));
     }

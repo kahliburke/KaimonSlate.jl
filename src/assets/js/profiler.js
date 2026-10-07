@@ -939,13 +939,16 @@ function StaticCheck() {
   if (st.error) return html`<div class="pfdet">${head}<div class="pfwarn">${st.error}</div></div>`;
   if (!st.findings.length) return html`<div class="pfdet">${head}<div class="pfdim">nothing found</div></div>`;
   const where = (g) => g.file.startsWith('cell:') ? html`<b>${g.file.slice(5)}</b>:${g.line}` : shortFile(g.file) + ':' + g.line;
+  const kinds = [...new Set(st.findings.flatMap(g => Object.keys(g.kinds)))].filter(k => STATIC_WHAT[k]);
   return html`<div class="pfdet">${head}
+    <div class="pfjwhat">${kinds.map(k => html`<div><span class=${'pfjk ' + k}>${k === 'captured' ? 'boxed' : k}</span> ${STATIC_WHAT[k].replace(/^[^:]+: /, '')}</div>`)}</div>
     ${st.findings.map(g => html`<div class="pfjet" onClick=${() => showCode(g.file, g.line)}
         title=${[...g.sigs, ...g.libsigs.map(x => 'inside a library call: ' + x)].join('\n')}>
       <span class="pfjks">${Object.entries(g.kinds).map(([k, n]) => html`<span class=${'pfjk ' + k.replace(/\s+/g, '-')}>${k === 'captured' ? 'boxed' : k}${n > 1 ? ' ×' + n : ''}</span>`)}</span>
       <span class="pfloc">${where(g)}<span class="pfsnip">${cellLine(g.file, g.line)}</span></span>
       <span class="pfsig">${g.sig}${g.sigs.length > 1 ? html`<span class="pfdim">  +${g.sigs.length - 1}</span>` : null}${
         g.lib ? html`<span class="pfdim">  · ${g.lib} inside ${g.calls.slice(0, 3).join(', ')}${g.calls.length > 3 ? '…' : ''}</span>` : null}</span>
+      <span class="pfjwhy">${explainStatic(g).map(e => html`<div>${e.why}${e.fix ? html` <b>Fix:</b> ${e.fix}` : null}</div>`)}</span>
     </div>`)}</div>`;
 }
 
@@ -1136,15 +1139,53 @@ const staticFound = () => { const st = pf.value && pf.value.prepared && pf.value
 const kindName = (k) => k === 'dispatch' ? 'runtime dispatch' : k === 'captured' ? 'boxed capture' : k;
 const setTabTo = (t) => { tab.value = t; lsSet('slateProfTab', t); };
 // The static check's findings on `file`'s lines, for the code pane's margin.
+// What a static finding means, its likely cause, and the usual fix, read from the types JET
+// reports on the line. `what` is the same for every finding of a kind; `why` and `fix` are this one's.
+const STATIC_WHAT = {
+  dispatch: 'Runtime dispatch: Julia cannot tell when it compiles this code which method these calls need, ' +
+            'so it looks each one up while the line runs and boxes the result. On a hot line that is usually ' +
+            'most of the cost, and it allocates.',
+  captured: 'Boxed capture: a closure assigns to a variable it captured, so Julia keeps the variable in a ' +
+            'box (Core.Box) whose contents have no fixed type, and every use of it is dispatched at runtime.',
+};
+const ABSTRACT = /::(Real|Number|AbstractFloat|Integer|Signed|Unsigned|AbstractString|Function|DataType|Abstract\w*(?:\{[^}]*\})?)(?![\w{])/g;
+function explainStatic(g) {
+  const sigs = [...g.sigs, ...g.libsigs].join('\n');
+  const out = [];
+  if (g.kinds.captured) {
+    const vars = [...new Set(g.sigs.map(s => (/^([^\s=]+) = Core\.Box/.exec(s) || [])[1]).filter(Boolean))];
+    const v = vars.map(x => '`' + x + '`').join(' and ') || 'a variable';
+    out.push({ why: 'A closure here reassigns ' + v + ' after capturing ' + (vars.length > 1 ? 'them' : 'it') + '.',
+               fix: 'Avoid reassigning a captured variable: use a plain loop instead of the closure, or hold the value in a typed Ref (' +
+                    (vars[0] ? vars[0] + ' = Ref(…)' : 'x = Ref(…)') + ', then ' + (vars[0] || 'x') + '[] = …).' });
+  }
+  if (g.kinds.dispatch) {
+    const abs = [...new Set([...sigs.matchAll(ABSTRACT)].map(m => m[1]))];
+    const anyT = /::Any\b/.test(sigs), anyArr = /\{Any\}|Array\{Any|Vector\{Any/.test(sigs);
+    if (abs.length) out.push({ why: 'Values here have an abstract type (' + abs.slice(0, 3).join(', ') + '), usually from a struct field or a container declared with one; Julia cannot specialise the code on it.',
+                               fix: 'Give the field or container a concrete type (Float64), or make the struct parametric: struct P{T<:Real}; β::T; end.' });
+    if (anyArr) out.push({ why: 'A container here holds Any: one created as [] is a Vector{Any}.',
+                           fix: 'Create it with an element type, as Float64[] or Vector{Float64}(undef, n).' });
+    if (anyT && !abs.length && !anyArr) out.push({ why: 'Values here have type Any: their type is lost before this line, often by an untyped [] container, an abstractly typed field, or a function whose return type depends on runtime values.',
+                                                  fix: 'Find where it is lost: @code_warntype on the function, at these arguments, shows each value typed Any.' });
+    if (!abs.length && !anyT) out.push({ why: 'The argument types of these calls are not known when the code is compiled.', fix: '@code_warntype on the function shows which value is the problem.' });
+  }
+  if (g.lib) out.push({ why: g.lib + ' more inside library calls this line makes (' + g.calls.slice(0, 4).join(', ') + '): they dispatch because they were handed these values, and go when this line is fixed.' });
+  return out;
+}
+
 function staticRows(file) {
   const st = pf.value && pf.value.prepared && pf.value.prepared.static;
   if (!st || !st.findings) return [];
   const by = new Map();
   for (const g of st.findings) {
     if (g.file !== file) continue;
+    const ex = explainStatic(g);
     by.set(g.line, { line: g.line, j: g.count,
-      jt: [Object.entries(g.kinds).map(([k, n]) => kindName(k) + ' ×' + n).join(', '), ...g.sigs.slice(0, 6),
-           ...(g.lib ? [g.lib + ' more inside library calls (' + g.calls.join(', ') + ')'] : [])] });
+      jt: [Object.entries(g.kinds).map(([k, n]) => kindName(k) + ' ×' + n).join(', '),
+           ...Object.keys(g.kinds).map(k => STATIC_WHAT[k]).filter(Boolean), '',
+           ...ex.flatMap(e => [e.why, ...(e.fix ? ['Fix: ' + e.fix] : [])]), '',
+           ...g.sigs.slice(0, 4)] });
   }
   return [...by.values()];
 }
@@ -1512,6 +1553,10 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
   border:1px solid color-mix(in srgb, #ffd27a 45%, transparent); background:color-mix(in srgb, #ffd27a 10%, transparent); cursor:default; }
 .pfjetadd { color:var(--dim); border-style:dashed; }
 .pfjetadd:hover { color:var(--text); }
+.pfjwhat { display:flex; flex-direction:column; gap:4px; margin:0 6px 8px; color:var(--dim); font-size:.72rem; }
+.pfjwhat .pfjk { margin-right:4px; }
+.pfjwhy { grid-column:2 / -1; color:var(--dim); font-size:.7rem; line-height:1.45; }
+.pfjwhy b { color:var(--text); font-weight:600; }
 .pfjks { display:inline-flex; flex-wrap:wrap; gap:3px; }
 .pfjet { display:grid; grid-template-columns:130px minmax(0, 360px) minmax(0, 1fr); gap:10px; align-items:center;
   padding:3px 6px; border-radius:4px; cursor:pointer; }
