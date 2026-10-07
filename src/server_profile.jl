@@ -81,7 +81,9 @@ function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractStrin
     try
         k, why = _profile_kernel(nb, side)
         k === nothing && return fail(why)
+        # A worker still starting (after a restart, say) is waited for, as a cell's run would.
         lock(_eval_mutex(nb)) do
+            ReportEngine.prepare!(k, nb.report)
             ReportEngine.profile_arm!(k, nb.report; cell = String(cid), mode = String(mode), opts...)
         end
         t0 = time()
