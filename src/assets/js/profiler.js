@@ -982,7 +982,7 @@ function StaticCheck() {
       <span class="pfloc">${where(g)}<span class="pfsnip">${cellLine(g.file, g.line)}</span></span>
       <span class="pfsig">${g.sig}${g.sigs.length > 1 ? html`<span class="pfdim">  +${g.sigs.length - 1}</span>` : null}${
         g.lib ? html`<span class="pfdim">  · ${g.lib} inside ${g.calls.slice(0, 3).join(', ')}${g.calls.length > 3 ? '…' : ''}</span>` : null}</span>
-      <span class="pfjwhy">${explainStatic(g).map(e => html`<div>${e.why}${e.fix ? html` <b>Fix:</b> ${e.fix}` : null}</div>`)}</span>
+      <span class="pfjwhy">${explainStatic(g).map(e => html`<div>${withCode(e.why)}${e.fix ? html` <b>Fix:</b> ${withCode(e.fix)}` : null}</div>`)}</span>
     </div>`)}</div>`;
 }
 
@@ -1068,14 +1068,40 @@ function Crumbs() {
 }
 
 // ── the code pane ─────────────────────────────────────────────────────────────────────────────────
+// A line JET flagged explains itself on hover, in a card beside the pointer.
+const jetTip = signal(null);      // {g, x, y}: the finding under the pointer, where to draw it
+function staticAt(file, line) {
+  const st = pf.value && pf.value.prepared && pf.value.prepared.static;
+  return st && st.findings ? st.findings.find(g => g.file === file && g.line === line) || null : null;
+}
+// `name` in an explanation is code.
+const withCode = (t) => String(t).split('`').map((part, i) => i % 2 ? html`<code>${part}</code>` : part);
+function JetCard() {
+  const t = jetTip.value; if (!t) return null;
+  const g = t.g, ex = explainStatic(g);
+  return html`<div class="pfjcard" style=${'left:' + t.x + 'px;top:' + t.y + 'px'}>
+    <div class="pfjchead"><span class="pfjks">${Object.entries(g.kinds).map(([k, n]) =>
+      html`<span class=${'pfjk ' + k}>${k === 'captured' ? 'boxed' : k}${n > 1 ? ' ×' + n : ''}</span>`)}</span>
+      <span class="pfdim">JET · line ${g.line}</span></div>
+    ${Object.keys(g.kinds).filter(k => STATIC_WHAT[k]).map(k => html`<p class="pfjcwhat">${STATIC_WHAT[k].replace(/^[^:]+: /, '')}</p>`)}
+    ${ex.map(e => html`<p>${withCode(e.why)}</p>${e.fix ? html`<p><b>Fix</b> ${withCode(e.fix)}</p>` : null}`)}
+    ${g.sigs.length ? html`<div class="pfjcsigs">${g.sigs.slice(0, 4).map(x => html`<code>${x}</code>`)}${
+      g.sigs.length > 4 ? html`<span class="pfdim">+${g.sigs.length - 4} more</span>` : null}</div>` : null}
+  </div>`;
+}
+
 function Code() {
   const M = model.value, at = codeAt.value;
-  const host = useRef(null), vw = useRef(null);
+  const host = useRef(null), vw = useRef(null), box = useRef(null), ptr = useRef({ x: 0, y: 0 });
   useEffect(() => {
     if (!host.current || !window.slateSourceViewer) return;
     vw.current = window.slateSourceViewer(host.current, {
       heat: true,
-      onLineHover: (ln) => { hotLine.value = ln ? { file: codeAt.value.file, line: ln } : null; },
+      onLineHover: (ln) => {
+        hotLine.value = ln ? { file: codeAt.value.file, line: ln } : null;
+        const g = ln ? staticAt(codeAt.value.file, ln) : null;
+        jetTip.value = g ? { g, ...ptr.current } : null;
+      },
       onLineClick: (ln) => {
         const best = heaviestAt(codeAt.value.file, ln);
         if (best) sel.value = best.id;
@@ -1099,13 +1125,21 @@ function Code() {
     v.setHot(h && h.n && h.n.kind === K.line && !h.folded && h.n.file === at.file ? [h.n.line] : []);
   }, [hover.value, at.file]);
   const P = pf.value, isCell = P && at.file === 'cell:' + P.cell;
-  return html`<div class="pfcode">
+  // Where the card goes: beside the pointer, inside the pane, flipped up near the bottom.
+  const track = (ev) => {
+    const b = box.current && box.current.getBoundingClientRect(); if (!b) return;
+    const x = Math.min(ev.clientX - b.left + 16, b.width - 440), y = ev.clientY - b.top + 18;
+    ptr.current = { x: Math.max(8, x), y: y > b.height - 220 ? Math.max(8, y - 240) : y };
+    if (jetTip.value) jetTip.value = { ...jetTip.value, ...ptr.current };   // the card follows the pointer
+  };
+  return html`<div class="pfcode" ref=${box} onMouseMove=${track} onMouseLeave=${() => { jetTip.value = null; }}>
     <div class="pfcodehead">
       <span class="pffile" title=${(s && s.path) || at.file}>${at.file.startsWith('cell:') ? 'cell ' + at.file.slice(5) : shortFile(at.file)}</span>
       ${!isCell && P ? html`<button class="pfback" onClick=${() => showCode('cell:' + P.cell, 0)}>back to the cell</button>` : null}
       ${s && s.loading ? html`<span class="hydspin"></span>` : s && s.error ? html`<span class="pfwarn">${s.error}</span>` : null}
     </div>
     <div class="pfcodebody" ref=${host}></div>
+    <${JetCard} />
   </div>`;
 }
 
@@ -1221,7 +1255,6 @@ function JetStatus() {
 }
 const staticCount = (st) => (st.findings || []).length;     // lines of the notebook's code flagged
 const staticFound = () => { const st = pf.value && pf.value.prepared && pf.value.prepared.static; return !!(st && st.findings && st.findings.length); };
-const kindName = (k) => k === 'dispatch' ? 'runtime dispatch' : k === 'captured' ? 'boxed capture' : k;
 const setTabTo = (t) => { tab.value = t; lsSet('slateProfTab', t); };
 // The static check's findings on `file`'s lines, for the code pane's margin.
 // What a static finding means, its likely cause, and the usual fix, read from the types JET
@@ -1265,12 +1298,7 @@ function staticRows(file) {
   const by = new Map();
   for (const g of st.findings) {
     if (g.file !== file) continue;
-    const ex = explainStatic(g);
-    by.set(g.line, { line: g.line, j: g.count,
-      jt: [Object.entries(g.kinds).map(([k, n]) => kindName(k) + ' ×' + n).join(', '),
-           ...Object.keys(g.kinds).map(k => STATIC_WHAT[k]).filter(Boolean), '',
-           ...ex.flatMap(e => [e.why, ...(e.fix ? ['Fix: ' + e.fix] : [])]), '',
-           ...g.sigs.slice(0, 4)] });
+    by.set(g.line, { line: g.line, j: g.count });
   }
   return [...by.values()];
 }
@@ -1551,7 +1579,18 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
   color:var(--text); border:1px solid var(--border); }
 .pfexport button:hover { border-color:#e8933a; }
 .pfbody { flex:1 1 auto; min-height:0; display:grid; }
-.pfcode { display:flex; flex-direction:column; min-width:0; min-height:0; border-right:1px solid var(--border); }
+.pfcode { position:relative; display:flex; flex-direction:column; min-width:0; min-height:0; border-right:1px solid var(--border); }
+.pfjcard { position:absolute; z-index:5; width:420px; max-width:calc(100% - 16px); pointer-events:none; padding:9px 12px 10px;
+  border-radius:8px; background:var(--bg2); border:1px solid color-mix(in srgb, #ffd27a 35%, var(--border));
+  box-shadow:0 10px 30px rgba(0,0,0,.5); font-size:.74rem; line-height:1.5; color:var(--text); }
+.pfjcard p { margin:5px 0 0; }
+.pfjcard p code, .pfjwhy code { font-family:var(--mono,ui-monospace,monospace); font-size:.95em; color:var(--text);
+  padding:0 3px; border-radius:3px; background:color-mix(in srgb, var(--bg3) 80%, transparent); }
+.pfjcard b { color:#ffd27a; font-weight:600; margin-right:3px; }
+.pfjchead { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.pfjcwhat { color:var(--dim); }
+.pfjcsigs { display:flex; flex-direction:column; gap:2px; margin-top:7px; padding-top:6px; border-top:1px solid var(--border); }
+.pfjcsigs code { font-family:var(--mono,ui-monospace,monospace); font-size:.68rem; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* A split bar has no width of its own: a 9px grab area straddles the border it sits on. */
 .pfsplit { position:relative; z-index:3; flex:0 0 0; }
 .pfsplit::before { content:''; position:absolute; transition:background .12s; }

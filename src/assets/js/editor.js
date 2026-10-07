@@ -970,8 +970,7 @@
   // ── Profile heat (profiler.js) ───────────────────────────────────────────────
   // Rows `{line, incl, self, d, g, c}` in DOCUMENT lines: `incl`/`self` are shares of the samples,
   // `d`/`g`/`c` the samples under runtime dispatch, GC and compilation, `j` the static check's
-  // findings on the line (`jt` their descriptions). A margin shows the share and the marks; the line
-  // itself is tinted by it. `hot` outlines lines the flame graph points at.
+  // findings on the line. A margin shows the share and the marks; the line itself is tinted by it. `hot` outlines lines the flame graph points at.
   const setHeat = StateEffect.define(), setHot = StateEffect.define();
   const heatField = StateField.define({
     create: () => ({ rows: [], hot: [] }),
@@ -989,9 +988,8 @@
     for (const ln of [...new Set([...byLine.keys(), ...hot])].sort((a, b) => a - b)) {
       if (ln < 1 || ln > n) continue;
       const r = byLine.get(ln), x = r ? Math.min(1, Math.pow(r.incl, 0.6)) : 0;
-      // A line JET flagged says what it found when hovered, as its ◆ in the margin does.
+      // A line JET flagged explains itself on hover in the profiler's own card (profiler.js).
       const attributes = { style: '--heat:' + x.toFixed(3) };
-      if (r && r.j) attributes.title = (r.jt || []).join('\n');
       rs.push(Decoration.line({ class: 'cm-heat' + (hot.has(ln) ? ' cm-heathot' : '') + (r && r.j ? ' cm-jet' : ''),
                                 attributes }).range(state.doc.line(ln).from));
     }
@@ -1015,7 +1013,7 @@
       const marks = (r.d > 0 ? '<i class="pfm d" title="runtime dispatch">⤳</i>' : '') +
                     (r.c > 0 ? '<i class="pfm c" title="compilation">⚙</i>' : '') +
                     (r.g > 0 ? '<i class="pfm g" title="garbage collection">♻</i>' : '') +
-                    (r.j > 0 ? '<i class="pfm j" title="' + window.slateEscHtml((r.jt || []).join('\n')) + '">◆</i>' : '');
+                    (r.j > 0 ? '<i class="pfm j">◆</i>' : '');
       s.innerHTML = '<b style="width:' + Math.round(Math.min(1, r.incl) * 100) + '%"></b><em>' + _pct(r.incl) + '</em>' + marks;
       return s;
     }
