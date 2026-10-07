@@ -220,5 +220,8 @@ end
         s = RE.profile_source("./array.jl")
         @test s["error"] === nothing && occursin("function", s["text"]) && isfile(s["path"])
         @test RE.profile_source("/no/such/file.jl")["error"] !== nothing
+        # A stdlib frame names the file where Julia was built; it is read from this Julia's copy.
+        built = "/builder/julia-ci/usr/share/julia/stdlib/v$(VERSION.major).$(VERSION.minor)/LinearAlgebra/src/matmul.jl"
+        @test RE.profile_source(built)["error"] === nothing && startswith(RE.profile_source(built)["path"], Sys.STDLIB)
     end
 end

@@ -1035,6 +1035,19 @@ end
 
 # ── source for drill-down ───────────────────────────────────────────────────────────────────────
 
+# A file of Julia itself, where this Julia keeps it. Stdlib frames carry the path of the machine
+# Julia was built on (`…/julia-ci/usr/share/julia/stdlib/v1.12/LinearAlgebra/src/matmul.jl`), and
+# Base's are relative (`./array.jl`).
+function _local_julia_source(f::AbstractString)
+    p = something(Base.find_source_file(f), "")
+    isfile(p) && return p
+    m = match(r"/share/julia/stdlib/v[\d.]+/(.+)$", f)
+    m === nothing || (q = joinpath(Sys.STDLIB, m.captures[1]); isfile(q) && return q)
+    m = match(r"/share/julia/base/(.+)$", f)
+    m === nothing || (q = joinpath(Sys.BINDIR, Base.DATAROOTDIR, "julia", "base", m.captures[1]); isfile(q) && return q)
+    return ""
+end
+
 """
     profile_source(file) -> Dict
 
@@ -1044,7 +1057,7 @@ the depot this process loaded it from, so a region shows the version it ran. Bas
 """
 function profile_source(file::AbstractString)
     f = String(file)
-    p = isfile(f) ? f : something(Base.find_source_file(f), "")
+    p = isfile(f) ? f : _local_julia_source(f)
     isempty(p) && return Dict{String,Any}("file" => f, "path" => "", "text" => "", "error" => "no such file here")
     text = try; read(p, String); catch e; return Dict{String,Any}("file" => f, "path" => p, "text" => "",
                                                                     "error" => sprint(showerror, e)); end
