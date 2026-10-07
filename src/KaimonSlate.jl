@@ -3203,8 +3203,9 @@ function create_tools(GateTool::Type)
     way and holds your result until you ask.
 
     `region="name"` runs it on that region's worker instead, in the namespace its cells see (the
-    local worker does not have a region cell's bindings or packages). Starts the region's worker
-    if it has none, as running one of its cells would.
+    local worker does not have a region cell's bindings or packages). A region whose worker is not
+    up yet (queued for a node, connecting, preparing) answers with what it is waiting for: run one
+    of its cells, or retry once it is up.
     """
     function scratch_eval(notebook::String, source::String; ephemeral::String = "0", region::String = "",
                           memo_key::String = "", memo_threshold::String = "0")::String

@@ -34,7 +34,7 @@ function _profile_kernel(nb::LiveNotebook, side::AbstractString)
     return try
         (lock(_eval_mutex(nb)) do; _side_kernel!(nb, side); end, "")
     catch e
-        e isa RegionWaiting ? (nothing, "the $(side) region has no worker yet: start it from its worker panel, or run the cell") :
+        e isa RegionWaiting ? (nothing, _region_wait_text(e)) :
                               (nothing, first(sprint(showerror, e), 300))
     end
 end

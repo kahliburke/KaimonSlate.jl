@@ -251,6 +251,11 @@ end
 const _WAIT_TEXT = Dict(WAIT_QUEUED => "queued for a node", WAIT_NOT_SIGNED_IN => "waiting for a sign-in",
                         WAIT_CONNECTING => "connecting", WAIT_NOT_REQUESTED => "run it to request a node",
                         WAIT_NEEDS_PREPARE => "the region needs a prepare", WAIT_PREPARING => "preparing the region")
+# Why a region has no kernel to give yet, for a tool that wanted one.
+_region_wait_text(e::RegionWaiting) =
+    "the $(e.region) region's worker is not ready: " * get(_WAIT_TEXT, e.why, replace(e.why, '_' => ' ')) *
+    (isempty(e.host) ? "" : " ($(e.host))")
+
 function _cell_result_text(c::Cell)
     if c.state == BLOCKED
         # A locked wait names a cell, not a machine: the locked cell whose ▶ ends it.
@@ -554,8 +559,7 @@ function agent_scratch_eval!(nb::LiveNotebook, source::AbstractString;
             ReportEngine.eval_capture(_side_kernel!(nb, region), nb.report, src, "scratch", memo; region = region)
         end
     catch e
-        why = e isa RegionWaiting ? "the $(region) region has no worker yet: run one of its cells, or start it from its worker panel" :
-                                    first(sprint(showerror, e), 300)
+        why = e isa RegionWaiting ? _region_wait_text(e) : first(sprint(showerror, e), 300)
         ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[], "", why, nothing, 0.0)
     end
     ReportEngine.mark_result!(cell, out)
