@@ -194,14 +194,22 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
     connected(host) || error(_offline(host))
     isempty(parent) && return joinpath(root_remote, "env")
     # Source-inclusive, for the same reason as `task_env!`: the cluster's copy is made once, so an
-    # edit the fingerprint cannot see is an edit the compute nodes never get.
+    # edit the fingerprint cannot see is an edit the compute nodes never get. Each source version has
+    # its own directory, its developed packages inside it, so a sweep still running keeps its code.
     fp = env_source_fingerprint(parent)
     key = first(fp, 12)                              # `env_key` names it the same way, for the sweep key
     envdir = "$(root_remote)/env/$(key)"
     want = isempty(depot) ? fp : fp * " " * depot
     stamp = isempty(depot) ? "$(envdir)/.slate-parent" : "$(rstrip(depot, '/'))/slate/envs/batch-$(key)"
-    ok, had = _ssh_run(host, "cat " * shq_path(stamp) * " 2>/dev/null; true")
+    # Read with the version kept in use, which is what spares it from `_env_prune_sh`.
+    ok, had = _ssh_run(host, "cat " * shq_path(stamp) * " 2>/dev/null; touch -c " * shq_path(envdir) * " 2>/dev/null; true")
     (ok && strip(had) == want) && return envdir      # already built, in this depot
+
+    # Another version built here from the same Project and Manifest differs only in its sources: its
+    # packages are in the depot, so this one compiles without instantiating.
+    envfp = env_parent_fingerprint(parent) * (isempty(depot) ? "" : " " * depot)
+    ok, found = _ssh_run(host, _env_twin_sh(root_remote, envfp))
+    reuse = ok && !isempty(strip(found))
 
     # The project itself, Manifest included: its exact versions are what the notebook ran. Replaced
     # rather than merged, so a source file deleted here does not linger over there and get loaded.
@@ -210,8 +218,7 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
         error("could not copy $(parent) to $(host):$(envdir)")
 
     # Packages developed from a local checkout, which no registry on the cluster can supply: each is
-    # sent to `devsrc/<name>` and the environment's paths are pointed at the copy. Their sources are in
-    # the fingerprint, so an edit to one builds again.
+    # sent into this version's `devsrc/<name>` and the environment's paths are pointed at the copy.
     devs = Dict{String,String}(env_path_deps(parent))
     mf = parent_manifest(parent)
     for (name, dir) in dev_deps(mf, isempty(mf) ? parent : dirname(abspath(mf)))
@@ -221,7 +228,7 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
     rewrites = Tuple{String,String}[]
     for (name, dir) in sort!(collect(devs); by = first)
         isdir(dir) || continue
-        rp = "$(root_remote)/devsrc/$(name)"
+        rp = "$(envdir)/devsrc/$(name)"
         put_dir(host, dir, rp; delete = true, filter = true,
                 excludes = [".git", "test", "docs", "Manifest.toml", "*.cov"]) ||
             error("could not copy $(dir) to $(host):$(rp)")
@@ -231,14 +238,33 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
     rw = [(n, rel(r)) for (n, r) in rewrites]
     code = devpaths_script(rel(envdir), rw) * devsources_script(String[r for (_, r) in rw], rw) *
            "\nimport Pkg\n" * (precompile ? "" : "ENV[\"JULIA_PKG_PRECOMPILE_AUTO\"] = \"0\"\n") *
-           "Pkg.activate(joinpath(homedir(), raw\"$(rel(envdir))\"))\nPkg.instantiate()\n" *
-           (precompile ? "Pkg.precompile()\n" : "")
+           "Pkg.activate(joinpath(homedir(), raw\"$(rel(envdir))\"))\n" * _env_build_code(reuse, precompile)
     ok, out = run_julia_there(host, code; setup, what = "the task environment", online)
     ok || error("could not instantiate the task environment on $(host):\n$(first(strip(out), 2000))")
-    put_file(String(host), Vector{UInt8}(codeunits(want)), stamp) ||
+    put_file(String(host), Vector{UInt8}(codeunits(want)), stamp) &&
+        put_file(String(host), Vector{UInt8}(codeunits(envfp)), "$(envdir)/.slate-envfp") ||
         error("could not record the task environment on $(host)")
+    _ssh_run(host, _env_prune_sh(root_remote, key))
     return envdir
 end
+
+# What a task environment's build runs once it is active. A version whose packages another one already
+# installed (`reuse`) only compiles, and instantiates after all when that finds something missing.
+_env_build_code(reuse::Bool, precompile::Bool) =
+    !reuse ? "Pkg.instantiate()\n" * (precompile ? "Pkg.precompile()\n" : "") :
+    precompile ? "try\n    Pkg.precompile()\ncatch\n    Pkg.instantiate(); Pkg.precompile()\nend\n" : ""
+
+# Prints the first built version under `root/env` whose environment fingerprint is `envfp`.
+_env_twin_sh(root::AbstractString, envfp::AbstractString) =
+    "grep -lxF -- " * shq(envfp) * " " * shq_path(root) * "/env/*/.slate-envfp 2>/dev/null | head -n 1; true"
+
+# Removes old task environment versions, for disk space only: the newest eight are always kept, and so
+# is any version used in the last 14 days (`provision_remote_env!` touches the one it hands out), and
+# never `keep`.
+_env_prune_sh(root::AbstractString, keep::AbstractString) =
+    "cd " * shq_path(root) * "/env 2>/dev/null && ls -1dt -- */ 2>/dev/null | tail -n +9 | " *
+    "while IFS= read -r d; do d=\${d%/}; [ \"\$d\" = " * shq(keep) * " ] && continue; " *
+    "[ -n \"\$(find \"\$d\" -maxdepth 0 -mtime +14)\" ] && rm -rf -- \"\$d\"; done; true"
 
 # ── Targets ──────────────────────────────────────────────────────────────────────────────────
 # A target says WHERE shards run and HOW the two sides see the store. Everything a notebook needs

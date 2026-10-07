@@ -2034,6 +2034,33 @@ end
         end
     end
 
+    @testset "a task environment built again for new sources reuses what is installed" begin
+        mktempdir() do home
+            root = "slate-root"                         # relative, as ssh runs it: from the home dir
+            sh(script) = read(setenv(`sh -c $script`, merge(ENV, Dict("HOME" => home, "PATH" => "/usr/bin:/bin")); dir = home), String)
+            env = joinpath(home, root, "env")
+            for (k, fp) in (("v1", "fpA"), ("v2", "fpB"))
+                mkpath(joinpath(env, k)); write(joinpath(env, k, ".slate-envfp"), fp)
+            end
+            @test endswith(strip(sh(RE.Sweep._env_twin_sh(root, "fpB"))), "/env/v2/.slate-envfp")
+            @test isempty(strip(sh(RE.Sweep._env_twin_sh(root, "fpC"))))
+            # Built for new sources with the same packages: compiles, instantiating only if that fails.
+            @test !occursin("instantiate()\nPkg.precompile", RE.Sweep._env_build_code(true, true))
+            @test occursin("catch", RE.Sweep._env_build_code(true, true)) && RE.Sweep._env_build_code(true, false) == ""
+            @test startswith(RE.Sweep._env_build_code(false, true), "Pkg.instantiate()")
+
+            # Pruned gently: the newest eight stay, and anything used in the last 14 days, and `keep`.
+            rm(env; recursive = true)
+            old = [mkpath(joinpath(env, "o$i")) for i = 1:12]
+            for (i, d) in enumerate(old)
+                run(`touch -t $(string(202501010000 + i)) $d`)          # o12 is the newest
+            end
+            run(`touch $(old[1])`)                                       # used just now
+            sh(RE.Sweep._env_prune_sh(root, "o2"))
+            @test sort(readdir(env)) == sort(["o1", "o2", ["o$i" for i = 6:12]...])   # o3–o5 go
+        end
+    end
+
     @testset "a prepare compiles again only for a new environment, node type or image" begin
         mktempdir() do home
             t = RE.RemoteTarget("h"; project = "~/.cache/kaimonslate/remote/nb-1")
