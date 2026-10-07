@@ -1770,6 +1770,7 @@ function create_tools(GateTool::Type)
     function prof_run(notebook::String, cell::String; mode::String = "cpu")::String
         nb, err = _nb(notebook); nb === nothing && return err
         r = NotebookServer.profile_now!(nb, strip(cell); mode = mode)
+        get(r, "kind", "") == "waiting" && return String(r["why"]) * ". `prof_summary` reads it once it has."
         get(r, "kind", "") == "result" || return "⛔ " * String(get(r, "error", "the profile did not complete"))
         return NotebookServer.profile_summary_text(nb, strip(cell))
     end

@@ -4605,6 +4605,7 @@ function _eval_one_run!(nb::LiveNotebook, cell::Cell)
     end
     # Nothing to restore from: a locked cell with no key is held without asking the worker.
     (memo.restore_only && isempty(memo.key)) && return _hold_locked!(nb, cell)
+    armed = _arm_requested_profile!(nb, cell, kernel, side)   # server_profile.jl: a profile asked of this run
     out = try
         # `region`/`regions` seed the cell's task-local Slate execution context (`slate_context()`): the
         # effective side it runs on ("" = main) + the notebook's declared regions. Generic — a region-aware
@@ -4615,6 +4616,7 @@ function _eval_one_run!(nb::LiveNotebook, cell::Cell)
         ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[],
                                 "", sprint(showerror, e), nothing, 0.0)
     end
+    armed === nothing || _collect_requested_profile!(nb, cell, kernel, side, armed)
     # Namespace parity: a pure `using`/`import` cell runs on EVERY active side when a region is
     # in play — region cells need the same modules loaded. Mirrors run on main + each region any
     # cell references, except the side that just ran. Results discarded (the main run's output

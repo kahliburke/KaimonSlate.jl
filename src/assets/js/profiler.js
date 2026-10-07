@@ -290,6 +290,7 @@ function apply(p) {
   if (p.kind === 'preparing') Object.assign(next, { status: 'preparing', error: null });
   else if (p.kind === 'prepared') Object.assign(next, { status: 'idle', prepared: p });
   else if (p.kind === 'running') Object.assign(next, { status: 'running', error: null });
+  else if (p.kind === 'waiting') Object.assign(next, { status: 'waiting', error: null, why: p.why });
   else if (p.kind === 'error') Object.assign(next, { status: 'error', error: p.error });
   else if (p.kind === 'result') {
     // A new profile is compared with the one shown before it, which is usually the question.
@@ -952,7 +953,7 @@ const searchRef = { current: null };
 function Dock() {
   const P = pf.value;
   if (!P) return null;
-  const busy = P.status === 'preparing' || P.status === 'running';
+  const busy = P.status === 'preparing' || P.status === 'running' || P.status === 'waiting';
   const mt = matches.value;
   const setTab = (t) => { tab.value = t; lsSet('slateProfTab', t); };
   return html`<div class="pfbg" onClick=${e => { if (e.target.classList.contains('pfbg')) close(); else optsOpen.value = false; }}>
@@ -961,7 +962,7 @@ function Dock() {
         <span class="pftitle">Profile</span>
         <span class="pfcell">cell ${P.cell}</span>
         ${P.side ? html`<span class="pfside">on ${P.side}</span>` : null}
-        <span class="pfstatus">${busy ? html`<span class="hydspin"></span> ${P.status === 'preparing' ? 'compiling' : 'running'}` : ''}</span>
+        <span class="pfstatus">${busy ? html`<span class="hydspin"></span> ${P.status === 'preparing' ? 'compiling' : P.status === 'waiting' ? 'waiting to run' : 'running'}` : ''}</span>
         ${P.status === 'error' ? html`<span class="pfwarn">${P.error}</span>` : null}
         <span class="pfsp"></span>
         <${History} />

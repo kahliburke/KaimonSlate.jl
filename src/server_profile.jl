@@ -64,11 +64,45 @@ function prepare_profile!(nb::LiveNotebook, cid::AbstractString)
     return Dict{String,Any}("ok" => true)
 end
 
-"""
-    profile_now!(nb, cid; mode) -> Dict
+# Profiles asked for, waiting for the cell's next run. Armed on whichever kernel that run lands on,
+# just before it (`_eval_one!`), and collected just after: a region cell with no node yet is profiled
+# on the run that follows the grant, and one whose worker was replaced on the new worker.
+const _PROF_ASKED = Dict{Tuple{String,String},Any}()   # (nb, cell) → options
 
-Profile cell `cid` and wait: arm a profile for it on its kernel, run it as its ▶ would (so its
-output, bindings and memo entry are the run's), and push what came back. Returns that push.
+function _arm_requested_profile!(nb::LiveNotebook, cell, kernel, side::AbstractString)
+    o = lock(_PROF_HUB_LOCK) do; pop!(_PROF_ASKED, (nb.id, String(cell.id)), nothing); end
+    o === nothing && return nothing
+    try
+        ReportEngine.profile_arm!(kernel, nb.report; cell = String(cell.id), o...)
+    catch e
+        _profile_fail(nb, cell.id, side, "could not arm the profile: " * first(sprint(showerror, e), 200))
+        return nothing
+    end
+    return time()
+end
+
+function _collect_requested_profile!(nb::LiveNotebook, cell, kernel, side::AbstractString, t0::Float64)
+    r = try; ReportEngine.profile_result(kernel, nb.report; cell = String(cell.id)); catch; nothing; end
+    if r === nothing || Float64(get(r, "at", 0.0)) < t0
+        try; ReportEngine.profile_disarm!(kernel, nb.report; cell = String(cell.id)); catch; end
+        _profile_fail(nb, cell.id, side, "the run did not reach the cell's code (restored, or held)")
+        return nothing
+    end
+    payload = Dict{String,Any}("kind" => "result", "cell" => String(cell.id), "side" => String(side),
+                               "source" => cell.source, "profile" => r)
+    lock(_PROF_HUB_LOCK) do; _PROF_LAST[(nb.id, String(cell.id))] = payload; end
+    try; _profile_save!(nb, cell.id, payload); catch e; @warn "slate: could not keep a profile" cell = cell.id exception = e; end
+    _broadcast_profile(nb, payload)
+    return payload
+end
+
+"""
+    profile_now!(nb, cid; mode, opts...) -> Dict
+
+Profile cell `cid`: ask for a profile of its next run and run it as its ▶ would (so its output,
+bindings and memo entry are the run's). Returns the profile's push once the run is over, or
+`kind = "waiting"` when the cell is waiting (for a node, say), in which case the profile is taken
+when it runs and pushed then.
 """
 function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractString = "cpu", opts...)
     cell = _profile_cell(nb, cid)
@@ -76,36 +110,27 @@ function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractStrin
     _, side = _region_route(nb, cell)
     _broadcast_profile(nb, Dict{String,Any}("kind" => "running", "cell" => String(cid), "side" => side,
                                             "mode" => String(mode)))
-    fail(why) = (_profile_fail(nb, cid, side, why);
-                 Dict{String,Any}("kind" => "error", "cell" => String(cid), "error" => String(why)))
+    lock(_PROF_HUB_LOCK) do; _PROF_ASKED[(nb.id, String(cid))] = (; mode = String(mode), opts...); end
+    t0 = time()
     try
-        k, why = _profile_kernel(nb, side)
-        k === nothing && return fail(why)
-        # A worker still starting (after a restart, say) is waited for, as a cell's run would.
-        lock(_eval_mutex(nb)) do
-            ReportEngine.prepare!(k, nb.report)
-            ReportEngine.profile_arm!(k, nb.report; cell = String(cid), mode = String(mode), opts...)
-        end
-        t0 = time()
         lock(nb.lock) do; _force_cell!(nb, cid); end
         _eval!(nb; wait_for = cid)
-        r = lock(_eval_mutex(nb)) do
-            ReportEngine.profile_result(k, nb.report; cell = String(cid))
-        end
-        if r === nothing || Float64(get(r, "at", 0.0)) < t0
-            try; lock(_eval_mutex(nb)) do; ReportEngine.profile_disarm!(k, nb.report; cell = String(cid)); end; catch; end
-            c = _profile_cell(nb, cid)
-            return fail("the cell did not run" * (c !== nothing && c.state == BLOCKED ? " (it is waiting: $(c.blocked))" : ""))
-        end
-        payload = Dict{String,Any}("kind" => "result", "cell" => String(cid), "side" => side,
-                                   "source" => _profile_cell(nb, cid).source, "profile" => r)
-        lock(_PROF_HUB_LOCK) do; _PROF_LAST[(nb.id, String(cid))] = payload; end
-        try; _profile_save!(nb, cid, payload); catch e; @warn "slate: could not keep a profile" cell = cid exception = e; end
-        _broadcast_profile(nb, payload)
-        return payload
     catch e
-        return fail(first(sprint(showerror, e), 300))
+        lock(_PROF_HUB_LOCK) do; delete!(_PROF_ASKED, (nb.id, String(cid))); end
+        return Dict{String,Any}("kind" => "error", "cell" => String(cid),
+                                "error" => _profile_fail(nb, cid, side, first(sprint(showerror, e), 300))["error"])
     end
+    p = last_profile(nb, cid)
+    p !== nothing && Float64(get(p["profile"], "at", 0.0)) >= t0 && return p
+    c = _profile_cell(nb, cid)
+    if c !== nothing && c.state == BLOCKED
+        why = "the cell is waiting ($(c.blocked)); it is profiled when it runs"
+        _broadcast_profile(nb, Dict{String,Any}("kind" => "waiting", "cell" => String(cid), "side" => side, "why" => why))
+        return Dict{String,Any}("kind" => "waiting", "cell" => String(cid), "why" => why)
+    end
+    lock(_PROF_HUB_LOCK) do; delete!(_PROF_ASKED, (nb.id, String(cid))); end
+    return Dict{String,Any}("kind" => "error", "cell" => String(cid),
+                            "error" => _profile_fail(nb, cid, side, "the cell did not run")["error"])
 end
 
 "Profile cell `cid` in the background; the page follows the pushes (`profile_now!`)."
