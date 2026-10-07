@@ -48,7 +48,14 @@ const runOpts = () => Object.assign({ mode: 'cpu', delay_ms: 1, buffer: 4000000,
 const pct = (x) => !(x > 0) ? '' : x >= 0.995 ? '100%' : x >= 0.1 ? Math.round(x * 100) + '%' : x >= 0.001 ? (x * 100).toFixed(1) + '%' : '<0.1%';
 const ms = (x) => !(x >= 0) ? '' : x >= 10000 ? (x / 1000).toFixed(1) + ' s' : x >= 1000 ? (x / 1000).toFixed(2) + ' s' : x >= 10 ? Math.round(x) + ' ms' : x.toFixed(1) + ' ms';
 const bytes = (b) => !(b >= 0) ? '' : b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + ' GB' : b >= 1 << 20 ? (b / (1 << 20)).toFixed(1) + ' MB' : b >= 1 << 10 ? Math.round(b / (1 << 10)) + ' KB' : b + ' B';
-const shortFile = (f) => !f ? '' : f.startsWith('cell:') ? f : f.replace(/^.*\/(?:packages|dev)\/([^/]+)\/[^/]+\//, '$1/').replace(/^.*\/share\/julia\/(?:base|stdlib\/[^/]+)\//, '');
+// A file as a reader names it: a package's from the package, Julia's own from base or the stdlib,
+// and anything else by its last two parts.
+const shortFile = (f) => {
+  if (!f || f.startsWith('cell:')) return f || '';
+  const s = f.replace(/^.*\/(?:packages|dev)\/([^/]+)\/[^/]+\//, '$1/').replace(/^.*\/share\/julia\/(?:base|stdlib\/[^/]+)\//, '').replace(/^\.\//, '');
+  const parts = s.split('/');
+  return s.startsWith('/') && parts.length > 3 ? '…/' + parts.slice(-2).join('/') : s;
+};
 const K = { line: 0, compile: 1, gc: 2, other: 3, synth: 4 };
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -295,7 +302,8 @@ function apply(p) {
   else if (p.kind === 'result') {
     // A new profile is compared with the one shown before it, which is usually the question.
     const was = cur.profile && cur.status === 'done' ? { id: String(Math.round(cur.profile.at * 1000)), profile: cur.profile } : null;
-    Object.assign(next, { status: 'done', profile: p.profile, source: p.source || cur.source, error: null, shownId: '' });
+    Object.assign(next, { status: 'done', profile: p.profile, source: p.source || cur.source, error: null,
+                          shownId: String(Math.round(p.profile.at * 1000)) });
     if (was && !base.value) base.value = was;
     resetView(cur.cell);
     loadHistory(cur.cell);
@@ -337,8 +345,28 @@ function animateTo(sig, t0, t1) {
 let _lay = null;                  // the graph's current layout, for zooming to a node from outside it
 function focusOn(id) {
   zoom.value = id;
+  if (tab.value === 'timeline') {
+    // The timeline zooms to the stretch of time the frame was on any thread.
+    const TL = timeline.value; if (!TL) return;
+    let a = Infinity, b = -Infinity;
+    for (const L of TL.lanes) for (const r of L.rects) if (r.n.id === id) { a = Math.min(a, r.t0); b = Math.max(b, r.t1); }
+    if (a < b) animateTo(tview, a / TL.end, b / TL.end);
+    return;
+  }
+  const root = dview.value;
+  if (root && (!_lay || _lay.root !== root)) _lay = layout(root);
   const sp = _lay && _lay.span.get(id);
   if (sp) animateTo(view, sp[0], sp[0] + sp[1]);
+}
+// A canvas pane is drawn again when its size changes (a split dragged, the window resized).
+function useRedrawOnResize(boxRef, draw, live) {
+  useEffect(() => {
+    const el = boxRef.current; if (!el || !window.ResizeObserver) return;
+    let raf = 0;
+    const ro = new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => draw.current && draw.current()); });
+    ro.observe(el);
+    return () => { cancelAnimationFrame(raf); ro.disconnect(); };
+  }, [live]);
 }
 // Wheel and drag for a canvas showing `sig`'s window.
 function useZoomPan(boxRef, canvasRef, sig) {
@@ -369,15 +397,25 @@ function dragPan(ev, dr, canvas, sig) {
 }
 
 // ── colour ────────────────────────────────────────────────────────────────────────────────────────
-const PKG_COLOR = { cell: '#d8913a', notebook: '#c27b34' };
-const KIND_COLOR = { [K.compile]: '#8f74d6', [K.gc]: '#d4555f', [K.other]: '#3b4058', [K.synth]: '#4a5072' };
-function hue(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h % 360; }
+// A family of colours per kind of code, and within it a shade per function, so two neighbouring
+// functions are told apart: warm for the notebook's own code, blue for packages being worked on,
+// slate for Base, a muted hue of its own for each other package.
+const KIND_COLOR = { [K.compile]: '#8a6fd1', [K.gc]: '#cf5560', [K.other]: '#363b52', [K.synth]: '#454b6b' };
+function hue(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0; return h; }
+const _colors = new Map();
 function colorOf(n, M) {
-  if (n.kind !== K.line) return KIND_COLOR[n.kind] || '#4a5072';
-  if (PKG_COLOR[n.pkg]) return PKG_COLOR[n.pkg];
-  if (M.mine.has(n.pkg)) return '#4f8fd0';
-  if (n.pkg === 'Base') return '#5e6788';
-  return `hsl(${hue(n.pkg)}, 28%, 44%)`;
+  if (n.kind !== K.line) return KIND_COLOR[n.kind] || '#454b6b';
+  const key = n.pkg + '\x1f' + n.func + (M.mine.has(n.pkg) ? '\x1fm' : '');
+  let c = _colors.get(key);
+  if (c) return c;
+  const h = hue(n.func), j = (h % 1000) / 1000, j2 = ((h >>> 10) % 1000) / 1000;
+  if (n.pkg === 'cell' || n.pkg === 'notebook')
+    c = `hsl(${(n.pkg === 'cell' ? 30 : 18) + j * 16}, ${66 + j2 * 14}%, ${n.pkg === 'cell' ? 50 + j2 * 8 : 44 + j2 * 7}%)`;
+  else if (M.mine.has(n.pkg)) c = `hsl(${204 + j * 18}, ${52 + j2 * 14}%, ${48 + j2 * 8}%)`;
+  else if (n.pkg === 'Base') c = `hsl(${222 + j * 16}, ${14 + j2 * 8}%, ${38 + j2 * 8}%)`;
+  else c = `hsl(${hue(n.pkg) % 360}, ${24 + j2 * 10}%, ${38 + j * 8}%)`;
+  _colors.set(key, c);
+  return c;
 }
 // Comparing: red where the share grew, blue where it shrank, grey where it held.
 function diffColor(n, M) {
@@ -443,8 +481,13 @@ function layout(root) {
     const ks = parent.kids;
     while (i < ks.length) {
       let j = i, gu = 0;
-      while (j < ks.length && key(ks[j]) === key(ks[i])) { gu += ks[j].total / T; j++; }
-      rects.push({ band: true, u, uw: gu, y, h: BAND, dn: ks[i], d });
+      const sum = { total: 0, self: 0, d: 0, g: 0, c: 0 };   // the function's, over its lines here
+      while (j < ks.length && key(ks[j]) === key(ks[i])) {
+        gu += ks[j].total / T;
+        for (const f of ['total', 'self', 'd', 'g', 'c']) sum[f] += ks[j][f];
+        j++;
+      }
+      rects.push({ band: true, u, uw: gu, y, h: BAND, dn: { ...ks[i], ...sum }, d });
       for (let k = i; k < j; k++) {
         const cu = ks[k].total / T;
         rects.push({ band: false, u, uw: cu, y: y + BAND, h: ROW, dn: ks[k], d });
@@ -460,21 +503,29 @@ function layout(root) {
   return { rects, span, height: (depth + 1) * LEVEL + 4, root };
 }
 
-function drawFlame(g, L, W, vw, M, { mini = false } = {}) {
+// `yOff`/`viewH`: the part of the graph on screen; only that is drawn, at `y - yOff`.
+function drawFlame(g, L, W, vw, M, { mini = false, yOff = 0, viewH = Infinity } = {}) {
   const kx = W / (vw.v1 - vw.v0), out = [];
   const hl = hotLine.value, hv = hover.value, mt = matches.value, fsel = fnSel.value;
   for (const r of L.rects) {
     const x = (r.u - vw.v0) * kx, w = r.uw * kx;
     if (w < 0.5 || x + w < 0 || x > W) continue;
+    if (!mini && (r.y + r.h < yOff || r.y > yOff + viewH)) continue;
     const cx = Math.max(0, x), cw = Math.min(W, x + w) - cx;
-    const y = mini ? (r.d + 1) * 4 : r.y, h = mini ? (r.band ? 0 : 3) : r.h;
+    const y = mini ? (r.d + 1) * 4 : r.y - yOff, h = mini ? (r.band ? 0 : 3) : r.h;
     if (h <= 0) continue;
-    out.push({ ...r, x: cx, w: cw });
+    out.push({ ...r, x: cx, w: cw, y });
     const dn = r.dn, n = dn.n;
     const dim = mt && !mt.ids.has(n.id) && !r.top;
-    g.globalAlpha = (r.band ? 0.55 : 1) * (dim ? 0.3 : 1);
+    g.globalAlpha = (r.band ? 0.42 : 1) * (dim ? 0.28 : 1);
     g.fillStyle = (!r.band && !dn.folded && diffColor(n, M)) || colorOf(n, M);
-    g.fillRect(cx + (x >= 0 ? 0.5 : 0), y + 0.5, Math.max(0.5, cw - 1), h - (mini ? 0 : 1));
+    const bw = Math.max(0.5, cw - 1), bh = h - (mini ? 0 : 1);
+    if (!mini && bw > 4 && g.roundRect) {
+      // A function's band and its line rows read as one block: rounded on the outside only.
+      g.beginPath();
+      g.roundRect(cx + (x >= 0 ? 0.5 : 0), y + 0.5, bw, bh, r.band ? [3, 3, 0, 0] : [0, 0, 2, 2]);
+      g.fill();
+    } else g.fillRect(cx + (x >= 0 ? 0.5 : 0), y + 0.5, bw, bh);
     g.globalAlpha = 1;
     if (mini || r.band) continue;
     const hot = hl && n.kind === K.line && !dn.folded && n.file === hl.file && n.line === hl.line;
@@ -503,14 +554,16 @@ function drawFlame(g, L, W, vw, M, { mini = false } = {}) {
                 : r.band ? funcLabel(dn) + (dn.folded ? '  ▸' : '') : cellLabel(dn);
     const room = cw - 8 - (r.band ? 0 : 14);
     if (room > 14) {
-      g.fillStyle = r.band ? 'rgba(235,238,250,.85)' : '#f4f5fb';
-      g.font = r.band ? '10px system-ui, sans-serif' : '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+      g.fillStyle = r.band ? 'rgba(232,235,248,.92)' : '#fbfbfe';
+      g.font = r.band ? '600 10px system-ui, sans-serif' : '11px ui-monospace, SFMono-Regular, Menlo, monospace';
       g.fillText(fit(g, label, room), cx + 4, r.y + r.h / 2 + 0.5);
     }
   }
   return out;
 }
 
+// How far down its scroll spacer a sticky canvas sits: the y in the graph its top row shows.
+const scrolledBy = (c) => Math.max(0, c.getBoundingClientRect().top - c.parentNode.getBoundingClientRect().top);
 function sizeCanvas(c, W, H) {
   const dpr = window.devicePixelRatio || 1;
   c.width = W * dpr; c.height = H * dpr; c.style.width = W + 'px'; c.style.height = H + 'px';
@@ -518,14 +571,20 @@ function sizeCanvas(c, W, H) {
   return g;
 }
 
+// The canvas covers only the visible part of the scroll area, and is drawn for where it is scrolled
+// to: a deep graph (or a timeline of many threads) stays inside the browser's canvas limits.
 function Flame() {
   const M = model.value, root = dview.value, vw = view.value;
+  // Read here so a change redraws: the canvas reads them only while drawing.
+  void [sel.value, hover.value, hotLine.value, matches.value, fnSel.value, baseShare.value, unit.value];
   const box = useRef(null), cv = useRef(null), mini = useRef(null), tip = useRef(null), drawn = useRef([]), drag = useRef(null);
+  const draw = useRef(null);
   if (M && root && (!_lay || _lay.root !== root)) _lay = layout(root);
-  useEffect(() => {
+  draw.current = () => {
     const el = box.current, c = cv.current; if (!el || !c || !M || !root || !_lay) return;
-    const W = Math.max(200, el.clientWidth - 18);
-    drawn.current = drawFlame(sizeCanvas(c, W, _lay.height), _lay, W, vw, M);
+    const W = Math.max(200, el.clientWidth - 18), viewH = Math.min(_lay.height, Math.max(40, el.clientHeight - 12));
+    const g = sizeCanvas(c, W, viewH);
+    drawn.current = drawFlame(g, _lay, W, view.value, M, { yOff: scrolledBy(c), viewH });
     // The minimap: the whole run, small, with the window on screen marked.
     const m = mini.current;
     if (m) {
@@ -536,7 +595,9 @@ function Flame() {
       g.fillRect(vw.v0 * W, 0, (vw.v1 - vw.v0) * W, depth * 4 + 6);
       g.strokeRect(vw.v0 * W + 0.5, 0.5, Math.max(2, (vw.v1 - vw.v0) * W) - 1, depth * 4 + 5);
     }
-  });
+  };
+  useEffect(() => { draw.current && draw.current(); });
+  useRedrawOnResize(box, draw, !!(M && root));
   useZoomPan(box, cv, view);
   const stt = pf.value && pf.value.status;
   if (!M || !root) return html`<div class="pfflame pfempty">${
@@ -562,6 +623,7 @@ function Flame() {
     placeTip(t, ev, box.current);
   };
   const down = (ev) => { if (ev.button === 0) drag.current = { x: ev.clientX, ...view.value, moved: false }; };
+  const scrolled = () => requestAnimationFrame(() => draw.current && draw.current());
   const click = (ev) => {
     const dr = drag.current; drag.current = null;
     if (dr && dr.moved) return;
@@ -573,19 +635,23 @@ function Flame() {
   const dbl = (ev) => { const r = at(ev); if (r && !r.dn.folded) focusOn(r.dn.n.id); };
   const miniDown = (ev) => {
     const go = (e) => {
+      if (!mini.current) return up();      // the minimap went away mid-drag (zoomed back out)
       const b = mini.current.getBoundingClientRect(), f = clamp((e.clientX - b.left) / b.width, 0, 1);
       const { v0, v1 } = view.value, s = v1 - v0;
       setV(view, f - s / 2, f + s / 2);
     };
-    go(ev);
-    const mv = (e) => go(e), up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); };
+    const mv = (e) => go(e);
+    function up() { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); }
     window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
+    go(ev);
   };
   return html`<div class="pfgraph">
     ${vw.v1 - vw.v0 < 0.999 ? html`<canvas class="pfmini" ref=${mini} onMouseDown=${miniDown} title="the whole run; drag to move"></canvas>` : null}
-    <div class="pfflame" ref=${box} onMouseMove=${move} onMouseDown=${down}
+    <div class="pfflame" ref=${box} onMouseMove=${move} onMouseDown=${down} onScroll=${scrolled}
       onMouseLeave=${() => { hover.value = null; drag.current = null; if (tip.current) tip.current.style.display = 'none'; }}>
-      <canvas ref=${cv} onClick=${click} onDblClick=${dbl}></canvas>
+      <div class="pfscroll" style=${'height:' + (_lay ? _lay.height : 0) + 'px'}>
+        <canvas ref=${cv} onClick=${click} onDblClick=${dbl}></canvas>
+      </div>
       <div class="pftip" ref=${tip}></div>
     </div>
   </div>`;
@@ -598,7 +664,9 @@ const TL_ROW = 13, TL_DEPTH = 14, TL_LANEGAP = 10, TL_AXIS = 18;
 const timeline = computed(() => {
   const M = model.value, P = M && M.P, T = P && P.timeline;
   if (!T || !T.node || !T.node.length) return null;
-  const step = T.step_ms || M.delay, end = Math.max(...T.t) + step;
+  let tmax = 0;
+  for (const t of T.t) if (t > tmax) tmax = t;          // not Math.max(...): too many arguments for a long run
+  const step = T.step_ms || M.delay, end = tmax + step;
   const chainOf = new Map();
   const chain = (id) => {
     if (chainOf.has(id)) return chainOf.get(id);
@@ -618,15 +686,22 @@ const timeline = computed(() => {
   let y = TL_AXIS;
   for (const th of [...byThread.keys()].sort((a, b) => a - b)) {
     const ix = byThread.get(th).sort((a, b) => T.t[a] - T.t[b]);
+    // The thread's real sampling interval, which is longer than the one asked for (the sampler's own
+    // cost, and on Linux it ticks with CPU time): the typical gap between its samples. A sample is
+    // drawn that wide, so a stretch in one frame is one bar, and only a real pause leaves a gap.
+    const gaps = [];
+    for (let k = 1; k < ix.length; k++) { const g = T.t[ix[k]] - T.t[ix[k - 1]]; if (g > 0) gaps.push(g); }
+    gaps.sort((a, b) => a - b);
+    const lstep = gaps.length ? Math.max(step, gaps[Math.floor(gaps.length * 0.75)]) : step;
     const rects = [];
     let depth = 0;
     const open = [];                     // per depth: the bar being extended
     for (const i of ix) {
-      const c = chain(T.node[i]), t0 = T.t[i], t1 = t0 + step;
+      const c = chain(T.node[i]), t0 = T.t[i], t1 = t0 + lstep;
       depth = Math.max(depth, Math.min(TL_DEPTH, c.length));
       for (let d = 0; d < Math.min(TL_DEPTH, c.length); d++) {
         const o = open[d];
-        if (o && o.n === c[d] && t0 - o.t1 <= step * 1.5) o.t1 = t1;
+        if (o && o.n === c[d] && t0 - o.t1 <= lstep * 1.5) o.t1 = t1;
         else { const r = { n: c[d], d, t0, t1 }; rects.push(r); open[d] = r; }
       }
       for (let d = Math.min(TL_DEPTH, c.length); d < open.length; d++) open[d] = null;
@@ -638,11 +713,15 @@ const timeline = computed(() => {
 });
 
 function Timeline() {
-  const M = model.value, TL = timeline.value, vw = tview.value;
-  const box = useRef(null), cv = useRef(null), tip = useRef(null), drawn = useRef([]), drag = useRef(null);
-  useEffect(() => {
+  const M = model.value, TL = timeline.value;
+  void [sel.value, hover.value, matches.value, fnSel.value, baseShare.value, tview.value];
+  const box = useRef(null), cv = useRef(null), tip = useRef(null), drawn = useRef([]), drag = useRef(null), draw = useRef(null);
+  draw.current = () => {
     const el = box.current, c = cv.current; if (!el || !c || !TL) return;
-    const W = Math.max(200, el.clientWidth - 18), g = sizeCanvas(c, W, TL.height);
+    const vw = tview.value, viewH = Math.min(TL.height, Math.max(40, el.clientHeight - 12));
+    const W = Math.max(200, el.clientWidth - 18), g0 = sizeCanvas(c, W, viewH), yOff = scrolledBy(c);
+    g0.save(); g0.translate(0, -yOff);
+    const g = g0;
     const span = TL.end * (vw.v1 - vw.v0), t0 = TL.end * vw.v0, kx = W / span, out = [];
     // The time axis.
     g.fillStyle = 'rgba(200,205,225,.55)'; g.font = '10px system-ui, sans-serif'; g.textBaseline = 'top';
@@ -653,6 +732,7 @@ function Timeline() {
     }
     const hv = hover.value, mt = matches.value, fsel = fnSel.value;
     for (const L of TL.lanes) {
+      if (L.y > yOff + viewH || L.y + 12 + L.depth * TL_ROW < yOff) continue;    // off screen
       g.fillStyle = 'rgba(200,205,225,.7)'; g.fillText('thread ' + L.thread + '  ·  ' + L.n + ' samples', 2, L.y);
       for (const r of L.rects) {
         const x = (r.t0 - t0) * kx, w = (r.t1 - r.t0) * kx;
@@ -661,7 +741,8 @@ function Timeline() {
         const n = r.n, dim = mt && !mt.ids.has(n.id);
         g.globalAlpha = dim ? 0.3 : 1;
         g.fillStyle = diffColor(n, M) || colorOf(n, M);
-        g.fillRect(cx, y, Math.max(0.5, cw - 0.5), TL_ROW - 1);
+        if (cw > 4 && g.roundRect) { g.beginPath(); g.roundRect(cx, y, cw - 0.5, TL_ROW - 1, 2); g.fill(); }
+        else g.fillRect(cx, y, Math.max(0.5, cw - 0.5), TL_ROW - 1);
         g.globalAlpha = 1;
         if (n.id === sel.value || (hv && hv.n && hv.n.id === n.id) || (fsel && n.fk === fsel) || (mt && mt.ids.has(n.id))) {
           g.strokeStyle = n.id === sel.value ? '#fff' : '#ff6fd8'; g.lineWidth = 1.5;
@@ -672,11 +753,14 @@ function Timeline() {
           g.fillText(fit(g, n.kind === K.line ? (n.func === 'top-level scope' ? n.line + '  ' + cellLine(n.file, n.line) : n.func + ':' + n.line) : n.func, cw - 6), cx + 3, y + TL_ROW / 2);
           g.textBaseline = 'top';
         }
-        out.push({ x: cx, w: cw, y, h: TL_ROW, n });
+        out.push({ x: cx, w: cw, y: y - yOff, h: TL_ROW, n });
       }
     }
+    g0.restore();
     drawn.current = out;
-  });
+  };
+  useEffect(() => { draw.current && draw.current(); });
+  useRedrawOnResize(box, draw, !!TL);
   useZoomPan(box, cv, tview);
   if (!M) return html`<div class="pfflame pfempty">not profiled yet</div>`;
   if (!TL) return html`<div class="pfflame pfempty">${M.bytes ? 'an allocation profile has no timeline' : 'this profile has no timeline'}</div>`;
@@ -697,9 +781,10 @@ function Timeline() {
   };
   const down = (ev) => { if (ev.button === 0) drag.current = { x: ev.clientX, ...tview.value, moved: false }; };
   const click = (ev) => { const dr = drag.current; drag.current = null; if (dr && dr.moved) return; const r = at(ev); if (r) select(r.n); };
-  return html`<div class="pfflame" ref=${box} onMouseMove=${move} onMouseDown=${down}
+  const scrolled = () => requestAnimationFrame(() => draw.current && draw.current());
+  return html`<div class="pfflame" ref=${box} onMouseMove=${move} onMouseDown=${down} onScroll=${scrolled}
       onMouseLeave=${() => { hover.value = null; drag.current = null; if (tip.current) tip.current.style.display = 'none'; }}>
-    <canvas ref=${cv} onClick=${click}></canvas>
+    <div class="pfscroll" style=${'height:' + TL.height + 'px'}><canvas ref=${cv} onClick=${click}></canvas></div>
     <div class="pftip" ref=${tip}></div>
   </div>`;
 }
@@ -719,7 +804,7 @@ function Functions() {
       <span class="pfnum">${fmt(e.v, M)}</span>${bar(e.v)}<span class="pffn">${fnName(e)}</span>
       <span class="pfdim">${e.kind === K.line ? shortFile(e.file) : ''}</span></div>`)
       : html`<div class="pfdim pfrelrow">none</div>`}</div>`;
-  return html`<div class="pffuncs">
+  return html`<div class="pffuncs" style=${'grid-template-rows:minmax(0,1fr) 0 minmax(0,' + pctOf('sandwich') + ')'}>
     <div class="pftable">
       <div class="pfthead"><span>self</span><span>total</span><span>function</span><span>file</span><span></span></div>
       ${rows.map(f => html`<div class=${'pftrow' + (fnSel.value === f.fk ? ' on' : '')} onClick=${() => pick(f)}>
@@ -727,6 +812,7 @@ function Functions() {
         <span class="pffn">${fnName(f)}</span><span class="pfdim pffile">${f.kind === K.line ? shortFile(f.file) : ''}</span>
         <span class="pfmk">${f.d ? '⤳' : ''}${f.c ? '⚙' : ''}${f.g ? '♻' : ''}</span></div>`)}
     </div>
+    <${Split} name="sandwich" dir="y" edge="after" min=${0.12} max=${0.8} />
     ${R ? html`<div class="pfsandwich">
       ${rel('called from', R.callers)}
       <div class="pfrelmid"><b>${fnName(R.f)}</b> <span class="pfdim">${fmt(R.f.total, M)} total · ${fmt(R.f.self, M)} self</span></div>
@@ -807,8 +893,8 @@ function Code() {
     v.setDoc(text, 1);
     const rows = M && M.lines.get(at.file);
     v.setHeat(rows ? [...rows.values()] : []);
-    if (at.line) v.setLine(at.line);
-  }, [text, at.file, at.line, M]);
+  }, [text, at.file, M]);
+  useEffect(() => { const v = vw.current; if (v && at.line) v.setLine(at.line); }, [text, at.file, at.line]);
   useEffect(() => {
     const v = vw.current; if (!v) return;
     const h = hover.value;
@@ -835,16 +921,22 @@ function Hot() {
   const top = rows.filter(r => r.self > 0).slice(0, 14);
   const wasOf = (r) => { const m = B && B.lines.get(r.file); const w = m && m.get(r.line); return w ? w.self : 0; };
   const go = (r) => { select(heaviestAt(r.file, r.line)); showCode(r.file, r.line); };
-  return html`<div class="pfhot">
-    <div class=${'pfhothead' + (B ? ' cmp' : '')}><span>self</span><span>total</span>${B ? html`<span>before</span>` : null}<span>line</span></div>
+  // Another cell's lines are named by their text too, which the hub has.
+  for (const r of top) if (r.file.startsWith('cell:') && !srcText(r.file)) loadSource(r.file);
+  const lead = top.length ? top[0].self : 1;
+  return html`<div class="pfhot" style=${'flex-basis:' + pctOf('hot')}>
+    <div class=${'pfhothead' + (B ? ' cmp' : '')}><span>self</span><span></span><span>total</span>${B ? html`<span>before</span>` : null}<span>line</span></div>
     ${top.map(r => html`<div class=${'pfhotrow' + (B ? ' cmp' : '')} onClick=${() => go(r)}
         onMouseEnter=${() => { hotLine.value = { file: r.file, line: r.line }; }}
         onMouseLeave=${() => { hotLine.value = null; }}>
-      <span class="pfnum">${fmt(r.self * M.total, M)}</span><span class="pfnum dim">${fmt(r.incl * M.total, M)}</span>
+      <span class="pfnum">${fmt(r.self * M.total, M)}</span>
+      <span class="pfbar"><i style=${'width:' + Math.max(2, Math.round(100 * r.self / lead)) + '%'}></i></span>
+      <span class="pfnum dim">${fmt(r.incl * M.total, M)}</span>
       ${B ? html`<span class="pfnum dim">${pct(wasOf(r)) || '–'}</span>` : null}
-      <span class="pfloc">${r.file.startsWith('cell:') ? html`<b>${r.file.slice(5)}</b>:${r.line}` : shortFile(r.file) + ':' + r.line}
+      <span class="pfloc" title=${r.file + ':' + r.line}>
+        <span class="pfmk">${r.d ? '⤳' : ''}${r.c ? '⚙' : ''}${r.g ? '♻' : ''}</span>
+        ${r.file.startsWith('cell:') ? html`<b>${r.file.slice(5)}</b>:${r.line}` : shortFile(r.file) + ':' + r.line}
         <span class="pfsnip">${cellLine(r.file, r.line)}</span></span>
-      <span class="pfmk">${r.d ? '⤳' : ''}${r.c ? '⚙' : ''}${r.g ? '♻' : ''}</span>
     </div>`)}
   </div>`;
 }
@@ -890,13 +982,15 @@ const when = (at) => { const d = new Date(at * 1000); return d.toLocaleDateStrin
 function History() {
   const P = pf.value, h = hist.value;
   if (!P || h.length < 1) return null;
-  const shown = P.shownId || (h[0] && h[0].id);
+  const shown = P.shownId || (h[0] && h[0].id), b = base.value;
   const label = (e) => when(e.at) + ' · ' + (e.mode || 'cpu') + ' · ' + ms(e.duration_ms);
   return html`<span class="pfhist">
     <select title="a kept profile of this cell" value=${shown} onChange=${e => showKept(e.currentTarget.value)}>
+      ${h.some(e => e.id === shown) ? null : html`<option value=${shown}>${when(P.profile.at)}</option>`}
       ${h.map(e => html`<option value=${e.id}>${label(e)}</option>`)}</select>
-    <select title="compare with an earlier profile" value=${base.value ? base.value.id : ''} onChange=${e => compareWith(e.currentTarget.value)}>
+    <select title="compare with an earlier profile" value=${b ? b.id : ''} onChange=${e => compareWith(e.currentTarget.value)}>
       <option value="">compare with…</option>
+      ${b && !h.some(e => e.id === b.id) ? html`<option value=${b.id}>${when(b.profile.at)}</option>` : null}
       ${h.filter(e => e.id !== shown).map(e => html`<option value=${e.id}>${label(e)}</option>`)}</select>
   </span>`;
 }
@@ -948,6 +1042,34 @@ function Specialist() {
   </span>`;
 }
 
+// ── pane sizes ────────────────────────────────────────────────────────────────────────────────────
+// Each split is a share of its container, kept across sessions. Double-click a bar to put it back.
+const SPLITS = { code: 0.38, hot: 0.28, sandwich: 0.4 };
+const split = Object.fromEntries(Object.entries(SPLITS).map(([k, d]) => [k, signal(clamp(+ls('slateProfSplit.' + k, d) || d, 0.1, 0.85))]));
+// A bar between two panes. `edge`: which pane the share is of, the one before the bar or after it.
+function Split({ name, dir, edge = 'before', min = 0.12, max = 0.8 }) {
+  const sig = split[name];
+  const down = (ev) => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    const bar = ev.currentTarget, box = bar.parentNode.getBoundingClientRect();
+    bar.classList.add('on'); document.body.classList.add('pfdrag-' + dir);
+    const mv = (e) => {
+      const f = dir === 'x' ? (e.clientX - box.left) / box.width : (e.clientY - box.top) / box.height;
+      sig.value = clamp(edge === 'before' ? f : 1 - f, min, max);
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up);
+      bar.classList.remove('on'); document.body.classList.remove('pfdrag-' + dir);
+      lsSet('slateProfSplit.' + name, String(sig.value));
+    };
+    window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
+  };
+  const reset = () => { sig.value = SPLITS[name]; lsSet('slateProfSplit.' + name, String(sig.value)); };
+  return html`<div class=${'pfsplit ' + dir} onMouseDown=${down} onDblClick=${reset}></div>`;
+}
+const pctOf = (name) => (100 * split[name].value).toFixed(2) + '%';
+
 // ── the dock ──────────────────────────────────────────────────────────────────────────────────────
 const searchRef = { current: null };
 function Dock() {
@@ -992,13 +1114,16 @@ function Dock() {
           <button onClick=${() => exportAs('speedscope')} title="for speedscope.app">speedscope</button>
           <button onClick=${() => exportAs('pprof')} title="for go tool pprof and its viewers">pprof</button></span>
       </div>
-      <div class="pfbody">
+      <div class="pfbody" style=${'grid-template-columns:minmax(220px,' + pctOf('code') + ') 0 minmax(0,1fr)'}>
         <${Code} />
+        <${Split} name="code" dir="x" max=${0.7} />
         <div class="pfright">
           <${Crumbs} />
           ${tab.value === 'timeline' ? html`<${Timeline} />` : tab.value === 'functions' ? html`<${Functions} />`
             : tab.value === 'details' ? html`<${Details} />` : html`<${Flame} />`}
-          ${tab.value === 'flame' || tab.value === 'timeline' ? html`<${Hot} />` : null}
+          ${(tab.value === 'flame' || tab.value === 'timeline') && model.value ? html`
+            <${Split} name="hot" dir="y" edge="after" min=${0.08} max=${0.7} />
+            <${Hot} />` : null}
         </div>
       </div>
     </div>
@@ -1011,11 +1136,14 @@ function Dock() {
 document.addEventListener('keydown', (e) => {
   if (!pf.value) return;
   if (e.key === 'Escape') {
+    // Escape in the search box clears the search; the box's own handler does that.
+    if (e.target && e.target.classList && e.target.classList.contains('pfsearch') && query.value) return;
     if (optsOpen.value || pickOpen.value) { optsOpen.value = false; pickOpen.value = false; e.stopPropagation(); return; }
     e.stopPropagation(); close(); return;
   }
   const tag = (e.target && e.target.tagName) || '';
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target && e.target.isContentEditable)) return;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON' || (e.target && e.target.isContentEditable)) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
   const M = model.value; if (!M) return;
   const sig = tab.value === 'timeline' ? tview : view, { v0, v1 } = sig.value, mid = (v0 + v1) / 2;
   const cur = M.nodes[sel.value] || null;
@@ -1103,8 +1231,16 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pfexport button { font:inherit; font-size:.72rem; padding:2px 7px; border-radius:5px; cursor:pointer; background:var(--bg3);
   color:var(--text); border:1px solid var(--border); }
 .pfexport button:hover { border-color:#e8933a; }
-.pfbody { flex:1 1 auto; min-height:0; display:grid; grid-template-columns:minmax(320px, 38%) minmax(0, 1fr); }
+.pfbody { flex:1 1 auto; min-height:0; display:grid; }
 .pfcode { display:flex; flex-direction:column; min-width:0; min-height:0; border-right:1px solid var(--border); }
+/* A split bar has no width of its own: a 9px grab area straddles the border it sits on. */
+.pfsplit { position:relative; z-index:3; flex:0 0 0; }
+.pfsplit::before { content:''; position:absolute; transition:background .12s; }
+.pfsplit.x::before { top:0; bottom:0; left:-5px; width:9px; cursor:col-resize; }
+.pfsplit.y::before { left:0; right:0; top:-5px; height:9px; cursor:row-resize; }
+.pfsplit:hover::before, .pfsplit.on::before { background:color-mix(in srgb, #e8933a 35%, transparent); }
+body.pfdrag-x, body.pfdrag-x * { cursor:col-resize !important; user-select:none !important; }
+body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none !important; }
 .pfcodehead { display:flex; align-items:center; gap:8px; padding:5px 10px; border-bottom:1px solid var(--border);
   font-family:var(--mono,ui-monospace,monospace); font-size:.74rem; }
 .pffile { color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -1129,7 +1265,7 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pfgraph { display:flex; flex-direction:column; flex:1 1 60%; min-height:0; }
 .pfmini { display:block; margin:4px 8px 0; cursor:pointer; border-bottom:1px solid var(--border); }
 .pfflame { position:relative; flex:1 1 60%; min-height:0; overflow:auto; padding:6px 8px; }
-.pfflame canvas { display:block; cursor:pointer; }
+.pfflame canvas { display:block; cursor:pointer; position:sticky; top:0; }
 .pfflame:active canvas { cursor:grabbing; }
 .pfempty { display:flex; align-items:center; justify-content:center; gap:8px; color:var(--dim); font-size:.82rem; }
 .pftip { display:none; position:absolute; z-index:2; max-width:250px; pointer-events:none; padding:6px 8px;
@@ -1138,18 +1274,21 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pftip b { font-family:var(--mono,ui-monospace,monospace); font-weight:600; }
 .pftw { color:var(--dim); font-family:var(--mono,ui-monospace,monospace); }
 .pftm { color:#ffd27a; }
-.pfhot { flex:0 0 auto; max-height:30%; overflow:auto; border-top:1px solid var(--border); font-size:.74rem; }
-.pfhothead, .pfhotrow { display:grid; grid-template-columns:64px 64px minmax(0,1fr) 48px; gap:6px; padding:3px 10px; }
-.pfhothead.cmp, .pfhotrow.cmp { grid-template-columns:64px 64px 56px minmax(0,1fr) 48px; }
-.pfhothead { color:var(--dim); font-size:.68rem; position:sticky; top:0; background:var(--bg); }
-.pfhotrow { cursor:pointer; }
+.pfhot { flex:0 0 28%; min-height:0; overflow:auto; border-top:1px solid var(--border); font-size:.74rem; }
+.pfhothead, .pfhotrow { display:grid; grid-template-columns:56px 90px 56px minmax(0,1fr); gap:8px; align-items:center; padding:3px 12px; }
+.pfhothead.cmp, .pfhotrow.cmp { grid-template-columns:56px 90px 56px 56px minmax(0,1fr); }
+.pfhothead { color:var(--dim); font-size:.66rem; text-transform:uppercase; letter-spacing:.05em; position:sticky; top:0; z-index:1;
+  background:var(--bg); border-bottom:1px solid color-mix(in srgb, var(--border) 60%, transparent); padding-top:5px; padding-bottom:4px; }
+.pfhotrow { cursor:pointer; border-radius:4px; margin:0 4px; }
+.pfhotrow .pfmk { display:inline-block; min-width:0; margin-right:4px; }
+.pfhotrow .pfbar { width:100%; }
 .pfhotrow:hover { background:color-mix(in srgb, #e8933a 12%, transparent); }
 .pfnum { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .pfnum.dim { color:var(--dim); }
 .pfloc { font-family:var(--mono,ui-monospace,monospace); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pfsnip { color:var(--dim); margin-left:8px; }
 .pfmk { color:#ffd27a; }
-.pffuncs { flex:1 1 auto; min-height:0; display:grid; grid-template-rows:minmax(0,1fr) minmax(0, 40%); }
+.pffuncs { flex:1 1 auto; min-height:0; display:grid; }
 .pftable { overflow:auto; font-size:.74rem; }
 .pfthead, .pftrow { display:grid; grid-template-columns:64px 64px minmax(0, 1.3fr) minmax(0, 1fr) 44px; gap:8px; padding:3px 10px; }
 .pfthead { color:var(--dim); font-size:.68rem; position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--border); }
@@ -1165,8 +1304,8 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pfrelrow:hover .pffn { color:#ff6fd8; }
 .pfrelmid { align-self:center; text-align:center; font-family:var(--mono,ui-monospace,monospace); }
 .pfrelmid .pfdim { display:block; }
-.pfbar { display:inline-block; height:6px; background:var(--bg3); border-radius:3px; overflow:hidden; }
-.pfbar i { display:block; height:100%; background:#e8933a; }
+.pfbar { display:inline-block; height:6px; background:color-mix(in srgb, var(--bg3) 70%, transparent); border-radius:3px; overflow:hidden; }
+.pfbar i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg, #c8742a, #f0a54a); }
 .pfdetails { flex:1 1 auto; overflow:auto; padding:8px 10px; display:flex; flex-direction:column; gap:14px; font-size:.74rem; }
 .pfdetrow { display:grid; grid-template-columns:80px 80px minmax(0,1fr); gap:8px; padding:2px 0; }
 .pfdethead { color:var(--dim); font-size:.68rem; }
