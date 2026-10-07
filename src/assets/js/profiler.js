@@ -948,7 +948,10 @@ function StaticCheck() {
 // ── details: compiling, dispatch, allocation types, the GPU ─────────────────────────────────────────
 function Details() {
   const P = pf.value && pf.value.profile;
-  if (!P) return html`<div class="pfflame pfempty">not profiled yet</div>`;
+  // Compiled but not yet profiled: the static check is all there is to show.
+  if (!P) return pf.value && pf.value.prepared && pf.value.prepared.static
+    ? html`<div class="pfdetails"><${StaticCheck} /></div>`
+    : html`<div class="pfflame pfempty"><button class="pfbtn primary pfbig" onClick=${run}>▶ Run and profile</button></div>`;
   // Every column but the last is a figure; the last (a type, a signature, a kernel) takes the rest.
   const tbl = (title, head, rows, empty) => {
     const cols = 'grid-template-columns:repeat(' + (head.length - 1) + ', 80px) minmax(0,1fr)';
@@ -1038,7 +1041,7 @@ function Code() {
   const P = pf.value, isCell = P && at.file === 'cell:' + P.cell;
   return html`<div class="pfcode">
     <div class="pfcodehead">
-      <span class="pffile" title=${(s && s.path) || at.file}>${isCell ? 'cell ' + P.cell : shortFile(at.file)}</span>
+      <span class="pffile" title=${(s && s.path) || at.file}>${at.file.startsWith('cell:') ? 'cell ' + at.file.slice(5) : shortFile(at.file)}</span>
       ${!isCell && P ? html`<button class="pfback" onClick=${() => showCode('cell:' + P.cell, 0)}>back to the cell</button>` : null}
       ${s && s.loading ? html`<span class="hydspin"></span>` : s && s.error ? html`<span class="pfwarn">${s.error}</span>` : null}
     </div>
@@ -1479,7 +1482,7 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfbar i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg, #c8742a, #f0a54a); }
 .pfdetails { flex:1 1 auto; overflow:auto; padding:8px 10px; display:flex; flex-direction:column; gap:14px; font-size:.74rem; }
 .pfdetrow { display:grid; grid-template-columns:80px 80px minmax(0,1fr); gap:8px; padding:2px 0; }
-.pfjet { display:grid; grid-template-columns:92px minmax(0, 1fr) minmax(0, 1.2fr); gap:10px; align-items:center;
+.pfjet { display:grid; grid-template-columns:92px minmax(0, 360px) minmax(0, 1fr); gap:10px; align-items:center;
   padding:3px 6px; border-radius:4px; cursor:pointer; }
 .pfjet:hover { background:color-mix(in srgb, #e8933a 10%, transparent); }
 .pfjk { justify-self:start; padding:0 7px; border-radius:9px; font-size:.68rem; color:#ffd27a;

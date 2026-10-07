@@ -862,7 +862,7 @@ function _static_tidy!(st::Dict{String,Any}, mod::Module, cellfile::AbstractStri
     pre = string(mod) * "."
     lines = split(source, '\n')
     for g in st["findings"]
-        g["sig"] = replace(g["sig"], pre => "")
+        g["sig"] = replace(replace(g["sig"], pre => ""), r"([^\s(),:]+)::typeof\(\1\)\(" => s"\1(")
         g["kind"] == "captured" && g["file"] == cellfile || continue
         m = match(r"`([^`]+)`", g["msg"]); m === nothing && continue
         v = Regex("(?<![\\w.])" * replace(m.captures[1], r"([^\w])" => s"\\\1") * "\\s*[-+*/^]?=(?!=)")
