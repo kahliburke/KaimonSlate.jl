@@ -43,7 +43,7 @@ const codeAt = signal({ file: '', line: 0 });
 const srcs = signal({});         // file → {text, error}, as the cell's machine has it
 const optsOpen = signal(false);
 const opts = signal((() => { try { return JSON.parse(ls('slateProfOpts', '')) || {}; } catch (_) { return {}; } })());
-const runOpts = () => Object.assign({ mode: 'cpu', delay_ms: 1, buffer: 4000000, trace: true, alloc_rate: 0.01 }, opts.value);
+const runOpts = () => Object.assign({ mode: 'cpu', delay_ms: 1, buffer: 4000000, trace: true, alloc_rate: 0.001 }, opts.value);
 
 const pct = (x) => !(x > 0) ? '' : x >= 0.995 ? '100%' : x >= 0.1 ? Math.round(x * 100) + '%' : x >= 0.001 ? (x * 100).toFixed(1) + '%' : '<0.1%';
 const ms = (x) => !(x >= 0) ? '' : x >= 10000 ? (x / 1000).toFixed(1) + ' s' : x >= 1000 ? (x / 1000).toFixed(2) + ' s' : x >= 10 ? Math.round(x) + ' ms' : x.toFixed(1) + ' ms';

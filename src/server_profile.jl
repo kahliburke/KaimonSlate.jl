@@ -219,7 +219,7 @@ function _register_profile_routes!(router, h::Hub)
         b = _body(req)
         _json(run_profile!(nb, String(get(b, "cell", "")); mode = String(get(b, "mode", "cpu")),
                            delay_ms = Float64(get(b, "delay_ms", 1.0)), buffer = Int(get(b, "buffer", 4_000_000)),
-                           trace = get(b, "trace", true) === true, alloc_rate = Float64(get(b, "alloc_rate", 0.01))))
+                           trace = get(b, "trace", true) === true, alloc_rate = Float64(get(b, "alloc_rate", 0.001))))
     end))
     HTTP.register!(router, "GET", "/api/{id}/profile/last", req -> _withnb(h, req, nb -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))

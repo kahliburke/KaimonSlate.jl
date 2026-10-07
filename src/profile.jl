@@ -44,7 +44,7 @@ end
 
 "Profile the next run of `cell` (see `ProfOpts`)."
 function profile_arm!(cell::AbstractString, mode::AbstractString = "cpu"; delay_ms::Real = 1.0,
-                      buffer::Integer = _PROF_BUFFER, trace::Bool = true, alloc_rate::Real = 0.01)
+                      buffer::Integer = _PROF_BUFFER, trace::Bool = true, alloc_rate::Real = 0.001)
     o = ProfOpts(String(mode) in ("cpu", "wall", "alloc", "gpu") ? String(mode) : "cpu",
                  clamp(Float64(delay_ms), 0.1, 100.0), clamp(Int(buffer), 100_000, 100_000_000), trace,
                  clamp(Float64(alloc_rate), 1e-4, 1.0))
@@ -438,6 +438,21 @@ function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
     return cur
 end
 
+# Only the runtime and Base's scheduler from `start` on, waiting in it: a task with nothing to do.
+const _SCHED_FNS = (:wait, :poptask, :task_get_next, :try_yieldto, :wait_forever, :yield)
+_scheduling(frames, start, cellfile) =
+    !any(j -> (fr = frames[j]; fr.from_c ? (_gc_c(string(fr.func)) || _compile_c(string(fr.func))) :
+                                           !(_frame_pkg(fr, cellfile) in ("Base", "Compiler"))), start:length(frames)) &&
+    any(j -> frames[j].func in _SCHED_FNS || occursin("task_get_next", string(frames[j].func)), start:length(frames))
+
+# Where work running now belongs in the cell: the call its task last waited in during this
+# statement, else the statement's line, else the cell.
+function _statement_node(t, root, cellfile, graft, graftat, stmt0, marks, mi)
+    graft > 0 && graftat >= stmt0 && return graft
+    mi > 0 && marks[mi][2] > 0 && return _node!(t, root, cellfile, marks[mi][2], "top-level scope", "cell", _K_LINE)
+    return root
+end
+
 # Where a stack outside the cell's own code starts saying something: past the task entry, and on
 # the cell's task past the evaluation machinery that brought it there (`_eval_cell_source`, `eval`).
 # The runtime's frames stay, so compiling and collecting are recognised.
@@ -494,8 +509,16 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
             cur = root; start = cidx
         elseif own
             start = _outside_start(frames, cellfile)
-            toplevel == 0 && (toplevel = _node!(t, root, cellfile, 0, "top level", "cell", _K_SYNTH))
-            cur = toplevel
+            if _scheduling(frames, start, cellfile)
+                # The cell's task waiting on work it handed out: its thread runs the scheduler
+                # meanwhile, as the same task. Shown as waiting, under the call that waits.
+                cur = _node!(t, _statement_node(t, root, cellfile, graft, graftat, stmt0, marks, mi),
+                             "", 0, "waiting", "", _K_SYNTH)
+                start = length(frames) + 1
+            else
+                toplevel == 0 && (toplevel = _node!(t, root, cellfile, 0, "top level", "cell", _K_SYNTH))
+                cur = toplevel
+            end
         else
             any(fr -> !fr.from_c && _frame_pkg(fr, cellfile) in _INFRA_PKGS, frames) &&
                 (dropped["worker"] += 1; continue)
