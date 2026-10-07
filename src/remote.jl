@@ -3272,7 +3272,7 @@ function teardown_remote!(k; kill::Bool = false)
             # Only kill a worker we actually spawned (port assigned). pkill exits nonzero when nothing
             # matches — a normal outcome, not a failure — so route it through the quiet predicate, not _ssh_ok.
             _rlog("teardown: closing tunnel + sync, killing remote worker-$(k.port).jl on $(t.ssh_host)")
-            try; _ssh_test(t.ssh_host, `pkill -f $("worker-" * string(k.port) * ".jl")`); catch; end
+            try; _run_on(t.ssh_host, "pkill -u \"\$USER\" -f " * Sweep.shq("[w]orker-$(k.port)\\.jl")); catch; end
             try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json") $("$_REMOTE_WORKER/worker-$(k.port).state") $("$_REMOTE_WORKER/worker-$(k.port).stats")`); catch; end
             try; _attach_clear!(t.ssh_host, k.label); catch; end   # a killed worker must not be re-dialed from the record
             try; _evict_parked!(t.ssh_host; label = k.label, port = k.port); catch; end   # …nor via a parked wire
@@ -5991,7 +5991,7 @@ for f in worker-*.json; do
   # read, usually the login node, whose `pgrep` cannot see that process. The worker rewrites its stats
   # sidecar every 2 s, and the directory is shared, so a fresh one is the liveness signal there.
   alive=0
-  if pgrep -f "worker-$port.jl" >/dev/null 2>&1 || [ $(( now - smt )) -lt 90 ]; then alive=1; fi
+  if pgrep -u "$USER" -f "worker-$port.jl" >/dev/null 2>&1 || [ $(( now - smt )) -lt 90 ]; then alive=1; fi
   # Collect the record of a worker that is GONE. A process ends but its manifest stays, and the
   # roster is built from manifests, so every host accumulated an entry per worker it had ever run.
   # Nothing else removes them: every reap in the hub is aimed at one host and port, or at a region
@@ -6284,11 +6284,13 @@ function reap_remote_worker(host, port::Int)
     # port the old holder is gone (no "address already in use").
     # The worker's name is assembled from variables and matched as `[w]orker-…`: `pkill -f` reads whole
     # command lines, and this shell's own must not contain the name it kills, or it kills itself.
+    # Every match is limited to the user's own processes: reading another user's command line can
+    # block (a process stuck on a hung filesystem), and a login node often has one.
     script = "d=$(Sweep.shq(_REMOTE_WORKER)); p=$port; pat=\"[w]orker-\$p\\.jl\"; " *
              "e=0; [ -f \"\$d/worker-\$p.jl\" ] && e=1; " *
-             "pkill -TERM -f \"\$pat\"; i=0; " *
-             "while [ \$i -lt 10 ] && pgrep -f \"\$pat\" >/dev/null 2>&1; do sleep 0.1; i=\$((i+1)); done; " *
-             "pkill -KILL -f \"\$pat\"; " *
+             "pkill -TERM -u \"\$USER\" -f \"\$pat\"; i=0; " *
+             "while [ \$i -lt 10 ] && pgrep -u \"\$USER\" -f \"\$pat\" >/dev/null 2>&1; do sleep 0.1; i=\$((i+1)); done; " *
+             "pkill -KILL -u \"\$USER\" -f \"\$pat\"; " *
              "for x in jl log json state stats; do rm -f \"\$d/worker-\$p.\$x\"; done; " *
              "echo \"existed=\$e\""
     ok, out = try; _run_on(String(host), script); catch; (false, ""); end

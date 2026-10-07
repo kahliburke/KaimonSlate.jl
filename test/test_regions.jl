@@ -728,6 +728,14 @@ end
                 end
             end
 
+            @testset "a remote process match reads only the user's own processes" begin
+                # Reading another user's command line can block on a login node, and `pgrep -f` reads them all.
+                code = [l for f in ("remote.jl", "publish_targets.jl")
+                        for l in eachline(joinpath(pkgdir(KaimonSlate), "src", f)) if !startswith(lstrip(l), "#")]
+                @test !any(l -> occursin(r"\bp(grep|kill)( -[A-Z]+)? -f", l), code)
+                @test occursin("pgrep -u \"\$USER\" -f", RE._WORKERS_PROBE_SH)
+            end
+
             @testset "a prepare's compile is recorded in the environment's stamp" begin
                 proj, home = mktempdir(), mktempdir()
                 write(joinpath(proj, "Project.toml"), "name = \"P\"\n")

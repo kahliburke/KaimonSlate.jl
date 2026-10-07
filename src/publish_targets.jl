@@ -291,7 +291,7 @@ function purge_deployed!(t::RsyncServeTarget)
         "systemctl --user disable --now slate-serve-$slug.service 2>/dev/null || true",
         "rm -f \"\${XDG_CONFIG_HOME:-\$HOME/.config}/systemd/user/slate-serve-$slug.service\"",
         "systemctl --user daemon-reload 2>/dev/null || true",
-        "pkill -f 'slate_serve.jl.*$slug' 2>/dev/null || true",
+        "pkill -u \"\$USER\" -f 'slate_serve.jl.*$slug' 2>/dev/null || true",
         "rm -rf \"\$HOME/.local/share/slate-serve/$slug\" '$remote_dir'",
     ], "; ")
     ok, out = _run_capture(`ssh $host $script`)
