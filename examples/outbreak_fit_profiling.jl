@@ -226,21 +226,22 @@ fit_draft = calibrate(observed, C, N, I0)
 Open the profiler on `fit_v1` and press **▶ Run and profile**. The cell runs as it always does,
 under the sampler.
 
-Under `calibrate`, the flame graph splits in two, side by side and about the same width:
+Under `calibrate`, each trial splits in two, side by side:
 
-- **`infections!`, the simulation.** Its bars carry no marks. Underneath are the in-place broadcasts
-  of the RK stages, the right-hand side's arithmetic, and `mul!` in LinearAlgebra's colour: the
-  matrix product, every evaluation. This is the model's real cost.
+- **`infections!`, the simulation**, the wider of the two. Its bars carry no marks. Underneath are
+  the in-place broadcasts of the RK stages, the right-hand side's arithmetic, and `mul!` in
+  LinearAlgebra's colour with the BLAS kernel under it: the matrix product, every evaluation. This
+  is the model's real cost.
 - **`expected_reports`, the reporting delay.** It does a few thousand multiplications per trial,
-  next to the simulation's few hundred thousand, and takes as long. Its bars carry **⤳** (runtime
-  dispatch) and **♻** (garbage collection), and under it are `delay_kernel`, slices, `reverse` and
-  the allocator.
+  next to the simulation's few hundred thousand, and still takes half as long. Its bars carry **⤳**
+  (runtime dispatch) and **♻** (garbage collection), and under it are `delay_kernel`, slices,
+  `reverse` and the allocator.
 
-Switch the colour key to **time**: the bars that spend time themselves light up, and the
-observation model's are as hot as the simulation's.
+Switch the colour key to **time**: the bars that spend time themselves light up, and the delay's
+are as hot as the simulation's.
 
-So half the time is waste, beside work that has to happen. The profile shows where; it does not
-show why. Add JET (the **＋ JET** button in the header, if it is not there yet) and press
+So a third of the time is waste, beside work that has to happen. The profile shows where; it does
+not show why. Add JET (the **＋ JET** button in the header, if it is not there yet) and press
 **Compile**. JET analyses the cell without running it. Its findings land on the lines in the
 margin, with what each one means when you hover it, and in **Details**:
 
@@ -252,7 +253,7 @@ margin, with what each one means when you hover it, and in **Details**:
 | one line of `rhs!`, in the simulation | runtime dispatch | caused by its caller: the global `susc` reaches it inside `p`. It goes when the caller is fixed |
 
 The last row is worth a second look. JET marks where a type is used, and the cause can be several
-calls away; the hover card on a line says where the unknown value came from.
+calls away: in **Details**, hovering a finding lists the calls it was reached through.
 
 The profile also says something JET does not: `delay_kernel` is rebuilt for every day of every
 trial, though it never changes.
