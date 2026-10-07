@@ -280,7 +280,7 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
         signed = _site_steps!(step, host, m, facts; own = r.prologue)
         signed == "fail" && return
         step("Worker runtime on $host") do
-            ("ok", _provision_runtime!(host))
+            ("ok", _provision_runtime!(host; numbered = false))
         end
         if !isempty(r.data_root)
             step("Data root $(r.data_root)") do
@@ -596,16 +596,17 @@ end
 """
 
 # What a prepare's compile was for, kept beside the environment's stamp (`mark`): the environment (its
-# stamp without the "compiled" suffix a compile adds), the node's CPU, and the options its workers boot
-# with, the sysimage among them. Before Julia starts, the shell compares them and stops when they match;
-# after a compile, Julia writes them. Both read `$SLATE_PC`, which the check sets.
-function _precompiled_check_sh(t, mark::AbstractString)
+# stamp without the "compiled" suffix a compile adds), the node's CPU, the options its workers boot
+# with (the sysimage among them), and the sources of the packages it develops (`_dev_sources_digest`).
+# Before Julia starts, the shell compares them and stops when they match; after a compile, Julia writes
+# them. Both read `$SLATE_PC`, which the check sets.
+function _precompiled_check_sh(t, mark::AbstractString; sources::AbstractString = "")
     q(p) = (startswith(p, "/") || startswith(p, "~/")) ? Sweep.shq_path(p) : "\"\$HOME/\"" * Sweep.shq(p)
     # A match also marks the stamp compiled, as the compile would have, so a start finds the
     # environment complete rather than building it again.
     st = q(_env_stamp_path(t))
     return _SYSIMAGE_CPU_SH * "; R=\$(cat " * st * " 2>/dev/null); S=\${R%+pc}; " *
-           "export SLATE_PC=\"\$S|\$CPU|\$JOPT\"; " *
+           "export SLATE_PC=\"\$S|\$CPU|\$JOPT|" * sources * "\"; " *
            "if [ -n \"\$S\" ] && [ \"\$(cat " * q(mark) * " 2>/dev/null)\" = \"\$SLATE_PC\" ]; then " *
            "[ \"\$R\" = \"\$S\" ] && printf '%s' \"\$S+pc\" > " * st * "; " *
            "echo '@@PRECOMPILED current'; exit 0; fi; "
@@ -651,7 +652,8 @@ function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothi
         ok, out = _ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.precompile(); " *
                                     "println(\"@@JULIA julia version \", VERSION)\n" * _precompiled_mark_snippet(mark),
                               "precompile $name on $host"; stream = true, jopt = true,
-                              setup = t.setup * pro * _sysimage_jopt_sh(t) * "; " * _precompiled_check_sh(t, mark))
+                              setup = t.setup * pro * _sysimage_jopt_sh(t) * "; " *
+                                      _precompiled_check_sh(t, mark; sources = _dev_sources_digest(ref[1])))
         ok || return ("fail", first(strip(out), 400))   # the step shows its own time
         occursin("@@PRECOMPILED current", out) && return ("ok", "compiled already for this node, image and environment")
         # Compiled now, so a start finds the environment complete and builds nothing.

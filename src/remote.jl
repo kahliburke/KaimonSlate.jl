@@ -154,7 +154,7 @@ function _activity_line(msg::AbstractString)
     m === nothing || return _act_dim("provision ") * _act_bold(m[1]) * _activity_tokens(m[2])
     m = match(r"^provision (\[\d/\d\])(.*)$"s, msg)
     m === nothing || return _act_dim("provision ") * "\e[1;34m" * m[1] * "\e[22;39m" * _activity_tokens(m[2])
-    m = match(r"^(env:|transfer:|sync:|spawn:|connect(?: OK)?:|sysimg:)(.*)$"s, msg)
+    m = match(r"^(env:|transfer:|sync:|spawn:|connect(?: OK)?:|sysimg:|runtime:)(.*)$"s, msg)
     m === nothing || return _act_dim(m[1]) * _activity_tokens(m[2])
     startswith(msg, "FAILED") && return "\e[31mFAILED" * _ACT_PLAIN * _activity_tokens(msg[7:end])
     return _activity_tokens(msg)
@@ -810,6 +810,18 @@ end
 _sent_digest_path(dir::AbstractString, key::AbstractString) =
     joinpath(_slate_cache_dir(), "sync", bytes2hex(_SHA.sha1(string(dir, "\n", key)))[1:16] * ".digest")
 
+# The sources of the packages environment `env` develops from local checkouts, digested: compiled code
+# depends on them, so a compile is current only for the sources it compiled (`_precompiled_check_sh`).
+function _dev_sources_digest(env::AbstractString)
+    (isempty(env) || !isdir(env)) && return ""
+    mf = parent_manifest(env)
+    parts = String[]
+    for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? env : dirname(abspath(mf)))
+        isdir(lpath) && push!(parts, string(name, "=", _tree_digest(lpath, [".git", "*.cov"])))
+    end
+    return isempty(parts) ? "" : bytes2hex(_SHA.sha1(join(sort!(parts), "\n")))[1:16]
+end
+
 # `_send_dir!` with the transfer rules, skipped when the directory's files are what was last sent to
 # this copy, unless `force`.
 function _send_tree!(host, dir::AbstractString, remote::AbstractString; excludes::Vector{String} = String[],
@@ -1238,7 +1250,9 @@ end
 # considered — Julia, the worker's own files, and the runtime env it boots from. Idempotent, and the
 # host stage of `prepare_region!` as well as the start of every provision. `seen` is the host's state
 # when the caller already read it. Returns what it did, one phrase per part.
-function _provision_runtime!(host; seen = nothing, setup::AbstractString = "")
+function _provision_runtime!(host; seen = nothing, setup::AbstractString = "", numbered::Bool = true)
+    # Numbered as steps 1–2 of a provision; a prepare that checks the runtime on its own says so instead.
+    pfx(n) = numbered ? "provision [$n/3] " : "runtime: "
     st = seen === nothing ? something(_host_state(host), Dict{String,String}()) : seen
     did = String[]
     # 0. Julia — a fresh box may have none; install juliaup unattended (Linux/macOS). Everything below
@@ -1248,7 +1262,7 @@ function _provision_runtime!(host; seen = nothing, setup::AbstractString = "")
     # 1. worker payload, unless the host already holds this exact one
     sha = _payload_sha()
     if get(st, "payload", "") == sha
-        _rlog("provision [1/3] worker payload on $host is current ($sha)")
+        _rlog(pfx(1) * "worker payload on $host is current ($sha)")
         push!(did, "worker files current")
     else
         srcdir = @__DIR__
@@ -1259,7 +1273,7 @@ function _provision_runtime!(host; seen = nothing, setup::AbstractString = "")
                 cp(joinpath(srcdir, f), joinpath(tmp, f))
             end
             had = get(st, "payload", "")
-            _rlog("provision [1/3] send worker payload → $host:$_REMOTE_WORKER " *
+            _rlog(pfx(1) * "send worker payload → $host:$_REMOTE_WORKER " *
                   "(host has $(isempty(had) ? "none" : had), sending $sha)")
             _prep_stage("Syncing worker files → $host")
             _send_dir!(host, tmp, _REMOTE_WORKER) || error("provision: could not send the worker payload → $host")
@@ -1287,7 +1301,7 @@ function _provision_runtime!(host; seen = nothing, setup::AbstractString = "")
     # 2. KaimonGate worker env (from the registry) — instantiate once
     if get(st, "kgate", "") != "1"
         push!(did, "runtime env built")
-        _rlog("provision [2/3] building KaimonGate env on $host (first run — adds KaimonGate+Revise; can take minutes)")
+        _rlog(pfx(2) * "building KaimonGate env on $host (first run — adds KaimonGate+Revise; can take minutes)")
         _prep_stage("Building worker runtime on $host")
         code = """
         import Pkg
@@ -1299,7 +1313,7 @@ function _provision_runtime!(host; seen = nothing, setup::AbstractString = "")
             error("provision: could not build the remote KaimonGate env on $host (is `julia` on its PATH?)")
         _ssh_ok(host, `touch $_REMOTE_KGATE_ENV/.ready`)
     else
-        _rlog("provision [2/3] KaimonGate env already built on $host (skip)")
+        _rlog(pfx(2) * "KaimonGate env already built on $host (skip)")
     end
     return join(did, " · ")
 end

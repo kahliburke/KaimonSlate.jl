@@ -2084,6 +2084,19 @@ end
         @test RE._activity_line("\e[32m✓\e[39m JSON") == "\e[32m✓\e[39m JSON"     # its own colours kept
     end
 
+    @testset "a developed package's sources are in what a compile is for" begin
+        mktempdir() do d
+            dep = mkpath(joinpath(d, "Dep", "src")); write(joinpath(dep, "Dep.jl"), "module Dep end")
+            write(joinpath(d, "Dep", "Project.toml"), "name = \"Dep\"\nuuid = \"00000000-0000-0000-0000-0000000000dd\"\n")
+            env = mkpath(joinpath(d, "env")); write(joinpath(env, "Project.toml"), "[deps]\nDep = \"00000000-0000-0000-0000-0000000000dd\"\n")
+            write(joinpath(env, "Manifest.toml"), "manifest_format = \"2.0\"\n[[deps.Dep]]\npath = \"../Dep\"\nuuid = \"00000000-0000-0000-0000-0000000000dd\"\n")
+            a = RE._dev_sources_digest(env)
+            @test !isempty(a) && RE._dev_sources_digest(env) == a
+            write(joinpath(dep, "Dep.jl"), "module Dep f() = 1 end")
+            @test RE._dev_sources_digest(env) != a
+        end
+    end
+
     @testset "an unchanged source directory is not sent again" begin
         src, dest, cache = mktempdir(), mktempdir(), mktempdir()
         withenv("KAIMONSLATE_CACHE_HOME" => cache) do
@@ -2106,10 +2119,10 @@ end
             mkpath(joinpath(home, dirname(stamp)))
             # What the step's shell does: the check, then (when it did not stop) a compile that writes
             # the mark as the Julia snippet would.
-            run_step(jopt = "") = read(setenv(`sh -c $("JOPT='$jopt'; " * RE._precompiled_check_sh(t, mark) *
+            run_step(jopt = "", sources = "") = read(setenv(`sh -c $("JOPT='$jopt'; " * RE._precompiled_check_sh(t, mark; sources) *
                                                        "echo compiled; printf '%s' \"\$SLATE_PC\" > \"\$HOME/$mark\"")`,
                                               merge(ENV, Dict("HOME" => home, "PATH" => "/usr/bin:/bin"))), String)
-            compiled(jopt = "") = occursin("compiled", run_step(jopt))
+            compiled(jopt = "", sources = "") = occursin("compiled", run_step(jopt, sources))
             @test compiled()                                           # no environment recorded
             write(joinpath(home, stamp), "fp1")
             @test compiled()                                           # first compile for it
@@ -2121,6 +2134,9 @@ end
             @test compiled("--sysimage=/x/cpu.so")                     # booted from an image now
             write(joinpath(home, stamp), "fp2")
             @test compiled("--sysimage=/x/cpu.so")                     # another environment
+            @test compiled("--sysimage=/x/cpu.so", "srcA")             # a developed package's sources
+            @test !compiled("--sysimage=/x/cpu.so", "srcA")
+            @test compiled("--sysimage=/x/cpu.so", "srcB")             # ... edited
             f = joinpath(home, "m.pc")
             withenv("SLATE_PC" => "fp2|cpu|") do
                 Core.eval(Module(), Meta.parseall(RE._precompiled_mark_snippet(f)))
