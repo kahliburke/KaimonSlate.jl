@@ -1355,6 +1355,27 @@ function unresolved_using_paths(report::Report)
     end
 end
 
+# The same, grouped by where each cell runs (`side(cell)`, "" for the notebook's own kernel), so a module
+# is loaded where the cells that use it run. One a main-side cell also uses stays on the main side.
+function unresolved_using_paths_by_side(report::Report, side)
+    by = Dict{String,Vector{String}}()
+    for c in report.cells
+        (c.kind == CODE && :opaque in c.flags) || continue
+        top = try; Meta.parseall(c.source); catch; continue; end
+        stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
+        for s in stmts
+            s isa LineNumberNode && continue
+            _import_names(s) === nothing && append!(get!(by, String(side(c)), String[]), _using_module_paths(s))
+        end
+    end
+    main = Set(get(by, "", String[]))
+    return lock(_USING_LOCK) do
+        Dict{String,Vector{String}}(sd => [p for p in unique(ps) if !haskey(_USING_EXPORTS, p) && !(p in _USING_TRIED) &&
+                                                                      (isempty(sd) || !(p in main))]
+                                    for (sd, ps) in by)
+    end
+end
+
 # Load each module WHERE the cells run and cache its export set — `refine_usings!`'s resolution step
 # made available BEFORE the run. The barrier `using` cell is about to load the package anyway, so the
 # `import` here is front-loaded work, not new work. A failed import (package not installed) leaves the

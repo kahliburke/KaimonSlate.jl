@@ -5079,10 +5079,17 @@ function _run_loop!(nb::LiveNotebook)
         # the import round-trip (a possible worker spawn + package load, seconds) runs OUTSIDE nb.lock
         # so UI state requests stay live; only the graph rebuild takes the lock. No-op after the first
         # drain that sees each module.
-        paths = lock(nb.lock) do; ReportEngine.unresolved_using_paths(nb.report); end
-        if !isempty(paths) && ReportEngine.resolve_usings!(nb.report, nb.kernel, paths)
-            lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+        # Each module is loaded where the cells that use it run: a region's on its worker once that is up,
+        # and never on this machine for cells that do not run here.
+        bys = lock(nb.lock) do; ReportEngine.unresolved_using_paths_by_side(nb.report, c -> _cell_side(nb, c)); end
+        resolved = false
+        for (side, paths) in bys
+            isempty(paths) && continue
+            k = isempty(side) ? nb.kernel : _region_kernel_if_active(nb, side)
+            k === nothing && continue
+            ReportEngine.resolve_usings!(nb.report, k, paths) && (resolved = true)
         end
+        resolved && lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
         # Same pre-run phasing for macro-recovered bindings: package macros (`@kwdef`, `@enum`,
         # `@chain`, …) are expandable as soon as their modules are imported (just above), so the
         # graph + memo keys see macro-hidden writes from the FIRST eval. Notebook-defined macros

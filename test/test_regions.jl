@@ -2097,6 +2097,17 @@ end
         end
     end
 
+    @testset "a module is loaded where the cells that use it run" begin
+        r = RE.parse_report("#%% code id=a region=far\nusing OnlyFarPkgX\n" *
+                            "#%% code id=b\nusing HerePkgX\n" *
+                            "#%% code id=c region=far\nusing HerePkgX, SharedPkgX\n" *
+                            "#%% code id=d\nusing SharedPkgX\n")
+        RE.build_dependencies!(r)
+        by = RE.unresolved_using_paths_by_side(r, c -> NS._cell_region(c))
+        @test sort(get(by, "", String[])) == ["HerePkgX", "SharedPkgX"]
+        @test get(by, "far", String[]) == ["OnlyFarPkgX"]          # a module only the region uses
+    end
+
     @testset "a directory walk is complete and the same every time" begin
         # `walkdir` cannot be pruned: editing the list it hands out races its traversal and can drop a
         # sibling of the pruned directory. These walks prune `.git` and must still see `src`.
