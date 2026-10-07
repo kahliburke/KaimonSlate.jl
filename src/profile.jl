@@ -227,9 +227,11 @@ function _with_gpu(f, out::Dict{String,Any})
         return val[]
     end
     try
+        # CUDA.jl hands its device trace back as columns by name (a NamedTuple of vectors).
         dev = Base.invokelatest(getproperty, res, :device)
-        names = String.(Base.invokelatest(getindex, dev, !, :name))
-        dur = Float64.(Base.invokelatest(getindex, dev, !, :stop)) .- Float64.(Base.invokelatest(getindex, dev, !, :start))
+        col(k) = Base.invokelatest(getproperty, dev, k)
+        names = String.(col(:name))
+        dur = Float64.(col(:stop)) .- Float64.(col(:start))
         agg = Dict{String,Vector{Float64}}()
         for (n, d) in zip(names, dur)
             a = get!(() -> [0.0, 0.0], agg, n); a[1] += 1; a[2] += d
@@ -429,6 +431,12 @@ function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
         end
         pkg = _frame_pkg(fr, a.cellfile)
         haskey(a.pkgfile, pkg) || (a.pkgfile[pkg] = _ffile(fr))
+        # A task switched out in the scheduler is waiting (a wall-time sample of one): the path
+        # ends there, under the call that waits.
+        if pkg == "Base" && fr.func in _PARKED_FNS
+            cur = _node!(t, cur, "", 0, "waiting", "", _K_SYNTH); t.total[cur] += w
+            break
+        end
         if _compiler_pkg(pkg)
             t.compile[cur] += w; mark!(5)
             cur = _node!(t, cur, "", 0, "compilation", "", _K_COMPILE); t.total[cur] += w
@@ -446,6 +454,8 @@ function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
     leaf[1] > 0 && (_lrow(a, leaf)[2] += w)
     return cur
 end
+
+const _PARKED_FNS = (:try_yieldto, :poptask, :wait_forever, :task_get_next)
 
 # Only the runtime and Base's scheduler from `start` on, waiting in it: a task with nothing to do.
 const _SCHED_FNS = (:wait, :poptask, :task_get_next, :try_yieldto, :wait_forever, :yield)
