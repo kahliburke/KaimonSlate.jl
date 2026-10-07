@@ -325,59 +325,26 @@ async function probe(expr) {
 }
 
 // ── the specialist ────────────────────────────────────────────────────────────────────────────────
-// Summoned from inside the session you are already in. It works in the chat pane — reasoning and
-// every tool call streaming as it goes — so the pane opens with it.
-const models = signal(null);     // ACP backends, loaded on first open of the picker
+// Summoned from inside the session you are already in, on the model set for the role (Settings →
+// agent roles, else the notebook's agent model).
 const summoning = signal(false);
-const pickerOpen = signal(false);
 const specialist = signal(null); // {agent_id, cell, model} once one is here
 
-async function loadModels() {
-  if (models.value) return;
-  try {
-    const r = await A('GET', '/api/acp-models');
-    models.value = (r && r.models) || [];
-  } catch (e) { models.value = []; }
-}
-
-async function summon(model) {
+async function summon() {
   const s = st.value;
   if (!s || summoning.value) return;
-  summoning.value = true; pickerOpen.value = false;
+  summoning.value = true;
   try {
-    const r = await A('POST', '/api/debug/agent', { cell: s.cell, model: model || '' });
+    const r = await A('POST', '/api/debug/agent', { cell: s.cell });
     if (r && r.ok) {
-      specialist.value = { agent_id: r.agent_id, cell: r.cell, model: model || '' };
+      specialist.value = { agent_id: r.agent_id, cell: r.cell, model: r.model || '' };
       focus.value = true;   // the debugging workspace is where it works — and where you watch it
     }
   } catch (e) {} finally { summoning.value = false; }
 }
 
-// The picker. An ACP agent can reach ~70 models, which is a list you search, not one you scroll —
-// so it opens on a filter box, and the last model you used is offered first because in practice
-// you summon the same one over and over.
-const filter = signal('');
-const lastModel = () => { try { return localStorage.getItem('slateDbgModel') || ''; } catch (_) { return ''; } };
-
 // The bare model name: `acp:opencode:opencode/claude-sonnet-5` → `claude-sonnet-5`.
 const bareModel = (m) => String(m).replace(/^acp:\w+:/, '').replace(/^.*\//, '');
-// Its family — the first hyphen-segment with any version digits stripped, so `claude-sonnet-5`,
-// `gpt-5.4-mini` and `qwen3.6-plus` land under claude / gpt / qwen. Cheap and wrong for nothing in
-// the current list; a name it can't parse simply becomes its own group rather than being hidden.
-const familyOf = (m) => (bareModel(m).split('-')[0].replace(/[\d.]+$/, '') || 'other').toLowerCase();
-
-// Grouped, each family's own models in the order the server gave them (newest last there, so
-// reversed here — you almost always want the newest of a family).
-function byFamily(list) {
-  const g = new Map();
-  for (const m of list) {
-    const f = familyOf(m);
-    if (!g.has(f)) g.set(f, []);
-    g.get(f).push(m);
-  }
-  return [...g.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-}
-
 function Summon() {
   const s = st.value;
   if (!s || s.finished) return null;
@@ -385,48 +352,9 @@ function Summon() {
     return html`<button class="dbgspec on" title="a debugging specialist is working on this — open the workspace"
       onClick=${() => focus.value = true}>🐞 specialist</button>`;
   }
-  const pick = (m) => { try { localStorage.setItem('slateDbgModel', m); } catch (_) {} summon(m); };
-  const q = filter.value.trim().toLowerCase();
-  const all = models.value || [];
-  const shown = q ? all.filter(m => m.toLowerCase().includes(q)) : all;
-  const prev = lastModel();
-  const open = () => {
-    pickerOpen.value = !pickerOpen.value;
-    filter.value = '';
-    loadModels();
-  };
-  return html`<span class="dbgspecwrap">
-    <button class="dbgspec" disabled=${summoning.value}
-      title="bring in a debugging specialist to work on this cell with you"
-      onClick=${open}>${summoning.value ? 'summoning…' : '＋ specialist'}</button>
-    ${pickerOpen.value ? html`<div class="dbgspecmenu">
-      <input class="dbgspecfind" autofocus placeholder="search models…" value=${filter.value}
-        onInput=${e => filter.value = e.target.value}
-        onKeyDown=${e => {
-          if (e.key === 'Escape') { pickerOpen.value = false; }
-          // Enter takes the top of the list, which is what the search narrowed it to.
-          else if (e.key === 'Enter' && shown.length) pick(shown[0]);
-        }} />
-      <div class="dbgspeclist">
-        ${!q && prev ? html`<div class="dbgspecrow recent" onClick=${() => pick(prev)}>
-            <span class="dbgspecmark">↩</span>${bareModel(prev)}</div>` : null}
-        ${!q ? html`<div class="dbgspecrow" onClick=${() => pick('')}>
-            <span class="dbgspecmark">·</span>Default model</div>` : null}
-        ${models.value === null ? html`<div class="dbgspecnote">loading…</div>`
-          : !all.length ? html`<div class="dbgspecnote">no ACP agents installed</div>`
-          : !shown.length ? html`<div class="dbgspecnote">nothing matches “${filter.value}”</div>`
-          // Searching already narrows, so a query renders flat; browsing renders by family.
-          : q ? shown.map(m => html`<div class="dbgspecrow" key=${m} onClick=${() => pick(m)}>
-                  ${bareModel(m)}</div>`)
-          : byFamily(shown).map(([fam, ms]) => html`<div class="dbgspecgrp" key=${fam}>
-              <div class="dbgspechead">${fam}<span class="dbgspecn">${ms.length}</span></div>
-              ${ms.map(m => html`<div class="dbgspecrow" key=${m} onClick=${() => pick(m)}>
-                  ${bareModel(m)}</div>`)}
-            </div>`)}
-      </div>
-      ${all.length ? html`<div class="dbgspecfoot">${shown.length} of ${all.length}</div>` : null}
-    </div>` : null}
-  </span>`;
+  return html`<button class="dbgspec" disabled=${summoning.value}
+    title="bring in a debugging specialist to work on this cell with you"
+    onClick=${summon}>${summoning.value ? 'summoning…' : '＋ specialist'}</button>`;
 }
 
 // ── the specialist's transcript ────────────────────────────────────────────────────────────────
@@ -1455,41 +1383,11 @@ style.textContent = `
   background:color-mix(in srgb, var(--purple) 10%, transparent); }
 .dbgloc.big { font-size:.78rem; padding:3px 10px; }
 
-.dbgspecwrap { position:relative; display:inline-block; }
 .dbgspec { padding:3px 9px; font-size:.75rem; border-radius:6px; background:var(--bg3);
   color:var(--dim); border:1px dashed var(--border); cursor:pointer; white-space:nowrap; }
 .dbgspec:hover:not(:disabled) { color:var(--teal); border-color:var(--teal); border-style:solid; }
 .dbgspec.on { color:var(--teal); border-color:var(--teal); border-style:solid;
   background:color-mix(in srgb, var(--teal) 12%, var(--bg3)); }
-/* Anchored to the RIGHT: the button lives at the top-right of the specialist pane, and a
-   left-anchored menu of this width would hang off the edge of the column. */
-.dbgspecmenu { position:absolute; z-index:80; top:calc(100% + 4px); right:0;
-  width:max(280px, 22vw); display:flex; flex-direction:column;
-  background:var(--bg2); border:1px solid var(--border); border-radius:8px; overflow:hidden;
-  box-shadow:0 8px 26px rgba(0,0,0,.4); }
-.dbgspecfind { flex:0 0 auto; padding:7px 10px; background:var(--bg3); color:var(--text);
-  border:none; border-bottom:1px solid var(--border); outline:none; font-size:.78rem; }
-.dbgspecfind:focus { border-bottom-color:var(--accent); }
-/* A list this long is scrolled, not shown — bounded so the menu can never outgrow the window. */
-.dbgspeclist { flex:1 1 auto; max-height:min(360px, 45vh); overflow:auto; padding:3px 0; }
-.dbgspecrow { display:flex; align-items:baseline; gap:7px; padding:5px 10px; font-size:.76rem;
-  cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-  font-family:var(--mono,ui-monospace,monospace); }
-.dbgspecrow:hover { background:var(--ovl); color:var(--teal); }
-.dbgspecrow.recent { color:var(--teal); }
-/* Family headers, so ~70 models read as a handful of groups. Sticky, because you scroll past
-   several of them looking for one. */
-.dbgspechead { position:sticky; top:0; z-index:1; display:flex; align-items:baseline; gap:6px;
-  padding:4px 10px 3px; background:var(--bg2); color:var(--dim);
-  font-size:.66rem; text-transform:uppercase; letter-spacing:.08em;
-  border-top:1px solid color-mix(in srgb, var(--border) 60%, transparent); }
-.dbgspecgrp:first-child .dbgspechead { border-top:none; }
-.dbgspecn { opacity:.6; font-variant-numeric:tabular-nums; }
-.dbgspecgrp .dbgspecrow { padding-left:18px; }
-.dbgspecmark { flex:0 0 auto; color:var(--dim); }
-.dbgspecnote { padding:6px 10px; font-size:.72rem; color:var(--dim); }
-.dbgspecfoot { flex:0 0 auto; padding:4px 10px; font-size:.68rem; color:var(--dim);
-  border-top:1px solid var(--border); font-variant-numeric:tabular-nums; }
 
 .dbgowner { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:11px;
   font-size:.72rem; white-space:nowrap; color:var(--teal); border:1px solid var(--teal);

@@ -20,6 +20,7 @@
 import { html, render } from 'htm/preact';
 import { signal, computed, effect } from '@preact/signals';
 import { lockScroll } from './scrolllock.js';
+import { specialistPane } from './specpane.js';
 import { useRef, useEffect } from 'preact/hooks';
 
 const A = (m, p, b) => window.api(m, p, b);
@@ -259,6 +260,7 @@ async function loadHistory(cell) {
 }
 // `kept`: a kept profile's id, to show that one rather than the latest (a run on the telemetry timeline).
 export async function openProfile(cellId, kept = '') {
+  resumeSpecialist();
   pf.value = { cell: cellId, side: '', status: 'loading', prepared: null, profile: null, source: cellSource(cellId), error: null };
   hist.value = []; base.value = null; query.value = '';
   resetView(cellId);
@@ -1345,47 +1347,83 @@ function exportAs(format) {
 }
 
 // ── the profiler specialist ───────────────────────────────────────────────────────────────────────
-// Summoned from the dock; it works in the chat pane, where its reasoning and tool calls stream.
-const models = signal(null);
-const pickOpen = signal(false);
-const pickQ = signal('');
-const summoning = signal(false);
-const bareModel = (m) => String(m).replace(/^acp:\w+:/, '').replace(/^.*\//, '');
-const lastModel = () => ls('slateProfModel', ls('slateDbgModel', ''));
-async function summon(model) {
-  const P = pf.value; if (!P || summoning.value) return;
-  summoning.value = true; pickOpen.value = false;
-  lsSet('slateProfModel', model);
-  try { await A('POST', '/api/profile/agent', { cell: P.cell, model }); } catch (_) {}
-  summoning.value = false;
+// Brought in with the model set for the role (Settings → agent roles). It works in a pane of the dock:
+// what it was asked, its reasoning, each step it takes, and its questions, beside the profile it is
+// reading. While it works, the code pane and the graph follow what it looks at.
+const specOpen = signal(false);
+const specFollow = signal(ls('slateProfFollow', '1') !== '0');
+const resolveFile = (f) => {
+  const M = model.value; f = String(f || '');
+  if (!M || !f) return f;
+  const files = [...M.lines.keys()];
+  return files.find(x => x === f) || files.find(x => x === 'cell:' + f) ||
+         files.find(x => x.endsWith('/' + f)) || (f.startsWith('cell:') ? f : f);
+};
+// Show what it is looking at: the source it reads, the subtree it asks for.
+function follow(name, inp) {
+  if (!specFollow.value || !pf.value) return;
+  const M = model.value;
+  if (name === 'prof_source' && inp.file) { showCode(resolveFile(inp.file), +inp.line || 0); return; }
+  if (name === 'prof_tree' && inp.at && M) {
+    const m = /^(.*):(\d+)$/.exec(String(inp.at));
+    if (m) {
+      const file = resolveFile(m[1]), line = +m[2], n = heaviestAt(file, line);
+      if (n) select(n);
+      showCode(file, line);
+      return;
+    }
+    let best = null;
+    for (const n of M.nodes) if (n && (n.func === inp.at || String(n.func).includes('#' + inp.at + '#')) && (!best || n.total > best.total)) best = n;
+    if (best) { select(best); if (best.kind === K.line) showCode(best.file, best.line); }
+  }
+}
+const spec = specialistPane('profiler', {
+  summonPath: '/api/profile/agent',
+  verbs: { prof_run: 'profile', prof_check: 'check', prof_summary: 'summary', prof_tree: 'tree', prof_source: 'source',
+           prof_eval: 'eval', read: 'read', edit_cell: 'edit', spec_ask: 'ask', spec_done: 'done' },
+  arg: (name, inp) => name === 'prof_tree' ? (inp.at || 'the whole cell')
+    : name === 'prof_source' ? (inp.file || '') + (inp.line ? ':' + inp.line : '')
+    : name === 'prof_eval' ? String(inp.code || '').split('\n')[0]
+    : name === 'prof_run' ? (inp.mode || 'cpu')
+    : name === 'read' || name === 'edit_cell' ? (inp.cells || inp.cell || '')
+    : name === 'spec_ask' ? String(inp.question || inp.text || '').split('\n')[0]
+    : name === 'spec_done' ? String(inp.summary || '').split('\n')[0] : '',
+  onStep: follow,
+});
+let _resumed = false;
+function resumeSpecialist() { if (!_resumed) { _resumed = true; spec.resume(); } }
+async function summonSpecialist() {
+  const P = pf.value; if (!P) return;
+  specOpen.value = true;
+  await spec.summon(P.cell);
 }
 function Specialist() {
-  const open = async () => {
-    pickOpen.value = !pickOpen.value; pickQ.value = '';
-    if (!models.value) { try { const r = await A('GET', '/api/acp-models'); models.value = (r && r.models) || []; } catch (_) { models.value = []; } }
-  };
-  const q = pickQ.value.trim().toLowerCase(), all = models.value || [];
-  const shown = (q ? all.filter(m => m.toLowerCase().includes(q)) : all).slice(0, 60);
-  const prev = lastModel();
-  return html`<span class="pfspec">
-    <button class="pfbtn" disabled=${summoning.value} onClick=${open} title="bring in a profiling specialist to work on this cell with you">
-      ${summoning.value ? html`<span class="hydspin"></span>` : '＋ specialist'}</button>
-    ${pickOpen.value ? html`<div class="pfspecmenu">
-      <input autofocus placeholder="search models…" value=${pickQ.value} onInput=${e => pickQ.value = e.target.value}
-        onKeyDown=${e => { if (e.key === 'Escape') pickOpen.value = false; else if (e.key === 'Enter' && shown.length) summon(shown[0]); }}/>
-      <div class="pfspeclist">
-        ${!q && prev ? html`<div class="pfspecrow" onClick=${() => summon(prev)}>↩ ${bareModel(prev)}</div>` : null}
-        ${!q ? html`<div class="pfspecrow" onClick=${() => summon('')}>Default model</div>` : null}
-        ${models.value === null ? html`<div class="pfspecnote"><span class="hydspin"></span></div>`
-          : shown.map(m => html`<div class="pfspecrow" key=${m} onClick=${() => summon(m)}>${bareModel(m)}</div>`)}
-      </div>
-    </div>` : null}
-  </span>`;
+  const here = !!spec.agent.value, w = spec.working.value, waiting = spec.asks.value.length > 0;
+  if (!here) return html`<button class="pfbtn" disabled=${spec.summoning.value} onClick=${summonSpecialist}
+      title="bring in a profiling specialist to work on this cell with you">${spec.summoning.value ? html`<span class="hydspin"></span>` : '＋ specialist'}</button>`;
+  return html`<button class=${'pfbtn' + (specOpen.value ? ' on' : '') + (waiting ? ' pfwait' : '')} onClick=${() => specOpen.value = !specOpen.value}
+      title=${specOpen.value ? 'hide the specialist (it keeps working)' : 'show the specialist'}>
+    ${w ? html`<span class="hydspin"></span> ` : null}${waiting ? '❓ ' : ''}specialist</button>`;
+}
+function SpecialistPane() {
+  return html`<${spec.Pane} title="Profiling specialist" onClose=${() => specOpen.value = false}
+    extra=${html`<label class="pftog" title="move the code pane and the graph to what it is looking at">
+      <input type="checkbox" checked=${specFollow.value}
+        onChange=${e => { specFollow.value = e.currentTarget.checked; lsSet('slateProfFollow', specFollow.value ? '1' : '0'); }}/><i></i>follow</label>`} />`;
+}
+// With the dock closed, a specialist that is working or waiting on you still says so.
+function SpecBadge() {
+  if (pf.value || !spec.agent.value) return null;
+  const waiting = spec.asks.value.length > 0, w = spec.working.value;
+  if (!waiting && !w) return null;
+  const cell = spec.agent.value.cell;
+  return html`<button class=${'pfbadge' + (waiting ? ' wait' : '')} onClick=${async () => { if (cell) { await openProfile(cell); specOpen.value = true; } }}>
+    ${waiting ? '❓ the profiling specialist is waiting on you' : html`<span class="hydspin"></span> profiling specialist working`}</button>`;
 }
 
 // ── pane sizes ────────────────────────────────────────────────────────────────────────────────────
 // Each split is a share of its container, kept across sessions. Double-click a bar to put it back.
-const SPLITS = { code: 0.38, hot: 0.28, sandwich: 0.4 };
+const SPLITS = { code: 0.38, hot: 0.28, sandwich: 0.4, spec: 0.28 };
 const split = Object.fromEntries(Object.entries(SPLITS).map(([k, d]) => [k, signal(clamp(+ls('slateProfSplit.' + k, d) || d, 0.1, 0.85))]));
 // A bar between two panes. `edge`: which pane the share is of, the one before the bar or after it.
 function Split({ name, dir, edge = 'before', min = 0.12, max = 0.8 }) {
@@ -1417,6 +1455,7 @@ function Dock() {
   const P = pf.value;
   if (!P) return null;
   const busy = P.status === 'preparing' || P.status === 'running' || P.status === 'waiting';
+  const showSpec = specOpen.value && !!spec.agent.value;
   const mt = matches.value;
   const setTab = (t) => { tab.value = t; lsSet('slateProfTab', t); };
   return html`<div class="pfbg" onClick=${e => { if (e.target.classList.contains('pfbg')) close(); else optsOpen.value = false; }}>
@@ -1456,7 +1495,8 @@ function Dock() {
           <button onClick=${() => exportAs('speedscope')} title="for speedscope.app">speedscope</button>
           <button onClick=${() => exportAs('pprof')} title="for go tool pprof and its viewers">pprof</button></span>
       </div>
-      <div class="pfbody" style=${'grid-template-columns:minmax(220px,' + pctOf('code') + ') 0 minmax(0,1fr)'}>
+      <div class="pfbody" style=${'grid-template-columns:minmax(220px,' + pctOf('code') + ') 0 minmax(0,1fr)' +
+                                  (showSpec ? ' 0 minmax(280px,' + pctOf('spec') + ')' : '')}>
         <${Code} />
         <${Split} name="code" dir="x" max=${0.7} />
         <div class="pfright">
@@ -1467,6 +1507,7 @@ function Dock() {
             <${Split} name="hot" dir="y" edge="after" min=${0.08} max=${0.7} />
             <${Hot} />` : null}
         </div>
+        ${showSpec ? html`<${Split} name="spec" dir="x" edge="after" min=${0.18} max=${0.5} /><div class="pfspecpane"><${SpecialistPane} /></div>` : null}
       </div>
     </div>
   </div>`;
@@ -1480,7 +1521,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     // Escape in the search box clears the search; the box's own handler does that.
     if (e.target && e.target.classList && e.target.classList.contains('pfsearch') && query.value) return;
-    if (optsOpen.value || pickOpen.value) { optsOpen.value = false; pickOpen.value = false; e.stopPropagation(); return; }
+    if (optsOpen.value) { optsOpen.value = false; e.stopPropagation(); return; }
     e.stopPropagation(); close(); return;
   }
   const tag = (e.target && e.target.tagName) || '';
@@ -1688,6 +1729,13 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfjwhat .pfjk { margin-right:4px; }
 .pfjwhy { grid-column:2 / -1; color:var(--dim); font-size:.7rem; line-height:1.45; }
 .pfjwhy b { color:var(--text); font-weight:600; }
+.pfspecpane { min-width:0; min-height:0; border-left:1px solid var(--border); }
+.pfbtn.on { border-color:#e8933a; }
+.pfbtn.pfwait { border-color:#ffd27a; color:#ffd27a; }
+.pfbadge { position:fixed; right:18px; bottom:18px; z-index:65; display:inline-flex; align-items:center; gap:7px; padding:7px 13px;
+  border-radius:18px; font:inherit; font-size:.78rem; cursor:pointer; color:var(--text); background:var(--bg2);
+  border:1px solid color-mix(in srgb, #e8933a 50%, var(--border)); box-shadow:0 8px 24px rgba(0,0,0,.4); }
+.pfbadge.wait { border-color:#ffd27a; color:#ffd27a; }
 .pfjks { display:inline-flex; flex-wrap:wrap; gap:3px; }
 .pfjet { display:grid; grid-template-columns:130px minmax(0, 360px) minmax(0, 1fr); gap:10px; align-items:center;
   padding:3px 6px; border-radius:4px; cursor:pointer; }
@@ -1705,15 +1753,6 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfdet { max-width:1100px; }
 .pfdethead { color:var(--dim); font-size:.68rem; }
 .pfsig { font-family:var(--mono,ui-monospace,monospace); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.pfspec { position:relative; }
-.pfspecmenu { position:absolute; right:0; top:calc(100% + 4px); z-index:5; width:280px; padding:6px;
-  background:var(--bg2); border:1px solid var(--border); border-radius:8px; box-shadow:0 12px 32px rgba(0,0,0,.5); }
-.pfspecmenu input { width:100%; box-sizing:border-box; font:inherit; font-size:.76rem; padding:4px 7px; border-radius:5px;
-  background:var(--bg); color:var(--text); border:1px solid var(--border); }
-.pfspeclist { max-height:300px; overflow:auto; margin-top:5px; }
-.pfspecrow { padding:4px 7px; border-radius:5px; cursor:pointer; font-size:.76rem; font-family:var(--mono,ui-monospace,monospace); }
-.pfspecrow:hover { background:color-mix(in srgb, #e8933a 14%, transparent); }
-.pfspecnote { padding:6px; text-align:center; }
 /* The code pane's heat (editor.js slateSourceViewer, heat: true). */
 .cm-heatgutter { min-width:74px; }
 .cm-heatm { position:relative; display:flex; align-items:center; gap:3px; height:100%; padding:0 4px 0 2px; font-size:10px; }
@@ -1728,4 +1767,4 @@ document.head.appendChild(style);
 
 const host = document.createElement('div');
 document.body.appendChild(host);
-render(html`<${Dock} />`, host);
+render(html`<${Dock} /><${SpecBadge} />`, host);

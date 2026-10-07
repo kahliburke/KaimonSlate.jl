@@ -132,7 +132,7 @@ function summon!(nb::LiveNotebook, role::AbstractString; subject::AbstractString
     broadcast_specialist(nb, s.name, Dict{String,Any}("specialist" => Dict{String,Any}(
         "agent_id" => aid, "crew" => s.name, "cell" => String(subject), "model" => m)))
     return Dict{String,Any}("ok" => true, "agent_id" => aid, "crew" => s.name,
-                            "cell" => String(subject))
+                            "cell" => String(subject), "model" => m)
 end
 
 """

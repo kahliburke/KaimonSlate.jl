@@ -3174,11 +3174,12 @@ function _make_router(h::Hub)
         log = lock(_AGENT_LOCK) do; copy(get(_AGENT_LOG, nb.id, String[])); end
         _json(Dict("events" => log, "agents" => copy(nb.agents)))
     end))
-    # Interrupt EVERY crew agent's in-flight turn (best effort, graceful).
+    # Interrupt EVERY crew agent's in-flight turn (best effort, graceful), or just `crew`'s.
     HTTP.register!(router, "POST", "/api/{id}/chat-interrupt", req -> _withnb(h, req, nb -> begin
         (_agent_available() && !isempty(nb.agents)) || return _json(Dict("ok" => false))
+        crew = String(get(_body(req), "crew", ""))
         any_int = false
-        for aid in collect(values(nb.agents))
+        for aid in (isempty(crew) ? collect(values(nb.agents)) : [a for (c, a) in nb.agents if c == crew])
             r = try; _agent_call(:agent_interrupt, Dict{String,Any}("agent_id" => aid)); catch; Dict("interrupted" => false); end
             get(r, "interrupted", false) === true && (any_int = true)
         end
