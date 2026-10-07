@@ -1861,11 +1861,12 @@ function _replicate_env!(t::RemoteTarget; precompile::Bool = true, stamp::Abstra
     # at the versions the notebook uses; else they are added on the host, which resolves.
     merged = _infra_merged(t, origin)
     envfiles = ["Project.toml", "Manifest.toml"]
-    # 1. the origin project WHOLESALE, INCLUDING the Manifest (exact versions) + its own /src.
-    _send_dir!(host, origin, t.project; excludes = vcat([".git", "*.cov", ".ready"], merged === nothing ? String[] : envfiles),
-                     region = t.region, filter = true) ||
+    # 1. the origin project's sources, unless the copy holds them already (the record a start's
+    #    `send_sources!` reads too), then its environment's files: combined, or as resolved here.
+    _send_tree!(host, origin, t.project; excludes = _PROJECT_SEND_EXCLUDES, region = t.region) ||
         error("env: could not send the origin project → $host")
-    merged === nothing || _put_texts(host, t.project, collect(zip(envfiles, merged))) ||
+    _put_texts(host, t.project, merged === nothing ? [f => read(joinpath(origin, f), String) for f in envfiles] :
+                                                     collect(zip(envfiles, merged))) ||
         error("env: could not send the environment's files → $host")
     # 2. dev'd deps: send each local source into its copy; collect (name → $HOME-relative remote path).
     rewrites = _send_dev_deps!(t, origin)
