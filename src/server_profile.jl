@@ -118,17 +118,18 @@ function profile_static_text(nb::LiveNotebook, cid::AbstractString)
     fs = st["findings"]
     isempty(fs) && return "Static check (JET): nothing found. Every call in the cell's code resolves at compile time at the current types."
     io = IOBuffer()
-    println(io, "Static check (JET, ", st["n"], " report", st["n"] == 1 ? "" : "s", "):")
+    println(io, "Static check (JET): ", st["n"], " report", st["n"] == 1 ? "" : "s", " on ", length(fs), " line", length(fs) == 1 ? "" : "s",
+            " of the notebook's code. Each line lists what was found there; reports from inside the library calls a line makes are counted with it.")
     for g in Iterators.take(fs, 40)
         where = string(_pshort(String(g["file"])), ":", g["line"], (t = _cell_line_text(nb, String(g["file"]), g["line"], p); isempty(t) ? "" : "  " * t))
-        println(io, "  ", rpad(String(g["kind"]), 10), g["count"] > 1 ? "×$(g["count"]) " : "", where)
-        isempty(g["sig"]) || println(io, "      ", g["sig"])
-        if g["mine"] !== true && !isempty(g["frames"])
-            l = g["frames"][end]
-            println(io, "      inside ", l[3], "  ", _pshort(String(l[1])), ":", l[2], " (", l[4], ")")
-        end
+        kinds = join(["$(k == "dispatch" ? "runtime dispatch" : k == "captured" ? "boxed capture" : k) ×$n" for (k, n) in g["kinds"]], ", ")
+        println(io, "  ", where, "  (in ", g["func"], ")")
+        println(io, "      ", kinds)
+        for sg in Iterators.take(g["sigs"], 4); println(io, "      ", sg); end
+        length(g["sigs"]) > 4 && println(io, "      … and ", length(g["sigs"]) - 4, " more here")
+        g["lib"] > 0 && println(io, "      ", g["lib"], " more inside library calls from this line (", join(g["calls"], ", "), ")")
     end
-    length(fs) > 40 && println(io, "  … and ", length(fs) - 40, " more")
+    length(fs) > 40 && println(io, "  … and ", length(fs) - 40, " more lines")
     return String(take!(io))
 end
 

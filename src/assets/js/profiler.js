@@ -932,17 +932,18 @@ function Functions() {
 function StaticCheck() {
   const P = pf.value, st = P && P.prepared && P.prepared.static;
   if (!st) return null;
-  const head = html`<div class="pfrelhead">Static check${st.available && !st.error ? ' · JET · ' + staticCount(st) + ' found' : ''}</div>`;
+  const head = html`<div class="pfrelhead">Static check${st.available && !st.error ? ' · JET · ' + st.n + ' reports on ' + staticCount(st) + ' lines' : ''}</div>`;
   if (!st.available) return html`<div class="pfdet">${head}<div class="pfdim">${st.why}</div></div>`;
   if (st.error) return html`<div class="pfdet">${head}<div class="pfwarn">${st.error}</div></div>`;
   if (!st.findings.length) return html`<div class="pfdet">${head}<div class="pfdim">nothing found</div></div>`;
   const where = (g) => g.file.startsWith('cell:') ? html`<b>${g.file.slice(5)}</b>:${g.line}` : shortFile(g.file) + ':' + g.line;
   return html`<div class="pfdet">${head}
     ${st.findings.map(g => html`<div class="pfjet" onClick=${() => showCode(g.file, g.line)}
-        title=${g.frames.map(f => f[2] + '  ' + shortFile(f[0]) + ':' + f[1]).join('\n')}>
-      <span class=${'pfjk ' + g.kind.replace(/\s+/g, '-')}>${g.kind === 'dispatch' ? 'dispatch' : g.kind === 'captured' ? 'boxed' : g.kind}${g.count > 1 ? ' ×' + g.count : ''}</span>
+        title=${[...g.sigs, ...g.libsigs.map(x => 'inside a library call: ' + x)].join('\n')}>
+      <span class="pfjks">${Object.entries(g.kinds).map(([k, n]) => html`<span class=${'pfjk ' + k.replace(/\s+/g, '-')}>${k === 'captured' ? 'boxed' : k}${n > 1 ? ' ×' + n : ''}</span>`)}</span>
       <span class="pfloc">${where(g)}<span class="pfsnip">${cellLine(g.file, g.line)}</span></span>
-      <span class="pfsig" title=${g.sig}>${g.sig}${g.mine ? '' : html`<span class="pfdim">  inside ${g.frames[g.frames.length - 1][2]}</span>`}</span>
+      <span class="pfsig">${g.sig}${g.sigs.length > 1 ? html`<span class="pfdim">  +${g.sigs.length - 1}</span>` : null}${
+        g.lib ? html`<span class="pfdim">  · ${g.lib} inside ${g.calls.slice(0, 3).join(', ')}${g.calls.length > 3 ? '…' : ''}</span>` : null}</span>
     </div>`)}</div>`;
 }
 
@@ -1102,7 +1103,7 @@ function Facts() {
     ${pp && pp.static ? html`<button class="pffigbtn" onClick=${() => setTabTo('details')} title=${pp.static.why || pp.static.error || 'found by JET without running the cell'}>${
         !pp.static.available ? fig('—', 'no static check (JET)', 'dim')
         : pp.static.error ? fig('!', 'static check failed', 'g')
-        : fig(staticCount(pp.static), 'static ' + (staticCount(pp.static) === 1 ? 'finding' : 'findings'), staticCount(pp.static) ? 'j' : 'dim')}</button>` : null}
+        : fig(staticCount(pp.static), (staticCount(pp.static) === 1 ? 'line' : 'lines') + ' flagged by JET', staticCount(pp.static) ? 'j' : 'dim')}</button>` : null}
     ${pp ? (pp.ok ? fig(ms(pp.compile_ms), 'to compile ahead', 'dim')
                   : html`<span class="pfwarn" title=${pp.error}>${String(pp.error).split('\n')[0]}</span>`) : null}
   </div>`;
@@ -1127,7 +1128,8 @@ function JetStatus() {
   };
   return html`<button class="pfbtn pfjetadd" onClick=${add} title="add JET to this notebook's environment, so Compile also checks the cell statically">＋ JET</button>`;
 }
-const staticCount = (st) => (st.findings || []).reduce((t, g) => t + g.count, 0);
+const staticCount = (st) => (st.findings || []).length;     // lines of the notebook's code flagged
+const kindName = (k) => k === 'dispatch' ? 'runtime dispatch' : k === 'captured' ? 'boxed capture' : k;
 const setTabTo = (t) => { tab.value = t; lsSet('slateProfTab', t); };
 // The static check's findings on `file`'s lines, for the code pane's margin.
 function staticRows(file) {
@@ -1136,10 +1138,9 @@ function staticRows(file) {
   const by = new Map();
   for (const g of st.findings) {
     if (g.file !== file) continue;
-    const r = by.get(g.line) || { line: g.line, j: 0, jt: [] };
-    r.j += g.count; r.jt.push((g.kind === 'dispatch' ? 'runtime dispatch' : g.kind === 'captured' ? 'boxed capture' : g.kind) +
-                              (g.sig ? ': ' + g.sig : '') + (g.mine ? '' : ' (inside ' + g.frames[g.frames.length - 1][2] + ')'));
-    by.set(g.line, r);
+    by.set(g.line, { line: g.line, j: g.count,
+      jt: [Object.entries(g.kinds).map(([k, n]) => kindName(k) + ' ×' + n).join(', '), ...g.sigs.slice(0, 6),
+           ...(g.lib ? [g.lib + ' more inside library calls (' + g.calls.join(', ') + ')'] : [])] });
   }
   return [...by.values()];
 }
@@ -1507,7 +1508,8 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
   border:1px solid color-mix(in srgb, #ffd27a 45%, transparent); background:color-mix(in srgb, #ffd27a 10%, transparent); cursor:default; }
 .pfjetadd { color:var(--dim); border-style:dashed; }
 .pfjetadd:hover { color:var(--text); }
-.pfjet { display:grid; grid-template-columns:92px minmax(0, 360px) minmax(0, 1fr); gap:10px; align-items:center;
+.pfjks { display:inline-flex; flex-wrap:wrap; gap:3px; }
+.pfjet { display:grid; grid-template-columns:130px minmax(0, 360px) minmax(0, 1fr); gap:10px; align-items:center;
   padding:3px 6px; border-radius:4px; cursor:pointer; }
 .pfjet:hover { background:color-mix(in srgb, #e8933a 10%, transparent); }
 .pfjk { justify-self:start; padding:0 7px; border-radius:9px; font-size:.68rem; color:#ffd27a;

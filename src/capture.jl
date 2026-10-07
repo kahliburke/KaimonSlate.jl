@@ -955,7 +955,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         # spans. Wrapped so ProgressLogging `@progress` records drive the cell meter instead of printing.
         _logger = _CellLogger(Logging.ConsoleLogger(_logio(capture)), _progress_sink(mod))
         Logging.with_logger(_logger) do
-            value = _profiled(() -> _eval_cell_source(mod, source, filename), cid)   # profile.jl: when armed
+            value = _profiled(() -> _eval_cell_source(mod, source, filename), cid; mod = mod)   # profile.jl: when armed
         end
     catch e
         err = e

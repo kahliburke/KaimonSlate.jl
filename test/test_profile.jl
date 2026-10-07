@@ -53,7 +53,14 @@ end
                     "sig" => "c = Core.Box()", "file" => "cell:ps1", "line" => 1),
                 Dict{String,Any}("kind" => "dispatch", "msg" => "runtime dispatch detected",
                     "sig" => "(%1::Any $(ProfNS).:+ 1)::Any", "file" => "cell:ps1", "line" => 3)])
-        RE._static_tidy!(fake, ProfNS, "cell:ps1", "a = 1\nc = 0\nf = () -> (c += 1)\n")
+        RE._static_tidy!(fake["findings"], ProfNS, "cell:ps1", "a = 1\nc = 0\nf = () -> (c += 1)\n")
+        # One finding per line, with what came from inside library calls counted there.
+        lines = RE._static_lines(Any[
+            Dict{String,Any}("kind" => "dispatch", "sig" => "a", "file" => "cell:x", "line" => 4, "func" => "f", "mine" => true, "call" => "f", "frames" => Any[]),
+            Dict{String,Any}("kind" => "dispatch", "sig" => "b", "file" => "cell:x", "line" => 4, "func" => "f", "mine" => false, "call" => "sum", "frames" => Any[]),
+            Dict{String,Any}("kind" => "captured", "sig" => "c", "file" => "cell:x", "line" => 2, "func" => "f", "mine" => true, "call" => "f", "frames" => Any[])])
+        @test [(g["line"], g["kind"], g["own"], g["lib"]) for g in lines] == [(2, "captured", 1, 0), (4, "dispatch", 1, 1)] &&
+              lines[2]["calls"] == ["sum"]
         @test fake["findings"][1]["line"] == 2 && fake["findings"][2]["sig"] == "(%1::Any :+ 1)::Any"
     end
 

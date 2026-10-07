@@ -77,7 +77,7 @@ function _prof_mark(line::Int)
 end
 
 # Called by `run_capture` around a cell's evaluation. Unarmed, it is the evaluation.
-function _profiled(f, cid::AbstractString)
+function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
     o = _profile_take(cid)
     o === nothing && return f()
     return lock(_PROF_LOCK) do
@@ -109,6 +109,7 @@ function _profiled(f, cid::AbstractString)
             r = o.mode == "alloc" ? _alloc_build(String(cid), task, fx; error = err, others = others) :
                                     _profile_build(String(cid), task, fx; error = err, others = others, marks = marks)
             merge!(r, traced)
+            _trace_keep!(r, mod)
             isempty(gpu) || (r["gpu"] = gpu)
             lock(_PROF_STATE_LOCK) do; _PROF_RESULT[String(cid)] = r; end
         end
@@ -223,6 +224,23 @@ end
 
 # A method of the profiler or the worker: its signature starts with its function's type.
 const _OWN_SIG = r"^Tuple\{(?:typeof\()?(?:Core\.)?(?:SlateWorker|ReportEngine|KaimonSlate|KaimonGate)\."
+
+# Tracing is process-wide, so the lists also hold what other work in the process compiled and
+# dispatched during the run (documentation lookups, serializing results). Kept: signatures whose
+# modules all appear in the cell's own profile, or are Base, Core or the notebook's.
+function _trace_keep!(r::Dict{String,Any}, mod)
+    haskey(r, "compiled") || return r
+    seen = Set{String}(String(x) for x in get(r, "strings", String[]))
+    union!(seen, ("Base", "Core", "Main"))
+    mod === nothing || union!(seen, split(string(mod), '.'))
+    ok(sig) = all(m -> m.captures[1] in seen, eachmatch(r"(?<![\w.])([A-Z][A-Za-z0-9_]*)\.", sig))
+    for (k, n) in (("compiled", "compiled_n"), ("dispatched", "dispatched_n"))
+        before = r[k]
+        r[k] = filter(x -> ok(String(x[1])), before)
+        r[n] = max(0, r[n] - (length(before) - length(r[k])))
+    end
+    return r
+end
 
 function _read_trace!(out::Dict{String,Any}, path::AbstractString)
     compiled = Dict{String,Vector{Float64}}(); dispatched = Dict{String,Int}()   # signature → [count, ms]
@@ -644,6 +662,11 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
         end
     end
     r, tree = _profile_result(a, cid, facts, kept; error, unit = "samples")
+    # Compile time from the cell's own samples: the process counter also counts what other work in
+    # the process compiled meanwhile.
+    cs = sum((t.total[i] for i in eachindex(t.kind) if t.kind[i] == _K_COMPILE); init = 0)
+    r["compile_ms"] = kept > 0 ? round(facts.ms * cs / kept; digits = 1) : 0.0
+    r["compile_ms_process"] = round(facts.compile_ms; digits = 1)
     r["dropped"] = dropped; r["threads"] = length(threads)
     r["buffer_full"] = try; Profile.is_buffer_full(); catch; false; end
     r["timeline"] = _timeline(tl_thread, tl_clock, tl_node, tree.map, facts.ms, facts.opts.delay_ms, cspan)
@@ -848,28 +871,8 @@ function profile_prepare!(mod::Module; cell::AbstractString, source::AbstractStr
         out["compile_ms"] = round((Base.cumulative_compile_time_ns()[1] - c0) / 1e6; digits = 1)
         Base.cumulative_compile_timing(false)
     end
-    if f !== nothing
-        st = _static_check(f, tt, "cell:" * String(cell))
-        _static_tidy!(st, mod, "cell:" * String(cell), String(source))
-        out["static"] = st
-    end
+    f === nothing || (out["static"] = _static_check(f, tt, "cell:" * String(cell); mod = mod, source = String(source)))
     return out
-end
-
-# Findings read in the cell's terms: without the notebook module's name in front of every function,
-# and a captured variable on the line that first assigns it (JET places it on the function's first).
-function _static_tidy!(st::Dict{String,Any}, mod::Module, cellfile::AbstractString, source::AbstractString)
-    pre = string(mod) * "."
-    lines = split(source, '\n')
-    for g in st["findings"]
-        g["sig"] = replace(replace(g["sig"], pre => ""), r"([^\s(),:]+)::typeof\(\1\)\(" => s"\1(")
-        g["kind"] == "captured" && g["file"] == cellfile || continue
-        m = match(r"`([^`]+)`", g["msg"]); m === nothing && continue
-        v = Regex("(?<![\\w.])" * replace(m.captures[1], r"([^\w])" => s"\\\1") * "\\s*[-+*/^]?=(?!=)")
-        k = findfirst(l -> occursin(v, l), lines)
-        k === nothing || (g["line"] = k)
-    end
-    return st
 end
 
 # ── the static check ────────────────────────────────────────────────────────────────────────────
@@ -892,14 +895,15 @@ const _JET_KIND = Dict("RuntimeDispatchReport" => "dispatch", "CapturedVariableR
 _mi_name(mi) = try; string(mi.def.name); catch; ""; end
 
 """
-    _static_check(f, tt, cellfile) -> Dict
+    _static_check(f, tt, cellfile; mod, source) -> Dict
 
-JET's `report_opt` of `f` at `tt`. A finding is placed at the innermost frame of its call chain in
-the reader's own code (this cell, another cell, a package being worked on), which is where a fix
-would go; `mine` says whether the problem is in that code itself or in a library it calls. The same
-finding reached along several paths is one entry with a count.
+JET's `report_opt` of `f` at `tt`, as one finding per line of the reader's own code (this cell,
+another cell, a package being worked on). Each report is placed at the innermost frame of its call
+chain in that code, which is where a fix would go. A report inside a library, reached from the
+line, is counted there as `lib` with the call it ends in: code that passes `Any` around makes many
+of those, and they are the line's consequence rather than separate problems.
 """
-function _static_check(f, tt, cellfile::AbstractString)
+function _static_check(f, tt, cellfile::AbstractString; mod::Union{Module,Nothing} = nothing, source::AbstractString = "")
     out = Dict{String,Any}("available" => false, "findings" => Any[], "n" => 0, "error" => nothing)
     J = _jet_module()
     J === nothing && (out["why"] = "JET is not in this notebook's environment"; return out)
@@ -907,7 +911,7 @@ function _static_check(f, tt, cellfile::AbstractString)
     t0 = time_ns()
     try
         reps = Base.invokelatest(J.get_reports, Base.invokelatest(J.report_opt, f, tt))
-        groups = Dict{Tuple{String,String,String,Int},Dict{String,Any}}()
+        raw = Dict{String,Any}[]
         for r in reps
             kind = get(_JET_KIND, string(nameof(typeof(r))), string(nameof(typeof(r))))
             msg = try; Base.invokelatest(sprint, J.print_report_message, r); catch; kind; end
@@ -919,22 +923,69 @@ function _static_check(f, tt, cellfile::AbstractString)
             frames = [(_ffile(fr), Int(fr.line), _mi_name(fr.linfo), _frame_pkg(fr, cellfile)) for fr in r.vst]
             isempty(frames) && continue
             k = something(findlast(x -> x[4] in ("cell", "notebook") || _user_pkg(x[4], x[1]), frames), 1)
-            at = frames[k]
-            g = get!(groups, (kind, sig, at[1], at[2])) do
-                Dict{String,Any}("kind" => kind, "msg" => msg, "sig" => sig, "file" => at[1], "line" => at[2],
-                                 "func" => at[3], "mine" => k == length(frames), "count" => 0,
-                                 "frames" => [[x[1], x[2], x[3], x[4]] for x in frames[1:min(end, 16)]])
-            end
-            g["count"] += 1
+            push!(raw, Dict{String,Any}("kind" => kind, "msg" => msg, "sig" => sig, "file" => frames[k][1],
+                                        "line" => frames[k][2], "func" => frames[k][3], "mine" => k == length(frames),
+                                        "call" => frames[end][3],
+                                        "frames" => [[x[1], x[2], x[3], x[4]] for x in frames[1:min(end, 16)]]))
         end
-        found = sort!(collect(values(groups)); by = g -> (!g["mine"], -g["count"], g["file"], g["line"]))
-        out["n"] = length(reps)
-        out["findings"] = found[1:min(end, 200)]
+        mod === nothing || _static_tidy!(raw, mod, cellfile, source)
+        out["n"] = length(raw)
+        out["findings"] = _static_lines(raw)
     catch e
         out["error"] = "JET could not check the cell: " * first(sprint(showerror, e), 300)
     end
     out["ms"] = round((time_ns() - t0) / 1e6; digits = 1)
     return out
+end
+
+# Reports in the cell's terms: without the notebook module's name in front of every function, and
+# a captured variable on the line that first assigns it (JET places it on the function's first).
+function _static_tidy!(raw::Vector, mod::Module, cellfile::AbstractString, source::AbstractString)
+    pre = string(mod) * "."
+    lines = split(source, '\n')
+    for g in raw
+        g["sig"] = replace(replace(g["sig"], pre => ""), r"([^\s(),:]+)::typeof\(\1\)\(" => s"\1(")
+        g["kind"] == "captured" && g["file"] == cellfile || continue
+        m = match(r"`([^`]+)`", g["msg"]); m === nothing && continue
+        v = Regex("(?<![\\w.])" * replace(m.captures[1], r"([^\w])" => s"\\\1") * "\\s*[-+*/^]?=(?!=)")
+        k = findfirst(l -> occursin(v, l), lines)
+        k === nothing || (g["line"] = k)
+    end
+    return raw
+end
+
+# One finding per line: what kinds were found there, the distinct signatures (the line's own first),
+# and how many more came from inside the library calls it makes.
+function _static_lines(raw::Vector)
+    by = Dict{Tuple{String,Int},Dict{String,Any}}()
+    for r in raw
+        g = get!(by, (r["file"], r["line"])) do
+            Dict{String,Any}("file" => r["file"], "line" => r["line"], "func" => r["func"], "kinds" => Dict{String,Int}(),
+                             "count" => 0, "own" => 0, "lib" => 0, "sigs" => String[], "libsigs" => String[],
+                             "calls" => String[], "frames" => r["frames"])
+        end
+        g["kinds"][r["kind"]] = get(g["kinds"], r["kind"], 0) + 1
+        g["count"] += 1
+        if r["mine"]
+            g["own"] += 1
+            r["sig"] in g["sigs"] || push!(g["sigs"], r["sig"])
+        else
+            g["lib"] += 1
+            r["sig"] in g["libsigs"] || push!(g["libsigs"], r["sig"])
+            r["call"] in g["calls"] || push!(g["calls"], r["call"])
+        end
+    end
+    out = collect(values(by))
+    for g in out
+        ks = g["kinds"]
+        g["kind"] = haskey(ks, "captured") ? "captured" : first(sort!(collect(keys(ks)); by = k -> -ks[k]))
+        g["mine"] = g["own"] > 0
+        g["sig"] = isempty(g["sigs"]) ? (isempty(g["libsigs"]) ? "" : g["libsigs"][1]) : g["sigs"][1]
+        g["sigs"] = g["sigs"][1:min(end, 12)]; g["libsigs"] = g["libsigs"][1:min(end, 12)]
+        g["calls"] = g["calls"][1:min(end, 8)]
+    end
+    sort!(out; by = g -> (!g["mine"], g["file"], g["line"]))
+    return out[1:min(end, 200)]
 end
 
 # ── source for drill-down ───────────────────────────────────────────────────────────────────────
