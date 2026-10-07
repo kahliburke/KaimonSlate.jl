@@ -608,7 +608,7 @@ function sizeCanvas(c, W, H) {
 function Flame() {
   const M = model.value, root = dview.value, vw = view.value;
   // Read here so a change redraws: the canvas reads them only while drawing.
-  void [sel.value, hover.value, hotLine.value, matches.value, fnSel.value, baseShare.value, unit.value];
+  void [sel.value, hover.value, hotLine.value, matches.value, fnSel.value, baseShare.value, unit.value, srcs.value];
   const box = useRef(null), cv = useRef(null), mini = useRef(null), tip = useRef(null), drawn = useRef([]), drag = useRef(null);
   const draw = useRef(null);
   if (M && root && (!_lay || _lay.root !== root)) _lay = layout(root);
@@ -629,13 +629,22 @@ function Flame() {
     }
   };
   useEffect(() => { draw.current && draw.current(); });
+  // Lines of other cells are labelled with their text, which the hub has.
+  useEffect(() => {
+    if (!M) return;
+    const files = new Set();
+    for (let i = 1; i < M.nodes.length; i++) { const f = M.nodes[i] && M.nodes[i].file; if (f && f.startsWith('cell:')) files.add(f); }
+    for (const f of files) if (!srcText(f)) loadSource(f);
+  }, [M]);
   useRedrawOnResize(box, draw, !!(M && root));
   useZoomPan(box, cv, view, { scrolls: _overflows });
   const stt = pf.value && pf.value.status;
   if (!M || !root) return html`<div class="pfflame pfempty">${
     stt === 'loading' ? html`<span class="hydspin"></span>`
     : stt === 'running' ? html`<span class="hydspin"></span> profiling`
-    : stt === 'preparing' ? html`<span class="hydspin"></span> compiling` : 'not profiled yet'}</div>`;
+    : stt === 'waiting' ? html`<span class="hydspin"></span> waiting to run`
+    : stt === 'preparing' ? html`<span class="hydspin"></span> compiling`
+    : html`<button class="pfbtn primary pfbig" onClick=${run}>▶ Run and profile</button>`}</div>`;
   const at = (ev) => {
     const c = cv.current; if (!c) return null;
     const b = c.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top, rs = drawn.current;
@@ -758,6 +767,8 @@ const timeline = computed(() => {
   for (const L of lanes) {
     L.y = y;
     if (L.n < most * 0.02) { L.depth = Math.min(L.depth, 4); L.rects = L.rects.filter(r => r.d < 4); }
+    L.rows = Array.from({ length: L.depth }, () => []);
+    for (const r of L.rects) L.rows[r.d].push(r);         // each row in time order
     y += L.depth * TL_ROW + TL_LANEGAP + 12;
   }
   return { lanes, end, height: y };
@@ -765,7 +776,7 @@ const timeline = computed(() => {
 
 function Timeline() {
   const M = model.value, TL = timeline.value;
-  void [sel.value, hover.value, matches.value, fnSel.value, baseShare.value, tview.value];
+  void [sel.value, hover.value, matches.value, fnSel.value, baseShare.value, tview.value, srcs.value];
   const box = useRef(null), cv = useRef(null), tip = useRef(null), drawn = useRef([]), drag = useRef(null), draw = useRef(null);
   draw.current = () => {
     const el = box.current, c = cv.current; if (!el || !c || !TL) return;
@@ -784,28 +795,51 @@ function Timeline() {
     const hv = hover.value, mt = matches.value, fsel = fnSel.value;
     for (const L of TL.lanes) {
       if (L.y > yOff + viewH || L.y + 12 + L.depth * TL_ROW < yOff) continue;    // off screen
-      g.fillStyle = 'rgba(200,205,225,.7)'; g.fillText('thread ' + L.thread + '  ·  ' + L.n + ' samples', 2, L.y);
-      for (const r of L.rects) {
-        const x = (r.t0 - t0) * kx, w = (r.t1 - r.t0) * kx;
-        if (x + w < 0 || x > W || w < 0.3) continue;
-        const cx = Math.max(0, x), cw = Math.min(W, x + w) - cx, y = L.y + 12 + r.d * TL_ROW;
-        const n = r.n, dim = mt && !mt.ids.has(n.id);
-        g.globalAlpha = dim ? 0.3 : 1;
-        g.fillStyle = diffColor(n, M) || colorOf(n, M);
-        if (cw > 4 && g.roundRect) { g.beginPath(); g.roundRect(cx, y, cw - 0.5, TL_ROW - 1, 2); g.fill(); }
-        else g.fillRect(cx, y, Math.max(0.5, cw - 0.5), TL_ROW - 1);
-        g.globalAlpha = 1;
-        if (n.id === sel.value || (hv && hv.n && hv.n.id === n.id) || (fsel && n.fk === fsel) || (mt && mt.ids.has(n.id))) {
-          g.strokeStyle = n.id === sel.value ? '#fff' : '#ff6fd8'; g.lineWidth = 1.5;
-          g.strokeRect(cx + 0.5, y + 0.5, Math.max(1, cw - 1), TL_ROW - 2);
+      g.fillStyle = 'rgba(200,205,225,.7)'; g.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      g.fillText('thread ' + L.thread + '  ·  ' + L.n.toLocaleString() + ' samples', 2, L.y);
+      L.rows.forEach((row, d) => {
+        const y = L.y + 12 + d * TL_ROW;
+        // Bars too narrow to see are gathered with their neighbours into one, drawn in the colour of
+        // what took most of it: zoomed out, a row that switches between functions every few samples
+        // reads as a band, and zooming in takes it apart.
+        let run = null;
+        const flush = () => {
+          if (!run) return;
+          let n = null, best = -1;
+          for (const [k, v] of run.cover) if (v > best) { best = v; n = k; }
+          const cw = run.x1 - run.x0, mixed = run.cover.size > 1;
+          const hit = (k) => k.id === sel.value || (hv && hv.n && hv.n.id === k.id) || (fsel && k.fk === fsel) || (mt && mt.ids.has(k.id));
+          g.globalAlpha = (mt && ![...run.cover.keys()].some(k => mt.ids.has(k.id)) ? 0.3 : 1) * (mixed ? 0.82 : 1);
+          g.fillStyle = diffColor(n, M) || colorOf(n, M);
+          if (cw > 4 && g.roundRect) { g.beginPath(); g.roundRect(run.x0, y, cw - 0.5, TL_ROW - 1, 2); g.fill(); }
+          else g.fillRect(run.x0, y, Math.max(0.5, cw - 0.5), TL_ROW - 1);
+          g.globalAlpha = 1;
+          if (hit(n) || (mixed && [...run.cover.keys()].some(hit))) {
+            g.strokeStyle = n.id === sel.value ? '#fff' : '#ff6fd8'; g.lineWidth = 1.5;
+            g.strokeRect(run.x0 + 0.5, y + 0.5, Math.max(1, cw - 1), TL_ROW - 2);
+          }
+          if (cw > 40 && !mixed) {
+            g.fillStyle = '#f4f5fb'; g.textBaseline = 'middle';
+            g.fillText(fit(g, n.kind === K.line ? (n.func === 'top-level scope' ? n.line + '  ' + cellLine(n.file, n.line) : n.func + ':' + n.line) : n.func, cw - 6), run.x0 + 3, y + TL_ROW / 2);
+            g.textBaseline = 'top';
+          }
+          out.push({ x: run.x0, w: cw, y: y - yOff, h: TL_ROW, n, t0: run.t0, t1: run.t1, mixed: mixed ? run.cover.size : 0 });
+          run = null;
+        };
+        for (const r of row) {
+          const x = (r.t0 - t0) * kx, w = (r.t1 - r.t0) * kx;
+          if (x + w < 0 || x > W) continue;
+          const cx = Math.max(0, x), ce = Math.min(W, x + w);
+          if (run && cx <= run.x1 + 1 && (ce - cx < 2 || run.x1 - run.x0 < 2 || (run.cover.has(r.n) && run.cover.size === 1))) {
+            run.x1 = Math.max(run.x1, ce); run.t1 = Math.max(run.t1, r.t1);
+            run.cover.set(r.n, (run.cover.get(r.n) || 0) + (ce - cx));
+          } else {
+            flush();
+            run = { x0: cx, x1: ce, t0: r.t0, t1: r.t1, cover: new Map([[r.n, ce - cx]]) };
+          }
         }
-        if (cw > 40) {
-          g.fillStyle = '#f4f5fb'; g.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace'; g.textBaseline = 'middle';
-          g.fillText(fit(g, n.kind === K.line ? (n.func === 'top-level scope' ? n.line + '  ' + cellLine(n.file, n.line) : n.func + ':' + n.line) : n.func, cw - 6), cx + 3, y + TL_ROW / 2);
-          g.textBaseline = 'top';
-        }
-        out.push({ x: cx, w: cw, y: y - yOff, h: TL_ROW, n, t0: r.t0, t1: r.t1 });
-      }
+        flush();
+      });
     }
     g0.restore();
     drawn.current = out;
@@ -827,7 +861,8 @@ function Timeline() {
     hover.value = r ? { n: r.n } : null;
     if (!t) return;
     if (!r) { t.style.display = 'none'; return; }
-    t.innerHTML = tipHtml({ n: r.n, total: r.n.total, self: r.n.self, d: r.n.d, g: r.n.g, c: r.n.c, folded: false }, false, M);
+    t.innerHTML = tipHtml({ n: r.n, total: r.n.total, self: r.n.self, d: r.n.d, g: r.n.g, c: r.n.c, folded: false }, false, M) +
+      (r.mixed ? '<div class="pftw">and ' + (r.mixed - 1) + ' more here; double-click to open</div>' : '');
     placeTip(t, ev, box.current);
   };
   const band = useRef(null);
@@ -860,7 +895,9 @@ function Functions() {
   if (!M || !fs) return html`<div class="pfflame pfempty">not profiled yet</div>`;
   const q = query.value.trim().toLowerCase();
   const rows = (q ? fs.filter(f => f.func.toLowerCase().includes(q) || f.file.toLowerCase().includes(q)) : fs).slice(0, 300);
-  const R = fnSel.value ? relatives(fnSel.value) : null;
+  // Nothing picked: the heaviest by its own time, so the callers and callees always show something.
+  const pickedFk = fnSel.value || (rows[0] && rows[0].fk) || '';
+  const R = pickedFk ? relatives(pickedFk) : null;
   const pick = (f) => { fnSel.value = f.fk; if (f.kind === K.line) showCode(f.file, f.line); };
   const bar = (v) => html`<span class="pfbar"><i style=${'width:' + Math.max(1, Math.round(100 * v / M.total)) + '%'}></i></span>`;
   const rel = (title, list) => html`<div class="pfrel"><div class="pfrelhead">${title}</div>
@@ -870,9 +907,9 @@ function Functions() {
       : html`<div class="pfdim pfrelrow">none</div>`}</div>`;
   return html`<div class="pffuncs" style=${'grid-template-rows:minmax(0,1fr) 0 minmax(0,' + pctOf('sandwich') + ')'}>
     <div class="pftable">
-      <div class="pfthead"><span>self</span><span>total</span><span>function</span><span>file</span><span></span></div>
-      ${rows.map(f => html`<div class=${'pftrow' + (fnSel.value === f.fk ? ' on' : '')} onClick=${() => pick(f)}>
-        <span class="pfnum">${fmt(f.self, M)}</span><span class="pfnum dim">${fmt(f.total, M)}</span>
+      <div class="pfthead"><span class="pfnum">self</span><span></span><span class="pfnum">total</span><span>function</span><span>file</span><span></span></div>
+      ${rows.map(f => html`<div class=${'pftrow' + (pickedFk === f.fk ? ' on' : '')} onClick=${() => pick(f)}>
+        <span class="pfnum">${fmt(f.self, M)}</span>${bar(f.self)}<span class="pfnum dim">${fmt(f.total, M)}</span>
         <span class="pffn">${fnName(f)}</span><span class="pfdim pffile">${f.kind === K.line ? shortFile(f.file) : ''}</span>
         <span class="pfmk">${f.d ? '⤳' : ''}${f.c ? '⚙' : ''}${f.g ? '♻' : ''}</span></div>`)}
     </div>
@@ -881,7 +918,7 @@ function Functions() {
       ${rel('called from', R.callers)}
       <div class="pfrelmid"><b>${fnName(R.f)}</b> <span class="pfdim">${fmt(R.f.total, M)} total · ${fmt(R.f.self, M)} self</span></div>
       ${rel('calls', R.callees)}
-    </div>` : html`<div class="pfsandwich pfempty">select a function to see what calls it and what it calls</div>`}
+    </div>` : html`<div class="pfsandwich"></div>`}
   </div>`;
 }
 
@@ -895,10 +932,19 @@ function Details() {
     return html`<div class="pfdet"><div class="pfrelhead">${title}</div>
     ${rows && rows.length ? html`<div class="pfdetrow pfdethead" style=${cols}>${head.map(h => html`<span>${h}</span>`)}</div>
       ${rows.map(r => html`<div class="pfdetrow" style=${cols}>${r.map((c, i) => html`<span class=${i === r.length - 1 ? 'pfsig' : 'pfnum'} title=${i === r.length - 1 ? c : null}>${c}</span>`)}</div>`)}`
-      : html`<div class="pfdim pfdetrow">${empty}</div>`}</div>`;
+      : html`<div class="pfdim">${empty}</div>`}</div>`;
   };
-  const g = P.gpu;
+  const g = P.gpu, dr = P.dropped ? Object.entries(P.dropped).filter(([, v]) => v > 0) : [];
+  const facts = [['mode', P.mode || 'cpu'], ['ran', ms(P.duration_ms)],
+    P.unit === 'bytes' ? ['recorded', (P.allocs || 0).toLocaleString() + ' allocations, ' + pct(P.alloc_rate) + ' of them']
+                       : ['sampled', Number(P.samples).toLocaleString() + ' samples, every ' + ms(P.delay_ms) + (P.threads > 1 ? ', on ' + P.threads + ' threads' : '')],
+    ['compiling', ms(P.compile_ms) || '0 ms'], ['GC', ms(P.gc_ms) || '0 ms'],
+    ...(dr.length ? [['left out', dr.map(([k, v]) => v.toLocaleString() + ' ' + k).join(', ')]] : []),
+    ...(P.buffer_full ? [['buffer', 'full: the end of the run is missing']] : []),
+    ...(P.error ? [['threw', String(P.error).split('\n')[0]]] : [])];
   return html`<div class="pfdetails">
+    <div class="pfdet"><div class="pfrelhead">The run</div>
+      ${facts.map(([k, v]) => html`<div class="pfdetkv"><span>${k}</span><span>${v}</span></div>`)}</div>
     ${P.types ? tbl('Allocated, by type (scaled from the ' + pct(P.alloc_rate) + ' recorded)', ['bytes', 'count', 'type'],
                     P.types.map(([t, c, b]) => [bytes(b), c.toLocaleString(), t]), 'nothing recorded') : null}
     ${g ? tbl('On the GPU' + (g.device_ms ? ' · ' + ms(g.device_ms) + ' of device time' : ''), ['time', 'calls', 'kernel or copy'],
@@ -1010,19 +1056,22 @@ function Facts() {
   const dr = pr && pr.dropped ? Object.entries(pr.dropped).filter(([k, v]) => v > 0 && k !== 'idle') : [];
   const left = dr.reduce((t, [, v]) => t + v, 0);
   if (!pp && !pr) return null;
+  const fig = (v, label, cls = '', title = null) => html`<span class=${'pffig ' + cls} title=${title}><b>${v}</b><i>${label}</i></span>`;
+  const share = (x) => pr && pr.duration_ms > 0 ? ' · ' + pct(x / pr.duration_ms) : '';
   return html`<div class="pffacts">
-    ${pp ? (pp.ok ? html`<span class="pfprep">compiled ${ms(pp.compile_ms)}</span>`
-                  : html`<span class="pfwarn" title=${pp.error}>${String(pp.error).split('\n')[0]}</span>`) : null}
     ${pr ? html`
       <span class="pfmode">${pr.mode || 'cpu'}</span>
-      <span>${ms(pr.duration_ms)}${B ? html` <span class="pfdim">(was ${ms(B.duration_ms)})</span>` : null}</span>
-      ${pr.unit === 'bytes' ? html`<span title=${(pr.allocs || 0).toLocaleString() + ' recorded, ' + pct(pr.alloc_rate) + ' of them'}>≈ ${bytes(pr.samples / (pr.alloc_rate || 1))} allocated</span>`
-        : html`<span>${pr.samples} samples</span>${pr.threads > 1 ? html`<span>${pr.threads} threads</span>` : null}`}
-      ${pr.compile_ms > 0.5 ? html`<span class="c">⚙ ${ms(pr.compile_ms)}</span>` : null}
-      ${pr.gc_ms > 0.5 ? html`<span class="g">♻ ${ms(pr.gc_ms)}</span>` : null}
-      ${left ? html`<span class="pfdim" title=${dr.map(([k, v]) => v + ' ' + k).join(', ')}>left out ${left}</span>` : null}
+      ${fig(ms(pr.duration_ms), B ? 'run · was ' + ms(B.duration_ms) : 'run')}
+      ${pr.unit === 'bytes' ? fig('≈ ' + bytes(pr.samples / (pr.alloc_rate || 1)), 'allocated', '', (pr.allocs || 0).toLocaleString() + ' recorded, ' + pct(pr.alloc_rate) + ' of them')
+        : html`${fig(Number(pr.samples).toLocaleString(), 'samples')}${pr.threads > 1 ? fig(pr.threads, 'threads') : null}`}
+      ${pr.compile_ms > 0.5 ? fig(ms(pr.compile_ms), 'compiling' + share(pr.compile_ms), 'c') : null}
+      ${pr.gc_ms > 0.5 ? fig(ms(pr.gc_ms), 'GC' + share(pr.gc_ms), 'g') : null}
+      ${left ? fig(left.toLocaleString(), 'left out', 'dim', dr.map(([k, v]) => v + ' ' + k).join(', ')) : null}
       ${pr.buffer_full ? html`<span class="pfwarn" title="the end of the run is missing: profile again with a larger buffer or a longer interval">buffer full</span>` : null}
       ${pr.error ? html`<span class="pfwarn" title=${pr.error}>threw ${String(pr.error).split('\n')[0]}</span>` : null}` : null}
+    <span class="pfsp"></span>
+    ${pp ? (pp.ok ? fig(ms(pp.compile_ms), 'to compile ahead', 'dim')
+                  : html`<span class="pfwarn" title=${pp.error}>${String(pp.error).split('\n')[0]}</span>`) : null}
   </div>`;
 }
 
@@ -1276,13 +1325,18 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pfhist { display:inline-flex; gap:4px; }
 .pfhist select { font:inherit; font-size:.72rem; max-width:220px; padding:3px 5px; border-radius:5px; background:var(--bg3);
   color:var(--text); border:1px solid var(--border); }
-.pffacts { padding:6px 12px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.76rem;
-  display:flex; flex-wrap:wrap; align-items:center; gap:14px; color:var(--text); white-space:nowrap; }
+.pffacts { padding:7px 14px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.76rem;
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 20px; color:var(--text); white-space:nowrap; }
+.pffig { display:inline-flex; align-items:baseline; gap:5px; }
+.pffig b { font-size:.92rem; font-weight:600; font-variant-numeric:tabular-nums; }
+.pffig i { font-style:normal; color:var(--dim); font-size:.72rem; }
+.pffig.dim b { color:var(--dim); font-weight:500; }
 .pffacts .pfwarn { overflow:hidden; text-overflow:ellipsis; max-width:60ch; }
 .pfprep { color:var(--dim); }
-.pfmode { color:#e8933a; }
-.pffacts .c { color:#b9a3f5; }
-.pffacts .g { color:#f08a92; }
+.pfmode { color:#e8933a; align-self:center; padding:1px 8px; border-radius:10px; font-size:.68rem; text-transform:uppercase; letter-spacing:.06em;
+  border:1px solid color-mix(in srgb, #e8933a 50%, transparent); background:color-mix(in srgb, #e8933a 14%, transparent); }
+.pffacts .c b { color:#b9a3f5; }
+.pffacts .g b { color:#f08a92; }
 .pfbar2 { display:flex; align-items:center; gap:10px; padding:5px 12px; border-bottom:1px solid var(--border); font-size:.74rem; }
 .pftabs { display:inline-flex; gap:2px; }
 .pftabs button { font:inherit; font-size:.76rem; padding:3px 10px; border:1px solid transparent; border-radius:6px;
@@ -1333,6 +1387,7 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfflame:active canvas { cursor:grabbing; }
 .pfrange { display:none; position:absolute; z-index:2; pointer-events:none; background:color-mix(in srgb, #e8933a 16%, transparent);
   border-left:1px solid #e8933a; border-right:1px solid #e8933a; }
+.pfbtn.pfbig { font-size:.86rem; padding:8px 20px; }
 .pfempty { display:flex; align-items:center; justify-content:center; gap:8px; color:var(--dim); font-size:.82rem; }
 .pftip { display:none; position:absolute; z-index:2; max-width:250px; pointer-events:none; padding:6px 8px;
   border-radius:6px; background:var(--bg2); border:1px solid var(--border); box-shadow:0 6px 20px rgba(0,0,0,.4);
@@ -1342,6 +1397,7 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pftm { color:#ffd27a; }
 .pfhot { flex:0 0 28%; min-height:0; overflow:auto; border-top:1px solid var(--border); font-size:.74rem; }
 .pfhothead, .pfhotrow { display:grid; grid-template-columns:56px 90px 56px minmax(0,1fr); gap:8px; align-items:center; padding:3px 12px; }
+.pfhothead > span:nth-child(1), .pfhothead > span:nth-child(3), .pfhothead.cmp > span:nth-child(4) { text-align:right; }
 .pfhothead.cmp, .pfhotrow.cmp { grid-template-columns:56px 90px 56px 56px minmax(0,1fr); }
 .pfhothead { color:var(--dim); font-size:.66rem; text-transform:uppercase; letter-spacing:.05em; position:sticky; top:0; z-index:1;
   background:var(--bg); border-bottom:1px solid color-mix(in srgb, var(--border) 60%, transparent); padding-top:5px; padding-bottom:4px; }
@@ -1356,9 +1412,11 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfmk { color:#ffd27a; }
 .pffuncs { flex:1 1 auto; min-height:0; display:grid; }
 .pftable { overflow:auto; font-size:.74rem; }
-.pfthead, .pftrow { display:grid; grid-template-columns:64px 64px minmax(0, 1.3fr) minmax(0, 1fr) 44px; gap:8px; padding:3px 10px; }
-.pfthead { color:var(--dim); font-size:.68rem; position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--border); }
-.pftrow { cursor:pointer; }
+.pfthead, .pftrow { display:grid; grid-template-columns:56px 80px 56px minmax(0, 1.3fr) minmax(0, 1fr) 44px; gap:8px; align-items:center; padding:3px 12px; }
+.pfthead { color:var(--dim); font-size:.66rem; text-transform:uppercase; letter-spacing:.05em; position:sticky; top:0; z-index:1;
+  background:var(--bg); border-bottom:1px solid var(--border); padding-top:5px; padding-bottom:4px; }
+.pftrow { cursor:pointer; border-radius:4px; margin:0 4px; }
+.pftrow .pfbar { width:100%; }
 .pftrow:hover { background:color-mix(in srgb, #e8933a 10%, transparent); }
 .pftrow.on { background:color-mix(in srgb, #ff6fd8 14%, transparent); }
 .pffn { font-family:var(--mono,ui-monospace,monospace); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -1368,12 +1426,16 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfrelhead { color:var(--dim); font-size:.68rem; text-transform:uppercase; letter-spacing:.04em; margin-bottom:3px; }
 .pfrelrow { display:grid; grid-template-columns:56px 60px minmax(0,1fr) auto; gap:6px; align-items:center; padding:2px 0; cursor:pointer; }
 .pfrelrow:hover .pffn { color:#ff6fd8; }
-.pfrelmid { align-self:center; text-align:center; font-family:var(--mono,ui-monospace,monospace); }
+.pfrelmid { align-self:start; margin-top:18px; padding:8px 14px; text-align:center; font-family:var(--mono,ui-monospace,monospace);
+  border:1px solid color-mix(in srgb, #ff6fd8 40%, var(--border)); border-radius:8px; background:color-mix(in srgb, #ff6fd8 8%, var(--bg2)); }
 .pfrelmid .pfdim { display:block; }
 .pfbar { display:inline-block; height:6px; background:color-mix(in srgb, var(--bg3) 70%, transparent); border-radius:3px; overflow:hidden; }
 .pfbar i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg, #c8742a, #f0a54a); }
 .pfdetails { flex:1 1 auto; overflow:auto; padding:8px 10px; display:flex; flex-direction:column; gap:14px; font-size:.74rem; }
 .pfdetrow { display:grid; grid-template-columns:80px 80px minmax(0,1fr); gap:8px; padding:2px 0; }
+.pfdetkv { display:grid; grid-template-columns:90px minmax(0,1fr); gap:8px; padding:2px 0; }
+.pfdetkv > span:first-child { color:var(--dim); }
+.pfdet { max-width:1100px; }
 .pfdethead { color:var(--dim); font-size:.68rem; }
 .pfsig { font-family:var(--mono,ui-monospace,monospace); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pfspec { position:relative; }
