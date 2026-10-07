@@ -821,6 +821,10 @@ end
                 r = only(NS._runs_since("runlog", "gpu", 0))
                 @test (r.id, round(r.t1 - r.t0; digits = 3), r.err) == ("q", 0.25, false)
                 @test isempty(NS._runs_since("runlog", "gpu", r.t1)) && isempty(NS._runs_since("runlog", "local", 0))
+                # A profiled run names its profile, which the telemetry timeline opens.
+                NS._run_log!(nb, "local", c; profile = "1700000000000")
+                @test NS._run_json(only(NS._runs_since("runlog", "local", 0)))["profile"] == "1700000000000" &&
+                      NS._run_json(r)["profile"] == ""
             end
 
             @testset "a kernel whose session was lost waits on that session" begin

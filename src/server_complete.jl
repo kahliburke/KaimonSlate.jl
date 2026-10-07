@@ -823,7 +823,7 @@ function _side_telemetry(h::Hub, nbid::AbstractString, side::AbstractString, sin
     return Dict("ok" => true, "connected" => conn !== nothing, "port" => k.port,
                 "host" => k.target isa ReportEngine.RemoteTarget ? k.target.ssh_host : "local",
                 "samples" => [_sample_full(s) for s in hist if s.rcv > since],
-                "runs" => [Dict("id" => r.id, "t0" => r.t0, "t1" => r.t1, "memo" => r.memo, "err" => r.err) for r in runs])
+                "runs" => [_run_json(r) for r in runs])
 end
 
 # A notebook and its worker for `side` ("" the main kernel); `nothing` for whichever is not there.
@@ -1987,8 +1987,7 @@ function _make_router(h::Hub)
         # samples after hub time `t`, so the open view adds what is new instead of refetching an hour.
         if get(q, "full", "") == "1"
             since = something(tryparse(Float64, String(get(q, "since", ""))), -Inf)
-            runs = [Dict("id" => r.id, "t0" => r.t0, "t1" => r.t1, "memo" => r.memo, "err" => r.err)
-                    for r in _worker_runs(h, host, port, since)]
+            runs = [_run_json(r) for r in _worker_runs(h, host, port, since)]
             return _json(_json_finite(Dict("ok" => true, "host" => host, "port" => port,
                                            "samples" => [_sample_full(s) for s in hist if s.rcv > since],
                                            "runs" => runs)))

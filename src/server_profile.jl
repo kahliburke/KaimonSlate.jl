@@ -93,14 +93,15 @@ function _collect_requested_profile!(nb::LiveNotebook, cell, kernel, side::Abstr
         try; ReportEngine.profile_disarm!(kernel, nb.report; cell = String(cell.id)); catch; end
         why = r === nothing ? "the run did not reach the cell's code (restored, or held)" : String(r["error"])
         _profile_fail(nb, cell.id, side, why)
-        return nothing
+        return ""
     end
     payload = Dict{String,Any}("kind" => "result", "cell" => String(cell.id), "side" => String(side),
                                "source" => String(src), "profile" => r, "hub_at" => time())
     lock(_PROF_HUB_LOCK) do; _PROF_LAST[(nb.id, String(cell.id))] = payload; end
-    try; _profile_save!(nb, cell.id, payload); catch e; @warn "slate: could not keep a profile" cell = cell.id exception = e; end
+    id = try; _profile_save!(nb, cell.id, payload); catch e; @warn "slate: could not keep a profile" cell = cell.id exception = e; ""; end
+    payload["id"] = id
     _broadcast_profile(nb, payload)
-    return payload
+    return id
 end
 
 """

@@ -254,14 +254,18 @@ async function loadHistory(cell) {
     if (pf.value && pf.value.cell === cell) hist.value = (r && r.profiles) || [];
   } catch (_) {}
 }
-export async function openProfile(cellId) {
+// `kept`: a kept profile's id, to show that one rather than the latest (a run on the telemetry timeline).
+export async function openProfile(cellId, kept = '') {
   pf.value = { cell: cellId, side: '', status: 'loading', prepared: null, profile: null, source: cellSource(cellId), error: null };
   hist.value = []; base.value = null; query.value = '';
   resetView(cellId);
   loadHistory(cellId);
   try {
-    const r = await A('GET', '/api/profile/last?cell=' + encodeURIComponent(cellId));
-    if (r && r.kind === 'result') apply(r);
+    if (kept) await showKept(kept);
+    else {
+      const r = await A('GET', '/api/profile/last?cell=' + encodeURIComponent(cellId));
+      if (r && r.kind === 'result') apply(r);
+    }
   } catch (_) {}
   if (pf.value && pf.value.cell === cellId && pf.value.status === 'loading') pf.value = { ...pf.value, status: 'idle' };
 }
@@ -311,7 +315,7 @@ function apply(p) {
   pf.value = next;
 }
 window.onProfilePush = (p) => apply(p);
-window.slateProfileCell = (id) => openProfile(id);
+window.slateProfileCell = (id, kept) => openProfile(id, kept || '');
 window.slateProfileOpen = () => !!pf.value;
 
 // ── zooming a span ────────────────────────────────────────────────────────────────────────────────

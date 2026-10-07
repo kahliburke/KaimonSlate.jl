@@ -147,7 +147,7 @@ function cellSpans(s, done) {
   const from = s[0].t, last = s[s.length - 1];
   // Clipped to the window: a run that began before the first sample starts at the axis, not past it.
   const spans = done.filter(r => r.t1 >= from)
-    .map(r => ({ id: r.id, a: Math.max(r.t0, from) * 1000, b: r.t1 * 1000,
+    .map(r => ({ id: r.id, a: Math.max(r.t0, from) * 1000, b: r.t1 * 1000, profile: r.profile || '',
                  kind: r.err ? 'err' : r.memo === 'restored' ? 'restored' : 'ran' }));
   for (const id of last.running || []) {
     let i = s.length - 1;
@@ -157,6 +157,7 @@ function cellSpans(s, done) {
   return spans;
 }
 const SPAN_COLOR = { ran: '#569cd6', running: '#56d364', restored: '#9d8fd6', err: '#e5636e' };
+const PROFILED = '#e8933a';   // the profiler's colour, on a run that was profiled
 
 // The worker's collections. Each one as it happened where the worker reports them (`gc`: [end, pause
 // ms, full, live bytes after]); otherwise the intervals between samples in which it collected, from
@@ -363,6 +364,12 @@ function Telemetry() {
       .map(([k, l]) => [SPAN_COLOR[k], l]), [GC_COLOR, 'GC'], [GC_FULL, 'full GC']]
     .map(([c, l]) => html`<span><i style=${'background:' + c}></i>${l}</span>`)}</span>`;
   // A run clicked here brings its cell into view in the notebook behind, so it is there on closing.
+  // A profiled run opens its own profile, in place of this view.
+  const openRunProfile = (id, prof) => {
+    if (v.nb !== (window.__slateState || {}).id || typeof window.slateProfileCell !== 'function') return reveal(id);
+    close();
+    window.slateProfileCell(id, prof);
+  };
   const reveal = (id) => {
     const el = document.getElementById('cell-' + id);
     if (!el || v.nb !== (window.__slateState || {}).id) return;
@@ -387,7 +394,7 @@ function Telemetry() {
     return r && { type: 'rect', shape: Object.assign(r, { r: 3 }), style: api.style() };
   };
   const running = lanes.length ? html`<${Chart} height=${Math.min(136, 30 + 16 * lanes.length)}
-      onClick=${(p) => p && p.data && p.data.value && reveal(p.data.value[3])} option=${{
+      onClick=${(p) => p && p.data && p.data.value && (p.data.value[5] ? openRunProfile(p.data.value[3], p.data.value[5]) : reveal(p.data.value[3]))} option=${{
       animation: false, grid: { left: 90, right: 16, top: 6, bottom: 20 }, xAxis: AXIS,
       yAxis: { type: 'category', data: lanes, axisLabel: { width: 80, overflow: 'truncate' } },
       tooltip: { formatter: (p) => {
@@ -398,12 +405,15 @@ function Telemetry() {
           return 'GC · ' + g.n + (g.n > 1 ? ' pauses' : ' pause') + (g.full ? ' · ' + g.full + ' full' : '') +
                  ' · ' + window.slateDuration(g.t);
         }
-        const [, a, b, id, kind] = p.data.value, d = b - a;
+        const [, a, b, id, kind, prof] = p.data.value, d = b - a;
         return id + ' · ' + window.slateDuration(d) +
-               ' · ' + ({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })[kind];
+               ' · ' + ({ ran: 'ran', running: 'running', restored: 'restored', err: 'failed' })[kind] +
+               (prof ? ' · profiled' : '');
       } },
       series: [{ id: 'runs', type: 'custom', encode: { x: [1, 2], y: 0 }, cursor: 'pointer', renderItem: bar,
-        data: spans.map(x => ({ value: [ids.indexOf(x.id), x.a, x.b, x.id, x.kind], itemStyle: { color: SPAN_COLOR[x.kind] } })) },
+        data: spans.map(x => ({ value: [ids.indexOf(x.id), x.a, x.b, x.id, x.kind, x.profile],
+                                itemStyle: x.profile ? { color: SPAN_COLOR[x.kind], borderColor: PROFILED, borderWidth: 2 }
+                                                     : { color: SPAN_COLOR[x.kind] } })) },
         gcs.length ? { id: 'gc', type: 'custom', encode: { x: [1, 2], y: 0 }, cursor: 'default', renderItem: bar,
           data: gcs.map(g => ({ value: [ids.length, g.a, g.b],
                                 itemStyle: { color: g.full ? GC_FULL : GC_COLOR, opacity: gcOpacity(g) } })) } : null

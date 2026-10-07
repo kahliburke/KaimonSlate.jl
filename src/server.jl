@@ -1086,11 +1086,12 @@ const _RUN_LOG = Dict{Tuple{String,String},Vector{Any}}()
 const _RUN_LOG_LOCK = ReentrantLock()
 const _RUN_LOG_MAX = 2000
 
-function _run_log!(nb::LiveNotebook, side::AbstractString, cell)
+# `profile`: the id of the profile taken of this run (server_profile.jl), "" for an ordinary run.
+function _run_log!(nb::LiveNotebook, side::AbstractString, cell; profile::AbstractString = "")
     out = cell.output; out === nothing && return nothing
     t1 = time()
     r = (id = String(cell.id), t0 = t1 - out.duration_ms / 1000, t1 = t1, memo = String(out.memo),
-         err = out.exception !== nothing)
+         err = out.exception !== nothing, profile = String(profile))
     lock(_RUN_LOG_LOCK) do
         v = get!(Vector{Any}, _RUN_LOG, (nb.id, String(side)))
         push!(v, r)
@@ -1098,6 +1099,8 @@ function _run_log!(nb::LiveNotebook, side::AbstractString, cell)
     end
     return nothing
 end
+
+_run_json(r) = Dict("id" => r.id, "t0" => r.t0, "t1" => r.t1, "memo" => r.memo, "err" => r.err, "profile" => r.profile)
 
 # The runs on one kernel side that ended after `since`.
 _runs_since(nbid::AbstractString, side::AbstractString, since::Real) = lock(_RUN_LOG_LOCK) do
@@ -4616,7 +4619,7 @@ function _eval_one_run!(nb::LiveNotebook, cell::Cell)
         ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[],
                                 "", sprint(showerror, e), nothing, 0.0)
     end
-    armed === nothing || _collect_requested_profile!(nb, cell, kernel, side, armed)
+    profiled = armed === nothing ? "" : _collect_requested_profile!(nb, cell, kernel, side, armed)
     # Namespace parity: a pure `using`/`import` cell runs on EVERY active side when a region is
     # in play — region cells need the same modules loaded. Mirrors run on main + each region any
     # cell references, except the side that just ran. Results discarded (the main run's output
@@ -4659,7 +4662,7 @@ function _eval_one_run!(nb::LiveNotebook, cell::Cell)
         c.binds = out.binds
         _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
-        _run_log!(nb, isempty(side) ? "local" : side, c)   # the side as `_kernel_side_label` names it
+        _run_log!(nb, isempty(side) ? "local" : side, c; profile = profiled)   # the side as `_kernel_side_label` names it
         _broadcast_progress(nb, c)
         # A successful `locked` run freezes ON this key: persist it (surviving a restart — the `.jl`
         # footer round-trips `c.flags`) and swap the durable-store pin, outside the lock (a gate RPC —
