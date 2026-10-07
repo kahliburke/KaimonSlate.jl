@@ -255,8 +255,12 @@ end
             end))
         g = Dict{String,Any}()
         RE._CUPTI_NAMES[] = nothing
-        @test RE._with_cupti(() -> 42, g, RE._cupti_prepare(fake), time_ns()) == 42 && g["source"] == "cupti" && isempty(g["kernels"])
-        @test_throws ErrorException("boom") RE._with_cupti(() -> error("boom"), Dict{String,Any}(), RE._cupti_prepare(fake), time_ns())
+        @test RE._with_cupti(() -> 42, g, RE._cupti_prepare(fake), time_ns()) == 42 && !haskey(g, "source")
+        @test RE._cupti_finish!(g)["source"] == "cupti" && isempty(g["kernels"]) && !haskey(g, "__finish")
+        # A cell that throws keeps its own error, and what it did on the GPU is still summarised.
+        gt = Dict{String,Any}()
+        @test_throws ErrorException("boom") RE._with_cupti(() -> error("boom"), gt, RE._cupti_prepare(fake), time_ns())
+        @test RE._cupti_finish!(gt)["source"] == "cupti"
         RE._CUPTI_NAMES[] = nothing
     end
 

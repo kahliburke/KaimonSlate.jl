@@ -95,6 +95,7 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
         cupti = o.mode == "gpu" ? _cupti_prepare(_cuda_module()) : nothing
         gpu = Dict{String,Any}()
         saved = _profile_settings()
+        o.mode == "alloc" || _warm_sampler!(o, cupti)
         Base.cumulative_compile_timing(true)
         c0 = Base.cumulative_compile_time_ns()[1]; g0 = Base.gc_num().total_time; t0 = time_ns(); cy0 = _cycles()
         task = UInt(pointer_from_objref(current_task()))
@@ -112,7 +113,7 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
                                     _profile_build(String(cid), task, fx; error = err, others = others, marks = marks)
             merge!(r, traced)
             _trace_keep!(r, mod)
-            isempty(gpu) || (r["gpu"] = gpu)
+            isempty(_cupti_finish!(gpu)) || (r["gpu"] = gpu)
             lock(_PROF_STATE_LOCK) do; _PROF_RESULT[String(cid)] = r; end
         end
         run = o.trace ? () -> _traced(f, traced) : f
@@ -147,6 +148,23 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
         _profile_release!(saved)
         v
     end
+end
+
+# The first samples a process takes are slow: each library's unwind tables are read the first time a
+# sampled stack passes through it, and the sampled thread waits while they are. One short profile
+# before the first run's clock pays for that, through the GPU driver too when the run uses it.
+const _SAMPLER_WARM = Threads.Atomic{Bool}(false)
+
+function _warm_sampler!(o, cupti)
+    Threads.atomic_xchg!(_SAMPLER_WARM, true) && return
+    try
+        Profile.init(n = o.buffer, delay = o.delay_ms / 1000)
+        work = cupti isa NamedTuple ? () -> (Base.invokelatest(cupti.sync); sleep(0.05)) : () -> sleep(0.05)
+        Profile.@profile_walltime work()
+        Profile.clear()
+    catch
+    end
+    return
 end
 
 # The sampler's settings before a profile, read without allocating a buffer: 0 entries means
@@ -404,21 +422,38 @@ function _with_cupti(f, out::Dict{String,Any}, cx, t0::Integer)
     try
         il(cx.sync)
         ts = Ref{UInt64}(0); il(K(:cuptiGetTimestamp), ts); off = Int64(ts[]) - Int64(time_ns())
+        # Reading the records and placing each call on its line wait until the run's clock has
+        # stopped (`_cupti_finish!`): they are the profiler's work, not the cell's. A cell that throws
+        # keeps what it did on the GPU before it threw.
+        out["__finish"] = () -> begin
+            il(K(:process), (ctx, sid, r) -> (x = _cupti_record(r, cx.kinds); x === nothing || push!(recs, x)), cx.acfg)
+            _cupti_summary!(out, cx.calls, cx.names, recs, off, Int64(t0))
+            out["source"] = "cupti"
+        end
         body = () -> begin
             started[] = true; val[] = f(); finished[] = true
             il(cx.sync)                  # every launch's activity is in before collection ends
             nothing
         end
         il(K(:enable!), () -> il(K(:enable!), body, cx.acfg), cx.ccfg)
-        il(K(:process), (ctx, sid, r) -> (x = _cupti_record(r, cx.kinds); x === nothing || push!(recs, x)), cx.acfg)
-        _cupti_summary!(out, cx.calls, cx.names, recs, off, Int64(t0))
-        out["source"] = "cupti"
     catch e
         started[] && !finished[] && rethrow()
+        delete!(out, "__finish")
         out["error"] = "CUPTI: " * first(sprint(showerror, e), 300)
         return started[] ? val[] : f()
     end
     return val[]
+end
+
+function _cupti_finish!(out::Dict{String,Any})
+    fin = pop!(out, "__finish", nothing)
+    fin === nothing && return out
+    try
+        fin()
+    catch e
+        out["error"] = "CUPTI: " * first(sprint(showerror, e), 300)
+    end
+    return out
 end
 
 # Driver call names by callback id, from CUPTI's own table.
