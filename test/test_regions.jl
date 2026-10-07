@@ -2106,7 +2106,7 @@ end
             write(joinpath(d, "Project.toml"), "")
             want = ["Project.toml", "src/A.jl", "src/sub/B.jl"]
             @test all(_ -> RE._files_under(d; descend = r -> basename(r) != ".git") == want, 1:50)
-            @test RE._files_under(d; descend = r -> r != "src/sub") == ["Project.toml", "src/A.jl"]
+            @test RE._files_under(d; descend = r -> r != "src/sub") == [".git/objects/x", "Project.toml", "src/A.jl"]
             digests = Set(RE._tree_digest(d, [".git"]) for _ = 1:50)
             @test length(digests) == 1
         end
