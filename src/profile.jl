@@ -678,8 +678,9 @@ const _INFRA_PKGS = ("KaimonGate", "ZMQ", "SlateWorker", "KaimonSlate", "Revise"
 
 # A package the user is working on rather than one installed for them: loaded from anywhere but a
 # depot's `packages/` or Julia's own tree (a `dev`ed or path package). The view does not fold these.
+# The worker's own packages never count, wherever they load from.
 _user_pkg(pkg::AbstractString, file::AbstractString) =
-    !(pkg in ("cell", "notebook", "Base", "Compiler", "?", "")) && isabspath(file) &&
+    !(pkg in ("cell", "notebook", "Base", "Compiler", "?", "")) && !(pkg in _INFRA_PKGS) && isabspath(file) &&
     !occursin("/packages/", file) && !occursin("/share/julia/", file) && !occursin("/stdlib/", file)
 
 # Where a task waits for work it handed to others: the caller of the first of these is where that

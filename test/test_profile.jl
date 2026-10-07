@@ -199,6 +199,12 @@ end
         @test !RE._other_cells([sf("task.jl"), sf("array.jl")], "cell:a")
     end
 
+    @testset "the worker's own code is never the user's package" begin
+        @test RE._user_pkg("MyModel", "/home/u/dev/MyModel/src/MyModel.jl")
+        @test !RE._user_pkg("SlateWorker", "/home/u/.cache/kaimonslate/worker/profile.jl")
+        @test !RE._user_pkg("CUDA", "/home/u/.julia/packages/CUDA/abc/src/array.jl")
+    end
+
     @testset "a thinned timeline keeps every thread" begin
         n = 2RE._TL_MAX + 2
         th = UInt[isodd(i) ? 1 : 2 for i in 1:n]
