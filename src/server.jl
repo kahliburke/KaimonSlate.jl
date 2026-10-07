@@ -1299,11 +1299,12 @@ function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString; rebuild_
                       end
                   end
                   k = _region_kernel!(nb, String(r.name); preparing = true)
+                  was_up = k isa ReportEngine.GateKernel && k.conn !== nothing
                   try; facts_changed!(); catch; end          # the pill shows it starting
                   ReportEngine.prepare!(k, nb.report; explicit = true)
                   k.conn === nothing && error("the worker did not connect")
                   try; facts_changed!(); catch; end          # …and up, before the load
-                  nothing
+                  !was_up                                    # whether this started it
               end,
               run = code -> begin
                   k = _region_kernel!(nb, String(r.name); preparing = true)

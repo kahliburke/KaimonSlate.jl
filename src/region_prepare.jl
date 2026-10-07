@@ -211,7 +211,8 @@ worker on a granted node to time its loads and check its GPUs. `project` (a note
 folder; the region's preload when empty) is installed and loaded on that node (on the host itself for
 a region without a scheduler), which is where CUDA is checked, and leaves the environment there ready
 for that project's first start. `keep_node` leaves the node held for the notebook that asked.
-`worker` is that notebook's own worker, as `(start = fresh -> …, run = code -> stdout)` (`fresh` replaces a running one): when given, the
+`worker` is that notebook's own worker, as `(start = fresh -> started, run = code -> stdout)` (`fresh` replaces a running one;
+`start` returns `false` when the worker was already up, so its earlier start and load times stand): when given, the
 packages are loaded in it rather than in a throwaway process, and it stays up for the notebook's cells.
 Returns the readiness record, which is
 also stored in the region. Runs to the end even when a step fails, recording each step's outcome, so
@@ -231,9 +232,10 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
     finish = function (ok, state)
         hostf = get(facts, "host", Dict{String,String}())
         nodef = get(facts, "node", Dict{String,String}())
-        rt = Float64(get(measured, "runtime_load_s", 0.0))
         prev = region_get(r.name)
         old = prev === nothing ? Dict{String,Any}() : prev.readiness
+        # No start was timed when the worker was already up: the last one timed stands.
+        rt = Float64(get(measured, "runtime_load_s", get(get(old, "measured", Dict()), "runtime_load_s", 0.0)))
         isempty(hostf) || _record_site!(host, hostf, nodef, m.prologue * "\n" * r.prologue, state["id"])
         # The region's part: the node, the loads timed there, and each project tested.
         rec = Dict{String,Any}(
@@ -704,9 +706,13 @@ function _prepare_in_worker!(step, measured, name, worker)
     # one, the notebook's worker is replaced so it boots from it.
     # So is one whose environment this prepare built anew: it loaded the packages it had.
     fresh = get(get(measured, "sysimage", Dict()), "result", "") == "built" || get(measured, "env_action", :keep) === :build
+    # A worker that was already up says nothing about how long a start or a load takes, so the
+    # measurements from when it started stand.
+    reused = false
     up = step("Start the notebook's worker") do
         t0 = time()
-        worker.start(fresh)
+        reused = worker.start(fresh) === false
+        reused && return ("ok", "already up")
         measured["worker_start_s"] = measured["runtime_load_s"] = round(time() - t0; digits = 1)
         ("ok", "up in $(measured["worker_start_s"])s")
     end
@@ -714,7 +720,10 @@ function _prepare_in_worker!(step, measured, name, worker)
     step("Load $name in it") do
         # In a module of its own: the code imports at top level, and its names must not land in the
         # notebook's namespace.
-        _load_result!(measured, worker.run("Core.eval(Module(:SlatePrepare), Meta.parseall(" * repr(_LOAD_CODE) * "))"))
+        st, msg = _load_result!(measured, worker.run("Core.eval(Module(:SlatePrepare), Meta.parseall(" * repr(_LOAD_CODE) * "))"))
+        reused || return (st, msg)
+        delete!(measured, "env_load_s")
+        (st, replace(msg, r"^loaded in [0-9.]+s" => "already loaded"))
     end
     return nothing
 end

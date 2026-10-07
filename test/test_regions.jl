@@ -1891,6 +1891,13 @@ end
         empty!(steps); empty!(ran)
         RE._prepare_in_worker!(step, Dict{String,Any}(), "proj", (start = (_ = false) -> error("no"), run = worker.run))
         @test steps == [("Start the notebook's worker", "fail")] && isempty(ran)
+        # A worker that was already up is still checked, but times neither a start nor a load: its
+        # packages were loaded long before, and the times from its start stand.
+        empty!(steps); empty!(ran)
+        up = Dict{String,Any}()
+        RE._prepare_in_worker!(step, up, "proj", (start = (_ = false) -> false, run = worker.run))
+        @test steps == [("Start the notebook's worker", "ok"), ("Load proj in it", "ok")] && length(ran) == 1
+        @test !haskey(up, "runtime_load_s") && !haskey(up, "env_load_s") && up["cuda"]["functional"] == "true devices=4"
         # A worker is started fresh when this prepare built its image or its environment anew, since a
         # running one keeps the packages it loaded.
         fresh = Bool[]
