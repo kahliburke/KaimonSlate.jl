@@ -8,20 +8,22 @@ try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — runni
 
 #%% md id=intro
 @md"""
-We have four months of daily reported cases from an outbreak and want the parameters of an SEIR
-model that reproduce them: the transmission rate β, the incubation rate σ, the recovery rate γ, and
-the share of infections that get reported, ρ. There is no closed form, so the model is fitted by
-running it many times and keeping the parameters whose curve sits closest to the data.
+We have twenty weeks of daily reported cases from an outbreak in a town of a million people, and
+want the parameters of an age-structured SEIR model that reproduce them: the transmission rate β,
+the incubation rate σ, the recovery rate γ, and the share of infections that get reported, ρ.
+Reports lag infections by a few days, so the model's infections pass through a reporting delay
+before they are compared with the data. There is no closed form, so the model is fitted by running
+it many times and keeping the parameters whose reports fit the data best.
 
-That makes speed the whole game. The first version below is written the way exploratory code
-usually is, and it works. The rest of the notebook uses the profiler to find where its time goes,
-JET to say why, and then fixes it, checking at each step that the answer does not change.
+The simulation is already written with care. The reporting delay was added later, quickly. The
+rest of the notebook uses the profiler to see where the time goes, JET to say why, and fixes what
+deserves fixing, checking that the answer does not change.
 
-To follow along, open the profiler on a cell with the 🔥 button in its toolbar.
+Open the profiler on a cell with the 🔥 button in its toolbar.
 """
 
 #%% code id=deps
-using CairoMakie, Random, Statistics, Printf
+using CairoMakie, LinearAlgebra, Random, Statistics, Printf
 
 #%% code id=theme hidecode
 CairoMakie.activate!()
@@ -35,94 +37,176 @@ set_theme!(theme_dark();
             xtickcolor = (:white, 0.4), ytickcolor = (:white, 0.4)),
     Legend = (backgroundcolor = :transparent, framevisible = false));
 
+#%% md id=town_md
+@md"""
+## The town
+
+Nine age bands. People mix mostly with their own age and with the bands next to it, children most
+of all, and the contact matrix `C` says how many contacts per day a person in one band has with
+each other band. Susceptibility rises with age. The outbreak starts with ten infections among
+people in their twenties.
+"""
+
+#%% code id=town
+ages = ["0–9", "10–19", "20–29", "30–39", "40–49", "50–59", "60–69", "70–79", "80+"]
+G = length(ages)
+N = 1e6 .* [0.11, 0.12, 0.13, 0.13, 0.13, 0.13, 0.11, 0.08, 0.06]
+C = let C = [1.2 * exp(-abs(i - j) / 1.5) + 0.35 + (i <= 2 && j <= 2 ? 2.0 : 0.0) for i in 1:G, j in 1:G]
+    (C .+ C') ./ 2
+end
+susc = [0.5, 0.7, 1.0, 1.0, 1.0, 1.0, 1.1, 1.2, 1.3]
+I0 = [i == 3 ? 10.0 : 0.0 for i in 1:G]
+(groups = G, population = sum(N), contacts_per_day = round.(sum(C; dims = 2)[:]; digits = 1))
+
+#%% code id=contacts_plot
+let fig = Figure(size = (520, 420)), ax = Axis(fig[1, 1]; title = "contacts per day", xticks = (1:G, ages),
+                                               yticks = (1:G, ages), xticklabelrotation = π / 4, aspect = 1)
+    hm = heatmap!(ax, C; colormap = :magma)
+    Colorbar(fig[1, 2], hm)
+    fig
+end
+
 #%% md id=data_md
 @md"""
-## The outbreak
+## The reports
 
-A town of a million people, ten initial infections, 120 days of reports. The reported counts are
-noisy: each day's count scatters around the true number of new reported infections.
+Twenty weeks of daily reported cases: new infections, delayed by a few days on their way to being
+reported, times the reporting share, with counting noise on top.
 """
 
 #%% code id=data
-u0 = (999_990.0, 0.0, 10.0, 0.0)          # susceptible, exposed, infectious, recovered
-days = 120
-observed = let β = 0.45, σ = 1 / 4, γ = 1 / 6, ρ = 0.3, dt = 0.01, rng = Xoshiro(7)
-    S, E, I, R = u0
-    out = Float64[]
+days = 140
+observed = let β = 0.06, σ = 1 / 4, γ = 1 / 6, ρ = 0.3, dt = 0.02, rng = Xoshiro(7)
+    S, E, I = N .- I0, zeros(G), copy(I0)
+    infected = Float64[]
     for d in 1:days
-        S0 = S
+        S0 = sum(S)
         for _ in 1:round(Int, 1 / dt)
-            inf = β * S * I / (S + E + I + R)
-            S, E, I, R = S - dt * inf, E + dt * (inf - σ * E), I + dt * (σ * E - γ * I), R + dt * γ * I
+            inf = β .* susc .* (C * (I ./ N)) .* S
+            S, E, I = S .- dt .* inf, E .+ dt .* (inf .- σ .* E), I .+ dt .* (σ .* E .- γ .* I)
         end
-        c = ρ * (S0 - S)
-        push!(out, max(0.0, round(c + sqrt(c + 1) * randn(rng))))
+        push!(infected, S0 - sum(S))
+    end
+    a, θ = (5.0 / 2.5)^2, 2.5^2 / 5.0                       # delay: mean 5 days, sd 2.5
+    kern = [k^(a - 1) * exp(-k / θ) for k in 1:21]; kern ./= sum(kern)
+    [max(0.0, round(ρ * c + sqrt(ρ * c + 1) * randn(rng)))
+     for c in (sum(infected[t - k + 1] * kern[k] for k in 1:min(21, t)) for t in 1:days)]
+end
+(days = length(observed), peak_day = argmax(observed), peak = maximum(observed), total = sum(observed))
+
+#%% md id=sim_md
+@md"""
+## The simulation
+
+Fourth-order Runge-Kutta on the nine age bands, in place: the state is one `G × 4` matrix, the
+right-hand side writes into a buffer it is handed, and the force of infection is a matrix-vector
+product of the contacts with the infectious, done by `mul!`. It returns each day's new infections.
+"""
+
+#%% code id=sim
+struct Params{T<:Real,V<:AbstractVector{T}}
+    β::T      # transmission rate per contact
+    σ::T      # 1 / incubation period
+    γ::T      # 1 / infectious period
+    ρ::T      # share of infections reported
+    susc::V   # relative susceptibility by age
+end
+
+# Scratch space for one simulation: the force of infection, and the four RK stages.
+struct Work{T}
+    x::Vector{T}
+    λ::Vector{T}
+    k::NTuple{4,Matrix{T}}
+end
+Work(G) = Work(zeros(G), zeros(G), ntuple(_ -> zeros(G, 4), 4))
+
+# u is G × 4: S, E, I, R by age band. du is written in place.
+function rhs!(du, u, p, C, N, w)
+    G = size(u, 1)
+    @inbounds for g in 1:G
+        w.x[g] = u[g, 3] / N[g]
+    end
+    mul!(w.λ, C, w.x)
+    @inbounds for g in 1:G
+        inf = p.β * p.susc[g] * w.λ[g] * u[g, 1]
+        du[g, 1] = -inf
+        du[g, 2] = inf - p.σ * u[g, 2]
+        du[g, 3] = p.σ * u[g, 2] - p.γ * u[g, 3]
+        du[g, 4] = p.γ * u[g, 3]
+    end
+    du
+end
+
+function infections!(out, u0, p, C, N, w; dt = 0.2)
+    u = copy(u0); tmp = similar(u)
+    k1, k2, k3, k4 = w.k
+    for d in eachindex(out)
+        S0 = sum(@view u[:, 1])
+        for _ in 1:round(Int, 1 / dt)
+            rhs!(k1, u, p, C, N, w)
+            @. tmp = u + dt / 2 * k1; rhs!(k2, tmp, p, C, N, w)
+            @. tmp = u + dt / 2 * k2; rhs!(k3, tmp, p, C, N, w)
+            @. tmp = u + dt * k3;     rhs!(k4, tmp, p, C, N, w)
+            @. u += dt / 6 * (k1 + 2k2 + 2k3 + k4)
+        end
+        out[d] = S0 - sum(@view u[:, 1])
     end
     out
 end
-(days = length(observed), peak = maximum(observed), total = sum(observed))
+
+# Poisson negative log-likelihood of the reports, its constant term dropped.
+function poisson_nll(expected::Vector{Float64}, observed::Vector{Float64})
+    s = 0.0
+    for t in eachindex(expected, observed)
+        λ = max(expected[t], 1e-9)
+        s += λ - observed[t] * log(λ)
+    end
+    s
+end
 
 #%% md id=draft_md
 @md"""
-## A first draft
+## The reporting delay, first draft
 
-The model as it might be written on a first pass. The parameters live in a struct, each step of
-the integrator returns a fresh vector, and the trajectory is collected into an empty list. The
-calibration draws random parameters and keeps the best, with a closure doing each trial.
+The delay settings come from a config dictionary, the way settings usually arrive. Each day's
+expected reports are the infections of the last three weeks weighted by the delay distribution.
+The calibration draws random parameters and keeps the best, with a closure doing each trial.
 """
 
-#%% code id=model_v1
-struct SEIRParams
-    β::Real      # transmission rate, per day
-    σ::Real      # 1 / incubation period
-    γ::Real      # 1 / infectious period
-    ρ::Real      # share of infections reported
+#%% code id=obs_v1
+obs_config = Dict{Symbol,Any}(:delay_mean => 5.0, :delay_sd => 2.5, :max_delay => 21)
+
+# The delay as weights for 1, 2, … days: a discretised gamma with the configured mean and sd.
+function delay_kernel(cfg)
+    m, s, K = cfg[:delay_mean], cfg[:delay_sd], cfg[:max_delay]
+    a, θ = (m / s)^2, s^2 / m
+    w = [k^(a - 1) * exp(-k / θ) for k in 1:K]
+    w ./ sum(w)
 end
 
-function seir_rhs(u, p)
-    S, E, I, R = u
-    infection = p.β * S * I / (S + E + I + R)
-    [-infection, infection - p.σ * E, p.σ * E - p.γ * I, p.γ * I]
-end
-
-# Fourth-order Runge-Kutta with a fixed step, every state kept.
-function simulate(p, u0, days; dt = 0.1)
-    u = u0
-    traj = []
-    for step in 1:round(Int, days / dt)
-        k1 = seir_rhs(u, p)
-        k2 = seir_rhs(u .+ dt / 2 .* k1, p)
-        k3 = seir_rhs(u .+ dt / 2 .* k2, p)
-        k4 = seir_rhs(u .+ dt .* k3, p)
-        u = u .+ dt / 6 .* (k1 .+ 2k2 .+ 2k3 .+ k4)
-        push!(traj, u)
+function expected_reports(infected, ρ, cfg)
+    out = []
+    for t in eachindex(infected)
+        kern = delay_kernel(cfg)
+        window = infected[max(1, t - length(kern) + 1):t]
+        w = reverse(kern)[end-length(window)+1:end]
+        push!(out, ρ * sum(window .* w))
     end
-    traj
+    out
 end
 
-# New reported infections each day: what left the susceptible pool, times the reporting share.
-function daily_cases(p, u0, days; dt = 0.1)
-    traj = simulate(p, u0, days; dt)
-    per_day = round(Int, 1 / dt)
-    cases = []
-    prevS = u0[1]
-    for d in 1:days
-        s = traj[d * per_day][1]
-        push!(cases, p.ρ * (prevS - s))
-        prevS = s
-    end
-    cases
-end
-
-loss(p, u0, observed) = sum((daily_cases(p, u0, length(observed)) .- observed) .^ 2)
-
-function calibrate(observed, u0; n = 3000, seed = 1)
+function calibrate(observed, C, N, I0; n = 10_000, seed = 1)
     rng = Xoshiro(seed)
+    G = length(N)
+    u0 = hcat(N .- I0, zeros(G), I0, zeros(G))
+    w = Work(G)
+    infected = zeros(length(observed))
     best = Inf
     bestp = nothing
     trial = () -> begin
-        p = SEIRParams(0.2 + 0.6rand(rng), 1 / (2 + 6rand(rng)), 1 / (3 + 9rand(rng)), 0.1 + 0.8rand(rng))
-        l = loss(p, u0, observed)
+        p = Params(0.02 + 0.06rand(rng), 1 / (2 + 6rand(rng)), 1 / (3 + 9rand(rng)), 0.1 + 0.8rand(rng), susc)
+        infections!(infected, u0, p, C, N, w)
+        l = poisson_nll(Float64.(expected_reports(infected, p.ρ, obs_config)), observed)
         if l < best
             best = l
             bestp = p
@@ -133,7 +217,7 @@ function calibrate(observed, u0; n = 3000, seed = 1)
 end
 
 #%% code id=fit_v1
-fit_draft = calibrate(observed, collect(u0))
+fit_draft = calibrate(observed, C, N, I0)
 
 #%% md id=profile_md
 @md"""
@@ -142,99 +226,87 @@ fit_draft = calibrate(observed, collect(u0))
 Open the profiler on `fit_v1` and press **▶ Run and profile**. The cell runs as it always does,
 under the sampler.
 
-- The **flame graph** starts at the cell's line and goes down through `calibrate`, `loss`,
-  `daily_cases` and `simulate` to `seir_rhs`. Almost all of the width is under the integrator.
-- The bars carry **⤳** marks: time spent dispatching calls at runtime, because the compiler could
-  not tell which method a call would need. There is a **♻** share too: garbage collection.
-- The **hot lines** table puts the last line of `seir_rhs`, the one that builds the new vector, at
-  the top, with about two fifths of the run on its own.
+Under `calibrate`, the flame graph splits in two, side by side and about the same width:
 
-So the time goes on dispatch and on allocating. The profile shows where; it does not show why.
+- **`infections!`, the simulation.** Its bars carry no marks. Underneath are the in-place broadcasts
+  of the RK stages, the right-hand side's arithmetic, and `mul!` in LinearAlgebra's colour: the
+  matrix product, every evaluation. This is the model's real cost.
+- **`expected_reports`, the reporting delay.** It does a few thousand multiplications per trial,
+  next to the simulation's few hundred thousand, and takes as long. Its bars carry **⤳** (runtime
+  dispatch) and **♻** (garbage collection), and under it are `delay_kernel`, slices, `reverse` and
+  the allocator.
 
-Add JET (the **＋ JET** button in the profiler's header, if it is not there yet) and press
-**Compile**. JET analyses the cell without running it. Its findings land on the lines in the margin
-and in **Details**, one entry per line of the notebook's code:
+Switch the colour key to **time**: the bars that spend time themselves light up, and the
+observation model's are as hot as the simulation's.
+
+So half the time is waste, beside work that has to happen. The profile shows where; it does not
+show why. Add JET (the **＋ JET** button in the header, if it is not there yet) and press
+**Compile**. JET analyses the cell without running it. Its findings land on the lines in the
+margin, with what each one means when you hover it, and in **Details**:
 
 | line | finding | cause |
 |---|---|---|
-| `infection = p.β * S * I / …` in `seir_rhs` | runtime dispatch | `β::Real` is abstract: every field read has an unknown type |
-| the `k1` … `u = u .+ …` lines in `simulate` | runtime dispatch | `seir_rhs` returns `Any`, so every broadcast on its result is dynamic |
-| `push!(cases, …)`, and the `sum` in `loss` | runtime dispatch | `[]` is a `Vector{Any}`: everything read from it is `Any` |
-| `best = Inf` in `calibrate` | boxed capture | `trial` reassigns `best` and `bestp`, so both live in a heap box |
+| `a, θ = …` and `w = [k^(a - 1) …]` in `delay_kernel` | runtime dispatch | `m`, `s` and `K` come out of a `Dict{Symbol,Any}`: their types are unknown, and so is everything computed from them |
+| the trial's `p = Params(…, susc)`, `infections!(…)` and `expected_reports(…, obs_config)` | runtime dispatch | `susc` and `obs_config` are notebook globals, and a function that reads a non-constant global cannot know its type |
+| `best = Inf` and `if l < best` in `calibrate` | boxed capture, and the dispatch it causes | `trial` reassigns `best` and `bestp`, so both live in a heap box |
+| one line of `rhs!`, in the simulation | runtime dispatch | caused by its caller: the global `susc` reaches it inside `p`. It goes when the caller is fixed |
 
-A line can also say "N inside sum, promote…": calls into Base that dispatch because they were
-handed `Any`. They go away with the line's own problem.
+The last row is worth a second look. JET marks where a type is used, and the cause can be several
+calls away; the hover card on a line says where the unknown value came from.
 
-JET lists every finding, cheap or not. The profile says which matter: the dispatch findings sit on
-the hottest lines, and the boxed capture is on a line that runs once per trial.
+The profile also says something JET does not: `delay_kernel` is rebuilt for every day of every
+trial, though it never changes.
 """
 
 #%% md id=tuned_md
 @md"""
-## The tuned version
+## The reporting delay, tuned
 
-One change per finding:
-
-- **A concrete parameter type.** `Params{T}` stores four values of one concrete type, so the
-  compiler knows what `p.β` is.
-- **Tuples for the state.** The right-hand side returns an `NTuple{4}`, which lives in registers.
-  No step allocates.
-- **Only what is needed, preallocated.** The calibration only uses each day's cases, so the
-  integrator writes those into a vector it is handed, instead of keeping every state.
+- **Typed settings, read once.** The delay is a `Delay` holding its weights, built from the
+  config before the search starts, with the config's values asserted to the types they are.
+- **No allocation per day.** The convolution is a plain loop into a vector it is handed.
+- **Inputs as arguments.** The search is handed `susc` and the delay instead of reading notebook
+  globals, so their types are known inside it.
 - **A plain loop for the search.** `best` and `bestp` are ordinary locals.
 """
 
-#%% code id=model_v2
-struct Params{T<:Real}
-    β::T
-    σ::T
-    γ::T
-    ρ::T
+#%% code id=obs_v2
+struct Delay{T}
+    kern::Vector{T}   # weights for 1, 2, … days
+end
+# The config's values are `Any` to the compiler; asserting their types here is what keeps that
+# from spreading into everything the delay touches.
+function Delay(cfg::AbstractDict)
+    m, s, K = cfg[:delay_mean]::Float64, cfg[:delay_sd]::Float64, cfg[:max_delay]::Int
+    a, θ = (m / s)^2, s^2 / m
+    w = [k^(a - 1) * exp(-k / θ) for k in 1:K]
+    Delay(w ./ sum(w))
 end
 
-@inline function rhs(u::NTuple{4,T}, p::Params{T}) where {T}
-    S, E, I, R = u
-    infection = p.β * S * I / (S + E + I + R)
-    (-infection, infection - p.σ * E, p.σ * E - p.γ * I, p.γ * I)
-end
-
-@inline step_along(u, k, h) = map((ui, ki) -> ui + h * ki, u, k)
-
-function daily_cases!(cases::Vector{T}, p::Params{T}, u0::NTuple{4,T}; dt::T = T(0.1)) where {T}
-    per_day = round(Int, 1 / dt)
-    u = u0
-    prevS = u0[1]
-    for d in eachindex(cases)
-        for _ in 1:per_day
-            k1 = rhs(u, p)
-            k2 = rhs(step_along(u, k1, dt / 2), p)
-            k3 = rhs(step_along(u, k2, dt / 2), p)
-            k4 = rhs(step_along(u, k3, dt), p)
-            u = map((ui, a, b, c, e) -> ui + dt / 6 * (a + 2b + 2c + e), u, k1, k2, k3, k4)
+function expected_reports!(out, infected, ρ, d::Delay)
+    K = length(d.kern)
+    @inbounds for t in eachindex(out, infected)
+        s = 0.0
+        for k in 1:min(K, t)
+            s += infected[t - k + 1] * d.kern[k]
         end
-        cases[d] = p.ρ * (prevS - u[1])
-        prevS = u[1]
+        out[t] = ρ * s
     end
-    cases
+    out
 end
 
-function loss!(cases, p, u0, observed)
-    daily_cases!(cases, p, u0)
-    s = zero(eltype(cases))
-    for d in eachindex(cases, observed)
-        s += (cases[d] - observed[d])^2
-    end
-    s
-end
-
-function calibrate_tuned(observed::Vector{Float64}, u0::NTuple{4,Float64}; n = 3000, seed = 1)
+function calibrate_tuned(observed, C, N, I0, susc, delay; n = 10_000, seed = 1)
     rng = Xoshiro(seed)
-    cases = similar(observed)
+    G = length(N)
+    u0 = hcat(N .- I0, zeros(G), I0, zeros(G))
+    w = Work(G)
+    infected = zeros(length(observed)); reports = similar(infected)
     best = Inf
-    bestp = Params(NaN, NaN, NaN, NaN)
+    bestp = Params(NaN, NaN, NaN, NaN, susc)
     for _ in 1:n
-        p = Params(0.2 + 0.6rand(rng), 1 / (2 + 6rand(rng)), 1 / (3 + 9rand(rng)), 0.1 + 0.8rand(rng))
-        l = loss!(cases, p, u0, observed)
+        p = Params(0.02 + 0.06rand(rng), 1 / (2 + 6rand(rng)), 1 / (3 + 9rand(rng)), 0.1 + 0.8rand(rng), susc)
+        infections!(infected, u0, p, C, N, w)
+        l = poisson_nll(expected_reports!(reports, infected, p.ρ, delay), observed)
         if l < best
             best = l
             bestp = p
@@ -244,68 +316,69 @@ function calibrate_tuned(observed::Vector{Float64}, u0::NTuple{4,Float64}; n = 3
 end
 
 #%% code id=fit_v2
-fit_tuned = calibrate_tuned(observed, u0)
+fit_tuned = calibrate_tuned(observed, C, N, I0, susc, Delay(obs_config))
 
 #%% md id=check_md
 @md"""
-Same seed, same draws, so the two searches must agree. Profile `fit_v2` and the ⤳ and ♻ marks
-are gone: what is left is the arithmetic of the integrator. **Compile** reports nothing.
+Same seed, same draws, so the two searches must agree.
 """
 
 #%% code id=check
 let (p1, l1) = fit_draft, (p2, l2) = fit_tuned
     agree = all(isapprox.((p1.β, p1.σ, p1.γ, p1.ρ), (p2.β, p2.σ, p2.γ, p2.ρ)))
-    (same_answer = agree, loss_draft = round(l1), loss_tuned = round(l2))
+    (same_answer = agree, nll_draft = round(l1), nll_tuned = round(l2))
 end
 
-#%% md id=wide_md
+#%% md id=after_md
 @md"""
-## What the speed buys
+## What is left
 
-3,000 random draws is a coarse search; the draft could not afford more. The tuned version runs a
-hundred thousand in about the time the draft took for three thousand.
+Profile `fit_v2` and compare it with the run before (**compare with…** in the header). The ⤳ and ♻
+marks are gone, `expected_reports!` is a sliver, and nearly all the time is the simulation: the
+matrix product, the RK stages, the right-hand side's arithmetic. **Compile** reports nothing.
+
+That is the model's real cost, and no fix of the same kind will shrink it. Going faster from here
+takes a different algorithm: fewer right-hand-side evaluations per day (a larger or adaptive step,
+checked against this one), or a smarter search than random draws, which needs far fewer of them.
+
+The fit itself recovers the transmission rate and the reporting share, while the incubation and
+infectious periods trade off against each other and against the reporting delay: reported counts
+alone cannot tell them apart.
 """
-
-#%% code id=fit_wide
-fit_wide = calibrate_tuned(observed, u0; n = 100_000, seed = 2)
 
 #%% code id=params
 let fmt(p) = @sprintf("β %.3f · incubation %.1f d · infectious %.1f d · reported %.0f%%", p.β, 1 / p.σ, 1 / p.γ, 100p.ρ)
-    (draft = fmt(fit_draft[1]), wide = fmt(fit_wide[1]), data_came_from = fmt(Params(0.45, 1 / 4, 1 / 6, 0.3)))
+    (fitted = fmt(fit_tuned[1]), data_came_from = fmt(Params(0.06, 1 / 4, 1 / 6, 0.3, susc)))
 end
 
 #%% code id=plot
 let fig = Figure(size = (900, 420)), ax = Axis(fig[1, 1]; xlabel = "day", ylabel = "reported cases")
-    for (fit, label, color) in ((fit_draft, "3,000 draws", :orange), (fit_wide, "100,000 draws", :deepskyblue))
-        p = fit[1]
-        lines!(ax, 1:days, daily_cases!(zeros(days), Params(p.β, p.σ, p.γ, p.ρ), u0); color, linewidth = 2.5, label)
-    end
+    u0 = hcat(N .- I0, zeros(G), I0, zeros(G))
+    p = fit_tuned[1]
+    infected = infections!(zeros(days), u0, p, C, N, Work(G))
+    lines!(ax, 1:days, expected_reports!(zeros(days), infected, p.ρ, Delay(obs_config));
+           color = :deepskyblue, linewidth = 2.5, label = "fitted")
+    lines!(ax, 1:days, p.ρ .* infected; color = (:deepskyblue, 0.45), linestyle = :dash, linewidth = 1.5,
+           label = "fitted, without the delay")
     scatter!(ax, 1:days, observed; color = (:white, 0.7), markersize = 6, label = "reported")
-    axislegend(ax; position = :rt)
+    axislegend(ax; position = :lt)
     fig
 end
-
-#%% md id=fit_reading
-@md"""
-The wider search fits the reports far more closely, yet its rates differ from the ones the data
-came from: a longer incubation with a shorter infectious period and a higher β. Case counts alone
-pin down how fast the outbreak grew and how many were reported, and several combinations of
-rates give the same curve. Telling them apart takes other data, such as the serial interval from
-contact tracing. A fast model is what makes that question cheap to explore.
-"""
 
 #%% md id=recap
 @md"""
 ## The loop
 
 1. **Profile** the cell that is slow. The flame graph and hot lines say where the time goes; the
-   ⤳, ♻ and ⚙ marks say what kind of time it is.
+   ⤳, ♻ and ⚙ marks say what kind of time it is, and the **time** colouring shows which bars spend it.
 2. **Compile** with JET in the environment. Its findings say why, on the lines they come from,
    without running anything.
 3. **Fix the findings on hot lines**, and leave the rest. Compile again to see a finding go.
-4. **Profile again** and compare with the run before (**compare with…** in the header).
+4. **Profile again** and compare with the run before. When what is left is real work, the next
+   step is a better algorithm, not a fix.
 
-The profiling specialist (**＋ specialist**) works the same loop and asks before it changes a cell.
+The profiling specialist (**＋ specialist**) works the same loop beside you in the profiler, and
+asks before it changes a cell.
 """
 
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)
