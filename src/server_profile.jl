@@ -280,7 +280,9 @@ function profile_tree_text(nb::LiveNotebook, cid::AbstractString; at::AbstractSt
     a = strip(String(at)); start = 1
     if !isempty(a)
         m = match(r"^(.*):(\d+)$", a)
-        cand = m === nothing ? [n for n in nodes if n.func == a] :
+        # A function's name also finds its closures (`#f##2`), which is how a `@threads` body shows.
+        cand = m === nothing ? (c = [n for n in nodes if n.func == a];
+                                isempty(c) ? [n for n in nodes if occursin("#" * a * "#", n.func)] : c) :
                [n for n in nodes if n.line == parse(Int, m.captures[2]) && endswith(n.file, m.captures[1])]
         isempty(cand) && return "Nothing in the profile at `$a`. Name a `file:line` or a function from the summary or the tree."
         start = cand[argmax([n.total for n in cand])].id

@@ -370,7 +370,7 @@ current_agent_id() = nothing
 
                 # `role` is a parameter now, and an unknown one says what there is rather than
                 # summoning nothing and reporting success.
-                bad = tools["spec_summon"](nb.id, "profiler")
+                bad = tools["spec_summon"](nb.id, "tuner")
                 @test occursin("⛔", bad) && occursin("debugger", bad) && occursin("checker", bad)
 
                 listed = tools["spec_roles"](nb.id)
@@ -386,10 +386,10 @@ current_agent_id() = nothing
             # `verbs` is an allowlist, and `permission` is unioned with it on the Claude Code path.
             dir = mktempdir()
             write(joinpath(dir, "specialists.toml"), """
-            [profiler]
-            brief = "You are a profiling specialist."
+            [tuner]
+            brief = "You are a tuning specialist."
             verbs = ["read", "spec_ask", "spec_done", "no_such_tool"]
-            opening = "Profile {subject}. {task}"
+            opening = "Tune {subject}. {task}"
 
             [debugger]
             brief = "hijacked"
@@ -409,23 +409,23 @@ current_agent_id() = nothing
                                 joinpath(cfg, "specialists.toml"); force = true)
                 n = KaimonSlate._load_specialists!(Set(["read", "spec_ask", "spec_done", "run",
                                                         "edit_cell", "pkg"]))
-                @test n == 1                                   # only the profiler was usable
+                @test n == 1                                   # only the tuner was usable
 
-                p = NS.SPECIALISTS["profiler"]
+                p = NS.SPECIALISTS["tuner"]
                 # A verb naming no real tool is dropped: it would otherwise read as a granted
                 # capability that silently does nothing.
                 @test p.verbs == ["read", "spec_ask", "spec_done"]
                 # A file cannot choose a permission preset, because one carrying allowances of its
                 # own is unioned with the verbs and undoes the narrowness the role exists for.
                 @test p.permission == "specialist"
-                @test p.briefing(nothing, "cell_x", "it is slow") == "Profile cell_x. it is slow"
+                @test p.briefing(nothing, "cell_x", "it is slow") == "Tune cell_x. it is slow"
 
                 # A role defined in code is not replaceable: redefining it with a longer verb list
                 # is a way to widen the narrowest agent in the system by editing a text file.
                 @test NS.SPECIALISTS["debugger"].verbs == was
                 @test !haskey(NS.SPECIALISTS, "Bad-Name")
             finally
-                delete!(NS.SPECIALISTS, "profiler")
+                delete!(NS.SPECIALISTS, "tuner")
                 old_home === nothing ? delete!(ENV, "KAIMONSLATE_HOME") :
                                        (ENV["KAIMONSLATE_HOME"] = old_home)
             end

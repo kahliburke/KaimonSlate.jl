@@ -123,7 +123,8 @@ _gc_c(f::AbstractString) = startswith(f, "jl_gc_") || startswith(f, "ijl_gc_") |
                            startswith(f, "_jl_gc") || f == "jl_safepoint_wait_gc"
 _compile_c(f::AbstractString) = any(p -> startswith(f, p),
     ("jl_compile", "ijl_compile", "jl_type_infer", "ijl_type_infer", "jl_generate_fptr", "ijl_generate_fptr",
-     "jl_emit_", "jl_add_to_ee", "jl_codegen"))
+     "jl_emit_", "jl_add_to_ee", "jl_codegen", "jl_expand", "ijl_expand", "jl_macroexpand", "ijl_macroexpand",
+     "jl_lower", "ijl_lower", "fl_", "jl_fl_", "jl_parse", "ijl_parse"))
 
 # A frame's file. Compiled top-level code reports a cell's as `./cell:<id>`.
 _ffile(fr) = (f = string(fr.file); startswith(f, "./cell:") ? f[3:end] : f)
@@ -267,7 +268,8 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
             # below the evaluation machinery that brought it there.
             ev = findlast(fr -> fr.func === :_eval_cell_source, frames)
             start = ev === nothing ? 1 : ev + 1
-            while start <= length(frames) && (frames[start].from_c || frames[start].func === :eval ||
+            # The runtime's own frames stay: compiling and collecting are recognised and marked below.
+            while start <= length(frames) && !frames[start].from_c && (frames[start].func === :eval ||
                                               _frame_pkg(frames[start], cellfile) in _INFRA_PKGS)
                 start += 1
             end
