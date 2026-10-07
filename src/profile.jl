@@ -545,6 +545,23 @@ function _other_cells(frames, cellfile)
 end
 _parked(frames) = !isempty(frames) && (j = findlast(fr -> !fr.from_c, frames); j !== nothing && _parked_tail(frames, j))
 
+# The BLAS or LAPACK routine a stack of C frames is inside ("gemv", "getrf"), "" for one that is
+# BLAS but unnamed, `nothing` for anything else. A kernel's own symbols are often assembly labels
+# (`.Lgemv_n_kernel_F40`), so the routine's name is searched for inside them.
+# Not after a lowercase letter, so a runtime symbol that merely contains one (`trigger`) is not BLAS.
+const _BLAS_ROUTINE = r"(?<![a-z])[sdcz]?((?:gemv|gemm|symv|symm|hemv|hemm|trmv|trsv|trmm|trsm|syrk|herk|ger|dot|axpy|scal|nrm2|asum|getrf|getrs|potrf|potrs|gesv|geqrf|syev|heev|gesdd|gesvd))(?![a-z])"
+const _BLAS_LIB = r"openblas|blas|lapack|NEOVERSE|HASWELL|SKYLAKE|SANDYBRIDGE|ZEN|COOPERLAKE"i
+# The routine is named without its precision (`dgemv` is `gemv`), and from the outermost frame that
+# has one, the routine's entry rather than the kernel it called.
+function _blas_name(frames)
+    for fr in frames
+        fr.from_c || continue
+        m = match(_BLAS_ROUTINE, string(fr.func))
+        m === nothing || return lowercase(m.captures[1])
+    end
+    return any(fr -> fr.from_c && occursin(_BLAS_LIB, string(fr.func)), frames) ? "" : nothing
+end
+
 # Where work running now belongs in the cell: the call its task last waited in during this
 # statement, else the statement's line, else the cell.
 function _statement_node(t, root, cellfile, graft, graftat, stmt0, marks, mi)
@@ -595,6 +612,7 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
     tl_thread = UInt[]; tl_clock = UInt[]; tl_node = Int[]
     frames = Base.StackTraces.StackFrame[]
     graft = 0; graftat = 0; mi = 0
+    lastla = Dict{UInt,Tuple{Int,Int}}(); nown = 0
     samples = _profile_samples(data)
     # The run's span on the sampler's clock, from every sample (idle ones too), for the timeline.
     cspan = isempty(samples) ? (UInt(0), UInt(0)) : extrema(s -> s.clock, samples)
@@ -615,11 +633,20 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
         elseif own
             start = _outside_start(frames, cellfile)
             if all(fr -> fr.from_c, frames)
-                # Interrupted inside the runtime where the stack cannot be unwound (thread-local
-                # lookups, memory copies): only the innermost frame or two were recorded. Which
-                # statement was running is still known.
-                cur = _node!(t, _statement_node(t, root, cellfile, graft, graftat, stmt0, marks, mi),
-                             "", 0, "runtime (stack not recorded)", "", _K_SYNTH)
+                # Interrupted where the stack cannot be unwound to Julia: only the innermost C
+                # frames were recorded. Inside a BLAS or LAPACK kernel (hand-written assembly) it is
+                # the linear algebra the cell asked for, placed under the call into it that this
+                # task's samples last went through. Otherwise it is the runtime (thread-local
+                # lookups, memory copies), under the statement that was running.
+                bn = _blas_name(frames)
+                st0 = _statement_node(t, root, cellfile, graft, graftat, stmt0, marks, mi)
+                if bn !== nothing
+                    la = get(lastla, s.task, (0, 0))
+                    cur = _node!(t, la[1] > 0 && nown - la[2] <= 200 ? la[1] : st0,
+                                 "", 0, isempty(bn) ? "BLAS" : "BLAS " * bn, "LinearAlgebra", _K_SYNTH)
+                else
+                    cur = _node!(t, st0, "", 0, "runtime (stack not recorded)", "", _K_SYNTH)
+                end
                 start = length(frames) + 1
             elseif _scheduling(frames, start, cellfile)
                 # The cell's task waiting on work it handed out: its thread runs the scheduler
@@ -654,6 +681,13 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
         end
         kept += 1; push!(threads, s.thread)
         leafnode = _add!(a, frames, start, cur, 1)
+        if own
+            nown += 1
+            # Where this sample entered LinearAlgebra (the `mul!` call, not whichever line of
+            # `gemv!` it was on): where a following sample caught inside BLAS itself belongs.
+            k = findfirst(n -> t.strings[t.pkg[n]] == "LinearAlgebra", a.path)
+            k === nothing || (lastla[s.task] = (a.path[k], nown))
+        end
         push!(tl_thread, s.thread); push!(tl_clock, s.clock); push!(tl_node, leafnode)
         # Where work handed out now would hang: the frame that waits for it, else the cell's line.
         if own && cidx !== nothing && !isempty(a.path)

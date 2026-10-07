@@ -475,7 +475,8 @@ function heatColor(self, M) {
 const barColor = (dn, M) => colorBy.value === 'time' ? heatColor(selfOf(dn, M), M) : colorOf(dn.n || dn, M);
 
 function colorOf(n, M) {
-  if (n.kind !== K.line) return KIND_COLOR[n.kind] || '#454b6b';
+  // A runtime node that belongs to a package (BLAS work, under LinearAlgebra) takes the package's colour.
+  if (n.kind !== K.line && !(n.kind === K.synth && n.pkg)) return KIND_COLOR[n.kind] || '#454b6b';
   const key = n.pkg + '\x1f' + n.func + (M.mine.has(n.pkg) ? '\x1fm' : '');
   let c = _colors.get(key);
   if (c) return c;

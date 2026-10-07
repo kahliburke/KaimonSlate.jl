@@ -185,6 +185,13 @@ end
         RE.profile_disarm!("ps")
     end
 
+    @testset "a sample caught inside a BLAS kernel is named as BLAS" begin
+        fr(f) = Base.StackTraces.StackFrame(Symbol(f), :x, 0, nothing, true, false, 0)
+        @test RE._blas_name([fr("dgemv_64_"), fr(".Lgemv_n_kernel_F40")]) == "gemv"
+        @test RE._blas_name([fr("dscal_k_NEOVERSEN1")]) == "scal"
+        @test RE._blas_name([fr("jl_safepoint_trigger")]) === nothing && RE._blas_name([fr("memmove")]) === nothing
+    end
+
     @testset "another cell's tasks are not this cell's" begin
         sf(file) = Base.StackTraces.StackFrame(:f, Symbol(file), 1)
         @test RE._other_cells([sf("task.jl"), sf("cell:b"), sf("cell:a")], "cell:a")
