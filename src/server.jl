@@ -1287,7 +1287,7 @@ function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString; rebuild_
     # The worker prepare starts and loads the packages in is the one this notebook's cells use.
     worker = (start = (fresh::Bool = false) -> begin
                   # Replacing a running worker: drop the hub's kernel for it and the process, so the
-                  # one started below boots afresh (from the image this prepare just built).
+                  # one started below boots afresh (from the image or environment this prepare just built).
                   if fresh
                       k0 = lock(() -> get(_REGION_KERNELS, (nb.id, String(r.name)), nothing), _REGION_LOCK)
                       if k0 isa ReportEngine.GateKernel && k0.conn !== nothing && k0.target isa ReportEngine.RemoteTarget
@@ -1295,7 +1295,7 @@ function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString; rebuild_
                           _forget_region_kernel!(nb, String(r.name))
                           try; ReportEngine._drop_kernel_conn!(k0); catch; end
                           try; ReportEngine.reap_remote_worker(host, port); catch; end
-                          ReportEngine._rlog("prepare[$(r.name)]: replaced worker-$port on $host so it boots from the new sysimage")
+                          ReportEngine._rlog("prepare[$(r.name)]: replaced worker-$port on $host so it starts from what this prepare built")
                       end
                   end
                   k = _region_kernel!(nb, String(r.name); preparing = true)
