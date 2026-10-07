@@ -48,7 +48,7 @@ Compile cell `cid`'s code where it runs, without running it, in the background. 
 function prepare_profile!(nb::LiveNotebook, cid::AbstractString)
     cell = _profile_cell(nb, cid)
     cell === nothing && return Dict{String,Any}("ok" => false, "error" => "no code cell '$cid'")
-    _, side = _region_route(nb, cell)
+    side = _region_active(nb) ? _cell_side(nb, cell) : ""   # the side only: the kernel may not exist yet
     src = cell.source; reads = String[String(r) for r in cell.reads]
     _broadcast_profile(nb, Dict{String,Any}("kind" => "preparing", "cell" => String(cid), "side" => side))
     Threads.@spawn try
@@ -107,7 +107,7 @@ when it runs and pushed then.
 function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractString = "cpu", opts...)
     cell = _profile_cell(nb, cid)
     cell === nothing && return Dict{String,Any}("kind" => "error", "error" => "no code cell '$cid'")
-    _, side = _region_route(nb, cell)
+    side = _region_active(nb) ? _cell_side(nb, cell) : ""   # the side only: the kernel may not exist yet
     _broadcast_profile(nb, Dict{String,Any}("kind" => "running", "cell" => String(cid), "side" => side,
                                             "mode" => String(mode)))
     lock(_PROF_HUB_LOCK) do; _PROF_ASKED[(nb.id, String(cid))] = (; mode = String(mode), opts...); end
@@ -229,7 +229,7 @@ function profile_source(nb::LiveNotebook, cid::AbstractString, file::AbstractStr
     end
     cell = _profile_cell(nb, cid)
     cell === nothing && return Dict{String,Any}("file" => f, "text" => "", "error" => "no code cell '$cid'")
-    _, side = _region_route(nb, cell)
+    side = _region_active(nb) ? _cell_side(nb, cell) : ""   # the side only: the kernel may not exist yet
     k, why = _profile_kernel(nb, side)
     k === nothing && return Dict{String,Any}("file" => f, "text" => "", "error" => why)
     return try
@@ -484,7 +484,7 @@ printed and its value: `@code_warntype f(x)`, `@allocated`, a timing at the type
 function profile_eval(nb::LiveNotebook, cid::AbstractString, code::AbstractString)
     cell = _profile_cell(nb, cid)
     cell === nothing && return "no code cell '$cid'"
-    _, side = _region_route(nb, cell)
+    side = _region_active(nb) ? _cell_side(nb, cell) : ""   # the side only: the kernel may not exist yet
     k, why = _profile_kernel(nb, side)
     k === nothing && return why
     out = lock(_eval_mutex(nb)) do
