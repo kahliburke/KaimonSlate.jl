@@ -601,9 +601,13 @@ end
 # after a compile, Julia writes them. Both read `$SLATE_PC`, which the check sets.
 function _precompiled_check_sh(t, mark::AbstractString)
     q(p) = (startswith(p, "/") || startswith(p, "~/")) ? Sweep.shq_path(p) : "\"\$HOME/\"" * Sweep.shq(p)
-    return _SYSIMAGE_CPU_SH * "; S=\$(cat " * q(_env_stamp_path(t)) * " 2>/dev/null); S=\${S%+pc}; " *
+    # A match also marks the stamp compiled, as the compile would have, so a start finds the
+    # environment complete rather than building it again.
+    st = q(_env_stamp_path(t))
+    return _SYSIMAGE_CPU_SH * "; R=\$(cat " * st * " 2>/dev/null); S=\${R%+pc}; " *
            "export SLATE_PC=\"\$S|\$CPU|\$JOPT\"; " *
            "if [ -n \"\$S\" ] && [ \"\$(cat " * q(mark) * " 2>/dev/null)\" = \"\$SLATE_PC\" ]; then " *
+           "[ \"\$R\" = \"\$S\" ] && printf '%s' \"\$S+pc\" > " * st * "; " *
            "echo '@@PRECOMPILED current'; exit 0; fi; "
 end
 _precompiled_mark_snippet(mark::AbstractString) = """

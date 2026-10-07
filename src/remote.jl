@@ -1348,7 +1348,8 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     else
         _rlog("provision [3/3] " * (repair ? "rebuilding the environment on $host" :
                                     isempty(had) ? "no environment recorded on $host" :
-                                    "environment on $host differs (recorded $(first(had, 12)), now $(first(stamp, 12)))") *
+                                    "environment on $host differs (recorded $(first(had, 12))$(endswith(had, "+pc") ? "+pc" : ""), " *
+                                    "now $(first(stamp, 12))$(endswith(stamp, "+pc") ? "+pc" : ""))") *
               " — building")
         _prep_stage("Building package environment on $host")
         try

@@ -2097,6 +2097,8 @@ end
             @test !compiled()                                          # the same again: stops
             write(joinpath(home, stamp), "fp1+pc")
             @test !compiled()                                          # the suffix a compile adds
+            write(joinpath(home, stamp), "fp1")
+            @test !compiled() && read(joinpath(home, stamp), String) == "fp1+pc"   # current: marked compiled
             @test compiled("--sysimage=/x/cpu.so")                     # booted from an image now
             write(joinpath(home, stamp), "fp2")
             @test compiled("--sysimage=/x/cpu.so")                     # another environment
