@@ -1224,7 +1224,7 @@ function create_tools(GateTool::Type)
     function _region_log(r)::String
         t = ReportEngine.region_acquire_trace(r)
         isempty(t) && return "No bring-up of '$(r.name)' recorded since this hub started."
-        return "Bring-up log of '$(r.name)', oldest line first:\n" * t
+        return "Bring-up log of '$(r.name)', oldest line first:\n" * ReportEngine._strip_ansi(t)   # the colours are for the page
     end
 
     # Where a region asks its scheduler: its host, or this machine when it names none.
@@ -2648,7 +2648,7 @@ function create_tools(GateTool::Type)
             ReportEngine._steps_text(io, get(rep, "steps", Any[]))
             lg = get(rep, "log", Any[])
             isempty(lg) || (println(io, "Activity (last $(min(60, length(lg))) of $(length(lg)) lines):");
-                            foreach(l -> println(io, "  ", l), lg[max(1, end - 59):end]))
+                            foreach(l -> println(io, "  ", ReportEngine._strip_ansi(string(l))), lg[max(1, end - 59):end]))
             return String(take!(io))
         end
         if strip(action) == "status"
