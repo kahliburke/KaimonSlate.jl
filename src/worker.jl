@@ -61,7 +61,9 @@ include(joinpath(@__DIR__, "profile.jl"))      # profile a cell where it runs (s
 # Gate-tool wrappers for the profiler, in this worker's namespace.
 __slate_profile_prepare(; cell::String = "", source::String = "", reads::Vector{String} = String[]) =
     profile_prepare!(_NS[]; cell = cell, source = source, reads = reads)
-__slate_profile_arm(; cell::String = "", mode::String = "cpu") = profile_arm!(cell, mode)
+__slate_profile_arm(; cell::String = "", mode::String = "cpu", delay_ms::Float64 = 1.0, buffer::Int = _PROF_BUFFER,
+                     trace::Bool = true, alloc_rate::Float64 = 0.01) =
+    profile_arm!(cell, mode; delay_ms, buffer, trace, alloc_rate)
 __slate_profile_disarm(; cell::String = "") = profile_disarm!(cell)
 __slate_profile_result(; cell::String = "") = something(profile_result(cell), Dict{String,Any}())
 __slate_profile_source(; file::String = "") = profile_source(file)

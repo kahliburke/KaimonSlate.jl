@@ -1756,9 +1756,14 @@ function create_tools(GateTool::Type)
     """
         prof_run(notebook, cell; mode="cpu") -> String
 
-    Run `cell` under the sampling profiler, on whichever kernel it runs on (a `region=` cell on its
-    node), and wait for it. The run is a real one: the cell's output, bindings and stored result are
-    what this run leaves. Returns the profile's summary, with the run before it for comparison.
+    Run `cell` under the profiler, on whichever kernel it runs on (a `region=` cell on its node),
+    and wait for it. The run is a real one: the cell's output, bindings and stored result are what
+    this run leaves. Returns the profile's summary, with the run before it for comparison, what
+    compiled during the run and which calls were dispatched at runtime.
+
+    `mode`: `cpu` (where the time goes), `wall` (time spent waiting too: I/O, locks, other tasks),
+    `alloc` (what allocates, by bytes and type), `gpu` (`cpu` plus the device's kernels and copies,
+    when the notebook uses CUDA).
 
     The first run of a cell includes compiling its code; run it again for the steady state.
     """

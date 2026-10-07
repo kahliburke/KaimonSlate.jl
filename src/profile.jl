@@ -15,7 +15,7 @@
 import Profile
 
 const _PROF_LOCK = ReentrantLock()                 # the sample buffer is process-wide: one at a time
-const _PROF_ARMED = Dict{String,String}()          # cell id → mode, for its next run
+const _PROF_ARMED = Dict{String,Any}()             # cell id → its options, for its next run
 const _PROF_RESULT = Dict{String,Any}()            # cell id → the last profile of it
 const _PROF_STATE_LOCK = ReentrantLock()           # guards the two dicts above
 
@@ -23,14 +23,34 @@ const _PROF_STATE_LOCK = ReentrantLock()           # guards the two dicts above
 # samples are theirs. The worker, which runs cells concurrently, sets this; the engine runs one at a time.
 const _PROF_OTHER_TASKS = Ref{Any}(() -> UInt[])
 
-# Samples every millisecond into a buffer of `_PROF_BUFFER` instruction pointers. A sample is its
-# stack depth plus six words, so this holds a few minutes of one busy thread at typical depths.
+# By default a sample every millisecond into a buffer of `_PROF_BUFFER` instruction pointers. A
+# sample is its stack depth plus six words, so this holds a few minutes of one busy thread.
 const _PROF_DELAY = 0.001
 const _PROF_BUFFER = 4_000_000
 
-"Profile the next run of `cell` (`mode`: \"cpu\", the only one so far)."
-profile_arm!(cell::AbstractString, mode::AbstractString = "cpu") =
-    (lock(_PROF_STATE_LOCK) do; _PROF_ARMED[String(cell)] = String(mode); end; true)
+"""
+How a cell is profiled. `mode`: `cpu` (sampled on-CPU time), `wall` (every task, waiting ones
+too), `alloc` (allocations, by bytes) or `gpu` (`cpu` plus CUDA.jl's record of the device's work).
+`delay_ms` and `buffer` set the sampler; `trace` records what compiled during the run and which
+calls were dispatched at runtime; `alloc_rate` is the share of allocations recorded.
+"""
+struct ProfOpts
+    mode::String
+    delay_ms::Float64
+    buffer::Int
+    trace::Bool
+    alloc_rate::Float64
+end
+
+"Profile the next run of `cell` (see `ProfOpts`)."
+function profile_arm!(cell::AbstractString, mode::AbstractString = "cpu"; delay_ms::Real = 1.0,
+                      buffer::Integer = _PROF_BUFFER, trace::Bool = true, alloc_rate::Real = 0.01)
+    o = ProfOpts(String(mode) in ("cpu", "wall", "alloc", "gpu") ? String(mode) : "cpu",
+                 clamp(Float64(delay_ms), 0.1, 100.0), clamp(Int(buffer), 100_000, 100_000_000), trace,
+                 clamp(Float64(alloc_rate), 1e-4, 1.0))
+    lock(_PROF_STATE_LOCK) do; _PROF_ARMED[String(cell)] = o; end
+    return true
+end
 
 profile_disarm!(cell::AbstractString) =
     (lock(_PROF_STATE_LOCK) do; delete!(_PROF_ARMED, String(cell)); end; true)
@@ -48,36 +68,49 @@ _prof_mark(line::Int) = (m = get(task_local_storage(), :slate_prof_marks, nothin
 
 # Called by `run_capture` around a cell's evaluation. Unarmed, it is the evaluation.
 function _profiled(f, cid::AbstractString)
-    mode = _profile_take(cid)
-    mode === nothing && return f()
+    o = _profile_take(cid)
+    o === nothing && return f()
     return lock(_PROF_LOCK) do
-        Profile.clear()
-        Profile.init(n = _PROF_BUFFER, delay = _PROF_DELAY)
         Base.cumulative_compile_timing(true)
         c0 = Base.cumulative_compile_time_ns()[1]; g0 = Base.gc_num().total_time; t0 = time_ns()
         task = UInt(pointer_from_objref(current_task()))
         others = delete!(Set{UInt}(_PROF_OTHER_TASKS[]()), task)
-        facts() = (; mode, ms = (time_ns() - t0) / 1e6,
+        traced = Dict{String,Any}()
+        gpu = Dict{String,Any}()
+        facts() = (; opts = o, ms = (time_ns() - t0) / 1e6,
                      compile_ms = (Base.cumulative_compile_time_ns()[1] - c0) / 1e6,
                      gc_ms = (Base.gc_num().total_time - g0) / 1e6)
-        store!(fx, err) = (union!(others, _PROF_OTHER_TASKS[]()); delete!(others, task);
-                           r = _profile_build(String(cid), task, fx; error = err, others = others, marks = marks);
-                           lock(_PROF_STATE_LOCK) do; _PROF_RESULT[String(cid)] = r; end)
+        marks = Tuple{Int,Int}[]
+        store!(fx, err) = begin
+            union!(others, _PROF_OTHER_TASKS[]()); delete!(others, task)
+            r = o.mode == "alloc" ? _alloc_build(String(cid), task, fx; error = err, others = others) :
+                                    _profile_build(String(cid), task, fx; error = err, others = others, marks = marks)
+            merge!(r, traced)
+            isempty(gpu) || (r["gpu"] = gpu)
+            lock(_PROF_STATE_LOCK) do; _PROF_RESULT[String(cid)] = r; end
+        end
+        run = o.trace ? () -> _traced(f, traced) : f
         local v
         task_local_storage(:slate_profiling, true)   # `_eval_cell_source` compiles the cell's statements
-        marks = Tuple{Int,Int}[]
         task_local_storage(:slate_prof_marks, marks)
+        done() = (Base.cumulative_compile_timing(false);
+                  delete!(task_local_storage(), :slate_profiling); delete!(task_local_storage(), :slate_prof_marks))
         try
-            v = Profile.@profile f()
+            if o.mode == "alloc"
+                Profile.Allocs.clear()
+                v = Profile.Allocs.@profile sample_rate = o.alloc_rate run()
+            else
+                Profile.clear(); Profile.init(n = o.buffer, delay = o.delay_ms / 1000)
+                v = o.mode == "wall" ? Profile.@profile_walltime(run()) :
+                    o.mode == "gpu" ? _with_gpu(() -> Profile.@profile(run()), gpu) : Profile.@profile(run())
+            end
         catch e
-            fx = facts(); Base.cumulative_compile_timing(false)
-            delete!(task_local_storage(), :slate_profiling); delete!(task_local_storage(), :slate_prof_marks)
+            fx = facts(); done()
             try; store!(fx, sprint(showerror, e)); catch; end
             _profile_release!()
             rethrow()
         end
-        fx = facts(); Base.cumulative_compile_timing(false)
-        delete!(task_local_storage(), :slate_profiling); delete!(task_local_storage(), :slate_prof_marks)
+        fx = facts(); done()
         try
             store!(fx, nothing)
         catch e
@@ -90,7 +123,77 @@ end
 
 # The sample buffer is only needed while a profile runs: shrunk back afterwards, so a worker that
 # was profiled once does not keep it.
-_profile_release!() = (Profile.clear(); Profile.init(n = 1000, delay = _PROF_DELAY); nothing)
+_profile_release!() = (Profile.clear(); Profile.init(n = 1000, delay = _PROF_DELAY);
+                       try; Profile.Allocs.clear(); catch; end; nothing)
+
+# ── what compiled, and what dispatched at runtime ───────────────────────────────────────────────
+# Julia reports both on stderr when asked (`@trace_compile`, `@trace_dispatch`): a compiled method
+# with how long it took, and each signature a call had to be dispatched on at runtime. Written to a
+# file rather than a pipe, since nothing would read a pipe while the cell holds this task. What
+# else reached stderr meanwhile is passed on to where it was going.
+function _traced(f, out::Dict{String,Any})
+    path, io = mktemp()
+    orig = stderr
+    ccall(:jl_force_trace_compile_timing_enable, Cvoid, ())
+    ccall(:jl_force_trace_dispatch_enable, Cvoid, ())
+    try
+        return redirect_stderr(f, io)
+    finally
+        ccall(:jl_force_trace_dispatch_disable, Cvoid, ())
+        ccall(:jl_force_trace_compile_timing_disable, Cvoid, ())
+        close(io)
+        compiled = Tuple{String,Float64}[]; dispatched = Dict{String,Int}()
+        for l in eachline(path)
+            m = match(r"^#=\s*([\d.]+)\s*ms\s*=#\s*precompile\((.*)\)(?:\s*#.*)?$", l)
+            if m !== nothing
+                push!(compiled, (String(m.captures[2]), parse(Float64, m.captures[1])))
+            elseif (m2 = match(r"^precompile\((.*)\)(?:\s*#.*)?$", l)) !== nothing
+                dispatched[String(m2.captures[1])] = get(dispatched, String(m2.captures[1]), 0) + 1
+            else
+                try; println(orig, l); catch; end
+            end
+        end
+        rm(path; force = true)
+        sort!(compiled; by = x -> -x[2])
+        out["compiled"] = [[s, ms] for (s, ms) in Iterators.take(compiled, 300)]
+        out["compiled_n"] = length(compiled)
+        out["dispatched"] = [[s, n] for (s, n) in Iterators.take(sort!(collect(dispatched); by = x -> -x[2]), 300)]
+        out["dispatched_n"] = length(dispatched)
+    end
+end
+
+# ── the GPU ─────────────────────────────────────────────────────────────────────────────────────
+const _CUDA_ID = Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b64840ba"), "CUDA")
+
+# `f` under CUDA.jl's own profiler, when the notebook has loaded CUDA: the device's kernels and
+# copies, summed by name, land in `out`. Without CUDA it is `f`, and `out` says why.
+function _with_gpu(f, out::Dict{String,Any})
+    m = get(Base.loaded_modules, _CUDA_ID, nothing)
+    m === nothing && (out["error"] = "CUDA is not loaded in this notebook"; return f())
+    val = Ref{Any}(nothing)
+    res = try
+        Base.invokelatest(Core.eval, Main,
+            Expr(:macrocall, GlobalRef(m, Symbol("@profile")), LineNumberNode(0), Expr(:call, () -> (val[] = f()))))
+    catch e
+        out["error"] = first(sprint(showerror, e), 300)
+        return val[]
+    end
+    try
+        dev = Base.invokelatest(getproperty, res, :device)
+        names = String.(Base.invokelatest(getindex, dev, !, :name))
+        dur = Float64.(Base.invokelatest(getindex, dev, !, :stop)) .- Float64.(Base.invokelatest(getindex, dev, !, :start))
+        agg = Dict{String,Vector{Float64}}()
+        for (n, d) in zip(names, dur)
+            a = get!(() -> [0.0, 0.0], agg, n); a[1] += 1; a[2] += d
+        end
+        rows = sort!([(n, a[1], a[2]) for (n, a) in agg]; by = x -> -x[3])
+        out["kernels"] = [[n, Int(c), round(t * 1000; digits = 3)] for (n, c, t) in Iterators.take(rows, 200)]
+        out["device_ms"] = round(sum(dur; init = 0.0) * 1000; digits = 3)
+    catch e
+        out["error"] = "could not read CUDA's profile: " * first(sprint(showerror, e), 200)
+    end
+    return val[]
+end
 
 # ── samples ─────────────────────────────────────────────────────────────────────────────────────
 # `Profile.fetch(include_meta = true)` is a flat buffer of blocks: a sample's instruction pointers,
@@ -222,41 +325,122 @@ function _node!(t::_ProfTree, parent::Int, file::AbstractString, line::Int, func
     end
 end
 
+# One profile's tree being built, and what the samples said beside it.
+mutable struct _Acc
+    t::_ProfTree
+    cellfile::String
+    lines::Dict{Tuple{Int,Int},Vector{Int}}    # (file, line) → [incl, self, dispatch, gc, compile]
+    pkgfile::Dict{String,String}                # package → a file of it, to tell the user's own
+    seen::Set{Tuple{Int,Int}}
+    path::Vector{Int}; pathfn::Vector{Symbol}   # the line nodes the last path went through
+end
+_Acc(t, cellfile) = _Acc(t, cellfile, Dict{Tuple{Int,Int},Vector{Int}}(), Dict{String,String}(),
+                         Set{Tuple{Int,Int}}(), Int[], Symbol[])
+_lrow(a::_Acc, key) = get!(() -> zeros(Int, 5), a.lines, key)
+
 """
-    _profile_build(cid, task, facts; error) -> Dict
+    _add!(acc, frames, start, cur, w) -> Int
+
+Add one stack, `frames` root first, below node `cur`, from `frames[start]` on, with weight `w` (a
+sample, or an allocation's bytes). Every node above `cur` holds it too. The runtime's own frames
+are not nodes: under a dispatch they mark the line above them, and garbage collection or
+compilation end the path in a node of their own. Returns the node the path ended in.
+"""
+function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
+    t = a.t
+    empty!(a.seen); empty!(a.path); empty!(a.pathfn)
+    x = cur
+    while x > 0
+        t.total[x] += w
+        if t.kind[x] == _K_LINE
+            key = (t.file[x], t.line[x])
+            key in a.seen || (push!(a.seen, key); _lrow(a, key)[1] += w)
+        end
+        x = t.parent[x]
+    end
+    leaf = (0, 0)
+    mark!(k) = leaf[1] > 0 && (_lrow(a, leaf)[k] += w)
+    for j in start:length(frames)
+        fr = frames[j]
+        if fr.from_c
+            fn = string(fr.func)
+            if fn in _DISPATCH_C
+                t.dispatch[cur] += w; mark!(3)
+            elseif _gc_c(fn)
+                t.gc[cur] += w; mark!(4)
+                cur = _node!(t, cur, "", 0, "garbage collection", "", _K_GC); t.total[cur] += w
+                break
+            elseif _compile_c(fn)
+                t.compile[cur] += w; mark!(5)
+                cur = _node!(t, cur, "", 0, "compilation", "", _K_COMPILE); t.total[cur] += w
+                break
+            end
+            continue
+        end
+        pkg = _frame_pkg(fr, a.cellfile)
+        haskey(a.pkgfile, pkg) || (a.pkgfile[pkg] = _ffile(fr))
+        if _compiler_pkg(pkg)
+            t.compile[cur] += w; mark!(5)
+            cur = _node!(t, cur, "", 0, "compilation", "", _K_COMPILE); t.total[cur] += w
+            break
+        end
+        file = _ffile(fr); ln = Int(fr.line)
+        cur = _node!(t, cur, file, ln, string(fr.func), pkg, _K_LINE)
+        t.total[cur] += w
+        push!(a.path, cur); push!(a.pathfn, fr.func)
+        key = (_str!(t, file), ln)
+        key in a.seen || (push!(a.seen, key); _lrow(a, key)[1] += w)
+        leaf = key
+    end
+    t.self[cur] += w
+    leaf[1] > 0 && (_lrow(a, leaf)[2] += w)
+    return cur
+end
+
+# Where a stack outside the cell's own code starts saying something: past the task entry, and on
+# the cell's task past the evaluation machinery that brought it there (`_eval_cell_source`, `eval`).
+# The runtime's frames stay, so compiling and collecting are recognised.
+function _outside_start(frames, cellfile)
+    ev = findlast(fr -> fr.func === :_eval_cell_source, frames)
+    s = ev === nothing ? 1 : ev + 1
+    while s <= length(frames) && !frames[s].from_c &&
+          (frames[s].func === :eval || _frame_pkg(frames[s], cellfile) in _INFRA_PKGS)
+        s += 1
+    end
+    return s
+end
+
+"""
+    _profile_build(cid, task, facts; error, others, marks) -> Dict
 
 Turn the sample buffer into the line-keyed tree for cell `cid`, whose evaluation ran on `task`.
 
-Which samples are the cell's: those of its task, and those of any task whose stack runs this
-cell's code (a `Threads.@threads` body, a spawned closure). Dropped, and counted by reason: idle
-threads, samples inside another cell, and the worker's own tasks. A sample of a task the cell did
-not obviously start, doing work that is not the worker's, is kept under "other threads": library
-code the cell set running on a thread pool lands there.
+Which samples are the cell's: those of its task, and those of any other task that is not another
+cell's (`others`), not the worker's own, and not a thread waiting for work. Work the cell hands to
+other tasks belongs under the call that handed it out; a task waiting on that work leaves no
+samples, so it goes where the cell's task last was in the same statement (inside the `@threads`
+loop, the `fetch`), or else on the statement's line, which `marks` give by buffer position: the
+buffer fills in the order samples are taken. In wall-time mode a waiting task is sampled too, and
+its waiting is time like any other.
 """
 function _profile_build(cid::String, task::UInt, facts; error = nothing, others::Set{UInt} = Set{UInt}(),
                         marks::Vector{Tuple{Int,Int}} = Tuple{Int,Int}[])
+    wall = facts.opts.mode == "wall"
     data = Profile.fetch(include_meta = true)
     lidict = Profile.getdict(data)
     cellfile = "cell:" * cid
-    t = _ProfTree()
+    t = _ProfTree(); a = _Acc(t, cellfile)
     root = _node!(t, 0, cellfile, 0, "cell " * cid, "cell", _K_SYNTH)
     toplevel = 0; spare = 0
     dropped = Dict{String,Int}("idle" => 0, "other cells" => 0, "worker" => 0)
     kept = 0; threads = Set{UInt}()
-    lines = Dict{Tuple{Int,Int},Vector{Int}}()    # (file, line) → [incl, self, dispatch, gc, compile]
+    tl_thread = UInt[]; tl_clock = UInt[]; tl_node = Int[]
     frames = Base.StackTraces.StackFrame[]
-    seen = Set{Tuple{Int,Int}}()
-    pkgfile = Dict{String,String}()               # package → a file of it, to tell the user's own
-    path = Int[]; pathfn = Symbol[]               # the line nodes this sample went through
-    # Work the cell hands to other tasks is the cell's, and belongs under the call that handed it
-    # out. A task waiting for that work leaves no samples, so it goes where the cell's own task last
-    # was in the same statement (inside the `@threads` loop, the `fetch`), or else on the
-    # statement's line. Samples are in the order they were taken, which is what `marks` index.
     graft = 0; graftat = 0; mi = 0
     for s in _profile_samples(data)
         while mi < length(marks) && marks[mi + 1][1] < first(s.ips); mi += 1; end
         stmt0 = mi == 0 ? 0 : marks[mi][1]
-        s.awake || (dropped["idle"] += 1; continue)
+        (s.awake || wall) || (dropped["idle"] += 1; continue)
         s.task in others && (dropped["other cells"] += 1; continue)
         empty!(frames)
         for k in s.ips   # leaf first; each ip may expand to several inlined frames, innermost first
@@ -268,15 +452,7 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
         if own && cidx !== nothing
             cur = root; start = cidx
         elseif own
-            # The cell's task outside its code: parsing, lowering and compiling its statements,
-            # below the evaluation machinery that brought it there.
-            ev = findlast(fr -> fr.func === :_eval_cell_source, frames)
-            start = ev === nothing ? 1 : ev + 1
-            # The runtime's own frames stay: compiling and collecting are recognised and marked below.
-            while start <= length(frames) && !frames[start].from_c && (frames[start].func === :eval ||
-                                              _frame_pkg(frames[start], cellfile) in _INFRA_PKGS)
-                start += 1
-            end
+            start = _outside_start(frames, cellfile)
             toplevel == 0 && (toplevel = _node!(t, root, cellfile, 0, "top level", "cell", _K_SYNTH))
             cur = toplevel
         else
@@ -296,88 +472,115 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
             end
         end
         kept += 1; push!(threads, s.thread)
-        # Everything above where this sample starts holds it too, lines included.
-        empty!(seen); empty!(path); empty!(pathfn)
-        a = cur
-        while a > 0
-            t.total[a] += 1
-            if t.kind[a] == _K_LINE
-                key = (t.file[a], t.line[a])
-                key in seen || (push!(seen, key); get!(() -> zeros(Int, 5), lines, key)[1] += 1)
-            end
-            a = t.parent[a]
-        end
-        leafline = (0, 0)
-        for j in start:length(frames)
-            fr = frames[j]
-            if fr.from_c
-                fn = string(fr.func)
-                if fn in _DISPATCH_C
-                    t.dispatch[cur] += 1
-                    leafline[1] > 0 && (get!(() -> zeros(Int, 5), lines, leafline)[3] += 1)
-                elseif _gc_c(fn)
-                    t.gc[cur] += 1
-                    leafline[1] > 0 && (get!(() -> zeros(Int, 5), lines, leafline)[4] += 1)
-                    cur = _node!(t, cur, "", 0, "garbage collection", "", _K_GC); t.total[cur] += 1
-                    break
-                elseif _compile_c(fn)
-                    t.compile[cur] += 1
-                    leafline[1] > 0 && (get!(() -> zeros(Int, 5), lines, leafline)[5] += 1)
-                    cur = _node!(t, cur, "", 0, "compilation", "", _K_COMPILE); t.total[cur] += 1
-                    break
-                end
-                continue
-            end
-            pkg = _frame_pkg(fr, cellfile)
-            haskey(pkgfile, pkg) || (pkgfile[pkg] = _ffile(fr))
-            if _compiler_pkg(pkg)
-                t.compile[cur] += 1
-                leafline[1] > 0 && (get!(() -> zeros(Int, 5), lines, leafline)[5] += 1)
-                cur = _node!(t, cur, "", 0, "compilation", "", _K_COMPILE); t.total[cur] += 1
-                break
-            end
-            file = _ffile(fr); ln = Int(fr.line)
-            cur = _node!(t, cur, file, ln, string(fr.func), pkg, _K_LINE)
-            t.total[cur] += 1
-            push!(path, cur); push!(pathfn, fr.func)
-            key = (_str!(t, file), ln)
-            if !(key in seen)
-                push!(seen, key)
-                get!(() -> zeros(Int, 5), lines, key)[1] += 1
-            end
-            leafline = key
-        end
-        t.self[cur] += 1
-        leafline[1] > 0 && (get!(() -> zeros(Int, 5), lines, leafline)[2] += 1)
+        leafnode = _add!(a, frames, start, cur, 1)
+        push!(tl_thread, s.thread); push!(tl_clock, s.clock); push!(tl_node, leafnode)
         # Where work handed out now would hang: the frame that waits for it, else the cell's line.
-        if own && cidx !== nothing && !isempty(path)
-            w = findfirst(in(_WAIT_FNS), pathfn)
-            graft = w === nothing ? path[1] : path[max(1, w - 1)]; graftat = first(s.ips)
+        if own && cidx !== nothing && !isempty(a.path)
+            w = findfirst(in(_WAIT_FNS), a.pathfn)
+            graft = w === nothing ? a.path[1] : a.path[max(1, w - 1)]; graftat = first(s.ips)
         end
     end
-    tree = _profile_prune(t, kept)
+    r, tree = _profile_result(a, cid, facts, kept; error, unit = "samples")
+    r["dropped"] = dropped; r["threads"] = length(threads)
+    r["buffer_full"] = try; Profile.is_buffer_full(); catch; false; end
+    r["timeline"] = _timeline(tl_thread, tl_clock, tl_node, tree.map, facts.ms, facts.opts.delay_ms)
+    return r
+end
+
+"""
+    _alloc_build(cid, task, facts; error, others) -> Dict
+
+The allocations a profile recorded (a sampled share of them), as the same line-keyed tree weighted
+by bytes, with a table of what was allocated: type, count and bytes, scaled back up by the share.
+"""
+function _alloc_build(cid::String, task::UInt, facts; error = nothing, others::Set{UInt} = Set{UInt}())
+    res = Profile.Allocs.fetch()
+    cellfile = "cell:" * cid
+    t = _ProfTree(); a = _Acc(t, cellfile)
+    root = _node!(t, 0, cellfile, 0, "cell " * cid, "cell", _K_SYNTH)
+    toplevel = 0; spare = 0
+    dropped = Dict{String,Int}("other cells" => 0, "worker" => 0)
+    kept = 0; bytes = 0
+    types = Dict{String,Vector{Int}}()
+    frames = Base.StackTraces.StackFrame[]
+    for al in res.allocs
+        tk = UInt(al.task)
+        tk in others && (dropped["other cells"] += 1; continue)
+        empty!(frames); append!(frames, al.stacktrace); reverse!(frames)
+        own = tk == task
+        cidx = findfirst(fr -> _ffile(fr) == cellfile, frames)
+        if cidx !== nothing
+            cur = root; start = cidx
+        elseif own
+            start = _outside_start(frames, cellfile)
+            toplevel == 0 && (toplevel = _node!(t, root, cellfile, 0, "top level", "cell", _K_SYNTH))
+            cur = toplevel
+        else
+            any(fr -> !fr.from_c && _frame_pkg(fr, cellfile) in _INFRA_PKGS, frames) &&
+                (dropped["worker"] += 1; continue)
+            start = something(findfirst(fr -> !fr.from_c, frames), 1)
+            spare == 0 && (spare = _node!(t, root, "", 0, "other threads", "", _K_SYNTH))
+            cur = spare
+        end
+        kept += 1; bytes += al.size
+        _add!(a, frames, start, cur, Int(al.size))
+        ty = types[string(al.type)] = get(types, string(al.type), [0, 0])
+        ty[1] += 1; ty[2] += al.size
+    end
+    r, _ = _profile_result(a, cid, facts, bytes; error, unit = "bytes")
+    k = 1 / facts.opts.alloc_rate
+    r["allocs"] = kept; r["dropped"] = dropped; r["threads"] = 0
+    r["alloc_rate"] = facts.opts.alloc_rate
+    r["types"] = [[ty, round(Int, c * k), round(Int, b * k)]
+                  for (ty, (c, b)) in Iterators.take(sort!(collect(types); by = x -> -x[2][2]), 200)]
+    return r
+end
+
+function _profile_result(a::_Acc, cid::String, facts, total::Int; error = nothing, unit = "samples")
+    tree = _profile_prune(a.t, total)
+    L = a.lines
     return Dict{String,Any}(
-        "cell" => cid, "mode" => String(facts.mode), "samples" => kept, "dropped" => dropped,
-        "threads" => length(threads), "duration_ms" => round(facts.ms; digits = 1),
+        "cell" => cid, "mode" => facts.opts.mode, "unit" => unit, "samples" => total,
+        "duration_ms" => round(facts.ms; digits = 1),
         "compile_ms" => round(facts.compile_ms; digits = 1), "gc_ms" => round(facts.gc_ms; digits = 1),
-        "delay_ms" => _PROF_DELAY * 1000, "error" => error, "at" => time(),
+        "delay_ms" => facts.opts.delay_ms, "error" => error, "at" => time(),
         "strings" => tree.strings, "nodes" => tree.nodes,
-        "mine" => sort!([p for (p, f) in pkgfile if _user_pkg(p, f)]),
+        "mine" => sort!([p for (p, f) in a.pkgfile if _user_pkg(p, f)]),
         "lines" => Dict{String,Any}(
-            "file" => [k[1] for k in keys(lines)], "line" => [k[2] for k in keys(lines)],
-            "incl" => [v[1] for v in values(lines)], "self" => [v[2] for v in values(lines)],
-            "dispatch" => [v[3] for v in values(lines)], "gc" => [v[4] for v in values(lines)],
-            "compile" => [v[5] for v in values(lines)]))
+            "file" => [k[1] for k in keys(L)], "line" => [k[2] for k in keys(L)],
+            "incl" => [v[1] for v in values(L)], "self" => [v[2] for v in values(L)],
+            "dispatch" => [v[3] for v in values(L)], "gc" => [v[4] for v in values(L)],
+            "compile" => [v[5] for v in values(L)])), tree
+end
+
+# Every kept sample in time order, for the timeline: its thread (numbered from 1), when (ms from the
+# first sample, scaled from the sampler's clock to the run's length) and the node it ended in. A
+# long run is thinned to `_TL_MAX` samples.
+const _TL_MAX = 150_000
+function _timeline(thread, clock, node, map, ms, delay)
+    n = length(node)
+    n == 0 && return Dict{String,Any}("thread" => Int[], "t" => Float64[], "node" => Int[], "step_ms" => delay)
+    step = max(1, cld(n, _TL_MAX))
+    ix = 1:step:n
+    c0, c1 = minimum(clock), maximum(clock)
+    span = c1 > c0 ? Float64(c1 - c0) : 1.0
+    tids = sort!(unique(thread)); tnum = Dict(t => i for (i, t) in enumerate(tids))
+    return Dict{String,Any}(
+        "thread" => [tnum[thread[i]] for i in ix],
+        "t" => [round((clock[i] - c0) / span * ms; digits = 2) for i in ix],
+        "node" => [map[node[i]] for i in ix],
+        "step_ms" => delay * step)
 end
 
 # Below this share of the samples a node is folded into an "other" sibling, so a deep library
 # stack sent from a compute node stays small. The line table is not pruned: it is one row per line.
 const _PROF_KEEP = 0.001
 
+# Also returns, for every node built, the node it is shown as: itself, or the "other" it folded into.
 function _profile_prune(t::_ProfTree, kept::Int)
     n = length(t.parent)
     floor_ = max(1, ceil(Int, _PROF_KEEP * kept))
-    keep = falses(n); keep[1] = n >= 1
+    keep = falses(n); n >= 1 && (keep[1] = true)
     for i in 2:n
         keep[i] = t.total[i] >= floor_ && keep[t.parent[i]]   # parents precede children
     end
@@ -392,10 +595,12 @@ function _profile_prune(t::_ProfTree, kept::Int)
         length(cols["parent"])
     end
     oname = _str!(t, "(other)"); empty_ = _str!(t, "")
+    map = zeros(Int, n)
     for i in 1:n
         if keep[i]
             newid[i] = add!(i == 1 ? 0 : newid[t.parent[i]], t.file[i], t.line[i], t.func[i], t.pkg[i],
                             t.kind[i], t.total[i], t.self[i], t.dispatch[i], t.gc[i], t.compile[i])
+            map[i] = newid[i]
         elseif keep[t.parent[i]]
             p = newid[t.parent[i]]
             o = get!(other, p) do
@@ -403,9 +608,12 @@ function _profile_prune(t::_ProfTree, kept::Int)
             end
             cols["total"][o] += t.total[i]
             cols["self"][o] += t.total[i]   # nothing below it is kept, so all of it is its own
+            map[i] = o
+        else
+            map[i] = map[t.parent[i]]      # under a folded node: shown as what that folded into
         end
     end
-    return (; strings = t.strings, nodes = cols)
+    return (; strings = t.strings, nodes = cols, map)
 end
 
 # ── prepare: compile without running ────────────────────────────────────────────────────────────

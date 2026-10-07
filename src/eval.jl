@@ -706,8 +706,8 @@ profile_prepare!(::InProcessKernel, report::Report; cell::AbstractString, source
     profile_prepare!(report_module(report); cell = cell, source = source, reads = reads)
 
 "Profile the next run of `cell` on this kernel."
-profile_arm!(::InProcessKernel, ::Report; cell::AbstractString, mode::AbstractString = "cpu") =
-    profile_arm!(cell, mode)
+profile_arm!(::InProcessKernel, ::Report; cell::AbstractString, mode::AbstractString = "cpu", kw...) =
+    profile_arm!(cell, mode; kw...)
 profile_disarm!(::InProcessKernel, ::Report; cell::AbstractString) = profile_disarm!(cell)
 
 "The last profile of `cell` taken on this kernel, or `nothing`."

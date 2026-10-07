@@ -1860,8 +1860,11 @@ function profile_prepare!(k::GateKernel, report::Report; cell::AbstractString, s
                  Dict{String,Any}("cell" => String(cell), "source" => String(source), "reads" => reads);
                  timeout = 1800.0)
 end
-profile_arm!(k::GateKernel, ::Report; cell::AbstractString, mode::AbstractString = "cpu") =
-    _tool(k, "__slate_profile_arm", Dict{String,Any}("cell" => String(cell), "mode" => String(mode)); timeout = 30.0)
+profile_arm!(k::GateKernel, ::Report; cell::AbstractString, mode::AbstractString = "cpu", delay_ms::Real = 1.0,
+             buffer::Integer = 4_000_000, trace::Bool = true, alloc_rate::Real = 0.01) =
+    _tool(k, "__slate_profile_arm", Dict{String,Any}("cell" => String(cell), "mode" => String(mode),
+          "delay_ms" => Float64(delay_ms), "buffer" => Int(buffer), "trace" => trace,
+          "alloc_rate" => Float64(alloc_rate)); timeout = 30.0)
 profile_disarm!(k::GateKernel, ::Report; cell::AbstractString) =
     _tool(k, "__slate_profile_disarm", Dict{String,Any}("cell" => String(cell)); timeout = 30.0)
 function profile_result(k::GateKernel, ::Report; cell::AbstractString)

@@ -70,7 +70,7 @@ end
 Profile cell `cid` and wait: arm a profile for it on its kernel, run it as its ▶ would (so its
 output, bindings and memo entry are the run's), and push what came back. Returns that push.
 """
-function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractString = "cpu")
+function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractString = "cpu", opts...)
     cell = _profile_cell(nb, cid)
     cell === nothing && return Dict{String,Any}("kind" => "error", "error" => "no code cell '$cid'")
     _, side = _region_route(nb, cell)
@@ -82,7 +82,7 @@ function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractStrin
         k, why = _profile_kernel(nb, side)
         k === nothing && return fail(why)
         lock(_eval_mutex(nb)) do
-            ReportEngine.profile_arm!(k, nb.report; cell = String(cid), mode = String(mode))
+            ReportEngine.profile_arm!(k, nb.report; cell = String(cid), mode = String(mode), opts...)
         end
         t0 = time()
         lock(nb.lock) do; _force_cell!(nb, cid); end
@@ -107,9 +107,9 @@ function profile_now!(nb::LiveNotebook, cid::AbstractString; mode::AbstractStrin
 end
 
 "Profile cell `cid` in the background; the page follows the pushes (`profile_now!`)."
-function run_profile!(nb::LiveNotebook, cid::AbstractString; mode::AbstractString = "cpu")
+function run_profile!(nb::LiveNotebook, cid::AbstractString; mode::AbstractString = "cpu", opts...)
     _profile_cell(nb, cid) === nothing && return Dict{String,Any}("ok" => false, "error" => "no code cell '$cid'")
-    Threads.@spawn profile_now!(nb, cid; mode = mode)
+    Threads.@spawn profile_now!(nb, cid; mode = mode, opts...)
     return Dict{String,Any}("ok" => true)
 end
 
@@ -217,7 +217,9 @@ function _register_profile_routes!(router, h::Hub)
         _json(prepare_profile!(nb, String(get(_body(req), "cell", ""))))))
     HTTP.register!(router, "POST", "/api/{id}/profile/run", req -> _withnb(h, req, nb -> begin
         b = _body(req)
-        _json(run_profile!(nb, String(get(b, "cell", "")); mode = String(get(b, "mode", "cpu"))))
+        _json(run_profile!(nb, String(get(b, "cell", "")); mode = String(get(b, "mode", "cpu")),
+                           delay_ms = Float64(get(b, "delay_ms", 1.0)), buffer = Int(get(b, "buffer", 4_000_000)),
+                           trace = get(b, "trace", true) === true, alloc_rate = Float64(get(b, "alloc_rate", 0.01))))
     end))
     HTTP.register!(router, "GET", "/api/{id}/profile/last", req -> _withnb(h, req, nb -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
@@ -238,6 +240,10 @@ function _register_profile_routes!(router, h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/profile/history", req -> _withnb(h, req, nb -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
         _json(Dict{String,Any}("profiles" => profile_history(nb, String(get(q, "cell", "")))))
+    end))
+    HTTP.register!(router, "GET", "/api/{id}/profile/export", req -> _withnb(h, req, nb -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        _profile_export_response(nb, String(get(q, "cell", "")), String(get(q, "id", "")), String(get(q, "format", "speedscope")))
     end))
     HTTP.register!(router, "GET", "/api/{id}/profile/load", req -> _withnb(h, req, nb -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
@@ -302,9 +308,13 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
     p === nothing && return "No profile of cell `$cid` yet. `prof_run` takes one."
     P = p["profile"]; T = max(1, P["samples"])
     io = IOBuffer()
-    println(io, "Cell `", cid, "`", isempty(p["side"]) ? "" : " on " * p["side"], ": ", _pms(P["duration_ms"]),
-            ", ", P["samples"], " samples", P["threads"] > 1 ? " on $(P["threads"]) threads" : "",
+    bytes = get(P, "unit", "samples") == "bytes"
+    println(io, "Cell `", cid, "`", isempty(p["side"]) ? "" : " on " * p["side"], " (", get(P, "mode", "cpu"), "): ",
+            _pms(P["duration_ms"]), ", ",
+            bytes ? string(Base.format_bytes(P["samples"]), " allocated in ", get(P, "allocs", 0), " sampled allocations") :
+                    string(P["samples"], " samples", get(P, "threads", 0) > 1 ? " on $(P["threads"]) threads" : ""),
             ", compiling ", _pms(P["compile_ms"]), ", GC ", _pms(P["gc_ms"]), ".")
+    get(P, "buffer_full", false) === true && println(io, "The sample buffer filled: the end of the run is missing. Profile again with a larger buffer or a longer interval.")
     P["error"] === nothing || println(io, "The run threw: ", first(split(String(P["error"]), '\n')))
     prev = previous_profile(nb, cid)
     if prev !== nothing
@@ -320,6 +330,34 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
         println(io, "  ", lpad(_ppct(r.self / T), 6), " / ", lpad(_ppct(r.incl / T), 5), "  ",
                 _pshort(r.file), ":", r.line, (t = _cell_line_text(nb, r.file, r.line); isempty(t) ? "" : "  " * t),
                 _pmarks(r.d, r.g, r.c, T))
+    end
+    if haskey(P, "types") && !isempty(P["types"])
+        println(io, "\nWhat was allocated (type, count, bytes):")
+        for (ty, c, b) in Iterators.take(P["types"], 10)
+            println(io, "  ", lpad(Base.format_bytes(b), 10), "  ", lpad(c, 9), "  ", ty)
+        end
+    end
+    if haskey(P, "compiled") && !isempty(P["compiled"])
+        println(io, "\nCompiled during the run (", P["compiled_n"], " methods), the slowest:")
+        for (sig, t) in Iterators.take(P["compiled"], 8)
+            println(io, "  ", lpad(_pms(t), 8), "  ", sig)
+        end
+    end
+    if haskey(P, "dispatched") && !isempty(P["dispatched"])
+        println(io, "\nDispatched at runtime (", P["dispatched_n"], " signatures):")
+        for (sig, n) in Iterators.take(P["dispatched"], 8)
+            println(io, "  ", sig)
+        end
+    end
+    if haskey(P, "gpu")
+        g = P["gpu"]
+        haskey(g, "error") && println(io, "\nGPU: ", g["error"])
+        if haskey(g, "kernels")
+            println(io, "\nOn the GPU (", _pms(g["device_ms"]), " of device time), by name:")
+            for (n, c, t) in Iterators.take(g["kernels"], 10)
+                println(io, "  ", lpad(_pms(t), 8), "  ×", c, "  ", n)
+            end
+        end
     end
     nodes, kids = _pnodes(P)
     println(io, "\nHot paths, from the cell's heaviest lines:")
@@ -499,3 +537,113 @@ end
 
 register_specialist!(Specialist(PROFILE_ROLE; brief = PROFILE_BRIEF, verbs = PROFILE_VERBS,
                                 briefing = profile_briefing))
+
+# ── export ─────────────────────────────────────────────────────────────────────────────────────
+# A kept profile in the formats other tools read: speedscope's JSON and pprof's protobuf. Both are
+# built from the tree: every node with time of its own is a stack (the path from the cell to it)
+# weighted by that time, which is what a sampled profile aggregates to.
+
+function _profile_stacks(P::AbstractDict)
+    nodes, _ = _pnodes(P)
+    w = get(P, "unit", "samples") == "bytes" ? 1.0 : Float64(get(P, "delay_ms", 1.0))
+    out = Tuple{Vector{Int},Float64}[]
+    for n in nodes
+        n.self > 0 || continue
+        path = Int[]; i = n.id
+        while i > 0; push!(path, i); i = nodes[i].parent; end
+        push!(out, (reverse!(path), n.self * w))
+    end
+    return nodes, out
+end
+
+_frame_name(n::_PNode) = n.id == 1 ? n.func : n.kind != 0 ? "[" * n.func * "]" :
+    n.func == "top-level scope" ? n.file * ":" * string(n.line) : n.func
+
+function profile_speedscope(P::AbstractDict, title::AbstractString)
+    nodes, stacks = _profile_stacks(P)
+    fidx = Dict{Tuple{String,String,Int},Int}(); frames = Dict{String,Any}[]
+    frame(n) = get!(fidx, (_frame_name(n), n.file, n.line)) do
+        push!(frames, Dict{String,Any}("name" => _frame_name(n), "file" => n.file, "line" => n.line))
+        length(frames) - 1
+    end
+    samples = [[frame(nodes[i]) for i in path] for (path, _) in stacks]
+    weights = [w for (_, w) in stacks]
+    bytes = get(P, "unit", "samples") == "bytes"
+    return Dict{String,Any}(
+        "\$schema" => "https://www.speedscope.app/file-format-schema.json",
+        "name" => title, "exporter" => "KaimonSlate", "activeProfileIndex" => 0,
+        "shared" => Dict{String,Any}("frames" => frames),
+        "profiles" => [Dict{String,Any}("type" => "sampled", "name" => title,
+            "unit" => bytes ? "bytes" : "milliseconds", "startValue" => 0, "endValue" => sum(weights; init = 0.0),
+            "samples" => samples, "weights" => weights)])
+end
+
+# Protobuf, by hand: varints and length-delimited fields are all pprof's schema needs.
+function _pb_varint(io::IO, x::UInt64)
+    while x >= 0x80
+        write(io, UInt8(x & 0x7f | 0x80)); x >>= 7
+    end
+    write(io, UInt8(x))
+end
+_pb_tag(io, field, wire) = _pb_varint(io, UInt64(field << 3 | wire))
+_pb_int(io, field, x) = (_pb_tag(io, field, 0); _pb_varint(io, reinterpret(UInt64, Int64(x))))
+function _pb_bytes(io, field, b::Vector{UInt8})
+    _pb_tag(io, field, 2); _pb_varint(io, UInt64(length(b))); write(io, b)
+end
+_pb_msg(io, field, f) = (b = IOBuffer(); f(b); _pb_bytes(io, field, take!(b)))
+function _pb_packed(io, field, xs)
+    b = IOBuffer(); foreach(x -> _pb_varint(b, reinterpret(UInt64, Int64(x))), xs); _pb_bytes(io, field, take!(b))
+end
+
+function profile_pprof(P::AbstractDict)
+    nodes, stacks = _profile_stacks(P)
+    strs = String[""]; sidx = Dict{String,Int}("" => 0)
+    s(x) = get!(sidx, String(x)) do; push!(strs, String(x)); length(strs) - 1; end
+    funcs = Dict{Tuple{String,String},Int}(); locs = Dict{Tuple{Int,Int},Int}()
+    io = IOBuffer()
+    bytes = get(P, "unit", "samples") == "bytes"
+    # sample_type, then the period
+    if bytes
+        _pb_msg(io, 1, b -> (_pb_int(b, 1, s("space")); _pb_int(b, 2, s("bytes"))))
+    else
+        _pb_msg(io, 1, b -> (_pb_int(b, 1, s("samples")); _pb_int(b, 2, s("count"))))
+        _pb_msg(io, 1, b -> (_pb_int(b, 1, s("cpu")); _pb_int(b, 2, s("nanoseconds"))))
+    end
+    delay_ns = round(Int, Float64(get(P, "delay_ms", 1.0)) * 1e6)
+    for (path, w) in stacks
+        ids = Int[]
+        for i in reverse(path)                      # pprof lists a stack leaf first
+            n = nodes[i]
+            fid = get!(funcs, (_frame_name(n), n.file)) do; length(funcs) + 1; end
+            push!(ids, get!(locs, (fid, n.line)) do; length(locs) + 1; end)
+        end
+        vals = bytes ? [round(Int, w)] : [nodes[path[end]].self, nodes[path[end]].self * delay_ns]
+        _pb_msg(io, 2, b -> (_pb_packed(b, 1, ids); _pb_packed(b, 2, vals)))
+    end
+    for ((fid, line), lid) in sort!(collect(locs); by = last)
+        _pb_msg(io, 4, b -> (_pb_int(b, 1, lid); _pb_msg(b, 4, l -> (_pb_int(l, 1, fid); _pb_int(l, 2, line)))))
+    end
+    for ((name, file), fid) in sort!(collect(funcs); by = last)
+        _pb_msg(io, 5, b -> (_pb_int(b, 1, fid); _pb_int(b, 2, s(name)); _pb_int(b, 3, s(name)); _pb_int(b, 4, s(file))))
+    end
+    bytes || (_pb_msg(io, 11, b -> (_pb_int(b, 1, s("cpu")); _pb_int(b, 2, s("nanoseconds")))); _pb_int(io, 12, delay_ns))
+    _pb_int(io, 9, round(Int, Float64(P["at"]) * 1e9))
+    _pb_int(io, 10, round(Int, Float64(P["duration_ms"]) * 1e6))
+    for x in strs; _pb_bytes(io, 6, Vector{UInt8}(codeunits(x))); end
+    return take!(io)
+end
+
+function _profile_export_response(nb::LiveNotebook, cid::AbstractString, id::AbstractString, format::AbstractString)
+    p = isempty(id) ? last_profile(nb, cid) : profile_load(nb, cid, id)
+    p === nothing && return HTTP.Response(404, "no such profile")
+    P = p["profile"]
+    stem = string(splitext(basename(nb.path))[1], "-", cid, "-", get(P, "mode", "cpu"), "-",
+                  Dates.format(Dates.unix2datetime(Float64(P["at"])), "yyyymmdd-HHMMSS"))
+    if format == "pprof"
+        return HTTP.Response(200, ["Content-Type" => "application/octet-stream",
+                                   "Content-Disposition" => "attachment; filename=\"$stem.pb\""], profile_pprof(P))
+    end
+    body = JSON.json(_json_finite(profile_speedscope(P, "cell $cid")))
+    return HTTP.Response(200, ["Content-Type" => "application/json",
+                               "Content-Disposition" => "attachment; filename=\"$stem.speedscope.json\""], body)
+end

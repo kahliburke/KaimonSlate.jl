@@ -94,6 +94,44 @@ end
         @test p["dropped"]["other cells"] == 0
     end
 
+    @testset "allocations are profiled by bytes, with what was allocated" begin
+        RE.profile_arm!("pa", "alloc"; alloc_rate = 0.5)
+        RE.run_capture(ProfNS, "a = Any[i for i in 1:50_000]\nb = sum(length(collect(1:k % 50)) for k in 1:20_000)\n", "cell:pa")
+        p = RE.profile_result("pa")
+        @test p["unit"] == "bytes" && p["samples"] > 0 && !isempty(p["types"])
+        nd = nodes(p)
+        l1 = [i for i in eachindex(nd["parent"]) if nd["parent"][i] == 1 && nd["line"][i] == 1]
+        @test !isempty(l1) && sum(nd["total"][l1]) > 0
+    end
+
+    @testset "what compiled during the run, and what dispatched at runtime" begin
+        RE.profile_arm!("pc2", "cpu")
+        RE.run_capture(ProfNS, "fresh_f(x) = x + 1\nv = Any[1, 2.5, 0x3]\nt = sum(fresh_f, v)\n", "cell:pc2")
+        p = RE.profile_result("pc2")
+        @test p["compiled_n"] >= 1 && any(c -> occursin("fresh_f", c[1]), p["compiled"])
+        @test p["dispatched_n"] >= 1
+    end
+
+    @testset "wall time samples a waiting task" begin
+        RE.profile_arm!("pw", "wall"; delay_ms = 0.2)
+        RE.run_capture(ProfNS, "sleep(0.3)\n", "cell:pw")
+        p = RE.profile_result("pw")
+        nd = nodes(p)
+        @test p["mode"] == "wall" && any(i -> nd["parent"][i] == 1 && nd["line"][i] == 1, eachindex(nd["parent"]))
+    end
+
+    @testset "a profile exports to speedscope and pprof" begin
+        NS = KaimonSlate.NotebookServer
+        p = RE.profile_result("pc")
+        ss = NS.profile_speedscope(p, "cell pc")
+        prof = only(ss["profiles"])
+        @test prof["type"] == "sampled" && length(prof["samples"]) == length(prof["weights"]) > 0
+        @test sum(prof["weights"]) ≈ p["samples"] * p["delay_ms"]
+        @test all(s -> all(i -> 0 <= i < length(ss["shared"]["frames"]), s), prof["samples"])
+        b = NS.profile_pprof(p)
+        @test length(b) > 100 && b[1] == 0x0a          # field 1 (sample_type), length-delimited
+    end
+
     @testset "source for a frame is read on the kernel's machine" begin
         s = RE.profile_source("./array.jl")
         @test s["error"] === nothing && occursin("function", s["text"]) && isfile(s["path"])
