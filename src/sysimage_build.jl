@@ -1,8 +1,8 @@
 # The program that builds a worker sysimage, run where the region's workers run and in their shell
 # (`build_sysimage!`). Its parameters are set above it as constants:
 #
-#   PROJ     the preparing notebook's environment on this machine: the image environment starts from
-#            its Manifest, so the image holds the versions the notebook resolves
+#   PROJ     the preparing notebook's environment on this machine: the image holds part of its
+#            Manifest, so every package in the image is the version the notebook resolves
 #   STORE    the machine's image store, in its depot
 #   REGION   the region asking, named in the lock while it builds
 #   SPEC     what the region lists: (name, uuid, version, path) for each package
@@ -12,9 +12,9 @@
 #   STALE    seconds after which another build's lock is taken over
 #   FORCE    build even when the image exists
 #
-# An image is named by what it holds: `STORE/<key>/` where the key hashes Julia and every package the
-# image environment resolves to, a package from a path by its contents. Regions that resolve to the same
-# packages share one. The directory holds that environment (`env`) and one image per CPU (`<cpu>.so`),
+# An image is named by what it holds: `STORE/<key>/` where the key hashes Julia and every package in
+# it, a package from a path by its contents. Notebooks whose environments agree on those packages share
+# one. The directory holds that environment (`env`) and one image per CPU (`<cpu>.so`),
 # since a native image built on one CPU can stop on an illegal instruction on another. The run prints
 # one `[sysimg] pkg …` line per package the image holds and ends with one `[sysimg] result=…` line:
 # current, built, deferred, busy, nocompiler or failed.
@@ -42,65 +42,36 @@ for (name, es) in get(nbm, "deps", Dict{String,Any}()), e in es
 end
 abspath_of(p) = (p = expanduser(String(p)); isabspath(p) ? p : normpath(joinpath(PROJ, p)))
 
-# The image environment, resolved in a scratch directory until its key names it. It starts from the
-# notebook's Manifest (paths made absolute), so a package both hold keeps the notebook's version and a
-# second resolve of the same list lands on the same key.
-stage = joinpath(STORE, ".resolve", string(gethostname(), "-", getpid()))
-try
-    rm(stage; force = true, recursive = true); mkpath(stage)
-    if !isempty(nbm)
-        seed = deepcopy(nbm); delete!(seed, "project_hash")
-        for (name, es) in get(seed, "deps", Dict{String,Any}())
-            filter!(e -> !haskey(e, "path") || isdir(abspath_of(e["path"])), es)
-            for e in es; haskey(e, "path") && (e["path"] = abspath_of(e["path"])); end
-        end
-        filter!(kv -> !isempty(kv[2]), get(seed, "deps", Dict{String,Any}()))
-        open(io -> TOML.print(io, seed; sorted = true), joinpath(stage, "Manifest.toml"), "w")
+# The image environment: the packages the region lists that the notebook's environment holds, Slate's
+# worker packages, and everything they depend on, each exactly as the notebook's Manifest has it. Taken
+# from the Manifest rather than resolved, so the image never holds a version the notebook does not, and
+# finding that an image is current costs no resolve. A listed package the notebook does not use is left
+# out of its image.
+roots = String[]
+for (name, uuid, version, path) in SPEC
+    if haskey(nbdeps, name)
+        push!(roots, name)
+    else
+        println("[sysimg] skip ", name, " (not in the notebook's environment)")
     end
-    write(joinpath(stage, "Project.toml"), "")
-    adds = Pkg.PackageSpec[]; devs = String[]
-    pinned(name) = (e = get(nbdeps, name, nothing); (e === nothing || haskey(e, "path")) ? "" : String(get(e, "version", "")))
-    for (name, uuid, version, path) in SPEC
-        if !isempty(path)
-            push!(devs, expanduser(path))
-        else
-            v = isempty(version) ? pinned(name) : version
-            push!(adds, isempty(v) ? Pkg.PackageSpec(name = name) : Pkg.PackageSpec(name = name, version = v))
-        end
-    end
-    for name in INFRA
-        any(s -> s.name == name, adds) && continue
-        e = get(nbdeps, name, nothing)
-        if e !== nothing && haskey(e, "path")
-            push!(devs, abspath_of(e["path"]))
-        else
-            v = pinned(name)
-            push!(adds, isempty(v) ? Pkg.PackageSpec(name = name) : Pkg.PackageSpec(name = name, version = v))
-        end
-    end
-    Pkg.activate(stage; io = devnull)
-    isempty(devs) || Pkg.develop([Pkg.PackageSpec(path = p) for p in unique(devs)]; io = devnull)
-    isempty(adds) || Pkg.add(adds; io = devnull)
-catch e
-    # The resolver's whole account goes to the log; the step names the clash: the package that could
-    # not be placed, and the packages held to one version that it ran into.
-    msg = sprint(showerror, e)
-    for l in split(msg, '\n'); println("[sysimg] resolve: ", l); end
-    stuck = (m = match(r"Unsatisfiable requirements detected for package (\S+)", msg); m === nothing ? "" : m.captures[1])
-    held = unique([String(m.captures[1]) * " " * String(m.captures[2])
-                   for m in eachmatch(r"([A-Za-z0-9_.]+) \[[0-9a-f]+\] log:\s*\n[\s│]*[├└]─possible versions are: [^\n]*\n[\s│]*[├└]─restricted to versions (\S+) by an explicit requirement", msg)
-                   if m.captures[2] != "*"])
-    why = isempty(stuck) ? first(replace(msg, '\n' => ' '), 300) :
-          "$stuck cannot be installed with the rest" * (isempty(held) ? "" : ": it clashes with " * join(held, ", ") *
-          " (held to that version)") * "; the resolver's account is in the activity log"
-    result("failed", "reason=the image's packages could not be resolved: " * why)
-    rm(stage; force = true, recursive = true)
-    exit(0)
+end
+for name in INFRA
+    haskey(nbdeps, name) && !(name in roots) && push!(roots, name)
+end
+if isempty(roots)
+    result("failed", "reason=the notebook's environment holds none of the packages the image would hold"); exit(0)
+end
+depnames(e) = (d = get(e, "deps", String[]); d isa AbstractDict ? collect(String, keys(d)) : collect(String, d))
+closure = Set{String}(); todo = copy(roots)
+while !isempty(todo)
+    n = pop!(todo)
+    (n in closure || !haskey(nbdeps, n)) && continue
+    push!(closure, n); append!(todo, depnames(nbdeps[n]))
 end
 
-# The key: Julia and every package the image environment resolved to, a path package by its contents.
-# Not the worker's own code: it is included at each boot, not held in the image, so a Slate update
-# leaves the image as good as it was.
+# The key: Julia and every package the image holds, a path package by its contents. Not the worker's
+# own code: it is included at each boot, not held in the image, so a Slate update leaves the image as
+# good as it was.
 ctx = SHA.SHA1_CTX()
 upd(x) = SHA.update!(ctx, codeunits(string(x, "\n")))
 upd(VERSION)
@@ -115,9 +86,9 @@ function tree_hash(dir)
     end
     bytes2hex(SHA.digest!(h))[1:16]
 end
-md = (f = joinpath(stage, "Manifest.toml"); isfile(f) ? TOML.parsefile(f) : Dict{String,Any}())
 held = String[]
-for name in sort!(collect(keys(get(md, "deps", Dict{String,Any}())))), e in md["deps"][name]
+for name in sort!(collect(closure))
+    e = nbdeps[name]
     tree = haskey(e, "path") ? "path:" * tree_hash(abspath_of(e["path"])) : String(get(e, "git-tree-sha1", ""))
     line = join((get(e, "uuid", ""), name, get(e, "version", ""), tree), " ")
     upd(line); push!(held, line)
@@ -125,11 +96,18 @@ end
 key = bytes2hex(SHA.digest!(ctx))[1:16]
 dir = joinpath(STORE, key); envdir = joinpath(dir, "env"); target = joinpath(dir, cpu * ".so")
 mkpath(dir)
-if isfile(joinpath(envdir, "Manifest.toml"))
-    rm(stage; force = true, recursive = true)                  # the same packages, resolved before
-else
-    rm(envdir; force = true, recursive = true)
-    try; mv(stage, envdir); catch; rm(stage; force = true, recursive = true); end   # a concurrent resolve placed it
+
+# Written when an image is about to be built: that part of the notebook's Manifest, paths made
+# absolute, and a Project naming the roots. Its packages are all in the depot already.
+function write_env()
+    mkpath(envdir)
+    m = Dict{String,Any}(k => v for (k, v) in nbm if k != "deps" && k != "project_hash")
+    m["deps"] = Dict{String,Any}(n => [let e = deepcopy(nbdeps[n])
+                                           haskey(e, "path") && (e["path"] = abspath_of(e["path"])); e
+                                       end] for n in closure)
+    open(io -> TOML.print(io, m; sorted = true), joinpath(envdir, "Manifest.toml"), "w")
+    open(io -> TOML.print(io, Dict("deps" => Dict(n => nbdeps[n]["uuid"] for n in roots)); sorted = true),
+         joinpath(envdir, "Project.toml"), "w")
 end
 image() = "image=$target bytes=$(filesize(target)) env=$envdir"
 println("[sysimg] key=$key cpu=$cpu"); flush(stdout)
@@ -190,6 +168,7 @@ function tree()
 end
 
 try
+    write_env()
     builder = joinpath(STORE, "builder"); Pkg.activate(builder; io = devnull)
     if !isfile(joinpath(builder, "Project.toml")) || !occursin("PackageCompiler", read(joinpath(builder, "Project.toml"), String))
         Pkg.add("PackageCompiler"; io = devnull)

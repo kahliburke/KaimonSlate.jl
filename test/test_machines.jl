@@ -348,26 +348,52 @@ const RE = KaimonSlate.ReportEngine
         end
 
         @testset "a sysimage build reports what it did" begin
-            # The build script decides before it builds anything; run it against a fake home, with no
-            # packages to resolve.
+            # The build script decides before it builds anything; run it against a fake home. The image
+            # holds part of the notebook's Manifest, read rather than resolved.
             r = RE.region_set!("simg"; host = "simghost"); r2 = RE.region_set!("simg2"; host = "simghost")
             mktempdir() do home
                 proj = mkpath(joinpath(home, "env")); write(joinpath(proj, "Project.toml"), "")
+                manifest(bv, cv) = write(joinpath(proj, "Manifest.toml"), """
+                    manifest_format = "2.0"
+                    [[deps.A]]
+                    deps = ["B"]
+                    git-tree-sha1 = "aaaa"
+                    uuid = "00000000-0000-0000-0000-00000000000a"
+                    version = "1.0.0"
+                    [[deps.B]]
+                    git-tree-sha1 = "bbbb"
+                    uuid = "00000000-0000-0000-0000-00000000000b"
+                    version = "$bv"
+                    [[deps.C]]
+                    git-tree-sha1 = "cccc"
+                    uuid = "00000000-0000-0000-0000-00000000000c"
+                    version = "$cv"
+                    """)
+                manifest("2.0.0", "3.0.0")
                 mkpath(joinpath(home, RE._REMOTE_WORKER)); write(joinpath(home, RE._REMOTE_WORKER, "worker.jl"), "")
                 store = joinpath(home, ".julia", "slate-sysimg")
                 @test RE.sysimage_store(r) == "~/.julia/slate-sysimg"                 # in the depot, shared
+                spec = [Dict("name" => "Gone", "uuid" => "", "version" => "", "path" => "")]
                 run_script(rg = r; minfree = 0.0, force = false) = begin
                     f = joinpath(home, "build.jl")
-                    write(f, RE._sysimage_build_script(rg, "env", Dict{String,String}[]; minfree_gb = minfree, force, infra = ()))
+                    write(f, RE._sysimage_build_script(rg, "env", spec; minfree_gb = minfree, force, infra = ("A",)))
                     read(setenv(`$(Base.julia_cmd()) --startup-file=no $f`, merge(ENV, Dict("HOME" => home))), String)
                 end
-                # Too little memory: put off, with the reason. The image is named by what it holds.
+                # Too little memory: put off, with the reason. The image is named by what it holds: the
+                # worker package A and what it depends on, not C, and not a listed package the notebook lacks.
                 out = run_script(; minfree = 1e9)
                 st, why, m = RE._sysimage_outcome(out, true, 3)
                 @test st == "warn" && occursin("free", why)
+                @test occursin(" A 1.0.0 aaaa", out) && occursin(" B 2.0.0 bbbb", out) && !occursin(" C ", out)
+                @test occursin("[sysimg] skip Gone", out)
                 key, cpu = m["key"], m["cpu"]
                 dir = joinpath(store, key)
-                @test isfile(joinpath(dir, "env", "Project.toml")) && isempty(readdir(joinpath(store, ".resolve")))
+                @test !isdir(joinpath(dir, "env")) && !isdir(joinpath(store, ".resolve"))   # nothing written yet
+                manifest("2.0.0", "3.1.0")
+                @test RE._sysimage_outcome(run_script(; minfree = 1e9), true, 3)[3]["key"] == key   # C is not in it
+                manifest("2.1.0", "3.0.0")
+                @test RE._sysimage_outcome(run_script(; minfree = 1e9), true, 3)[3]["key"] != key
+                manifest("2.0.0", "3.0.0")
                 # A build of the same image already running elsewhere holds it; the lock names its region.
                 write(joinpath(dir, ".building-" * cpu), "simg otherhost 1")
                 st, why, _ = RE._sysimage_outcome(run_script(r2), true, 3)
