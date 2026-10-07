@@ -250,7 +250,7 @@ margin, with what each one means when you hover it, and in **Details**:
 | `a, θ = …` and `w = [k^(a - 1) …]` in `delay_kernel` | runtime dispatch | `m`, `s` and `K` come out of a `Dict{Symbol,Any}`: their types are unknown, and so is everything computed from them |
 | the trial's `p = Params(…, susc)`, `infections!(…)` and `expected_reports(…, obs_config)` | runtime dispatch | `susc` and `obs_config` are notebook globals, and a function that reads a non-constant global cannot know its type |
 | `best = Inf` and `if l < best` in `calibrate` | boxed capture, and the dispatch it causes | `trial` reassigns `best` and `bestp`, so both live in a heap box |
-| one line of `rhs!`, in the simulation | runtime dispatch | caused by its caller: the global `susc` reaches it inside `p`. It goes when the caller is fixed |
+| one line of `rhs!`, in the simulation | runtime dispatch | caused by its caller: the global `susc` reaches it inside `p`. Fixing the caller fixes this line too |
 
 The last row is worth a second look. JET marks where a type is used, and the cause can be several
 calls away: in **Details**, hovering a finding lists the calls it was reached through.
@@ -382,6 +382,9 @@ The profiling specialist (**＋ specialist**) works the same loop beside you in 
 asks before it changes a cell.
 """
 
+# ╔═╡ Slate.env · notebook packages (auto-maintained — manage via the package panel)
+#   JET 0.12.3 c3a54625-cd67-489e-a8e7-0a5a0ff4e31b
+# ╚═╡
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)
 #   docid = 34a383e6-83ac-436c-987d-e975d217ec91
 #   format = 2
