@@ -2200,6 +2200,18 @@ end
         end
     end
 
+    @testset "a worker whose environment was built again is replaced" begin
+        # Asked on every reattach (record, probe, park, adoption): it holds the packages it loaded at boot.
+        @eval struct EnvInfoK; info::Dict{String,Any}; running::Vector{String}; port::Int; label::String; end
+        @eval RE._tool(k::EnvInfoK, name::String, args::Dict; timeout::Float64 = 0.0) =
+            name == "__slate_env_info" ? k.info : Dict{String,Any}("running" => k.running)
+        info(rebuilt) = Dict{String,Any}("payload_sha" => RE._payload_sha(), "job" => "", "env_rebuilt" => rebuilt)
+        @test RE._worker_current(EnvInfoK(info(false), String[], 1, "nb"))
+        @test !RE._worker_current(EnvInfoK(info(true), String[], 1, "nb"))
+        @test RE._worker_current(EnvInfoK(info(true), ["cell1"], 1, "nb"))          # its running cell is kept
+        @test RE._worker_current(EnvInfoK(delete!(info(true), "env_rebuilt"), String[], 1, "nb"))   # an older worker
+    end
+
     @testset "old versions of the worker code are removed gently" begin
         mktempdir() do home
             pay = joinpath(home, RE._REMOTE_WORKER, "payload")

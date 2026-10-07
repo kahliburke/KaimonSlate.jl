@@ -36,6 +36,13 @@ const PAYLOAD_SHA = Ref("")
 # The scheduler job this process booted in (`SLURM_JOB_ID`, or `PBS_JOBID`), read by `__init__`; "" outside
 # one. Read at boot, so a cell that changes the environment does not change it.
 const BOOT_JOB = Ref("")
+# Where the host records which environment it built for this worker (set from a remote boot script; ""
+# otherwise), and that record as this process booted. A worker whose environment was built again since
+# it booted holds the packages it loaded then, so the hub replaces it on reattach (`__slate_env_info`).
+const ENV_STAMP_FILE = Ref("")
+const BOOT_ENV_STAMP = Ref("")
+_env_stamp_now() = isempty(ENV_STAMP_FILE[]) ? "" :
+    (try; replace(strip(read(ENV_STAMP_FILE[], String)), r"\+pc$" => ""); catch; ""; end)
 
 # Minimal ECharts marker so notebooks can `echart(opt)`. Only the struct + helper
 # live here (no JSON); the server JSON-encodes the option Dict. `capture.jl`
@@ -1938,8 +1945,9 @@ end
 
 "Environment provenance for the package viewer: the notebook's own direct deps (the active
 project — where `Pkg.add` lands) and, separately, the parent project's deps (inherited via
-LOAD_PATH stacking). Shape: `{notebook:{path,deps}, parent:{path,deps}|nothing, payload_sha, job}`.
-`job` is the scheduler job this process booted in, and empty outside one (`BOOT_JOB`)."
+LOAD_PATH stacking). Shape: `{notebook:{path,deps}, parent:{path,deps}|nothing, payload_sha, job, env_rebuilt}`.
+`job` is the scheduler job this process booted in, and empty outside one (`BOOT_JOB`). `env_rebuilt`
+says the host built this worker's environment again after it booted."
 function __slate_env_info()
     nb = Dict{String,Any}("path" => "", "deps" => Dict{String,Any}[])
     try
@@ -1956,7 +1964,8 @@ function __slate_env_info()
         parent = Dict{String,Any}("path" => p, "name" => name, "deps" => _project_deps_at(p))
     end
     return Dict{String,Any}("notebook" => nb, "parent" => parent, "payload_sha" => PAYLOAD_SHA[],
-                            "job" => BOOT_JOB[])
+                            "job" => BOOT_JOB[],
+                            "env_rebuilt" => !isempty(BOOT_ENV_STAMP[]) && _env_stamp_now() != BOOT_ENV_STAMP[])
 end
 
 # Seed a forked notebook env from `parent`: write the env's Project/Manifest from the parent (the

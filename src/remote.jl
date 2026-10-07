@@ -2510,6 +2510,8 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     _bt("Revise loaded")
     SlateWorker.PARENT_PROJECT[] = expanduser(raw"$parent")   # `~/.cache/…` → absolute, so @asset/@sfile/datadir don't emit un-expandable tilde paths
     SlateWorker.PAYLOAD_SHA[] = raw"$(_payload_sha())"
+    SlateWorker.ENV_STAMP_FILE[] = let p = raw"$(_env_stamp_path(t))"; isabspath(p) ? p : joinpath(homedir(), p); end
+    SlateWorker.BOOT_ENV_STAMP[] = SlateWorker._env_stamp_now()
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
                       curve=$curve, allowed_clients=$allow, data_port=$(port + 2),
                       warm_deps=$warm_deps, blob_curve=$(_blob_curve(t)), blob_bind="0.0.0.0",
@@ -2721,13 +2723,16 @@ catch
 end
 
 # Can the live worker `k` serve a kernel whose target sits in scheduler job `job` ("" for none)? One
-# `__slate_env_info` call answers two questions, and a "no" to either makes the caller reap the
+# `__slate_env_info` call answers three questions, and a "no" to any makes the caller reap the
 # worker. A failed env_info call counts as "yes", so a transient error does not reap a worker;
 # liveness is checked separately.
 #
 # Does it run the current worker payload? Its stamp from boot (`payload_sha`) must equal
 # `_payload_sha()`. A stale stamp, or none from an old worker, is a "no". The check is on by
 # default, as the body says.
+#
+# Does it hold its environment as the host has it now? One built again after the worker booted
+# (`env_rebuilt`) may differ in every package the worker already loaded.
 #
 # Does it run inside that job? A worker found by record, probe or adoption can come from an earlier
 # allocation of the region, or from a launch that the release of one left outside any job. Such a
@@ -2739,7 +2744,6 @@ function _worker_current(k, job::AbstractString = "")::Bool
     # `_tool` errors cleanly (not a MethodError) if a best-effort caller hits the transient nil-conn window.
     # The job is checked whatever that switch says.
     payload = get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") != "1"
-    (payload || !isempty(job)) || return true
     info = try
         _tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0)
     catch
@@ -2755,10 +2759,11 @@ function _worker_current(k, job::AbstractString = "")::Bool
             return false
         end
     end
-    payload || return true
     want = _payload_sha()
     got = String(_infofield(info, "payload_sha", ""))
-    got == want && return true
+    stale = payload && got != want ? "is stale (sha $(isempty(got) ? "none" : first(got, 12)) ≠ current $(first(want, 12)))" :
+            _infofield(info, "env_rebuilt", false) === true ? "loaded its environment before it was built again" : ""
+    isempty(stale) && return true
     # A worker still computing keeps its work: replacing it would kill a cell whose result nothing can
     # recover. It is swapped on an attach after it has finished.
     busy = try
@@ -2769,11 +2774,10 @@ function _worker_current(k, job::AbstractString = "")::Bool
         ""
     end
     if !isempty(busy)
-        _rlog("payload: worker-$(k.port) for '$(k.label)' runs older code but is still running $busy — kept until it is idle")
+        _rlog("payload: worker-$(k.port) for '$(k.label)' $stale but is still running $busy — kept until it is idle")
         return true
     end
-    _rlog("payload: worker-$(k.port) for '$(k.label)' is stale " *
-          "(sha $(isempty(got) ? "none" : first(got, 12)) ≠ current $(first(want, 12))) — reprovisioning")
+    _rlog("payload: worker-$(k.port) for '$(k.label)' $stale — reprovisioning")
     return false
 end
 
