@@ -1493,6 +1493,18 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     return built ? :build : action
 end
 
+# The end of a worker's own log, copied into the hub's before the worker is reaped.
+function _log_worker_tail(host::AbstractString, port::Integer; lines::Integer = 40)
+    ok, out = try
+        _run_on(_host_for_files(host), "tail -n $lines " * Sweep.shq("$_REMOTE_WORKER/worker-$port.log") * " 2>/dev/null")
+    catch e
+        (false, sprint(showerror, e))
+    end
+    (ok && !isempty(strip(out))) || return nothing
+    _rlog("worker-$port's log ends:\n" * join(("    " * l for l in split(_strip_ansi(rstrip(out)), '\n')), '\n'))
+    return nothing
+end
+
 # ── worker sysimage ───────────────────────────────────────────────────────────────────────────
 # A region that boots from a sysimage gets it built by its prepare (`build_sysimage!`, the program in
 # src/sysimage_build.jl), on the node type its workers run on. Images live in the machine's store,
@@ -3130,6 +3142,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         # replacement). Synchronous + best-effort so no port/file race with the fresh spawn that follows;
         # the kill lands at once if reachable, else when the process thaws.
         _rlog("reconnect: live worker-$(k.port) didn't answer the 15s dial — reaping the superseded worker and cold-spawning fresh")
+        _log_worker_tail(host, k.port)   # the reap deletes its log, which is all that can say why
         try; reap_remote_worker(host, k.port)
         catch e; _rlog("reconnect: reap of superseded worker-$(k.port) failed: $(first(sprint(showerror, e), 100))"); end
     end
