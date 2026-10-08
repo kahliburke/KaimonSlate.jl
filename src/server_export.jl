@@ -650,8 +650,8 @@ end
 # The sweep ids still backed by a cell that EXISTS, or `nothing` when the whole registry is live (the
 # common case, and `nothing` means "no filter" downstream, so it costs nothing).
 #
-# The registry is keyed by cell id and only grows: a mark is written when its cell RUNS, and nothing
-# retires it when that cell is later renamed or deleted. Renaming through the UI could be made to evict,
+# The registry is keyed by cell id. A cell that runs again replaces its own marks, but nothing retires
+# the marks of a cell that is later renamed or deleted. Renaming through the UI could be made to evict,
 # but the notebook is a file — edit the `.jl` outside Slate and no rename event exists to hook. So the
 # export reconciles instead, which catches every route in. Left alone, a stale mark is swept, packed and
 # shipped for a cell that is not in the document: bytes the reader downloads and nothing can ever use,

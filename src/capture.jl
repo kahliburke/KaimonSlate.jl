@@ -852,6 +852,8 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     cid = replace(filename, r"^cell:" => "")
     task_local_storage(:slate_cell, cid)
     _ns_defined(mod, :__slate_cleanups) && _run_cell_cleanups!(_ns_read(mod, :__slate_cleanups), cid)
+    # Clear this cell's `@replay` marks, so that this run registers the full set again (see `_do_replay`).
+    _ns_defined(mod, :__slate_replay_forget) && _ns_read(mod, :__slate_replay_forget)(cid)
 
     # Cell-effects sink (see `_slate_effect`): declarations a cell / a package it calls makes during eval,
     # attributed to the executing statement. Seeded here, harvested + cleared after the eval — like the
