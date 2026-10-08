@@ -1856,6 +1856,18 @@ end
         @test RE._site_prologue(f) == "module unload cudatoolkit"
         @test RE._site_prologue(f, "module unload cudatoolkit") == ""
         @test RE._site_prologue(merge(f, Dict("cudalibs" => ""))) == ""      # nothing shadowed
+        # With the probe's word on each module, only one that unloads cleanly is unloaded. A module
+        # that sets Julia's environment (clima's `cuda/julia-pref`, which points CUDA.jl at the system
+        # toolkit and which `climacommon` requires) is left loaded, and so is one the site refuses.
+        @test RE._site_prologue(merge(f, Dict("cudamods" => "cudatoolkit:ok"))) == "module unload cudatoolkit"
+        clima = Dict("modules" => "climacommon/2026_02_18 cuda/julia-pref julia/1.12.5",
+                     "cudalibs" => "/usr/local/cuda/lib64", "cudamods" => "cuda:julia")
+        @test RE._site_prologue(clima) == ""
+        @test RE._site_prologue(merge(clima, Dict("cudamods" => "cuda:fails"))) == ""
+        @test RE._site_prologue(merge(f, Dict("cudamods" => ""))) == ""      # nothing could be checked
+        # A record from before the probe said so still leaves out a module whose version names Julia.
+        @test RE._site_prologue(delete!(copy(clima), "cudamods")) == ""
+        @test RE._parse_probe("cudamods=cuda:julia \n")["cudamods"] == "cuda:julia"
         # Patience from what loading took, never below the hub's default.
         @test RE._grace_for(1) == 45 && RE._grace_for(40) == 110
         # Module order is the site's, not a change.
@@ -1874,8 +1886,8 @@ end
             @test occursin("✓ Read the site", RE.readiness_text(r))
             # The site's fix belongs to the machine and runs first; the region's own prologue after it.
             RE.host_facts_merge!("login", Dict{String,Any}("site_prologue" => "module unload cudatoolkit"))
-            @test endswith(RE.machine_setup(RE.region_machine(r)), "{ module unload cudatoolkit ; } && ")
-            @test RE._region_prologue("prep") == "{ module load x ; } && "
+            @test endswith(RE.machine_setup(RE.region_machine(r)), RE.guarded_prologue("module unload cudatoolkit"))
+            @test RE._region_prologue("prep") == RE.guarded_prologue("module load x")
             @test occursin("site prologue: module unload cudatoolkit", RE.readiness_text(r))
             # Editing another field keeps the record.
             RE.region_set!("prep"; walltime = "00:10:00")

@@ -108,7 +108,8 @@ const RE = KaimonSlate.ReportEngine
             # The trailing `:` keeps the bundled stdlib depot; juliaup is kept looking at home.
             @test occursin("JULIA_DEPOT_PATH='/scratch/me/jd':", s) && occursin("JULIAUP_DEPOT_PATH=", s)
             # The site's fix first, then the user's prologue, and the command only if they succeed.
-            @test endswith(s, "{ module unload cudatoolkit ; module load x ; } && ")
+            @test endswith(s, RE.guarded_prologue("module unload cudatoolkit ; module load x"))
+            @test occursin("{ { module unload cudatoolkit ; module load x ; }", s)
             # A machine that names its own julia puts that directory first instead of juliaup's.
             j = RE.machine_setup(RE.Machine("pm", "perlmutter", :slurm, "", "/opt/julia/bin/julia", "", ""))
             @test occursin("'/opt/julia/bin':", j) && !occursin("juliaup", j)
@@ -120,6 +121,32 @@ const RE = KaimonSlate.ReportEngine
                 out = read(`sh -c $(RE.machine_setup(RE.Machine("", "box", :exec, "", "", d, "true")) * "echo \$JULIA_DEPOT_PATH")`, String)
                 @test strip(out) == d * ":"
             end
+        end
+
+        @testset "a prologue that fails says so, and the command does not run" begin
+            run_sh(cmd) = (out = IOBuffer(); err = IOBuffer();
+                           ok = success(pipeline(ignorestatus(`sh -c $cmd`); stdout = out, stderr = err));
+                           (ok, String(take!(out)), String(take!(err))))
+            @test RE.guarded_prologue("  ") == ""
+            ok, out, err = run_sh(RE.guarded_prologue("true") * "echo ran")
+            @test ok && strip(out) == "ran" && isempty(err)
+            # The exit status and the prologue's text, on stderr, where a worker's log keeps them.
+            ok, out, err = run_sh(RE.guarded_prologue("sh -c 'exit 3'") * "echo ran")
+            @test !ok && isempty(out)
+            @test occursin("failed (exit 3)", err) && occursin("sh -c 'exit 3'", err)
+            # A load path left set but empty would leave Julia unable to load any package.
+            ok, out, err = run_sh(RE.guarded_prologue("export JULIA_LOAD_PATH=") * "echo ran")
+            @test !ok && isempty(out) && occursin("JULIA_LOAD_PATH set but empty", err)
+            ok, out, _ = run_sh(RE.guarded_prologue("unset JULIA_LOAD_PATH") * "echo ran")
+            @test ok && strip(out) == "ran"
+        end
+
+        @testset "a worker launch that exits leaves its exit code in the log" begin
+            # The command keeps its own quoting and the outer shell's variables.
+            line = "JOPT=--opt; " * RE._noting_exit("sh -c " * RE.Sweep.shq("echo \"\$1\" \"\$2\"; exit 7") * " x \"a b\" \$JOPT")
+            out = read(ignorestatus(`sh -c $line`), String)
+            @test occursin("a b --opt", out)
+            @test occursin(RE._WORKER_EXIT_MARK * " 7", out)
         end
 
         @testset "where a host records the environment it built" begin

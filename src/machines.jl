@@ -441,5 +441,24 @@ function machine_setup(m::Machine)
     pre = filter(!isempty, [String(strip(String(get(host_facts(m.host), "site_prologue", "")))),
                             String(strip(m.prologue))])
     s = join(parts, "; ") * "; "
-    return isempty(pre) ? s : s * "{ " * join(pre, " ; ") * " ; } && "
+    return isempty(pre) ? s : s * guarded_prologue(join(pre, " ; "))
+end
+
+"""
+    guarded_prologue(prologue) -> String
+
+Shell that runs `prologue` and continues past its trailing `&&` only when it succeeds, ready to
+prefix a command. A prologue that fails stops the command, and says so on stderr with its exit
+status and its text, which a worker's log then shows. So does a prologue that leaves
+`JULIA_LOAD_PATH` set but empty, as unloading the module that set it can: Julia then has no load
+path at all, and fails to find any package, the worker's own included.
+"""
+function guarded_prologue(prologue::AbstractString)
+    p = String(strip(prologue))
+    isempty(p) && return ""
+    q = Sweep.shq(p)
+    return "{ { " * p * " ; } || { echo \"slate: the shell setup before Julia failed (exit \$?):\" " * q * " >&2; false; } ; } && " *
+           "{ [ -z \"\${JULIA_LOAD_PATH+x}\" ] || [ -n \"\$JULIA_LOAD_PATH\" ] || " *
+           "{ echo \"slate: the shell setup before Julia left JULIA_LOAD_PATH set but empty, so Julia finds no packages:\" " *
+           q * " >&2; false; } ; } && "
 end
