@@ -14,6 +14,25 @@ Two things to know about the published GitHub releases for this package:
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-07
+
+### Added
+
+`HookLogger(inner, handle; min_level, shouldlog)` is a logger whose behaviour is supplied as
+functions, called in the latest world. A package compiled into a sysimage runs in the world the image
+was built in, and a custom compiler (GPUCompiler's, for one) asks the current logger for its level
+while inferring. A logger type defined outside the image is invisible from there; this one is in the
+image along with this package.
+
+`slate_on(channel) do args … end`, the do-block form. A do-block passes the function first, which
+previously registered the pair the wrong way round and left the channel unreachable.
+
+### Fixed
+
+A `WebPage`'s script runs in a block of its own. A cell that rendered again, or two cells, declared
+the same top-level `const` or `let` twice in the page's one global scope, and the browser rejected
+the whole script. A top-level `function` is still visible to the page's markup.
+
 ## [0.11.0] - 2026-10-04
 
 ### Breaking
