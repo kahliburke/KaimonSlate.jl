@@ -1327,7 +1327,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", submit="", options="", prologue="", idle_release="", idle_warn="", liveness_grace="", clear="") -> String
+        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", sysimage="", curve="", peer="", machine="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", submit="", options="", prologue="", idle_release="", idle_warn="", liveness_grace="", clear="", delete="") -> String
 
     Define (or update) a named region — a global compute target: a `host` reached over `transport`
     (`tunnel`|`direct`), an optional `preload` (a LOCAL project dir replicated on the host so its
@@ -1366,6 +1366,14 @@ function create_tools(GateTool::Type)
 
     `warm` is ignored on a SCHEDULER region: its node is an allocation rather than a host to keep
     workers on, and holding workers there holds the node.
+
+    `sysimage="true"` gives the region's workers a sysimage of the notebook's packages, built by
+    `region_prepare` on the node (on a scheduler region) and booted by every worker after it; a worker
+    then loads its packages in a fraction of the time. `threads` is the workers' thread counts as
+    `"<compute>,<interactive>"` (empty: the hub's default). `curve="false"` sends the region's data
+    channel unencrypted. `peer` is the address other regions dial to reach this one, its public address
+    when they are on different networks. `machine` names a machine from `machine(action="list")`, whose
+    host, scheduler and default account the region then takes.
     """
     function region(name::String; host::String = "", transport::String = "", base_port::String = "",
                     preload::String = "", data_root::String = "", cache_root::String = "", warm::String = "",
