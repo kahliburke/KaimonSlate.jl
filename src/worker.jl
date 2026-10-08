@@ -410,6 +410,49 @@ function __slate_memo_pin(; key::String = "", pin::Bool = true)
     end
 end
 
+# Each cell's last error-free run: the namespace it ran in, the memo key it ran under, and its wire.
+# A cell that is already up to date can then be stored as it stands (`__slate_memo_keep`) when a tag
+# asks for its result to persist, with the output it actually rendered. A wire past `_LAST_RUN_CAP`
+# bytes is not kept; such a cell is stored by its next run.
+const _LAST_RUN = Dict{String,Tuple{Module,String,Any}}()
+const _LAST_RUN_LOCK = ReentrantLock()
+const _LAST_RUN_CAP = 256 * 2^20
+
+function _keep_last_run!(cid::AbstractString, key::AbstractString, wire)
+    keep = !isempty(key) && wire.exception === nothing && (try; Base.summarysize(wire) <= _LAST_RUN_CAP; catch; false; end)
+    lock(_LAST_RUN_LOCK) do
+        keep ? (_LAST_RUN[String(cid)] = (_NS[], String(key), wire)) : delete!(_LAST_RUN, String(cid))
+    end
+    return nothing
+end
+
+"""
+    __slate_memo_keep(; cell, key, names, unread, safe) -> Dict
+
+Store cell `cell`'s current result under memo key `key` without running it: the values of `names`
+from the namespace and the wire of its last run there. Refused when that run was under another key
+(its inputs have changed since) or there is none in this namespace. An entry already stored under
+the key is left as it is. Returns `stored`, `fullkey` and, when not stored, `why`.
+"""
+function __slate_memo_keep(; cell::String = "", key::String = "", names::Vector{String} = String[],
+                           unread::Vector{String} = String[], safe::Vector{String} = String[])
+    res(ok, why = "") = Dict{String,Any}("stored" => ok, "fullkey" => isempty(key) ? "" : _memo_fullkey(key), "why" => why)
+    _MEMO_OK || return res(false, "the memo store is off in this worker")
+    isempty(key) && return res(false, "the cell has no memo key")
+    root = _memo_dir(); fk = _memo_fullkey(key)
+    (try; MemoStore.read_manifest(root, fk) !== nothing; catch; false; end) && return res(true)
+    last = lock(() -> get(_LAST_RUN, cell, nothing), _LAST_RUN_LOCK)
+    (last === nothing || last[1] !== _NS[]) && return res(false, "this worker holds no run of the cell")
+    last[2] == key || return res(false, "the cell's inputs have changed since it ran")
+    tr = Dict{String,Any}()
+    ok = try
+        _memo_store(key, names, last[3]; unread = unread, safe = safe, trace = tr)
+    catch e
+        tr["store_fail"] = first(sprint(showerror, e), 200); false
+    end
+    return res(ok === true, String(get(tr, "store_fail", "")))
+end
+
 # Snapshot the CURRENT namespace values for the given memoizable cells into the durable store,
 # BYPASSING the auto-store time threshold — so a standalone export can offer every memoizable
 # result for embedding, not just the cells that happened to run slow. `cells` maps cell-id →
@@ -895,6 +938,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
                 _trace_commit!(cid, tr)
                 live = Dict(b.name => b for b in sink)
                 binds = [get(live, b.name, b) for b in w.binds]
+                _keep_last_run!(cid, memo_key, w)
                 return merge(w, (binds = binds, memo = "restored"))   # tell the server this run came from the durable cache
             end
         end
@@ -920,6 +964,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
         @error "slate eval: capture machinery threw" cell = cid exception = (e, catch_backtrace())
         return merge(_interrupted_wire(), (; exception = "internal capture error: " * sprint(showerror, e)))
     end
+    _keep_last_run!(cid, memo_key, r)
     if r.exception !== nothing
         @warn "slate eval: cell errored" cell = cid error = first(split(String(r.exception), '\n'))
     else
@@ -2789,6 +2834,7 @@ function tools()
         # …plus the marks the export COMPOSES from the graph rather than reading off a cell.
         KaimonGate.GateTool("__slate_replay_chain", __slate_replay_chain),
         KaimonGate.GateTool("__slate_memo_pin", __slate_memo_pin),
+        KaimonGate.GateTool("__slate_memo_keep", __slate_memo_keep),
         KaimonGate.GateTool("__slate_blob_of", __slate_blob_of),
         KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),
         KaimonGate.GateTool("__slate_client_key", __slate_client_key),

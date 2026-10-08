@@ -280,14 +280,14 @@ const NS = KaimonSlate.NotebookServer
             # Whitespace would break the header token, so it still folds.
             @test Symbol("note=a_b") in NS._parse_tag_symbols(["note=a b"])
             @test isempty(NS._parse_tag_symbols(["needs="]))                        # empty value → dropped
-            # End-to-end: tag a downstream cell via the UI path; the edge lands in deps, the cell
-            # restales, and the tag survives the persist round-trip verbatim.
+            # End-to-end: tag a downstream cell via the UI path; the edge lands in deps, the cell keeps
+            # its result (a tag does not re-run it), and the tag survives the persist round-trip verbatim.
             up = match(r"id=(\w+)", NS.agent_add_cell!(nb, "sideeffect = 1"))[1]
             dn = match(r"id=(\w+)", NS.agent_add_cell!(nb, "observed = 2"))[1]
             NS.set_cell_tags!(nb, dn, ["needs=$up"])
             dncell = nb.report.cells[NS._index_of(nb.report.cells, dn)]
             @test up in dncell.deps
-            @test dncell.state == KaimonSlate.ReportEngine.STALE
+            @test dncell.state == KaimonSlate.ReportEngine.FRESH
             @test occursin("needs=$up", read(nb.path, String))
         end
 
@@ -450,8 +450,7 @@ end
         id = NS.open_notebook!(hub, nbp)
         nb = hub.notebooks[id]
         NS._eval!(nb; wait_all = true)
-        NS.set_cell_tags!(nb, "b", ["locked"])
-        NS._eval!(nb; wait_all = true)   # locking a FRESH cell freezes it on a forced run
+        NS.set_cell_tags!(nb, "b", ["locked"])   # a FRESH cell freezes on the result it holds
         cell(n, id) = n.report.cells[findfirst(c -> c.id == id, n.report.cells)]
         @test !isempty(RE_._locked_key(cell(nb, "b")))
 
@@ -500,7 +499,6 @@ end
         nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
         NS._eval!(nb; wait_all = true)
         NS.set_cell_tags!(nb, "b", ["locked"])
-        NS._eval!(nb; wait_all = true)   # surgical force-run queued by locking a FRESH cell
         bcell() = nb.report.cells[findfirst(c -> c.id == "b", nb.report.cells)]
         acell() = nb.report.cells[findfirst(c -> c.id == "a", nb.report.cells)]
         @test bcell().state == KaimonSlate.ReportEngine.FRESH
@@ -514,6 +512,30 @@ end
         @test acell().state == KaimonSlate.ReportEngine.FRESH        # the played cell itself re-ran
         @test bcell().state == KaimonSlate.ReportEngine.FRESH        # `b` stayed frozen — never went STALE
         @test KaimonSlate.ReportEngine._locked_key(bcell()) == lockedkey_before
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
+@testset "a tag change does not run the cell" begin
+    hub = NS.start_hub(; port = freeport())
+    try
+        log = tempname()
+        nbp = tempname() * ".jl"
+        write(nbp, "#%% code id=a\nbase = 10\n#%% code id=b\nderived = (open(io -> write(io, 'x'), $(repr(log)), \"a\"); base * 2)\n")
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        NS._eval!(nb; wait_all = true)
+        runs() = filesize(log)
+        bcell() = nb.report.cells[findfirst(c -> c.id == "b", nb.report.cells)]
+        @test runs() == 1
+        # Locking an up-to-date cell freezes it on the result it already holds, and caching it stores
+        # that result: neither runs it again, nor does a trace, a manual edge or a free-form tag.
+        for tags in (["locked"], ["locked", "cache"], ["locked", "cache", "trace"], ["cache", "needs=a", "note"])
+            NS.set_cell_tags!(nb, "b", tags)
+            NS._eval!(nb; wait_all = true)
+        end
+        @test runs() == 1 && bcell().state == KaimonSlate.ReportEngine.FRESH
+        @test bcell().output.value_repr == "20"
     finally
         NS.stop_hub(hub)
     end

@@ -1245,12 +1245,11 @@ end
 # changes the run result, so re-stale the cell in that case (same policy as `set_cell_flag!`).
 function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
     unpin = nothing   # (kernel, oldkey) — an unlock's memo_pin! release, done OUTSIDE the lock (a gate RPC)
+    store_held = false   # store the cell's current result once the lock is released (a gate RPC too)
     lock(nb.lock) do
         i = _index_of(nb.report.cells, id); i === nothing && return nb
         c = nb.report.cells[i]
-        had_trace = :trace in c.flags
         had_cache = :cache in c.flags
-        had_nocache = :nocache in c.flags
         had_locked = :locked in c.flags
         had_needs = sort!(ReportEngine._manual_needs(c.flags))
         had_mut = sort!(ReportEngine._manual_mutates(c.flags))
@@ -1258,36 +1257,26 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         want = _parse_tag_symbols(tags)
         keep = Set(f for f in c.flags if f === :opaque)        # re-derived each eval — keep it
         empty!(c.flags); union!(c.flags, keep); union!(c.flags, want)
-        (had_trace != (:trace in c.flags)) && (c.state = STALE)
-        # Flipping cache/nocache changes what the NEXT eval persists — restale so the tag takes
-        # effect on the next auto-run instead of silently waiting for an unrelated source edit
-        # (seen live: a freshly cache-tagged cell stayed fresh and its value never persisted).
-        (had_cache != (:cache in c.flags) || had_nocache != (:nocache in c.flags)) && (c.state = STALE)
+        # A tag says how the cell is treated from now on, so changing one does not run it: `trace`
+        # shows on the next run, `nocache` stops the next run storing. A tag that asks for the result
+        # to persist (`locked`, `cache`) stores the one the worker already holds (`_keep_result!`).
+        # `region=` is the exception: the result lives on the worker of the side it left.
         # A `needs=` or `mutates=` change rewires the graph: rebuild deps now (the DAG view reads
-        # them from the next state pull, not the next run) and restale the cell so it re-runs under
-        # the new ordering — its completion restales dependents through the ordinary reactive path.
+        # them from the next state pull, not the next run). The result stands; the new edges decide
+        # what re-runs it from here.
         if had_needs != sort!(ReportEngine._manual_needs(c.flags)) ||
            had_mut != sort!(ReportEngine._manual_mutates(c.flags))
             build_dependencies!(nb.report)
-            c.state = STALE
         end
         # A `region=` change moves where the cell runs, so its result belongs to the old place and
         # has to be recomputed in the new one. It also ends any WAIT it was in: that wait was for a
         # node in the region it just left, and left standing it reads as "local · queued".
         _cell_region(c) == had_region || ReportEngine.restale!(c)
         now_locked = :locked in c.flags
-        if now_locked && !had_locked
-            # `locked` just turned ON. A STALE cell has nothing to freeze yet and computes on its own
-            # ▶ (`_eval_one!` persists + pins the key it freezes on). A FRESH cell needs an explicit
-            # (surgical, non-cascading — no dependents involved) force-run so its CURRENT result
-            # actually lands in the durable store under a pinned key, not just the in-memory value
-            # `c.output` (which a restart would lose): `always` in `_eval_one!` guarantees the
-            # store happens even for a cell too cheap to auto-persist otherwise.
-            if c.state == FRESH
-                c.state = STALE
-                push!(get!(Set{String}, _FORCE_RUN, nb.id), c.id)
-            end
-        elseif !now_locked && had_locked
+        # A STALE cell has nothing to store yet: a locked one computes on its own ▶, which stores and
+        # pins the key it freezes on (`_eval_one!`).
+        ((now_locked && !had_locked) || (:cache in c.flags && !had_cache)) && c.state == FRESH && (store_held = true)
+        if !now_locked && had_locked
             old = ReportEngine._locked_key(c)
             ReportEngine._set_locked_key!(c, "")
             ReportEngine._set_frozen_stamp!(c, "")   # no longer frozen → drop the freeze identity too
@@ -1296,6 +1285,11 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         _persist!(nb; label = "tags · $id")
     end
     unpin === nothing || ReportEngine.memo_pin!(unpin[1], nb.report, unpin[2], false)
+    store_held && try
+        _keep_result!(nb, String(id))
+    catch e
+        @warn "slate memo: storing a cell's result for its tag failed" cell = id exception = e
+    end
     return nb
 end
 

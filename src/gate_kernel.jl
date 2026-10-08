@@ -2033,6 +2033,20 @@ end
 
 # Best-effort: a dead/reconnecting worker just means the pin doesn't (yet) apply — never surfaces
 # as a cell error (called from tag-editing / bookkeeping paths, not an eval).
+function memo_keep!(k::GateKernel, report::Report, cell_id::AbstractString, memo)
+    isempty(memo.key) && return (false, "the cell has no memo key")
+    k.conn === nothing && return (false, "its worker is not running")
+    r = try
+        _tool(k, "__slate_memo_keep", Dict{String,Any}("cell" => String(cell_id), "key" => String(memo.key),
+              "names" => collect(String, memo.names), "unread" => collect(String, memo.unread),
+              "safe" => collect(String, memo.safe)); timeout = 600.0)
+    catch e
+        return (false, first(sprint(showerror, e), 200))
+    end
+    r isa AbstractDict || return (false, "the worker gave no answer")
+    return (get(r, "stored", false) === true, String(get(r, "why", "")))
+end
+
 function memo_pin!(k::GateKernel, report::Report, key::AbstractString, pin::Bool)
     isempty(key) && return nothing
     try

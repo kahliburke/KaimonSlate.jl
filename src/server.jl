@@ -4579,6 +4579,51 @@ end
 # A ▶ force marker is for one run of the cell. A cell left waiting keeps it, so the run it waits for
 # is forced as asked; every other way out of the run, an error before the cell reached its kernel
 # included, uses it up.
+# What a run of `cell` asks of the memo store: the key it targets, the names it defines, and which of
+# them nothing else reads or mutates. Called under `nb.lock`. Shared by a run and by a tag that asks
+# for a cell's current result to be stored without one (`_keep_result!`).
+function _memo_spec(nb::LiveNotebook, cell::Cell; forced::Bool = false)
+    # The cell's genuinely-DEFINED names: writes minus `provides` (names brought in by
+    # `using`/`import`) and minus @bind CONTROL variables. A provided name is a function/module
+    # reference, not a value to cache; a bind variable is a UI `Choice`/value that the `@bind` REPLAY
+    # re-establishes on restore (`_replay_scaffold!`) — snapshotting it would serialize a wrapper
+    # object into the durable store (and a decode failure would sink the whole entry). Same
+    # scaffold pattern as `using` exports. Matters for `:using_redundant` and MIXED (`@bind x W; y =
+    # solve(x)`) cells: only the genuine compute (`v`/`y`) is cached. For ordinary cells both sets
+    # are empty, so this is a no-op.
+    bindnames = Set{Symbol}(b.name for b in cell.binds)
+    defs = Set{Symbol}(w for w in cell.writes
+                       if !(w in cell.provides) && !(w in bindnames) && w !== ReportEngine._THEME_SENTINEL)
+    # Writes no OTHER cell reads — eligible for display-object elision at store time (the
+    # worker decides by TYPE: a Makie Figure nobody reads stores as its wire image only, not
+    # a multi-MB scene graph). Passed at restore time too: an entry that elided a name which
+    # has SINCE gained a reader is treated as a miss, so the re-run re-stores the real object.
+    unread = String[string(w) for w in defs
+                    if !any(o -> o !== cell && w in o.reads, nb.report.cells)]
+    # Writes no OTHER cell mutates — zero-copy-safe at restore time (mmap / arrow-backed view
+    # instead of a materialized copy; a mutation attempt on one THROWS rather than corrupting
+    # the immutable CAS blob — the graph's `mutates` analysis is the safety proof).
+    safe = String[string(w) for w in defs
+                  if !any(o -> o !== cell && w in o.mutates, nb.report.cells)]
+    # Snapshot the defined names ∪ mutates. The analysis maintains mutates ⊆ writes (a mutator
+    # IS a writer), so this union normally adds nothing — it ENFORCES the property the entry's
+    # faithfulness depends on: an entry missing a mutated name restores the pre-mutation
+    # namespace while downstream entries carry post-mutation results.
+    # `locked`: reuse the FROZEN key from the run this cell locked on (instead of the freshly
+    # computed one, which would reflect any upstream drift since) — unless this is the explicit
+    # ▶ force re-run, which always re-keys fresh (it's the one thing allowed to move the lock).
+    locked = :locked in cell.flags
+    key = ReportEngine.target_key(cell, nb.report; forced)
+    return (key = key,
+         names = unique!(String[string(w) for w in Iterators.flatten((defs, cell.mutates))
+                                if w !== ReportEngine._THEME_SENTINEL && !(w in bindnames)]),
+         threshold = ReportEngine._MEMO_THRESHOLD_MS,
+         force = forced,
+         always = (:cache in cell.flags) || locked,   # `cache`/`locked` → persist regardless of runtime
+         restore_only = locked && !forced,            # a locked cell computes only on its own ▶
+         unread = unread, safe = safe)
+end
+
 function _eval_one!(nb::LiveNotebook, cell::Cell)
     try
         _eval_one_run!(nb, cell)
@@ -4697,45 +4742,8 @@ function _eval_one_run!(nb::LiveNotebook, cell::Cell)
         _broadcast_progress(nb, cell)
         s = (:trace in cell.flags) ? string("@trace begin ", cell.source, "\nend") : cell.source
         frc = _take_force!(nb.id, cell.id)   # consume a one-shot ▶ force marker
-        # The cell's genuinely-DEFINED names: writes minus `provides` (names brought in by
-        # `using`/`import`) and minus @bind CONTROL variables. A provided name is a function/module
-        # reference, not a value to cache; a bind variable is a UI `Choice`/value that the `@bind` REPLAY
-        # re-establishes on restore (`_replay_scaffold!`) — snapshotting it would serialize a wrapper
-        # object into the durable store (and a decode failure would sink the whole entry). Same
-        # scaffold pattern as `using` exports. Matters for `:using_redundant` and MIXED (`@bind x W; y =
-        # solve(x)`) cells: only the genuine compute (`v`/`y`) is cached. For ordinary cells both sets
-        # are empty, so this is a no-op.
-        bindnames = Set{Symbol}(b.name for b in cell.binds)
-        defs = Set{Symbol}(w for w in cell.writes
-                           if !(w in cell.provides) && !(w in bindnames) && w !== ReportEngine._THEME_SENTINEL)
-        # Writes no OTHER cell reads — eligible for display-object elision at store time (the
-        # worker decides by TYPE: a Makie Figure nobody reads stores as its wire image only, not
-        # a multi-MB scene graph). Passed at restore time too: an entry that elided a name which
-        # has SINCE gained a reader is treated as a miss, so the re-run re-stores the real object.
-        unread = String[string(w) for w in defs
-                        if !any(o -> o !== cell && w in o.reads, nb.report.cells)]
-        # Writes no OTHER cell mutates — zero-copy-safe at restore time (mmap / arrow-backed view
-        # instead of a materialized copy; a mutation attempt on one THROWS rather than corrupting
-        # the immutable CAS blob — the graph's `mutates` analysis is the safety proof).
-        safe = String[string(w) for w in defs
-                      if !any(o -> o !== cell && w in o.mutates, nb.report.cells)]
-        # Snapshot the defined names ∪ mutates. The analysis maintains mutates ⊆ writes (a mutator
-        # IS a writer), so this union normally adds nothing — it ENFORCES the property the entry's
-        # faithfulness depends on: an entry missing a mutated name restores the pre-mutation
-        # namespace while downstream entries carry post-mutation results.
-        # `locked`: reuse the FROZEN key from the run this cell locked on (instead of the freshly
-        # computed one, which would reflect any upstream drift since) — unless this is the explicit
-        # ▶ force re-run, which always re-keys fresh (it's the one thing allowed to move the lock).
         locked = :locked in cell.flags
-        key = ReportEngine.target_key(cell, nb.report; forced = frc)
-        m = (key = key,
-             names = unique!(String[string(w) for w in Iterators.flatten((defs, cell.mutates))
-                                    if w !== ReportEngine._THEME_SENTINEL && !(w in bindnames)]),
-             threshold = ReportEngine._MEMO_THRESHOLD_MS,
-             force = frc,
-             always = (:cache in cell.flags) || locked,   # `cache`/`locked` → persist regardless of runtime
-             restore_only = locked && !frc,               # a locked cell computes only on its own ▶
-             unread = unread, safe = safe)
+        m = _memo_spec(nb, cell; forced = frc)
         (s, cell.src_hash, m, locked)
     end
     # Nothing to restore from: a locked cell with no key is held without asking the worker.
@@ -4802,30 +4810,64 @@ function _eval_one_run!(nb::LiveNotebook, cell::Cell)
         # run time) so downstream memo keys track a new frozen value even when the source (hence the
         # computed key) didn't move — the benchmark / training-run case: same code, new output. A plain
         # restore-run is never forced and already has a key, so it leaves both untouched.
-        if locked && c.state == FRESH
-            old = ReportEngine._locked_key(c)
-            moved = memo.key != old
-            moved && ReportEngine._set_locked_key!(c, memo.key)
-            # Freeze identity = a hash of the OUTPUT: stable across restores (same value → same stamp),
-            # and it changes whenever the frozen value is refreshed (a force ▶, or any fresh compute that
-            # yields a new value). Downstream memo keys fold this in, so a dependent re-keys ONLY when the
-            # frozen value actually changes — the benchmark / training-run case (same code, new output).
-            # Output-based, so it's independent of HOW the run was triggered (no reliance on the force
-            # marker, which a non-`▶` re-run path may not set).
-            oldstamp = ReportEngine._frozen_stamp(c)
-            newstamp = string(hash(out === nothing ? "" : out.value_repr); base = 16)
-            newstamp == oldstamp || ReportEngine._set_frozen_stamp!(c, newstamp)
-            (moved || newstamp != oldstamp) && _persist!(nb; label = "locked · $(c.id)")
-            (moved && !isempty(old)) ? (old, memo.key) : nothing
-        else
-            nothing
-        end
+        (locked && c.state == FRESH) ? _freeze_on!(nb, c, memo.key, out === nothing ? "" : out.value_repr) : nothing
     end
-    if relock !== nothing
-        old, new = relock
-        isempty(old) || ReportEngine.memo_pin!(kernel, nb.report, old, false)
-        ReportEngine.memo_pin!(kernel, nb.report, new, true)
+    relock === nothing || _swap_pin!(kernel, nb, relock...)
+    return nothing
+end
+
+# A locked cell freezes on `key`: recorded in its header (a restart keeps it) with a freeze stamp.
+# Called under `nb.lock`. Returns the pin to swap, `(old, new)`, when the key moved, else `nothing`.
+#
+# The stamp is a hash of the OUTPUT: stable across restores (same value, same stamp), and it changes
+# whenever the frozen value is refreshed (a forced ▶, or any fresh compute that yields a new value).
+# Downstream memo keys fold it in, so a dependent re-keys only when the frozen value actually changes:
+# the benchmark or training-run case, same code and new output.
+function _freeze_on!(nb::LiveNotebook, c::Cell, key::AbstractString, value_repr::AbstractString)
+    old = ReportEngine._locked_key(c)
+    moved = key != old
+    moved && ReportEngine._set_locked_key!(c, key)
+    oldstamp = ReportEngine._frozen_stamp(c)
+    newstamp = string(hash(value_repr); base = 16)
+    newstamp == oldstamp || ReportEngine._set_frozen_stamp!(c, newstamp)
+    (moved || newstamp != oldstamp) && _persist!(nb; label = "locked · $(c.id)")
+    return moved ? (old, String(key)) : nothing
+end
+
+# Pin the entry a locked cell froze on against eviction, releasing the one it held before. A gate
+# call, so never under `nb.lock`.
+function _swap_pin!(kernel, nb::LiveNotebook, old::AbstractString, new::AbstractString)
+    isempty(old) || ReportEngine.memo_pin!(kernel, nb.report, old, false)
+    ReportEngine.memo_pin!(kernel, nb.report, new, true)
+    return nothing
+end
+
+# Store an up-to-date cell's result as it stands, for a tag that asks for it to persist (`locked`,
+# `cache`). Nothing runs: the worker writes the values it holds and the output of the cell's last run
+# under the cell's key. Only a worker that is already up is asked. A cell that cannot be stored this
+# way (no run of it in the worker, its inputs moved since, or a value that does not serialise) keeps
+# its result in memory and is stored by its next run. A locked cell freezes on the key either way, and
+# its entry is pinned when there is one.
+function _keep_result!(nb::LiveNotebook, id::AbstractString)
+    spec = lock(nb.lock) do
+        i = _index_of(nb.report.cells, id); i === nothing && return nothing
+        c = nb.report.cells[i]
+        (c.kind == CODE && c.state == FRESH) || return nothing
+        side = _cell_side(nb, c)
+        k = isempty(side) ? nb.kernel : lock(() -> get(_REGION_KERNELS, (nb.id, side), nothing), _REGION_LOCK)
+        (; kernel = k, memo = _memo_spec(nb, c), src = c.src_hash)
     end
+    spec === nothing && return nothing
+    stored, why = spec.kernel === nothing ? (false, "its worker is not running") :
+                  ReportEngine.memo_keep!(spec.kernel, nb.report, id, spec.memo)
+    stored || ReportEngine._rlog("memo: $(nb.id)/$id is held in memory only, not stored ($why)")
+    relock = lock(nb.lock) do
+        i = _index_of(nb.report.cells, id); i === nothing && return nothing
+        c = nb.report.cells[i]
+        (:locked in c.flags && c.state == FRESH && c.src_hash == spec.src && !isempty(spec.memo.key)) || return nothing
+        _freeze_on!(nb, c, spec.memo.key, c.output === nothing ? "" : c.output.value_repr)
+    end
+    (stored && relock !== nothing) && _swap_pin!(spec.kernel, nb, relock...)
     return nothing
 end
 

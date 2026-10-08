@@ -873,6 +873,16 @@ so this is a no-op there.
 memo_pin!(::Kernel, ::Report, ::AbstractString, ::Bool) = nothing
 
 """
+    memo_keep!(kernel, report, cell_id, memo) -> (stored::Bool, why::String)
+
+Store a cell's current result under `memo.key` without running it: the values of `memo.names` as
+the worker holds them and the output of the cell's last run there. Refused when that run was under
+another key or the worker holds none; only a worker that is already up is asked. The in-process
+kernel has no durable store.
+"""
+memo_keep!(::Kernel, ::Report, ::AbstractString, memo) = (false, "this kernel has no durable store")
+
+"""
     pkg_op(kernel, report, op, name; target="notebook") -> Dict{String,Any}
 
 Add (`op="add"`), remove (`op="rm"`) or update a package. `target="notebook"` operates on the
