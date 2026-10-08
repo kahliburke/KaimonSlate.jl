@@ -484,8 +484,12 @@ end
         nb3 = hub.notebooks[NS.open_notebook!(hub, nbp)]
         timedwait(() -> cell(nb3, "c").state == RE_.BLOCKED, 10.0; pollint = 0.05)
         plain = (NS.agent_run!(nb3, "c"); NS._eval!(nb3; wait_all = true); cell(nb3, "b").state)
+        # Naming the locked cell itself is not enough either, and both replies say what is.
+        own = (NS.agent_run!(nb3, "b"); NS._eval!(nb3; wait_all = true); cell(nb3, "b").state)
+        @test all(occursin("run_locked=true", NS._cell_result_text(cell(nb3, x))) for x in ("b", "c"))
         NS.agent_run!(nb3, "c"; run_locked = true); NS._eval!(nb3; wait_all = true)
-        @test (plain, cell(nb3, "b").state, cell(nb3, "c").output.value_repr) == (RE_.BLOCKED, RE_.FRESH, "21")
+        @test (plain, own, cell(nb3, "b").state, cell(nb3, "c").output.value_repr) ==
+              (RE_.BLOCKED, RE_.BLOCKED, RE_.FRESH, "21")
     finally
         NS.stop_hub(hub)
     end
