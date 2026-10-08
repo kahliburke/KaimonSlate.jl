@@ -589,6 +589,10 @@ end
     @testset "WebPage renders self-contained HTML" begin
         w = ReportEngine.WebPage(css = "body{color:red}", html = "<h1>hi</h1>", js = "console.log(1)")
         h = sprint(show, MIME"text/html"(), w)
+        # The script sits in a BLOCK (SlateExtensionsBase 0.11.1): the page is one global scope, so a
+        # cell rendering again — or two cells — would declare the same top-level `const`/`let` twice
+        # and the browser would reject the whole script. The newlines keep a trailing `//` comment off
+        # the closing brace.
         @test h == "<style>body{color:red}</style><h1>hi</h1><script>{\nconsole.log(1)\n}</script>"
         # `</script>` / `</style>` in content are escaped so they can't close the tag early
         w2 = ReportEngine.WebPage(js = "a='</script>'", css = "x</style>")

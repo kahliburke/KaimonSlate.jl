@@ -12,10 +12,31 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-10-08
+
+### Changed
+
+- A control runs its readers only when its value changes. A select sends its value on input and
+  again on change, and each send re-ran every cell reading it. A button is exempt: pressing it is
+  the change.
+- The package-install modal shows the last few lines of Pkg's own output, in its colour, starting
+  from the point the install began rather than from whatever the worker log already held.
+
 ### Fixed
 
 - A figure that imports a module from `/ext-assets/` no longer stays blank when it shows before the
   notebook declares the package.
+- A cell whose HTML output imports a module from `/ext-assets/` now draws in a static HTML export,
+  opened from disk or from a site below the host root. A standalone page carries each such module
+  once. (#63, @disberd)
+- A vendored module is carried into a static export uncompressed. The browser's own loader has no
+  inflate step, so a compressed one did not load at all.
+- A static export resolves its vendored asset directories itself, so one taken before a notebook's
+  first run finishes no longer ships a page pointing at a route it has no server for.
+- A cell's own run is no longer reported back to it as an external edit, so blank lines the server
+  trims and typing during a run do not raise the conflict prompt.
+- An edit survives a run that never reaches the server. The baseline used to advance anyway, and the
+  next update then overwrote the edit the run was committing.
 
 ## [1.11.0] - 2026-10-06
 
@@ -717,7 +738,8 @@ First release in General.
 - `KAIMONSLATE_PORT` is read at run time rather than captured at precompile time, so a launcher can
   pin the hub port (#6).
 
-[Unreleased]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.11.0...HEAD
+[Unreleased]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.11.1...HEAD
+[1.11.1]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.10.0...v1.11.0
 [1.10.0]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.8.7...v1.9.0

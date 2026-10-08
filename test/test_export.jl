@@ -731,6 +731,93 @@ end
     cdn = NS._rewrite_ext_asset_urls!(Dict{String,Any}("globe" => Dict{String,Any}("baseTexture" => "https://cdn/x.png")), tnb; inline = false)
     @test cdn["globe"]["baseTexture"] == "https://cdn/x.png"                          # external url untouched
     @test NS._site_ctype("earth.png") == "image/png"                                  # image mime for the live route
+
+    # A cell's HTML output that names vendored assets (a package's `slate_render`, e.g. a plotting
+    # library it `import()`s; `html_fragment` gives the second MIME). A standalone page carries the
+    # module ONCE, as an import-map entry that both cells resolve through, and inlines the image in
+    # place. A site points both urls at the page-local sibling. Either way no live `/ext-assets/`
+    # route survives in the cells.
+    write(joinpath(pkgdir, "lib.mjs"), "export default 42;")
+    _html_nb() = begin
+        html = "<script>import(\"/ext-assets/GlobeSlate/lib.mjs\")</script><img src=\"/ext-assets/GlobeSlate/earth.png\">"
+        rep = _RE.parse_report("#%% md id=t title\n# h\n\n#%% code id=a\n1\n\n#%% code id=b\n2\n")
+        for (c, mime) in zip(rep.cells[2:3], ("text/html", "application/vnd.kaimonslate.html+html"))
+            c.output = _RE.CellOutput("", [_RE.MimeChunk(mime, Vector{UInt8}(html))], Any[], Any[],
+                                      _RE.BindSpec[], "", nothing, nothing, 1.0)
+        end
+        nb = NS.LiveNotebook("h", "/tmp/h.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
+            ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+        nb.assets["GlobeSlate"] = pkgdir
+        nb
+    end
+    hstand = NS.export_html(_html_nb(); inline_assets = true)
+    imap = JSON.parse(match(r"<script type=\"importmap\">(.*?)</script>"s, hstand).captures[1])["imports"]
+    libdata = imap["/ext-assets/GlobeSlate/lib.mjs"]
+    @test String(Base64.base64decode(split(libdata, ",")[2])) == "export default 42;"
+    @test count(libdata, hstand) == 1                                     # once for both cells
+    @test count("import(\"/ext-assets/GlobeSlate/lib.mjs\")", hstand) == 2  # the map resolves the call sites
+    @test !occursin("/ext-assets/GlobeSlate/earth.png", hstand)
+    @test count("src=\"data:image/png;base64,", hstand) == 2
+    hsite = NS.export_html(_html_nb(); inline_assets = false)
+    @test count("import(\"./ext-assets/GlobeSlate/lib.mjs\")", hsite) == 2
+    @test count("src=\"./ext-assets/GlobeSlate/earth.png\"", hsite) == 2
+    @test !occursin(NS._EXT_ASSET_URL_RE, hsite)
+    # A JS url that the import map does not carry (a cell re-ran after the map was built) stays the
+    # live url: a direct `import("data:…")` of a large module costs gigabytes of renderer memory in
+    # Chrome. A non-JS url still inlines.
+    unmapped = NS._export_ext_asset_html(_html_nb(), "<script>import(\"/ext-assets/GlobeSlate/lib.mjs\")</script><img src=\"/ext-assets/GlobeSlate/earth.png\">";
+                                         inline = true, mapped = Dict{String,String}())
+    @test occursin("import(\"/ext-assets/GlobeSlate/lib.mjs\")", unmapped)
+    @test !occursin("data:application/javascript", unmapped)
+    @test occursin("src=\"data:image/png;base64,", unmapped)
+    # A cache-busted module url is still a module. `splitext` alone reads `lib.mjs?v=2` as `.mjs?v=2`,
+    # which would keep it out of the import map AND let the call site inline it.
+    @test NS._is_js("/ext-assets/P/lib.mjs?v=2") && NS._is_js("/ext-assets/P/lib.js#f")
+    @test NS._is_js("sub/b.js") && !NS._is_js("/ext-assets/P/a.png?v=1")
+
+    # A vendored MODULE is never gzipped, however big. `import()`, `<script src>` and the import map
+    # all hand the url to the browser's own loader, which has no inflate step: `Slate.asset` is the
+    # only consumer that inflates one, and a module never reaches it.
+    @testset "a vendored module is inlined uncompressed" begin
+        big = "export const pad = \"" * repeat("x", 3 * NS._ASSET_GZIP_MIN) * "\";"
+        write(joinpath(pkgdir, "big.mjs"), big)
+        write(joinpath(pkgdir, "big.bin"), repeat("y", 3 * NS._ASSET_GZIP_MIN))
+        gnb = _html_nb()
+        js = NS._inline_ext_asset_urls(gnb, "/ext-assets/GlobeSlate/big.mjs"; compress = true)
+        @test !startswith(js, "data:application/gzip")                  # the loader cannot inflate
+        @test String(Base64.base64decode(split(js, ",")[2])) == big     # and it is the source
+        # Everything else still compresses: the saving is the whole point, and those consumers fetch.
+        bin = NS._inline_ext_asset_urls(gnb, "/ext-assets/GlobeSlate/big.bin"; compress = true)
+        @test startswith(bin, "data:application/gzip")
+        @test length(bin) < length(js)
+    end
+
+    # `nb.assets` is filled at the end of a drain, so an export taken before the first one finishes
+    # saw no vendored directory at all and left every url pointing at a route the page has no server
+    # for. The export pulls the manifest itself now.
+    @testset "an export before the first drain pulls the asset dirs" begin
+        SEB = _RE.SlateExtensionsBase
+        pnb = _html_nb()
+        empty!(pnb.assets)                     # as it stands before the drain-end refresh
+        _RE.report_module(pnb.report)          # an in-process kernel answers once its namespace exists
+        SEB.provide_assets!("GlobeSlate", pkgdir)
+        try
+            h = NS.export_html(pnb; inline_assets = true)
+            # Carried as bytes, resolved from the manifest — not left on a route nothing serves.
+            maps = JSON.parse(match(r"<script type=\"importmap\">(.*?)</script>"s, h).captures[1])["imports"]
+            @test maps["/ext-assets/GlobeSlate/lib.mjs"] == libdata
+            @test haskey(pnb.assets, "GlobeSlate")         # and the pull populated the notebook
+        finally
+            delete!(SEB._ASSETS, "GlobeSlate")
+        end
+    end
+
+    # A `provide_import!` target on the vendored route: inlined standalone, the sibling on a site.
+    inb = _html_nb()
+    inb.pkgimports["glib"] = "/ext-assets/GlobeSlate/lib.mjs"
+    _imap(h) = JSON.parse(match(r"<script type=\"importmap\">(.*?)</script>"s, h).captures[1])["imports"]
+    @test _imap(NS._export_importmap_for(inb; inline = true))["glib"] == libdata
+    @test _imap(NS._export_importmap_for(inb; inline = false))["glib"] == "./ext-assets/GlobeSlate/lib.mjs"
 end
 
 # `save_asset` generated blobs: stored on a cell output, then served live and inlined (standalone) or

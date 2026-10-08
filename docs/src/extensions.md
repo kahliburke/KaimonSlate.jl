@@ -238,6 +238,12 @@ end
 const GL_URL = @ext_asset_url("echarts-gl/echarts-gl.min.js")
 ```
 
+An export repoints these URLs in chart specs, in front-end scripts, and in the HTML that a cell
+outputs. A published site points them at its own copy of the directory. A standalone page inlines
+each file that it uses, and puts a JS module that cell HTML imports in its import map once, for all
+cells. Load such a module with `import` or `import()`, and keep it to one file. A standalone page
+does not resolve a `<script src>` to the module, or a relative import inside it.
+
 [`provide_served_asset!`](@ref) is for the other case: a big runtime that many outputs share. It
 registers bytes at a content-addressed URL and returns the path. The bytes stay in the worker; the
 hub fetches them once, by hash, and caches them immutably. That is how a multi-megabyte JS runtime
