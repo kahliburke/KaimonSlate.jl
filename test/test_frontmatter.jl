@@ -748,4 +748,61 @@ x = 1
         @test NS.state_json(nb)["moduleImports"]["mermaid"] == "https://example.test/mine.js"
         @test NS.state_json(nb)["moduleImports"] == NS._effective_imports(nb)
     end
+
+    # A page can import `/ext-assets/<pkg>/…` before a manifest declares `<pkg>`: a stored preview
+    # runs its scripts before the worker is up, and a figure can show before the drain-end pull. The
+    # page keeps a failed module import, so the route must hold the request while the notebook can
+    # still declare `<pkg>`, and must not hold it when the notebook cannot.
+    @testset "/ext-assets/ miss waits for a busy notebook to declare the package" begin
+        SEB = RE.SlateExtensionsBase
+        nb = _mknb("#%% code id=c\n1 + 1\n")
+        RE.report_module(nb.report)                  # an in-process kernel pulls after its namespace exists
+        h = NS.Hub(Dict("fm" => nb), nothing, "127.0.0.1", 0, ReentrantLock(), false, false, Dict{String,Any}())
+        req = NS.HTTP.Request("GET", "/ext-assets/LatePkg/m.js",
+                              ["Referer" => "http://127.0.0.1/n/fm", "Sec-Fetch-Dest" => "script"])
+        dir = mktempdir()
+        @test (@elapsed @test NS._await_ext_asset_dir(h, req, "LatePkg") === nothing) < 60  # idle → 404 now
+
+        # Busy while it opens. The route pull must not push a version: while the notebook opens, the page
+        # answers a version with a state fetch that applies the stored preview over live cells.
+        nb.report.meta["hydrating"] = true
+        v = nb.version
+        t = @async (sleep(1.0); SEB.provide_assets!("LatePkg", dir))
+        try
+            @test NS._await_ext_asset_dir(h, req, "LatePkg") == dir                      # busy → held until declared
+            @test nb.version == v
+        finally
+            wait(t); delete!(SEB._ASSETS, "LatePkg"); delete!(nb.assets, "LatePkg")
+        end
+        nb.report.meta["hydrating"] = false
+
+        # Busy while its runner drains.
+        lock(() -> (NS._RUNNERS[nb.id] = true), NS._RUNNER_LOCK)
+        t = @async (sleep(1.0); SEB.provide_assets!("LatePkg", dir))
+        try
+            @test NS._await_ext_asset_dir(h, req, "LatePkg") == dir
+        finally
+            wait(t); delete!(SEB._ASSETS, "LatePkg"); delete!(nb.assets, "LatePkg")
+            lock(() -> delete!(NS._RUNNERS, nb.id), NS._RUNNER_LOCK)
+        end
+
+        SEB.provide_assets!("NowPkg", dir)           # declared, so any pull of `fm` would find it
+        try
+            # Only a module script keeps its failure: other destinations get a 404 at once, with no pull.
+            img = NS.HTTP.Request("GET", "/ext-assets/NowPkg/a.png",
+                                  ["Referer" => "http://127.0.0.1/n/fm", "Sec-Fetch-Dest" => "image"])
+            @test NS._await_ext_asset_dir(h, img, "NowPkg") === nothing
+            # A Referer with the id of a closed notebook gets a 404 at once; it does not watch `fm` instead.
+            gone = NS.HTTP.Request("GET", "/ext-assets/NowPkg/m.js", ["Referer" => "http://127.0.0.1/n/gone"])
+            @test NS._await_ext_asset_dir(h, gone, "NowPkg") === nothing
+            # A kernel that cannot answer yet is not pulled, and its namespace is not made early.
+            pnb = _mknb("#%% code id=c\n1 + 1\n")
+            pnb.kernel = RE.PendingKernel()
+            ph = NS.Hub(Dict("fm" => pnb), nothing, "127.0.0.1", 0, ReentrantLock(), false, false, Dict{String,Any}())
+            @test NS._await_ext_asset_dir(ph, req, "NowPkg") === nothing
+            @test pnb.report.mod === nothing
+        finally
+            delete!(SEB._ASSETS, "NowPkg")
+        end
+    end
 end

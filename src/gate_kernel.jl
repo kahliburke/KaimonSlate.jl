@@ -2003,9 +2003,10 @@ function env_info(k::GateKernel, report::Report)
 end
 
 # The worker's SlateExtensionsBase extension manifest — what its loaded packages registered for the
-# page to mirror (`frontend` scripts now; more fields as SEB grows). Pulled once per run drain (see
-# `_refresh_extensions!`); returns `nothing` when there's no live worker, so the caller keeps its
-# current registry. No `prepare!`: we only ask a worker that just ran, never spawn one to query.
+# page to mirror (`frontend` scripts now; more fields as SEB grows). Pulled at the end of each run drain
+# (see `_refresh_extensions!`) and on an `/ext-assets/` miss (see `_pull_ext_assets!`); returns `nothing`
+# when there's no live worker, so the caller keeps its current registry. No `prepare!`: we only ask a
+# worker that is up, never spawn one to query.
 function extension_manifest(k::GateKernel)
     k.conn === nothing && return nothing
     return try

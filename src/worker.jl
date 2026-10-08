@@ -2041,8 +2041,8 @@ end
 "The worker's SlateExtensionsBase extension manifest — what its loaded packages registered for the
 page to mirror: `{frontend:[{id, js, esm, kind}]}` (widget renderers + editor extensions declared from
 `__init__`; `esm` ⇒ ES module; a non-empty `kind` ⇒ a component whose default export Slate wraps). The
-server pulls this once per run drain and injects the scripts into the page. Empty when no such package
-is loaded."
+server pulls this at the end of each run drain and on an `/ext-assets/` miss, and injects the scripts
+into the page. Empty when no such package is loaded."
 function __slate_extension_manifest()
     out = Dict{String,Any}("frontend" => Dict{String,Any}[], "assets" => Dict{String,Any}[],
                            "imports" => Dict{String,Any}[], "fences" => String[])

@@ -12,6 +12,11 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Fixed
+
+- A figure that imports a module from `/ext-assets/` no longer stays blank when it shows before the
+  notebook declares the package.
+
 ## [1.11.0] - 2026-10-06
 
 ### Added
@@ -83,8 +88,6 @@ were written when they went out. They are marked.
 - A slide's cells stay on the stage when they re-run, so a knob works in present mode.
   (#48, @disberd)
 - A stored render no longer outranks a live payload while a notebook hydrates. (#43, @disberd)
-- A region kernel is rebuilt when its node belongs to a new job. (#46, @haakon-e)
-- Scheduler detection is called where it now lives. (#47, @haakon-e)
 
 ### Performance
 
@@ -129,7 +132,6 @@ were written when they went out. They are marked.
   itself when its project dir has no such file.
 - Vim keymap fixes (#36): Escape inside a cell no longer exits the dep-focus or zen view, and a
   chord that types a character is no longer installed into the cell editor.
-- The native title tooltip is replaced with a styled, delegated one. (#39, @haakon-e)
 
 ## [1.8.5] - 2026-09-20
 

@@ -72,8 +72,10 @@ mutable struct LiveNotebook
                                          # declaration order. `esm` ⇒ ES module; non-empty `kind` ⇒ a component whose
                                          # default export Slate wraps + registers. See `_frontend_scripts`.
     assets::Dict{String,String}          # package-vendored asset DIRECTORIES (pkg → absolute dir on disk), from the
-                                         # same manifest (`provide_assets!`). Served at `/ext-assets/<pkg>/…` while the
-                                         # package is loaded, and copied into a static export. See `_register_assets!`.
+                                         # same manifest (`provide_assets!`), refreshed at the end of each drain and
+                                         # on an `/ext-assets/` miss (`_pull_ext_assets!`). Served at
+                                         # `/ext-assets/<pkg>/…` while the package is loaded, and copied into a static
+                                         # export. Not in the page state. See `_register_assets!`.
     pkgimports::Dict{String,String}      # package-declared ES module imports (specifier → url), from the same manifest
                                          # (`provide_import!`) — an extension's own `@use`. Merged UNDER the notebook's
                                          # `@use` map wherever an import map is emitted. See `_register_import!`.
@@ -112,7 +114,7 @@ end
 # Kernel round-trip / blocking-boundary calls that must NEVER run while `nb.lock` is held.
 const _KERNEL_BOUNDARY = Set{Symbol}((:prepare!, :eval_cell!, :eval_stale!, :_eval!, :_eval_one!,
     :_run_code_batch!, :refine_usings!, :refine_macros!, :resolve_usings!, :resolve_macros!,
-    :_module_exports, :_dep_versions, :cancel_eval, :shutdown!))
+    :_module_exports, :_dep_versions, :cancel_eval, :shutdown!, :_refresh_extensions!, :_pull_ext_assets!))
 
 # Scan an expression for a synchronous call to a boundary symbol (`f(…)` or `Mod.f(…)`). Skips
 # `@async`/`@spawn` and `quote` subtrees — work scheduled there runs LATER, not under the held lock —
@@ -1830,62 +1832,169 @@ function _effective_imports(nb::LiveNotebook)
     return merge(nb.pkgimports, usemap)
 end
 
-# Refresh the notebook's front-end registry from the worker's SlateExtensionsBase extension manifest
-# (`{frontend: [{id, js}]}`) — the packages loaded this session declare their front-end from `__init__`,
-# which may run during namespace priming (no harvestable eval), so the process-global registry is the
-# authoritative source. Pulled ONCE per drain (see `_run_loop!`) — the gate worker is queried, the
-# in-process kernel read directly. Merges each script (sticky, id-deduped); returns true if anything
-# changed, so the caller pushes a fresh state for the browser to inject. Best-effort: a query failure
-# leaves the registry as-is. Runs under `nb.lock`.
-function _refresh_extensions!(nb::LiveNotebook)
-    manifest = try
+# One manifest pull of a notebook at a time, from the fetch to the end of the merge. The drain and the
+# `/ext-assets/` route can both pull, and an older manifest merged after a newer one would undo it (a
+# fence released that was just claimed). Gate kernels use one lock for each notebook, so a slow worker
+# delays only the pulls of its own notebook. In-process kernels share one lock: their pulls run the module
+# hooks in the hub process, and that registry (`SlateExtensionsBase._MODULE_FRONTEND_DONE`) has no lock.
+# Lock order: pull lock, then `nb.lock`.
+const _PULL_LOCKS = Dict{String,ReentrantLock}()      # nb.id → pull lock (gate kernels)
+const _ROUTE_PULLED_AT = Dict{String,Float64}()       # nb.id → time of the last `/ext-assets/` route pull
+const _PULL_LOCKS_LOCK = ReentrantLock()              # guards the two dicts above
+const _INPROCESS_PULL_LOCK = ReentrantLock()
+_manifest_pull_lock(nb::LiveNotebook) = nb.kernel isa ReportEngine.GateKernel ?
+    lock(() -> get!(ReentrantLock, _PULL_LOCKS, nb.id), _PULL_LOCKS_LOCK) : _INPROCESS_PULL_LOCK
+
+# The worker's SlateExtensionsBase extension manifest, or `nothing` when the kernel cannot answer. The gate
+# worker is queried, the in-process kernel read directly. A kernel round trip: call it off `nb.lock`.
+function _fetch_manifest(nb::LiveNotebook)
+    try
         nb.kernel isa ReportEngine.GateKernel ?
             ReportEngine.extension_manifest(nb.kernel) :
             ReportEngine.inprocess_extension_manifest(ReportEngine.report_module(nb.report))
     catch e
         ReportEngine._rlog("slate: extension manifest refresh failed: $(first(sprint(showerror, e), 120))")
-        return false
+        nothing
     end
-    manifest === nothing && return false
-    changed = false
-    # The manifest was pulled OFF nb.lock (a round-trip); take the lock only for each registry mutation,
-    # so this stays protocol-safe when the runner calls `_refresh_extensions!` off-lock.
-    fe = _manifest_field(manifest, :frontend)
-    if fe !== nothing
-        for e in fe
-            js = _manifest_field(e, :js); js === nothing && continue
-            esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
-            kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
-            lock(nb.lock) do
-                _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind)
-            end && (changed = true)
-        end
-    end
+end
+
+# Merge the asset directories of `manifest` into `nb.assets`. Returns true if anything changed.
+function _merge_assets!(nb::LiveNotebook, manifest)
     as = _manifest_field(manifest, :assets)
-    if as !== nothing
-        for e in as
-            pkg = _manifest_field(e, :pkg); dir = _manifest_field(e, :dir)
-            (pkg === nothing || dir === nothing) && continue
-            lock(nb.lock) do
-                _register_assets!(nb, String(pkg), String(dir))
-            end && (changed = true)
-        end
+    as === nothing && return false
+    changed = false
+    for e in as
+        pkg = _manifest_field(e, :pkg); dir = _manifest_field(e, :dir)
+        (pkg === nothing || dir === nothing) && continue
+        lock(nb.lock) do
+            _register_assets!(nb, String(pkg), String(dir))
+        end && (changed = true)
     end
-    im = _manifest_field(manifest, :imports)
-    if im !== nothing
-        for e in im
-            spec = _manifest_field(e, :spec); url = _manifest_field(e, :url)
-            (spec === nothing || url === nothing) && continue
-            lock(nb.lock) do
-                _register_import!(nb, String(spec), String(url))
-            end && (changed = true)
-        end
-    end
-    fl = _manifest_field(manifest, :fences)
-    fl === nothing || (lock(nb.lock) do
-        _refresh_fences!(nb, Set{String}(String(f) for f in fl))
-    end && (changed = true))
     return changed
+end
+
+# Refresh the notebook's front-end registry from the worker's SlateExtensionsBase extension manifest
+# (`{frontend: [{id, js}]}`) — the packages loaded this session declare their front-end from `__init__`,
+# which may run during namespace priming (no harvestable eval), so the process-global registry is the
+# authoritative source. Pulled at the end of each drain (see `_run_loop!`). Merges each script (sticky,
+# id-deduped); returns true if anything changed, so the caller pushes a fresh state for the browser to
+# inject. Best-effort: a query failure leaves the registry as-is. Call it off `nb.lock`: it takes the
+# pull lock, then `nb.lock` for each registry mutation.
+function _refresh_extensions!(nb::LiveNotebook)
+    lock(_manifest_pull_lock(nb)) do
+        manifest = _fetch_manifest(nb)
+        manifest === nothing && return false
+        changed = false
+        fe = _manifest_field(manifest, :frontend)
+        if fe !== nothing
+            for e in fe
+                js = _manifest_field(e, :js); js === nothing && continue
+                esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
+                kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
+                lock(nb.lock) do
+                    _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind)
+                end && (changed = true)
+            end
+        end
+        _merge_assets!(nb, manifest) && (changed = true)
+        im = _manifest_field(manifest, :imports)
+        if im !== nothing
+            for e in im
+                spec = _manifest_field(e, :spec); url = _manifest_field(e, :url)
+                (spec === nothing || url === nothing) && continue
+                lock(nb.lock) do
+                    _register_import!(nb, String(spec), String(url))
+                end && (changed = true)
+            end
+        end
+        fl = _manifest_field(manifest, :fences)
+        fl === nothing || (lock(nb.lock) do
+            _refresh_fences!(nb, Set{String}(String(f) for f in fl))
+        end && (changed = true))
+        return changed
+    end
+end
+
+# The longest time that the `/ext-assets/` route holds a request for a package that is not declared yet:
+# while a watched notebook opens (a cold worker start or a precompile can take minutes), and while it
+# only drains.
+const _EXT_ASSET_OPEN_WAIT_S = 600.0
+const _EXT_ASSET_WAIT_S = 120.0
+# The interval between two route pulls of one notebook, whatever the number of held requests.
+const _EXT_ASSET_POLL_S = 0.5
+
+# A notebook opens from the boot to the end of its first run, and drains while its runner is active. A
+# notebook that opens or drains can still load the package that declares an asset directory.
+_ext_assets_opening(nb::LiveNotebook) = lock(() -> get(nb.report.meta, "hydrating", false) === true, nb.lock)
+_ext_assets_draining(nb::LiveNotebook) = lock(() -> get(_RUNNERS, nb.id, false), _RUNNER_LOCK)
+
+# Pull the manifest for the `/ext-assets/` route and merge only its asset directories. Only this route
+# and the export read `nb.assets`, and the page state does not include them, so this pull pushes no
+# version. A version push while the notebook opens makes the page fetch the state, and that state has the
+# stored preview cells, which the page would apply over cells that are already live. The drain-end pull
+# (`_refresh_extensions!`) merges the other fields and pushes. The pull is skipped if the route pulled this
+# notebook less than `_EXT_ASSET_POLL_S` ago, unless `force`. Best-effort: a failure leaves `nb.assets`
+# as it is. Call it off `nb.lock`.
+function _pull_ext_assets!(nb::LiveNotebook; force::Bool = false)
+    # A gate kernel without a live worker answers `nothing`. An in-process kernel answers after the run
+    # makes its namespace; a pull before that would make the namespace out of order.
+    k = nb.kernel
+    (k isa ReportEngine.GateKernel || (k isa ReportEngine.InProcessKernel && nb.report.mod !== nothing)) ||
+        return nothing
+    due = lock(_PULL_LOCKS_LOCK) do
+        t = time()
+        (force || t - get(_ROUTE_PULLED_AT, nb.id, -Inf) >= _EXT_ASSET_POLL_S) || return false
+        _ROUTE_PULLED_AT[nb.id] = t
+        return true
+    end
+    due || return nothing
+    try
+        lock(_manifest_pull_lock(nb)) do
+            m = _fetch_manifest(nb)
+            m === nothing || _merge_assets!(nb, m)
+        end
+    catch e
+        @debug "slate: /ext-assets/ manifest pull failed" notebook = nb.id exception = e
+    end
+    return nothing
+end
+
+# The asset directory of `pkg` for an `/ext-assets/` request that found no notebook that declares it.
+# A page imports these urls before the manifest declares them in two cases: a stored preview runs its
+# scripts before the worker is up, and a figure cell shows its result before the drain-end pull. The
+# browser keeps a failed module import for the life of the page, so a 404 here is permanent for that
+# page. Thus hold the request: pull the manifest now and again while the notebook opens or drains, and
+# answer when a manifest declares `pkg`. Answer `nothing` when no watched notebook opens or drains after
+# a pull, or after `_EXT_ASSET_OPEN_WAIT_S` (while one opens) or `_EXT_ASSET_WAIT_S` (while one only
+# drains). The page's notebook (from the `Referer`) is the one to watch. Watch all open notebooks only
+# when the `Referer` has no `/n/<id>`.
+function _await_ext_asset_dir(h, req, pkg::AbstractString)
+    # Only a module script keeps its failure. Answer other misses now, so that held `<img>`, CSS or
+    # `fetch` requests do not use up the few connections that the browser opens to the hub.
+    dest = HTTP.header(req, "Sec-Fetch-Dest", "")
+    (isempty(dest) || dest == "script") || return nothing
+    m = match(r"/n/([^/?#]+)", HTTP.header(req, "Referer", ""))
+    id = m === nothing ? nothing : HTTP.URIs.unescapeuri(String(m.captures[1]))
+    t0 = time()
+    while true
+        nbs = lock(h.lock) do
+            id === nothing && return collect(values(h.notebooks))
+            nb = get(h.notebooks, id, nothing)
+            return nb === nothing ? LiveNotebook[] : [nb]     # the page's notebook is closed
+        end
+        # Read the state before the pulls: a pull after idle is final. Force the pulls only when no watched
+        # notebook is busy, because only then can this pass end the request with a 404. While one is busy,
+        # the throttle also applies to the idle ones, so held requests do not multiply their pulls.
+        opening = any(_ext_assets_opening, nbs)
+        busy = opening || any(_ext_assets_draining, nbs)
+        for nb in nbs
+            _pull_ext_assets!(nb; force = !busy)
+            d = lock(() -> get(nb.assets, pkg, nothing), nb.lock)
+            d === nothing || return d
+        end
+        (busy && time() - t0 < (opening ? _EXT_ASSET_OPEN_WAIT_S : _EXT_ASSET_WAIT_S)) || return nothing
+        sleep(_EXT_ASSET_POLL_S)
+    end
 end
 
 # The notebook's package-declared front-end scripts, as `(; id, js, esm)` entries in declaration order.

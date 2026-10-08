@@ -111,7 +111,7 @@ end
 function _ext_asset_file(nb::LiveNotebook, url::AbstractString)
     m = match(r"^/ext-assets/([^/]+)/(.*)$", String(url))
     m === nothing && return nothing
-    dir = get(nb.assets, HTTP.URIs.unescapeuri(String(m.captures[1])), nothing)
+    dir = lock(() -> get(nb.assets, HTTP.URIs.unescapeuri(String(m.captures[1])), nothing), nb.lock)
     dir === nothing && return nothing
     p = _confined_path(dir, HTTP.URIs.unescapeuri(String(m.captures[2])))
     (p !== nothing && isfile(p)) ? p : nothing
@@ -1205,7 +1205,7 @@ end
 # `_frontend_export_head`). A missing dir contributes nothing.
 function _package_asset_files(nb::LiveNotebook)
     out = Pair{String,String}[]
-    for (pkg, dir) in nb.assets
+    for (pkg, dir) in lock(() -> copy(nb.assets), nb.lock)   # an `/ext-assets/` route pull can merge at any time
         isdir(dir) || continue
         for (root, _, fnames) in walkdir(dir), f in fnames
             src = joinpath(root, f)
