@@ -480,8 +480,16 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
                     "KAIMONSLATE_PEER_BW_MBPS" => nothing,
                     "KAIMONSLATE_SYSIMAGE_LOCK_STALE" => nothing) do
                 @test RE._dial_deadline_cold() == 120.0
-                @test RE._dial_deadline_probe() == 15.0
-                @test RE._dial_deadline_record() == 5.0
+                # Short once the hub has dialled; until then long enough for its first dial to compile.
+                dialed = RE._DIALED[]
+                try
+                    RE._DIALED[] = true
+                    @test RE._dial_deadline_probe() == 15.0 && RE._dial_deadline_record() == 5.0
+                    RE._DIALED[] = false
+                    @test RE._dial_deadline_probe() == 30.0 && RE._dial_deadline_record() == 30.0
+                finally
+                    RE._DIALED[] = dialed
+                end
                 @test RE._ssh_connect_timeout() == 15 && RE._ssh_connect_timeout() isa Int
                 @test RE._ssh_control_persist() == 600
                 @test RE._tunnel_alive_interval() == 5 && RE._tunnel_alive_count() == 3

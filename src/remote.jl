@@ -291,6 +291,7 @@ end
 #   dial_deadline_cold      KAIMONSLATE_DIAL_DEADLINE_COLD      120   cold-spawn dial (covers remote boot + KaimonGate load)
 #   dial_deadline_probe     KAIMONSLATE_DIAL_DEADLINE_PROBE     15    reattach-probe / pool-adopt dial
 #   dial_deadline_record    KAIMONSLATE_DIAL_DEADLINE_RECORD    5     record-first dial (a live worker answers <1s)
+#   dial_deadline_first     KAIMONSLATE_DIAL_DEADLINE_FIRST     30    least a record or probe dial waits before the hub's first dial completes
 #   blob_chunk_timeout      KAIMONSLATE_BLOB_CHUNK_TIMEOUT      20    per-chunk ZMQ recv/send timeout (applied as ms)
 #   blob_xfer_timeout       KAIMONSLATE_BLOB_XFER_TIMEOUT       600   whole-binding / direct-blob move gate timeout
 #   sysimage_lock_stale     KAIMONSLATE_SYSIMAGE_LOCK_STALE     1800  concurrent sysimage-build lock staleness window
@@ -304,8 +305,14 @@ _fwd_ready_wait()         = _rcfg("fwd_ready_wait",         "KAIMONSLATE_FWD_REA
 _probe_timeout()          = _rcfg("probe_timeout",          "KAIMONSLATE_PROBE_TIMEOUT",          4.0)
 _firewall_giveup()        = _rcfg("firewall_giveup",        "KAIMONSLATE_FIREWALL_GIVEUP",        10.0)
 _dial_deadline_cold()     = _rcfg("dial_deadline_cold",     "KAIMONSLATE_DIAL_DEADLINE_COLD",     120.0)
-_dial_deadline_probe()    = _rcfg("dial_deadline_probe",    "KAIMONSLATE_DIAL_DEADLINE_PROBE",    15.0)
-_dial_deadline_record()   = _rcfg("dial_deadline_record",   "KAIMONSLATE_DIAL_DEADLINE_RECORD",   5.0)
+_dial_deadline_probe()    = _warm_dial(_rcfg("dial_deadline_probe",  "KAIMONSLATE_DIAL_DEADLINE_PROBE",  15.0))
+_dial_deadline_record()   = _warm_dial(_rcfg("dial_deadline_record", "KAIMONSLATE_DIAL_DEADLINE_RECORD", 5.0))
+# The first dial a hub makes compiles its side of the connection (the tunnel, CURVE, the gate client),
+# which takes longer than a live worker takes to answer. Until one dial has gone through, a worker that
+# is slow to answer is the hub, not a stale record, so the short deadlines wait at least this long.
+_dial_deadline_first()    = _rcfg("dial_deadline_first",    "KAIMONSLATE_DIAL_DEADLINE_FIRST",    30.0)
+const _DIALED = Ref(false)
+_warm_dial(deadline) = _DIALED[] ? deadline : max(deadline, _dial_deadline_first())
 _blob_chunk_timeout_ms()  = round(Int, _rcfg("blob_chunk_timeout", "KAIMONSLATE_BLOB_CHUNK_TIMEOUT", 20.0) * 1000)
 _blob_xfer_timeout()      = _rcfg("blob_xfer_timeout",      "KAIMONSLATE_BLOB_XFER_TIMEOUT",      600.0)
 _sysimage_lock_stale()    = round(Int, _rcfg("sysimage_lock_stale", "KAIMONSLATE_SYSIMAGE_LOCK_STALE", 1800))
@@ -2945,6 +2952,7 @@ function _dial_worker(t::RemoteTarget, port, stream_port; deadline::Float64, ser
         tunnel === nothing || (try; close_tunnel(tunnel); catch; end)
     end
     # resolved key/ip ride back so a successful caller can stamp them into the attachment record
+    conn === nothing || (_DIALED[] = true)
     return (conn = conn, tunnel = tunnel, err = last, server_key = server_key, remote_ip = ip)
 end
 
