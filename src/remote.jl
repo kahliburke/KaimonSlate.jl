@@ -2028,8 +2028,9 @@ so the result is one a resolve could have produced when the two agree on every p
 neither holds a weak dependency only the other has. Otherwise the reason, as a phrase.
 """
 function _merge_manifests(nbproj::AbstractDict, nbman::AbstractDict, refproj::AbstractDict, refman::AbstractDict)
-    (get(nbman, "manifest_format", "") == "2.0" && get(refman, "manifest_format", "") == "2.0") ||
-        return "a Manifest in another format"
+    # Format 2 in any minor version: 2.1 adds only a `[registries]` table, which the notebook's side keeps.
+    v2(m) = startswith(string(get(m, "manifest_format", "")), "2.")
+    (v2(nbman) && v2(refman)) || return "a Manifest in another format"
     jv, rv = string(get(nbman, "julia_version", "")), string(get(refman, "julia_version", ""))
     jv == rv || return "the notebook is resolved for Julia $jv, Slate's packages for $rv"
     nb = get(nbman, "deps", Dict{String,Any}()); ref = get(refman, "deps", Dict{String,Any}())

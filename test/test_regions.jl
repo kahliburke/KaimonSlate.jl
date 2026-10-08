@@ -2273,6 +2273,11 @@ end
         @test occursin("C is 2.1.0 in the notebook, 2.0.0",
                        RE._merge_manifests(nbp, man("1.12.7", ["A" => entry("1.0.0"), "C" => entry("2.1.0")]), refp, refm))
         @test occursin("Julia 1.12.6", RE._merge_manifests(nbp, merge(nbm, Dict("julia_version" => "1.12.6")), refp, refm))
+        # Format 2.1 is 2.0 with the registries the packages came from, kept from the notebook's side.
+        reg = Dict{String,Any}("General" => Dict{String,Any}("uuid" => "23338594-aafe-5451-b93e-139f81909106"))
+        p21, m21 = RE._merge_manifests(nbp, merge(nbm, Dict("manifest_format" => "2.1", "registries" => reg)), refp, refm)
+        @test m21["manifest_format"] == "2.1" && m21["registries"] == reg && haskey(m21["deps"], "G")
+        @test occursin("another format", RE._merge_manifests(nbp, merge(nbm, Dict("manifest_format" => "1.0")), refp, refm))
         @test occursin("weak dependency on G",
                        RE._merge_manifests(nbp, man("1.12.7", ["A" => entry("1.0.0"; weak = ["G"])]), refp, refm))
         @test occursin("G as a weak dependency",
