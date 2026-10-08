@@ -219,12 +219,7 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
 
     # Packages developed from a local checkout, which no registry on the cluster can supply: each is
     # sent into this version's `devsrc/<name>` and the environment's paths are pointed at the copy.
-    devs = Dict{String,String}(env_path_deps(parent))
-    mf = parent_manifest(parent)
-    for (name, dir) in dev_deps(mf, isempty(mf) ? parent : dirname(abspath(mf)))
-        rstrip(normpath(abspath(dir)), '/') == rstrip(normpath(abspath(parent)), '/') && continue
-        haskey(devs, name) || (devs[name] = dir)
-    end
+    devs = Dict{String,String}(local_dev_deps(parent))
     rewrites = Tuple{String,String}[]
     for (name, dir) in sort!(collect(devs); by = first)
         isdir(dir) || continue

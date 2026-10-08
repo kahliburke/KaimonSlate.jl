@@ -267,6 +267,7 @@ _runtime_key() = bytes2hex(_SHA.sha1(string(_payload_sha(), "\n", _seb_sha())))[
 _runtime_dir(key::AbstractString = _runtime_key()) = "$_REMOTE_WORKER/payload/$key"
 _remote_seb(key::AbstractString = _runtime_key()) = _runtime_dir(key) * "/SlateExtensionsBase"
 _remote_worker_pkg(key::AbstractString = _runtime_key()) = _runtime_dir(key) * "/SlateWorker"
+const _WORKER_CODE_PKGS = ("SlateExtensionsBase", "SlateWorker")
 # The SDK and the worker package are dev'd into the worker env together. The worker cannot load without
 # them, so a failure here fails the provision (which resets the env and retries once) rather than
 # starting a worker that dies on its first `using`.
@@ -856,9 +857,8 @@ end
 # depends on them, so a compile is current only for the sources it compiled (`_precompiled_check_sh`).
 function _dev_sources_digest(env::AbstractString)
     (isempty(env) || !isdir(env)) && return ""
-    mf = parent_manifest(env)
     parts = String[]
-    for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? env : dirname(abspath(mf)))
+    for (name, lpath) in Sweep.local_dev_deps(env)
         isdir(lpath) && push!(parts, string(name, "=", _tree_digest(lpath, [".git", "*.cov"])))
     end
     return isempty(parts) ? "" : bytes2hex(_SHA.sha1(join(sort!(parts), "\n")))[1:16]
@@ -1103,8 +1103,7 @@ function _env_fingerprint(envdir::AbstractString, infra::AbstractString; depot::
         for f in sort!(filter(Sweep._is_env_file, readdir(envdir)))
             add(f); add(read(joinpath(envdir, f), String))
         end
-        mf = parent_manifest(envdir)   # a workspace member's deps live in its root's manifest
-        for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? envdir : dirname(abspath(mf)))
+        for (name, lpath) in Sweep.local_dev_deps(envdir)
             p = joinpath(lpath, "Project.toml")
             isfile(p) && (add(name); add(read(p, String)))
             # Where its copy is on the host, which the environment's Manifest is rewritten to name.
@@ -1415,6 +1414,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
             # shipped here → no reliable pre-count, so the precompile bar is indeterminate ("k done"), but it
             # still shows live progress + the current package instead of going dark.
             build = Sweep.devpaths_script(rel, rewrites) *
+                Sweep.devsources_script(String[r for (n, r) in rewrites if !(n in _WORKER_CODE_PKGS)], rewrites) *
                 "\nimport Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
                 "Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _worker_develop() * "; Pkg.instantiate()\n" *
                 _held_record_snippet(_env_held_path(t), stamp) * _RG_RECORD_SNIPPET * _PREP_DONE_SNIPPET * "\n"
@@ -1837,15 +1837,11 @@ end
 function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString; force::Bool = false)
     host = t.ssh_host
     rewrites = Tuple{String,String}[]
-    # `parent_manifest` resolves the manifest the way the loader does — for a workspace member that is
-    # the shared one at the workspace root, and its relative `path=`s are anchored on ITS dir, not the
-    # project's. A fork env is an ordinary env, so this is just `local_env/Manifest.toml` there.
-    mf = parent_manifest(local_env)
-    for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? local_env : dirname(abspath(mf)))
-        # Normalize + strip the trailing slash the `path="."` form leaves (abspath("x/.") → "x/") so the
-        # project-itself entry compares equal to the env dir and is left as the active project.
-        if rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(local_env)), '/')
-            _rlog("env: dev dep '$name' is the project itself — left as the active project (not redirected to devsrc)")
+    for (name, lpath) in Sweep.local_dev_deps(local_env)
+        # Slate's SDK and worker package come from the worker's own copy of its code, whatever checkout
+        # the notebook develops them from, so the worker loads one of each.
+        if name in _WORKER_CODE_PKGS
+            push!(rewrites, (name, name == "SlateWorker" ? _remote_worker_pkg() : _remote_seb()))
             continue
         end
         if !isdir(lpath)
@@ -2171,9 +2167,12 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
                                  precompile::Bool = true, held_file::AbstractString = "", stamp::AbstractString = "")
     io = IOBuffer()
     # Redirect dev deps' Manifest + [sources] paths to their shipped devsrc locations (no-op when empty).
-    rw = Sweep.devpaths_script(projrel, merged ? vcat(rewrites, [("SlateExtensionsBase", _remote_seb()),
-                                                                ("SlateWorker", _remote_worker_pkg())]) : rewrites)
+    rewrites = merged ? unique!(vcat(rewrites, [("SlateExtensionsBase", _remote_seb()), ("SlateWorker", _remote_worker_pkg())])) :
+                        rewrites
+    rw = Sweep.devpaths_script(projrel, rewrites)
     isempty(rw) || print(io, rw)
+    # The shipped packages' own `[sources]`, which name each other by paths that mean nothing here.
+    print(io, Sweep.devsources_script(String[r for (n, r) in rewrites if !(n in _WORKER_CODE_PKGS)], rewrites))
     println(io, "import Pkg")
     # Fetch only: precompiling here would build for this machine's CPU, which need not be the CPU the
     # workers run on. The packages are compiled where they will run.
@@ -2337,9 +2336,8 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString; kernel = n
     # Read the SAME env whose Manifest provisioning replicated (origin_env, else the parent) to find the
     # dev'd packages; skip the project itself and any vanished source.
     env = isempty(t.origin_env) ? parent_project : t.origin_env
-    mf = parent_manifest(env)   # the workspace root's manifest for a member, as in `_rsync_dev_deps!`
-    for (name, lpath) in Sweep.dev_deps(mf, isempty(mf) ? env : dirname(abspath(mf)))
-        rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
+    for (name, lpath) in Sweep.local_dev_deps(env)
+        name in _WORKER_CODE_PKGS && continue          # the worker's own copy, sent with its code
         isdir(lpath) || continue
         push!(pairs, (String(lpath), _devsrc_path(lpath), _DEVSRC_SEND_EXCLUDES))
     end

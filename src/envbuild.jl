@@ -115,6 +115,25 @@ function run_julia_there(host::AbstractString, code::AbstractString; setup::Abst
 end
 
 """
+    local_dev_deps(env) -> Vector{Pair{String,String}}
+
+Every package the environment in `env` develops from a local directory, as `name => directory`:
+the `[sources]` paths of its project, followed through the packages they name (`env_path_deps`),
+and the path entries of the manifest that resolves it. Before a first resolve writes a manifest the
+`[sources]` are all there is. The project itself is left out.
+"""
+function local_dev_deps(env::AbstractString)
+    isempty(env) && return Pair{String,String}[]
+    devs = Dict{String,String}(env_path_deps(env))
+    mf = parent_manifest(env)
+    for (name, dir) in dev_deps(mf, isempty(mf) ? env : dirname(abspath(mf)))
+        haskey(devs, name) || (devs[name] = dir)
+    end
+    self = strip_trailing_sep(normpath(abspath(env)))
+    return sort!([n => d for (n, d) in devs if strip_trailing_sep(normpath(abspath(d))) != self]; by = first)
+end
+
+"""
     devsources_script(projects, rewrites) -> String
 
 Julia code that points the `[sources]` of each shipped package's own Project.toml at the shipped

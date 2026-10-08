@@ -2255,6 +2255,22 @@ end
         end
     end
 
+    @testset "an environment's developed packages are found before it has a Manifest" begin
+        # A project resolved nowhere yet names its local packages only in `[sources]`, and those name
+        # theirs the same way: all of them travel, and each copy's own paths are pointed at the others.
+        mktempdir() do root
+            mk(name, body) = (d = mkpath(joinpath(root, name)); write(joinpath(d, "Project.toml"), "name = \"$name\"\n" * body); d)
+            b = mk("B", "")
+            a = mk("A", "[sources]\nB = {path = \"../B\"}\n")
+            seb = mk("SlateExtensionsBase", "")
+            env = mk("env", "[sources]\nA = {path = \"../A\"}\nSlateExtensionsBase = {path = \"../SlateExtensionsBase\"}\nenv = {path = \".\"}\n")
+            @test RE.Sweep.local_dev_deps(env) == ["A" => a, "B" => b, "SlateExtensionsBase" => seb]
+        end
+        s = RE._env_instantiate_script("x", [("A", "devsrc/A"), ("SlateExtensionsBase", RE._remote_seb())])
+        @test occursin("raw\"devsrc/A\", \"Project.toml\"", s)                       # A's own [sources] rewritten
+        @test !occursin("raw\"" * RE._remote_seb() * "\", \"Project.toml\"", s)          # the worker's SDK left alone
+    end
+
     @testset "Slate's packages join a notebook's environment without a resolve" begin
         entry(v; deps = String[], weak = String[]) =
             Dict{String,Any}("uuid" => string(Base.UUID(UInt128(hash(v)))), "version" => v, "deps" => deps,
