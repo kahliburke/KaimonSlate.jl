@@ -1856,18 +1856,23 @@ end
         @test RE._site_prologue(f) == "module unload cudatoolkit"
         @test RE._site_prologue(f, "module unload cudatoolkit") == ""
         @test RE._site_prologue(merge(f, Dict("cudalibs" => ""))) == ""      # nothing shadowed
-        # With the probe's word on each module, only one that unloads cleanly is unloaded. A module
-        # that sets Julia's environment (clima's `cuda/julia-pref`, which points CUDA.jl at the system
-        # toolkit and which `climacommon` requires) is left loaded, and so is one the site refuses.
-        @test RE._site_prologue(merge(f, Dict("cudamods" => "cudatoolkit:ok"))) == "module unload cudatoolkit"
+        # A site whose Julia preferences point CUDA.jl at the system toolkit keeps its CUDA module,
+        # whether the site would let it go or not: clima's `cuda/julia-pref` (which `climacommon`
+        # requires) and derecho's `cuda/12.9.0` (whose libraries its `julia-preferences` selects).
         clima = Dict("modules" => "climacommon/2026_02_18 cuda/julia-pref julia/1.12.5",
-                     "cudalibs" => "/usr/local/cuda/lib64", "cudamods" => "cuda:julia")
+                     "cudalibs" => "/usr/local/cuda/lib64", "cudalocal" => "yes", "cudamods" => "cuda:fails")
+        derecho = Dict("modules" => "climacommon/2026_04_08 cuda/12.9.0 julia-preferences/2026_02_10",
+                       "cudalibs" => "/glade/u/apps/cuda/12.9.0/lib64", "cudalocal" => "yes", "cudamods" => "cuda:ok")
         @test RE._site_prologue(clima) == ""
-        @test RE._site_prologue(merge(clima, Dict("cudamods" => "cuda:fails"))) == ""
-        @test RE._site_prologue(merge(f, Dict("cudamods" => ""))) == ""      # nothing could be checked
+        @test RE._site_prologue(derecho) == ""
+        # Without that preference, only a module that unloads cleanly is unloaded.
+        @test RE._site_prologue(merge(f, Dict("cudalocal" => "", "cudamods" => "cudatoolkit:ok"))) == "module unload cudatoolkit"
+        @test RE._site_prologue(merge(derecho, Dict("cudalocal" => ""))) == "module unload cuda"
+        @test RE._site_prologue(merge(clima, Dict("cudalocal" => ""))) == ""      # the site refuses
+        @test RE._site_prologue(merge(f, Dict("cudamods" => ""))) == ""          # nothing could be checked
         # A record from before the probe said so still leaves out a module whose version names Julia.
-        @test RE._site_prologue(delete!(copy(clima), "cudamods")) == ""
-        @test RE._parse_probe("cudamods=cuda:julia \n")["cudamods"] == "cuda:julia"
+        @test RE._site_prologue(Dict("modules" => clima["modules"], "cudalibs" => clima["cudalibs"])) == ""
+        @test RE._parse_probe("cudalocal=yes\ncudamods=cuda:ok \n") == Dict("cudalocal" => "yes", "cudamods" => "cuda:ok")
         # Patience from what loading took, never below the hub's default.
         @test RE._grace_for(1) == 45 && RE._grace_for(40) == 110
         # Module order is the site's, not a change.
