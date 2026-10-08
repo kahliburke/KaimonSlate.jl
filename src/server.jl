@@ -2262,6 +2262,8 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
                         ReportEngine._sched_seconds(alloc.timeleft) < ReportEngine._sched_seconds(ReportEngine._alloc_walltime(r)) - 120
                 ReportEngine._rlog("region[$name]: " * (found ? "found its node still held" : "node granted") *
                                    " ($(ReportEngine.region_host(r))) — re-running the cells that were waiting")
+                # A new allocation means a new worker: whatever ran in the last one is not in it.
+                found || _restale_side!(nb, String(name))
                 _region_ready!(nb, String(name))
             end
         end
