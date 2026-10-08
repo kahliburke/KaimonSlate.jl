@@ -2949,12 +2949,11 @@ function create_tools(GateTool::Type)
 
     Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
 
-    LOCKED CELLS compute only when the run says it is deliberate. A locked cell restores its stored
-    result; one with nothing stored, whether it is `cell` itself or a cell UPSTREAM of it, is held and
-    replies "(locked; …)", and the cells reading it wait, as does a run of the whole notebook.
-    `run_locked=true` says the run is deliberate: `cell` computes even though it is locked, and so do
-    the held locked cells the run reaches (upstream of `cell`, or all of them for `cell=""`). Use it for
-    a planned, expensive computation you mean to make, not to clear a wait you did not expect.
+    LOCKED CELLS compute only when run deliberately. `run` on a locked cell computes it, but a locked
+    cell UPSTREAM of it that has no stored result is held ("🔒 · ▶ to compute") and the cell waits on
+    it, as does a run of the whole notebook. `run_locked=true` says the run is deliberate: the held
+    locked cells it reaches (upstream of `cell`, or all of them for `cell=""`) compute too. Use it for
+    a planned sequence of expensive runs, not to clear a wait you did not expect.
 
     SLOW RUNS HANDLE THEMSELVES. A run that outruns a ~30s grace window is promoted to a background
     job automatically: you get a job id, collect the result with `check_eval(notebook, job)`, and it

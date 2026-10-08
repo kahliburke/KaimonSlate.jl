@@ -260,9 +260,8 @@ function _cell_result_text(c::Cell)
     if c.state == BLOCKED
         # A locked wait names a cell, not a machine: the locked cell whose ▶ ends it.
         c.blocked == WAIT_LOCKED &&
-            return (isempty(c.blocked_host) || c.blocked_host == c.id) ?
-                   "(locked; nothing stored — `run_locked=true` computes it)" :
-                   "(waits on locked cell $(c.blocked_host); `run_locked=true` computes it)"
+            return (isempty(c.blocked_host) || c.blocked_host == c.id) ? "(locked; run it to compute)" :
+                   "(waits on locked cell $(c.blocked_host); `run_locked=true` computes it too)"
         why = get(_WAIT_TEXT, c.blocked, replace(c.blocked, '_' => ' '))
         return "(" * why * (isempty(c.blocked_host) ? "" : " on " * c.blocked_host) * ")"
     end
