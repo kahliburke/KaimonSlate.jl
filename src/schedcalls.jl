@@ -135,3 +135,21 @@ function sched_calls(; window::Real = _SCHED_KEEP_S)
             total = sum(v for (k, v) in _SCHED_TOTAL if k[1] == h)) for h in hosts]
     end
 end
+
+"""
+    sched_unflushed(host) -> (minute, Dict("command caller" => n))
+
+The counts not yet in the history file: those of the minute in progress (as a unix minute), which is
+written once a later minute has a call in it.
+"""
+function sched_unflushed(host::AbstractString)
+    lock(_SCHED_LOCK) do
+        d = Dict{String,Int}()
+        m = _SCHED_MINUTE[]
+        for (t, h, c, caller) in _SCHED_RECENT
+            (h == host && floor(Int, t / 60) == m) || continue
+            d["$c $caller"] = get(d, "$c $caller", 0) + 1
+        end
+        (m, d)
+    end
+end

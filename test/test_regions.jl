@@ -744,6 +744,21 @@ end
                 end
             end
 
+            @testset "the scheduler-use view reads the history a host's commands left" begin
+                withenv("KAIMONSLATE_CACHE_HOME" => mktempdir()) do
+                    p = RE.Sweep._sched_history_path(); mkpath(dirname(p))
+                    m = floor(Int, time() / 60) - 30
+                    stamp = RE.Sweep.Dates.format(RE.Sweep.Dates.unix2datetime(m * 60), "yyyy-mm-ddTHH:MM")
+                    write(p, "{\"minute\": \"$(stamp)Z\", \"host\": \"login\", \"total\": 3, \"by\": {\"squeue find_allocation\": 2, \"srun _in_allocation\": 1}}\n" *
+                             "{\"minute\": \"$(stamp)Z\", \"host\": \"other\", \"total\": 9, \"by\": {\"squeue x\": 9}}\n")
+                    v = NS._sched_calls_view("login", 1)
+                    @test (v["in_window"], v["peak"], v["over"]) == (3, 3, 1) && only(v["series"])[2] == 3
+                    @test [(r["command"], r["caller"], r["n"]) for r in v["by"]] ==
+                          [("squeue", "find_allocation", 2), ("srun", "_in_allocation", 1)]
+                    @test NS._sched_calls_view("login", 0.25)["in_window"] == 0      # older than the window
+                end
+            end
+
             @testset "a remote process match reads only the user's own processes" begin
                 # Reading another user's command line can block on a login node, and `pgrep -f` reads them all.
                 code = [l for f in ("remote.jl", "publish_targets.jl")

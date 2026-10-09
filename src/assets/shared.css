@@ -146,6 +146,12 @@
 .tm-body { flex:1 1 auto; overflow:auto; padding:10px 16px 14px; overscroll-behavior:contain; }
 .tm-empty { padding:40px; text-align:center; color:var(--dim, #6a7090); }
 .tm-tiles { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }
+/* Scheduler use dashboard (schedusage.js): the telemetry card, sized to what it holds. */
+.sc-card { height:auto; max-height:min(92vh, 900px); width:min(980px, 96vw); }
+.sc-tab { width:100%; border-collapse:collapse; font-size:.8rem; }
+.sc-tab th { text-align:left; font-weight:500; color:var(--dim, #6a7090); padding:3px 8px; border-bottom:1px solid var(--border, #2a2e40); }
+.sc-tab td { padding:3px 8px; border-bottom:1px solid color-mix(in srgb, var(--border, #2a2e40) 50%, transparent); color:var(--text, #d4d8e8); }
+.sc-tab .n { text-align:right; font-variant-numeric:tabular-nums; }
 .tm-tile { flex:1 1 auto; min-width:0; background:var(--bg2, #141828); border:1px solid var(--border, #2a2e40); border-radius:10px; padding:6px 10px; }
 .tm-ttop { display:flex; align-items:baseline; justify-content:space-between; gap:10px; white-space:nowrap; }
 .tm-tile.warn { border-color:color-mix(in srgb, var(--gold, #ffd700) 55%, var(--border, #2a2e40)); }

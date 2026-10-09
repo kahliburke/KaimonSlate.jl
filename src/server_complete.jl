@@ -957,6 +957,42 @@ function _release_region!(h, r)
     return (; ok, left, told)
 end
 
+# What the scheduler-use dashboard shows for one host: the counts held in memory (last minute, last ten,
+# since the hub started) and, from the history file, one bar per minute over the last `hours` with what
+# those minutes held by command and by the function that sent it.
+function _sched_calls_view(host::AbstractString, hours::Real)
+    SW = ReportEngine.Sweep
+    live = something(findfirst(c -> c.host == host, SW.sched_calls()), 0)
+    c = live == 0 ? nothing : SW.sched_calls()[live]
+    from = floor(Int, (time() - hours * 3600) / 60)
+    perminute = Dict{Int,Int}(); by = Dict{String,Int}()
+    add!(m, d) = for (k, n) in d
+        perminute[m] = get(perminute, m, 0) + n; by[k] = get(by, k, 0) + n
+    end
+    p = SW._sched_history_path()
+    if isfile(p)
+        for line in eachline(p)
+            occursin(host, line) || continue
+            r = try; JSON.parse(line); catch; continue; end
+            get(r, "host", "") == host || continue
+            m = try; floor(Int, Dates.datetime2unix(Dates.DateTime(chop(String(r["minute"])))) / 60); catch; continue; end
+            m >= from && add!(m, Dict{String,Int}(String(k) => Int(v) for (k, v) in get(r, "by", Dict())))
+        end
+    end
+    um, ud = SW.sched_unflushed(host)
+    um >= from && add!(um, ud)
+    split2(k) = (i = findfirst(' ', k); i === nothing ? (k, "?") : (k[1:prevind(k, i)], k[nextind(k, i):end]))
+    rows = [Dict("command" => split2(k)[1], "caller" => split2(k)[2], "n" => n)
+            for (k, n) in sort!(collect(by); by = last, rev = true)]
+    peak = isempty(perminute) ? 0 : maximum(values(perminute))
+    return Dict("ok" => true, "host" => String(host), "budget" => SW.sched_budget(), "hours" => hours,
+                "last_minute" => c === nothing ? 0 : c.last_minute, "last_10" => c === nothing ? 0 : c.window,
+                "since_start" => c === nothing ? 0 : c.total, "in_window" => sum(values(perminute); init = 0),
+                "peak" => peak, "over" => count(>(SW.sched_budget()), values(perminute)),
+                "series" => [[m * 60_000, n] for (m, n) in sort!(collect(perminute); by = first)],
+                "by" => rows)
+end
+
 # Everything the hub holds between requests, handed to SlateDiag as callbacks so it needs no
 # knowledge of these names and nothing breaks when one is added or renamed.
 function _register_diag_gauges!(h)
@@ -1838,6 +1874,14 @@ function _make_router(h::Hub)
         _json(Dict("ok" => true))
     end))
     # A machine: what preparing it found, what has passed a test task there, and preparing it.
+    # The scheduler commands this hub has sent `host`: live counts, and per-minute history over the last
+    # `hours` from the history file (`Sweep.note_sched_calls!`). Read locally; asks the cluster nothing.
+    HTTP.register!(router, "GET", "/api/sched-calls", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        host = String(get(q, "host", ""))
+        hours = clamp(something(tryparse(Float64, get(q, "hours", "24")), 24.0), 0.25, 24 * 31)
+        _json(_sched_calls_view(host, hours))
+    end)
     HTTP.register!(router, "GET", "/api/machines/view", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
         _json(ReportEngine.machine_view(String(get(q, "name", ""))))

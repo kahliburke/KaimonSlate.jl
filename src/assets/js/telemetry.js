@@ -53,7 +53,7 @@ export function closeTelemetry() { view.value && close(); }
 // loaded the first time the view opens there, with a theme in the default notebook palette (the home
 // page defines no theme variables) covering what these charts use.
 let echartsLoad = null;
-function chartsReady() {
+export function chartsReady() {
   if (window.echarts) return Promise.resolve();
   return echartsLoad || (echartsLoad = new Promise((ok, fail) => {
     const s = document.createElement('script');
@@ -71,7 +71,7 @@ function homeTheme() {
            tooltip: { backgroundColor: '#141828', borderColor: line, textStyle: { color: text } } };
 }
 let homeThemeSet = false;
-function initChart(el) {
+export function initChart(el) {
   if (window.slateInitChart) return window.slateInitChart(el);
   if (!homeThemeSet) { window.echarts.registerTheme('slate-home', homeTheme()); homeThemeSet = true; }
   return window.echarts.init(el, 'slate-home');

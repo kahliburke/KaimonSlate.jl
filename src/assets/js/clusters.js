@@ -13,6 +13,7 @@ import { schedInfo, loadScheduler } from './stores.js';
 import { sessions, openSessions } from './sessions.js';
 import { StepList, Activity, History } from './prepsteps.js';
 import { OptionsTable, optionsMap, optionRows } from './optstable.js';
+import { SchedUse } from './schedusage.js';
 
 export const clusters = signal([]);
 const procsDefault = signal(0);      // what a local target that names no `procs` gets on this machine
@@ -245,6 +246,7 @@ export function Clusters() {
         ${e ? html`<span class="pddim">${clusterSummary(e)}</span>
           <button class="rppregdel" title="forget this machine" onClick=${() => del(e.name)}>Delete</button>` : null}</div>
       ${e && e.host ? MachineReadiness(e.name) : null}
+      ${e && e.host && !isExecKind(e.kind) ? html`<${SchedUse} host=${e.host} />` : null}
       <div class="rpprow"><label>Name</label>
         <input class="rppname" autocomplete="off" spellcheck="false" placeholder="e.g. hpc, gpu, here" value=${kName.value} onInput=${ev => kName.value = ev.target.value}/>
         <span class="pddim">${'cluster=<name> in a job cell'}</span></div>
