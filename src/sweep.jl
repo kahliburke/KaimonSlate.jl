@@ -856,7 +856,22 @@ run_key(sweep, keys) = string(sweep, "_r", first(_hex(join(keys, ",")), 10))
 # which questions its configuration should ask.
 Base.include(@__MODULE__, joinpath(@__DIR__, "scheduler.jl"))
 # …over the connection a sweep already uses.
-detect_scheduler(host::AbstractString) = SchedulerDetect.detect(s -> run_there(host, s))
+# Which schedulers a host has, and their queues: one round of `sinfo`/`qstat` calls, so an answer is kept
+# for `_DETECT_TTL` per host (a site's queues rarely move) and a page, a region and a prepare share it.
+# A host that could not be asked is not cached, nor this machine (no round trip). `fresh = true` asks again.
+const _DETECT_TTL = 900.0
+const _DETECTED = Dict{String,Tuple{Float64,Any}}()
+const _DETECTED_LOCK = ReentrantLock()
+function detect_scheduler(host::AbstractString; fresh::Bool = false)
+    h = String(host)
+    if !fresh && !isempty(h)
+        hit = lock(() -> get(_DETECTED, h, nothing), _DETECTED_LOCK)
+        (hit !== nothing && time() - hit[1] < _DETECT_TTL) && return hit[2]
+    end
+    d = SchedulerDetect.detect(s -> run_there(h, s))
+    (isempty(h) || isempty(d.found)) || lock(() -> (_DETECTED[h] = (time(), d)), _DETECTED_LOCK)
+    return d
+end
 
 # Holding a piece of the machine, rather than submitting work to it — what an INTERACTIVE session on
 # a compute node needs. Included here because it speaks to the scheduler through the same target and
