@@ -13,6 +13,21 @@
 # compute node, and a stamp made of it reads as a changed site on every start.
 const _MODULES_LINE = raw"echo \"modules=$(type module >/dev/null 2>&1 && module -t list 2>&1 | grep -v ':$' | sort | tr '\n' ' ')\""
 
+# Whether Julia's preferences on this site tell CUDA.jl to use the system CUDA toolkit: some
+# directory on JULIA_LOAD_PATH holds a project whose `[preferences.CUDA_Runtime_jll]` sets
+# `local = "true"`. Cluster module systems set this up on purpose, by loading a module that adds
+# such a directory and a module that puts the toolkit's libraries on LD_LIBRARY_PATH.
+const _CUDALOCAL_LINE = String(strip(raw"""
+echo "cudalocal=$(for d in $(echo "$JULIA_LOAD_PATH" | tr ':' ' '); do for f in "$d"/Project.toml "$d"/JuliaProject.toml "$d"/LocalPreferences.toml "$d"/JuliaLocalPreferences.toml; do [ -f "$f" ] && awk '/^\[preferences\.CUDA_Runtime_jll\]/{s=1;next} /^\[/{s=0} s && /^local[ \t]*=[ \t]*"?true"?/{print "yes"; exit}' "$f"; done; done | head -1)"
+"""))
+
+# Each loaded CUDA module by name, with whether the site lets it be unloaded: `ok`, or `fails` when
+# another loaded module requires it. The unload is tried in a subshell, so the probe keeps every
+# module.
+const _CUDAMODS_LINE = String(strip(raw"""
+echo "cudamods=$(type module >/dev/null 2>&1 && for m in $(module -t list 2>&1 | grep -iE '^(cudatoolkit|cuda)(/|$)'); do n=${m%%/*}; if ( module unload "$n" >/dev/null 2>&1 ); then v=ok; else v=fails; fi; printf '%s:%s ' "$n" "$v"; done)"
+"""))
+
 # What the probe reads. One line per fact, `key=value`, so a site that lacks one tool loses one fact.
 const _PROBE_SCRIPT = replace(raw"""
 echo "arch=$(uname -m)"
@@ -21,11 +36,14 @@ echo "cores=$(nproc 2>/dev/null)"
 echo "home=$HOME"
 MODULES_LINE
 echo "cudalibs=$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -i cuda | tr '\n' ' ')"
+CUDALOCAL_LINE
+CUDAMODS_LINE
 echo "julia=$(PATH="$HOME/.juliaup/bin:$PATH" julia --version 2>/dev/null)"
 echo "gpus=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
 echo "gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
 echo "scratch=${SCRATCH:-${PSCRATCH:-}}"
-""", "MODULES_LINE" => _MODULES_LINE)
+""", "MODULES_LINE" => _MODULES_LINE, "CUDALOCAL_LINE" => _CUDALOCAL_LINE,
+    "CUDAMODS_LINE" => _CUDAMODS_LINE)
 
 function _parse_probe(out::AbstractString)
     d = Dict{String,String}()
@@ -39,11 +57,24 @@ end
 # Modules a site loads by default that put a CUDA toolkit's libraries on LD_LIBRARY_PATH. CUDA.jl
 # brings its own and warns, and can fail, when the system's are found first. Unloading them before
 # the worker starts is the fix, unless the region's own prologue already does.
+#
+# That premise fails on a site that points CUDA.jl at the system toolkit on purpose, through Julia
+# preferences (`cudalocal`): unloading the toolkit's module would remove the libraries CUDA.jl was
+# told to use. Nothing is unloaded there. Elsewhere, only a module that the site lets go is unloaded
+# (`cudamods`), because an unload that fails stops every worker from starting. A record from before
+# these facts existed falls back to the module names alone, leaving out a module whose version names
+# Julia.
 function _site_prologue(facts::AbstractDict, own_prologue::AbstractString = "")
     isempty(get(facts, "cudalibs", "")) && return ""
+    get(facts, "cudalocal", "") == "yes" && return ""
     mods = split(get(facts, "modules", ""))
-    shadow = [String(m) for m in mods if occursin(r"^(cudatoolkit|cuda)(/|$)"i, m)]
+    shadow = [String(m) for m in mods if occursin(r"^(cudatoolkit|cuda)(/|$)"i, m) && !occursin(r"julia"i, m)]
     names = unique([first(split(m, '/')) for m in shadow])
+    if haskey(facts, "cudamods")
+        verdicts = Dict(String(first(p)) => String(last(p)) for p in
+                        (split(w, ':'; limit = 2) for w in split(facts["cudamods"])) if length(p) == 2)
+        names = filter(n -> get(verdicts, n, "") == "ok", names)
+    end
     names = filter(n -> !occursin(Regex("unload\\s+(\\S+\\s+)*" * n * "\\b"), own_prologue), names)
     return isempty(names) ? "" : "module unload " * join(names, " ")
 end

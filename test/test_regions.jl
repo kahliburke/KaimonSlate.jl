@@ -1871,6 +1871,23 @@ end
         @test RE._site_prologue(f) == "module unload cudatoolkit"
         @test RE._site_prologue(f, "module unload cudatoolkit") == ""
         @test RE._site_prologue(merge(f, Dict("cudalibs" => ""))) == ""      # nothing shadowed
+        # A site whose Julia preferences point CUDA.jl at the system toolkit keeps its CUDA module,
+        # whether the site would let it go or not: clima's `cuda/julia-pref` (which `climacommon`
+        # requires) and derecho's `cuda/12.9.0` (whose libraries its `julia-preferences` selects).
+        clima = Dict("modules" => "climacommon/2026_02_18 cuda/julia-pref julia/1.12.5",
+                     "cudalibs" => "/usr/local/cuda/lib64", "cudalocal" => "yes", "cudamods" => "cuda:fails")
+        derecho = Dict("modules" => "climacommon/2026_04_08 cuda/12.9.0 julia-preferences/2026_02_10",
+                       "cudalibs" => "/glade/u/apps/cuda/12.9.0/lib64", "cudalocal" => "yes", "cudamods" => "cuda:ok")
+        @test RE._site_prologue(clima) == ""
+        @test RE._site_prologue(derecho) == ""
+        # Without that preference, only a module that unloads cleanly is unloaded.
+        @test RE._site_prologue(merge(f, Dict("cudalocal" => "", "cudamods" => "cudatoolkit:ok"))) == "module unload cudatoolkit"
+        @test RE._site_prologue(merge(derecho, Dict("cudalocal" => ""))) == "module unload cuda"
+        @test RE._site_prologue(merge(clima, Dict("cudalocal" => ""))) == ""      # the site refuses
+        @test RE._site_prologue(merge(f, Dict("cudamods" => ""))) == ""          # nothing could be checked
+        # A record from before the probe said so still leaves out a module whose version names Julia.
+        @test RE._site_prologue(Dict("modules" => clima["modules"], "cudalibs" => clima["cudalibs"])) == ""
+        @test RE._parse_probe("cudalocal=yes\ncudamods=cuda:ok \n") == Dict("cudalocal" => "yes", "cudamods" => "cuda:ok")
         # Patience from what loading took, never below the hub's default.
         @test RE._grace_for(1) == 45 && RE._grace_for(40) == 110
         # Module order is the site's, not a change.
@@ -1889,8 +1906,8 @@ end
             @test occursin("✓ Read the site", RE.readiness_text(r))
             # The site's fix belongs to the machine and runs first; the region's own prologue after it.
             RE.host_facts_merge!("login", Dict{String,Any}("site_prologue" => "module unload cudatoolkit"))
-            @test endswith(RE.machine_setup(RE.region_machine(r)), "{ module unload cudatoolkit ; } && ")
-            @test RE._region_prologue("prep") == "{ module load x ; } && "
+            @test endswith(RE.machine_setup(RE.region_machine(r)), RE.guarded_prologue("module unload cudatoolkit"))
+            @test RE._region_prologue("prep") == RE.guarded_prologue("module load x")
             @test occursin("site prologue: module unload cudatoolkit", RE.readiness_text(r))
             # Editing another field keeps the record.
             RE.region_set!("prep"; walltime = "00:10:00")

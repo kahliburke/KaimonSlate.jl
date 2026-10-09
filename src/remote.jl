@@ -762,6 +762,30 @@ _ssh_into(node, script; connect_timeout::Integer = 20) =
 # before it detaches, so nothing of the calling shell stays behind holding the ssh channel open (a
 # backgrounded `setsid nohup … &` leaves one, and the ssh that started it never returns). An older
 # util-linux without `-f` falls back to a double fork.
+# The line a worker's launch writes to the worker's log when it exits, followed by its exit code. A
+# launch that dies before the worker listens (a prologue that fails, a step the job refuses, a Julia
+# that cannot load its packages) is then seen in the log at once, instead of only as a port that never
+# opens. Written by `_noting_exit`, read by `_worker_exit_line`.
+const _WORKER_EXIT_MARK = "slate: the worker launch exited with code"
+
+# `cmd`, a simple command line, followed by the exit line. The outer shell parses `cmd` as before,
+# so its quoting and its `\$JOPT` reach the command unchanged.
+_noting_exit(cmd::AbstractString) =
+    "sh -c '\"\$0\" \"\$@\"; echo \"$(_WORKER_EXIT_MARK) \$?\"' " * cmd
+
+# The exit line in worker `port`'s log, read over the open session to `session_host` (the login host
+# of a routed node, which shares its files), or `nothing` while the launch still runs. Read on the raw
+# session, not `_run_on`: on a single-node cluster that would start a job step for every look.
+function _worker_exit_line(session_host::AbstractString, port::Integer)
+    ok, out = try
+        Sweep.run_there(session_host, "grep -a -m1 " * Sweep.shq(_WORKER_EXIT_MARK) * " " *
+                        Sweep.shq("$_REMOTE_WORKER/worker-$port.log") * " 2>/dev/null"; timeout = 15)
+    catch
+        (false, "")
+    end
+    return ok && occursin(_WORKER_EXIT_MARK, out) ? String(strip(out)) : nothing
+end
+
 _detach_on_node(cmd::AbstractString, logf::AbstractString) =
     "if setsid -f true 2>/dev/null; then setsid -f $cmd > $logf 2>&1 < /dev/null; " *
     "else ( nohup $cmd > $logf 2>&1 < /dev/null & ); fi"
@@ -2581,8 +2605,7 @@ function _region_prologue(region::AbstractString)
     r === nothing && return ""
     # The machine's setup (`machine_setup`: depot, the site's module fix, its prologue) runs before
     # this, so the region's own prologue can still undo or extend it.
-    p = strip(r.prologue)
-    return isempty(p) ? "" : "{ " * p * " ; } && "
+    return guarded_prologue(r.prologue)
 end
 
 # Why a target built in an allocation is not started: the region holds that allocation no more.
@@ -2666,7 +2689,11 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         # fall back to plain `nohup … &`, which with stdio to the log file also survives the channel
         # closing. Pass the whole line as ONE ssh arg so the remote login shell parses `&&`/`>`/`&`/`$HOME`
         # intact (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed).
-        launch = "$setup && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
+        # The setup writes to the log as well, so a prologue that fails says why there, and the exit
+        # line follows it.
+        noted = _noting_exit(jl)
+        launch = "{ $setup ; } > $logf 2>&1 && { if command -v setsid >/dev/null 2>&1; then setsid nohup $noted >> $logf 2>&1 & " *
+                 "else nohup $noted >> $logf 2>&1 & fi ; } || echo \"$(_WORKER_EXIT_MARK) \$?\" >> $logf"
         _ssh_ok(host, `$launch`) ||
             _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
     else
@@ -2692,9 +2719,9 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         # wrap this in ANOTHER `srun --overlap` step and the launcher would die with THAT step's cgroup.
         worker = "$setup && " * (v.kind === :pbs ? _pbs_attached(jl) : "exec $jl")
         launch = if v.kind === :pbs || (_node_by_ssh(host) && !_node_shared(v, host))
-            _in_allocation(v, host, "cd \$HOME && " * _detach_on_node("bash -c " * Sweep.shq(worker), logf))
+            _in_allocation(v, host, "cd \$HOME && " * _detach_on_node(_noting_exit("bash -c " * Sweep.shq(worker)), logf))
         else
-            inner = _srun_step(v, worker)
+            inner = _noting_exit(_srun_step(v, worker))
             "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $inner > $logf 2>&1 & else nohup $inner > $logf 2>&1 & fi"
         end
         first(Sweep.run_there(v.host, launch; timeout = 60)) ||
@@ -2873,9 +2900,22 @@ function _dial_worker(t::RemoteTarget, port, stream_port; deadline::Float64, ser
         v = via(host)
         sh, target = v === nothing ? (host, "127.0.0.1") : (v.host, host == v.host ? "127.0.0.1" : host)
         if Sweep.connected(sh)
-            w0 = time(); up = false
+            w0 = time(); up = false; exited = nothing; checked = w0
             while time() - w0 < deadline && !(up = Sweep.reachable(sh, target, port))
                 sleep(0.25)
+                # A launch that has exited will not open the port: say so now, with why.
+                if time() - checked > 2.0
+                    checked = time()
+                    (exited = _worker_exit_line(sh, port)) === nothing || break
+                end
+            end
+            if !up && exited !== nothing
+                quiet || (_rlog("connect: worker on $host exited before it listened on $port: $exited");
+                          _log_worker_tail(host, port))
+                close_tunnel(tunnel)
+                return (conn = nothing, tunnel = nothing,
+                        err = "the worker on $host exited before it listened on port $port ($exited); its log is $host:$_REMOTE_WORKER/worker-$port.log",
+                        server_key = server_key, remote_ip = ip)
             end
             if !up
                 # Nothing listens there, which the session knows for certain: a dial would only wait
