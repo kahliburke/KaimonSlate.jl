@@ -309,12 +309,13 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
         # Compiled here as well when the machine says so (`Machine.compile = :login`): some sites, NERSC
         # among them, want compiles on login nodes rather than on granted ones. The record it leaves keys
         # on the CPU architecture, so the node's own compile step finds it current when the node's
-        # architecture is the same and compiles for itself when it is not. A region that boots from a
-        # sysimage compiles on the node, against its image.
+        # architecture is the same and compiles for itself when it is not. It compiles against the
+        # region's sysimage when one is built for this architecture; an image the node builds after this
+        # makes the node compile again, against it.
         if !isempty(ref[1]) && _compiles_on_login(r)
             step("Compile $(basename(ref[1])) on $host") do
-                _compile_env!(r, _region_target(r; origin_env = ref[1], at = (String(host), "")), ref, host,
-                              _region_prologue(r.name) * "JOPT=''")
+                lt = _region_target(r; origin_env = ref[1], at = (String(host), ""))
+                _compile_env!(r, lt, ref, host, _region_prologue(r.name) * _sysimage_jopt_sh(lt))
             end
         end
         run_node = node === nothing ? (r.scheduler !== :none && isempty(r.readiness)) : node
@@ -637,7 +638,7 @@ _precompiled_mark_snippet(mark::AbstractString) = """
     """
 
 "Whether a prepare of region `r` compiles on its login node as well as on the node (`Machine.compile`)."
-_compiles_on_login(r) = r.scheduler !== :none && region_machine(r).compile === :login && !r.sysimage
+_compiles_on_login(r) = r.scheduler !== :none && region_machine(r).compile === :login
 
 # Compile environment `ref` for target `t` on `host`, in the shell `t.setup * pre` (which sets `$JOPT`),
 # unless the record beside its stamp (`_precompiled_check_sh`) says it is compiled already for this CPU

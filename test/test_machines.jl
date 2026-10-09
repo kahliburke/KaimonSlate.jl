@@ -54,8 +54,8 @@ const RE = KaimonSlate.ReportEngine
             RE.cluster_set!(Dict("name" => "pmc", "host" => "perlmutter", "kind" => "slurm", "compile" => "login"))
             @test RE.machine_get("pmc").compile === :login
             @test RE._compiles_on_login(RE.region_set!("pmcr"; machine = "pmc"))
-            # A region booting from a sysimage compiles against it, on the node; a plain host has one place.
-            @test !RE._compiles_on_login(RE.region_set!("pmcr"; sysimage = true))
+            # A region booting from a sysimage compiles there too, against its image; a plain host has one place.
+            @test RE._compiles_on_login(RE.region_set!("pmcr"; sysimage = true))
             @test !RE._compiles_on_login(RE.region_set!("wsc"; host = "box"))
             @test RE.machine_from(Dict("name" => "x", "compile" => "LOGIN")).compile === :login
             @test RE.machine_from(Dict("name" => "x", "compile" => "elsewhere")).compile === :node
