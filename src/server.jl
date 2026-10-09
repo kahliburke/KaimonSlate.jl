@@ -4624,11 +4624,15 @@ function _memo_spec(nb::LiveNotebook, cell::Cell; forced::Bool = false)
          unread = unread, safe = safe)
 end
 
+# Cells whose force was passed to the upstream they wait on (`_eval_one_run!`), under `nb.lock`.
+const _PASSED_ON = Set{Tuple{String,String}}()
+
 function _eval_one!(nb::LiveNotebook, cell::Cell)
+    passed_on = false
     try
-        _eval_one_run!(nb, cell)
+        passed_on = _eval_one_run!(nb, cell) === :passed_on
     finally
-        lock(nb.lock) do; cell.state == BLOCKED || _take_force!(nb.id, cell.id); end
+        lock(nb.lock) do; (passed_on || cell.state == BLOCKED) || _take_force!(nb.id, cell.id); end
     end
 end
 
@@ -4654,19 +4658,27 @@ function _eval_one_run!(nb::LiveNotebook, cell::Cell)
             j = _index_of(nb.report.cells, d)
             (j !== nothing && nb.report.cells[j].state == BLOCKED) && (u = nb.report.cells[j]; break)
         end
+        again = pop!(_PASSED_ON, (nb.id, cell.id), nothing) !== nothing
         u === nothing && return (false, false)
-        ReportEngine.mark_blocked!(cell, u.blocked, u.blocked_host, u.blocked_region)
-        _broadcast_progress(nb, cell)
         # A ▶ on this cell asks for what it waits on. A node nobody has asked for yet, or a prepare
         # nobody has been offered, comes from running the cell that needs it, so the force passes there.
-        forced = _take_force!(nb.id, cell.id)
-        (forced && u.blocked in (WAIT_NOT_REQUESTED, WAIT_NEEDS_PREPARE) && ReportEngine.restale!(u)) ||
-            return (true, false)
-        push!(get!(Set{String}, _FORCE_RUN, nb.id), u.id)
-        nb.version += 1
-        (true, true)
+        # This cell then runs again after it, still forced, and waits on what the upstream's run left,
+        # which is also what the caller of this run is told. Passed on once per run of this cell: an
+        # upstream that still waits after its own run is waiting on something this run cannot give.
+        if !again && cell.id in get(_FORCE_RUN, nb.id, ()) &&
+           u.blocked in (WAIT_NOT_REQUESTED, WAIT_NEEDS_PREPARE) && ReportEngine.restale!(u)
+            push!(get!(Set{String}, _FORCE_RUN, nb.id), u.id)
+            push!(_PASSED_ON, (nb.id, cell.id))
+            ReportEngine.restale!(cell)
+            nb.version += 1
+            return (true, true)
+        end
+        ReportEngine.mark_blocked!(cell, u.blocked, u.blocked_host, u.blocked_region)
+        _broadcast_progress(nb, cell)
+        _take_force!(nb.id, cell.id)
+        (true, false)
     end
-    passed_on && _ensure_runner!(nb)
+    passed_on && (_ensure_runner!(nb); return :passed_on)
     waits && return nothing
     # A locked cell computes only on its own ▶. Any other run restores the result it froze on, and only
     # where its worker is already up: it does not start one, since a region worker can mean a queue wait.

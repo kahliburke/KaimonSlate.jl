@@ -1211,21 +1211,31 @@ end
                 hub = (lock = ReentrantLock(), notebooks = Dict{String,Any}("waits" => nb))
                 @test "gpu" in last(NS._regions_in_use(hub))
 
-                # ▶ on the reader asks for the node: the force passes to the cell that needs it,
-                # and the reader's own marker is used up rather than left behind.
+                # ▶ on the reader asks for the node: the force passes to the cell that needs it, and the
+                # reader runs again after it, waiting on what that run left. Its marker is then used up.
                 lock(nb.lock) do; push!(get!(Set{String}, NS._FORCE_RUN, "waits"), "b"); end
                 lock(NS._RUNNER_LOCK) do; NS._RUNNERS["waits"] = true; end   # no runner spawned here
                 try
                     NS._eval_one!(nb, b)
-                    @test b.state == RE.BLOCKED
-                    @test a.state == RE.STALE
+                    @test (a.state, b.state) == (RE.STALE, RE.STALE)
+                    @test get(NS._FORCE_RUN, "waits", Set{String}()) == Set(["a", "b"])
+                    RE.mark_blocked!(a, NS.WAIT_QUEUED, "login", "gpu")           # as `a`'s run leaves it
+                    NS._eval_one!(nb, b)
+                    @test b.state == RE.BLOCKED && b.blocked == NS.WAIT_QUEUED
                     @test get(NS._FORCE_RUN, "waits", Set{String}()) == Set(["a"])
+                    # Passed on once per run: an upstream that still waits after its run is not run again.
+                    RE.mark_blocked!(a, NS.WAIT_NEEDS_PREPARE, "login", "gpu")
+                    delete!(NS._FORCE_RUN, "waits"); push!(get!(Set{String}, NS._FORCE_RUN, "waits"), "b")
+                    NS._eval_one!(nb, b); RE.mark_blocked!(a, NS.WAIT_NEEDS_PREPARE, "login", "gpu")
+                    NS._eval_one!(nb, b)
+                    @test b.state == RE.BLOCKED && b.blocked == NS.WAIT_NEEDS_PREPARE
                     # A region that needs preparing is offered one by running its cell, so the same.
                     delete!(NS._FORCE_RUN, "waits")
                     RE.mark_blocked!(a, NS.WAIT_NEEDS_PREPARE, "login", "gpu")
                     push!(get!(Set{String}, NS._FORCE_RUN, "waits"), "b")
                     NS._eval_one!(nb, b)
-                    @test a.state == RE.STALE && get(NS._FORCE_RUN, "waits", Set{String}()) == Set(["a"])
+                    @test a.state == RE.STALE && get(NS._FORCE_RUN, "waits", Set{String}()) == Set(["a", "b"])
+                    RE.mark_blocked!(a, NS.WAIT_NEEDS_PREPARE, "login", "gpu"); NS._eval_one!(nb, b)
                     # A queue wait is not helped by running anything; the marker is used up all the same.
                     delete!(NS._FORCE_RUN, "waits")
                     RE.mark_blocked!(a, NS.WAIT_QUEUED, "login", "gpu")
