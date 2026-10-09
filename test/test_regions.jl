@@ -2258,6 +2258,39 @@ end
         @test RE._worker_current(EnvInfoK(delete!(info(true), "env_rebuilt"), String[], 1, "nb"))   # an older worker
     end
 
+    @testset "a worker that does not start says what it is waiting on" begin
+        # The shape of the worker that hung on a scratch file system: blocked in the Lustre client
+        # reading a compiled cache, beside a compile child waiting on it.
+        out = """
+        P|4100|D|cl_sync_io_wait| 0.3 342
+        F|4100|/pscratch/d/compiled/v1.12/KaimonGate/OYbhc.ji
+        P|4101|S|pipe_read| 0.0 340
+        F|4101|/home/u/.cache/kaimonslate/worker/worker-9111.log
+        """
+        procs = RE._parse_start_probe(out)
+        @test [p.pid for p in procs] == [4100, 4101] && procs[1].age == 342 &&
+              procs[1].files == ["/pscratch/d/compiled/v1.12/KaimonGate/OYbhc.ji"]
+        d = RE._classify_start(procs)
+        @test d.kind === :fs && d.file == procs[1].files[1] && occursin("uninterruptible, cl_sync_io_wait", d.summary)
+        kind(s) = RE._classify_start(RE._parse_start_probe(s)).kind
+        @test kind("P|7|S|fifo_open| 0.0 30\n") === :fs                  # a file that will not open
+        @test kind("P|7|R|futex_wait_queue| 297.5 600\n") === :spin      # Julia-side, not the file system
+        @test kind("P|7|S|do_epoll_wait| 1.0 30\n") === :waiting
+        @test kind("") === :gone
+        @test success(`sh -n -c $(RE._start_probe_sh(9111))`)
+
+        # Two blocked starts in a row hold the next; the hold runs out, and a start that connects clears it.
+        h = "hold-test-host"
+        RE._clear_start_hold!(h)
+        RE._note_start!(h, :fs, "x"; now = 1000.0)
+        once = RE._start_held(h; now = 1001.0)
+        RE._note_start!(h, :fs, "blocked reading f"; now = 1010.0)
+        @test once === nothing && occursin("blocked reading f", something(RE._start_held(h; now = 1020.0), ""))
+        @test RE._start_held(h; now = 1010.0 + RE._start_hold_s() + 1) === nothing
+        RE._note_start!(h, :started)
+        @test RE._start_held(h; now = 1020.0) === nothing
+    end
+
     @testset "old versions of the worker code are removed gently" begin
         mktempdir() do home
             pay = joinpath(home, RE._REMOTE_WORKER, "payload")

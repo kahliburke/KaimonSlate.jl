@@ -1512,6 +1512,150 @@ function _log_worker_tail(host::AbstractString, port::Integer; lines::Integer = 
     return nothing
 end
 
+# ── a worker that does not start ──────────────────────────────────────────────────────────────
+# What a worker that never opened its port is doing, read from its processes on the node (the worker
+# and any compile it started): each one's state and kernel wait, its CPU and age, and the files it holds
+# outside the system's own. A process blocked on a file system that has stopped answering sits in
+# uninterruptible sleep reading one of those files, and another start would join it; one spinning at
+# high CPU is stuck in Julia instead. Every read is bounded, since reading /proc of a process stuck in
+# I/O can block the reader too, and every match is limited to the user's own processes.
+function _start_probe_sh(port::Integer)
+    return "p=$port; " * raw"""
+for w in $(pgrep -u "$USER" -f "[w]orker-$p\.jl"); do
+  for q in $w $(pgrep -u "$USER" -P "$w"); do
+    s=$(timeout 3 cut -d' ' -f3 /proc/$q/stat 2>/dev/null)
+    c=$(timeout 3 cat /proc/$q/wchan 2>/dev/null)
+    u=$(ps -o pcpu=,etimes= -p "$q" 2>/dev/null)
+    echo "P|$q|$s|$c|$u"
+    timeout 3 ls -l /proc/$q/fd 2>/dev/null | sed -n 's|.* -> \(/.*\)$|\1|p' | grep -v '^/dev/\|^/proc/' | head -4 | while read -r f; do echo "F|$q|$f"; done
+    timeout 3 sed -n 's|.* \(/[^ ]*\)$|\1|p' /proc/$q/maps 2>/dev/null | grep -v '^/usr/\|^/lib\|^/dev/\|/juliaup/' | sort -u | tail -3 | while read -r f; do echo "F|$q|$f"; done
+  done
+done
+true
+"""
+end
+
+"One process of a worker that did not start: its pid, state, kernel wait, CPU %, age in seconds, files."
+const _StartProc = @NamedTuple{pid::Int, state::String, wchan::String, cpu::Float64, age::Int, files::Vector{String}}
+
+function _parse_start_probe(out::AbstractString)
+    procs = _StartProc[]
+    for l in split(out, '\n')
+        f = split(strip(l), '|'; limit = 5)
+        if length(f) == 5 && f[1] == "P"
+            nums = split(strip(f[5]))
+            cpu = length(nums) >= 1 ? something(tryparse(Float64, nums[1]), 0.0) : 0.0
+            age = length(nums) >= 2 ? something(tryparse(Int, nums[2]), 0) : 0
+            push!(procs, (; pid = something(tryparse(Int, f[2]), 0), state = String(f[3]), wchan = String(f[4]),
+                          cpu, age, files = String[]))
+        elseif length(f) >= 3 && f[1] == "F"
+            pid = tryparse(Int, f[2]); i = findfirst(p -> p.pid == pid, procs)
+            i === nothing || (f[3] in procs[i].files || push!(procs[i].files, String(f[3])))
+        end
+    end
+    return procs
+end
+
+# Kernel waits that mean a process is waiting on a file system or a file that will not open: Lustre's
+# client (`cl_`, `ll_`, `osc_`, `ldlm`, `ptlrpc`), NFS and RPC, page I/O, and a FIFO with no writer.
+const _FS_WAIT = r"^(cl_|ll_|osc_|ldlm|ptlrpc|lustre|nfs|rpc_wait|io_schedule|folio_wait|wait_on_page|fifo_open|wait_for_partner)"
+
+"""
+    _classify_start(procs) -> (kind, summary, file)
+
+Why a worker did not start, from `_parse_start_probe`: `:fs` when one of its processes is blocked on a
+file (uninterruptible, or in a file-system wait), `:spin` when one is busy (Julia-side: a deadlock or a
+long compile), `:waiting` otherwise, `:gone` when it has no process. `file` is the file the blocked
+process holds, when it holds one.
+"""
+function _classify_start(procs::Vector{_StartProc})
+    isempty(procs) && return (; kind = :gone, summary = "its process is gone", file = "")
+    blocked = findfirst(p -> p.state == "D" || occursin(_FS_WAIT, p.wchan), procs)
+    if blocked !== nothing
+        p = procs[blocked]
+        file = isempty(p.files) ? "" : last(p.files)
+        what = isempty(file) ? "" : " reading $file"
+        return (; kind = :fs, file,
+                summary = "process $(p.pid) has been blocked for $(p.age)s in the kernel " *
+                          "($(p.state == "D" ? "uninterruptible, " : "")$(p.wchan))$what: the file system is not answering")
+    end
+    busy = argmax(p -> p.cpu, procs)
+    busy.cpu >= 50 &&
+        return (; kind = :spin, file = "",
+                summary = "process $(busy.pid) is busy at $(round(Int, busy.cpu))% CPU after $(busy.age)s ($(busy.wchan))")
+    p = first(procs)
+    return (; kind = :waiting, file = "", summary = "process $(p.pid) is waiting in $(p.wchan) after $(p.age)s at $(round(Int, p.cpu))% CPU")
+end
+
+# On Lustre, the storage target a file's data is on and how the client sees it: metadata only, so it
+# answers while the target itself does not. Empty off Lustre, or when the tools are missing.
+function _lustre_target(host::AbstractString, file::AbstractString)
+    isempty(file) && return ""
+    q = Sweep.shq(file)
+    sh = "i=\$(timeout 10 lfs getstripe -i $q 2>/dev/null) || exit 0; [ -n \"\$i\" ] || exit 0; " *
+         "echo \"ost=\$i \$(timeout 10 lfs osts $q 2>/dev/null | grep \"^ *\$i: \" | head -1)\""
+    ok, out = try; _run_on(_host_for_files(host), sh); catch; (false, ""); end
+    m = ok ? match(r"ost=(\d+)\s*(.*)", out) : nothing
+    m === nothing && return ""
+    return "storage target $(m.captures[1])" * (isempty(strip(m.captures[2])) ? "" : " ($(strip(m.captures[2])))")
+end
+
+"""
+    _diagnose_start(host, port) -> (kind, summary, file)
+
+Read why worker `port` on `host` has not opened its port, log it, and return it (`_classify_start`). A
+busy worker is sent SIGUSR1 once, which makes Julia write every thread's stack to its log.
+"""
+function _diagnose_start(host::AbstractString, port::Integer)
+    ok, out = try; _run_on(String(host), _start_probe_sh(port); timeout = 60.0); catch e; (false, sprint(showerror, e)); end
+    d = ok ? _classify_start(_parse_start_probe(out)) :
+             (; kind = :unknown, summary = "its processes could not be read ($(first(strip(out), 120)))", file = "")
+    summary = d.summary
+    if d.kind === :fs
+        tgt = _lustre_target(host, d.file)
+        isempty(tgt) || (summary *= "; it is on $tgt")
+    elseif d.kind === :spin
+        try; _run_on(String(host), "pkill -USR1 -u \"\$USER\" -f \"[w]orker-$port\\.jl\""); catch; end
+        summary *= "; its thread stacks were requested in its log"
+    end
+    _rlog("start: worker-$port on $host did not open its port: $summary")
+    return (; d.kind, summary, d.file)
+end
+
+# Consecutive starts on a machine that were blocked on a file, keyed by the host whose files they use
+# (a cluster's nodes share them): how many, when the last one was, and what it found. Two in a row hold
+# further starts for a while, rather than adding another process that will block the same way and
+# cannot be ended. A start that connects, or a prepare, clears it.
+const _START_BLOCKS = Dict{String,Tuple{Int,Float64,String}}()
+const _START_BLOCKS_LOCK = ReentrantLock()
+_start_hold_s() = _rcfg("start_hold", "KAIMONSLATE_START_HOLD", 900.0)
+
+function _note_start!(host::AbstractString, kind::Symbol, summary::AbstractString = ""; now::Real = time())
+    key = _host_for_files(String(host))
+    lock(_START_BLOCKS_LOCK) do
+        if kind === :fs
+            n = get(_START_BLOCKS, key, (0, 0.0, ""))[1]
+            _START_BLOCKS[key] = (n + 1, Float64(now), String(summary))
+        else
+            delete!(_START_BLOCKS, key)
+        end
+    end
+    return nothing
+end
+_clear_start_hold!(host::AbstractString) = lock(() -> delete!(_START_BLOCKS, _host_for_files(String(host))), _START_BLOCKS_LOCK)
+
+"Why starts on `host` are held, or `nothing`."
+function _start_held(host::AbstractString; now::Real = time())
+    key = _host_for_files(String(host))
+    b = lock(() -> get(_START_BLOCKS, key, nothing), _START_BLOCKS_LOCK)
+    (b === nothing || b[1] < 2) && return nothing
+    left = b[2] + _start_hold_s() - now
+    left <= 0 && return nothing
+    return "the last $(b[1]) worker starts on $key were blocked on a file ($(b[3])); not starting another " *
+           "for $(cld(round(Int, left), 60)) min, since it would block the same way and could not be ended. " *
+           "A prepare of the region tries again now."
+end
+
 # ── worker sysimage ───────────────────────────────────────────────────────────────────────────
 # A region that boots from a sysimage gets it built by its prepare (`build_sysimage!`, the program in
 # src/sysimage_build.jl), on the node type its workers run on. Images live in the machine's store,
@@ -2997,6 +3141,9 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     # changed nothing, short enough that one which built an environment reads the host again.
     fresh(sv) = sv !== nothing && time() - sv.at < 60
     function fresh_spawn()
+        # Starts here were blocked on a file twice in a row: another would block the same way.
+        held = _start_held(host)
+        held === nothing || error("slate remote: $held")
         # Reached without one when a reattached worker turned out stale: one command answers both the
         # provision's questions and the port pick's, where each would otherwise ask on its own.
         if !fresh(survey)
@@ -3042,13 +3189,17 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
             r.conn === nothing || break      # connected: done
             # The worker never answered. Retry only for the one cause retrying can fix: anything
             # else would just be a slower way to fail, with the real reason three attempts back.
-            (attempt < _SPAWN_TRIES && movable && _bind_conflict(host, port)) ||
-                error("slate remote: could not reach worker on $host:$port ($(r.err))")
+            if !(attempt < _SPAWN_TRIES && movable && _bind_conflict(host, port))
+                why = _diagnose_start(host, port)
+                _note_start!(host, why.kind, why.summary)
+                error("slate remote: could not reach worker on $host:$port ($(r.err)); $(why.summary)")
+            end
             _rlog("spawn: $host:$port was taken before the worker could bind — picking another block " *
                   "(attempt $attempt of $_SPAWN_TRIES)")
         end
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
+        _note_start!(host, :started)
         _attach_record!(host, k.label; port = port, stream_port = stream_port,
                         transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip, job = t.job)
         _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host " *
@@ -3162,6 +3313,9 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         # the kill lands at once if reachable, else when the process thaws.
         _rlog("reconnect: live worker-$(k.port) didn't answer the 15s dial — reaping the superseded worker and cold-spawning fresh")
         _log_worker_tail(host, k.port)   # the reap deletes its log, which is all that can say why
+        let why = _diagnose_start(host, k.port)
+            why.kind === :fs && _note_start!(host, :fs, why.summary)
+        end
         try; reap_remote_worker(host, k.port)
         catch e; _rlog("reconnect: reap of superseded worker-$(k.port) failed: $(first(sprint(showerror, e), 100))"); end
     end
@@ -6318,15 +6472,28 @@ function reap_remote_worker(host, port::Int)
     # command lines, and this shell's own must not contain the name it kills, or it kills itself.
     # Every match is limited to the user's own processes: reading another user's command line can
     # block (a process stuck on a hung filesystem), and a login node often has one.
+    # The worker's own processes too (a package compile it started), or they run on with nothing to
+    # report to. What is still there after the KILL is listed: a process in uninterruptible I/O on a file
+    # system that stopped answering cannot be ended until the I/O returns.
     script = "d=$(Sweep.shq(_REMOTE_WORKER)); p=$port; pat=\"[w]orker-\$p\\.jl\"; " *
              "e=0; [ -f \"\$d/worker-\$p.jl\" ] && e=1; " *
+             "kids=\$(for w in \$(pgrep -u \"\$USER\" -f \"\$pat\"); do pgrep -u \"\$USER\" -P \"\$w\"; done); " *
              "pkill -TERM -u \"\$USER\" -f \"\$pat\"; i=0; " *
              "while [ \$i -lt 10 ] && pgrep -u \"\$USER\" -f \"\$pat\" >/dev/null 2>&1; do sleep 0.1; i=\$((i+1)); done; " *
-             "pkill -KILL -u \"\$USER\" -f \"\$pat\"; " *
+             "pkill -KILL -u \"\$USER\" -f \"\$pat\"; [ -n \"\$kids\" ] && kill -KILL \$kids 2>/dev/null; " *
+             "i=0; while [ \$i -lt 10 ] && { pgrep -u \"\$USER\" -f \"\$pat\" >/dev/null 2>&1 || " *
+             "{ [ -n \"\$kids\" ] && ps -p \"\$(echo \$kids | tr ' ' ',')\" >/dev/null 2>&1; }; }; do sleep 0.1; i=\$((i+1)); done; " *
+             "for q in \$(pgrep -u \"\$USER\" -f \"\$pat\") \$kids; do [ -d /proc/\$q ] && " *
+             "echo \"left=\$q:\$(timeout 3 cut -d' ' -f3 /proc/\$q/stat 2>/dev/null):\$(timeout 3 cat /proc/\$q/wchan 2>/dev/null)\"; done; " *
              "for x in jl log json state stats; do rm -f \"\$d/worker-\$p.\$x\"; done; " *
              "echo \"existed=\$e\""
     ok, out = try; _run_on(String(host), script); catch; (false, ""); end
     existed = ok && occursin("existed=1", out)
     existed || _rlog("reap: no worker-$port script on $host — nothing was killed")
+    left = [m.captures for m in eachmatch(r"left=(\d+):(\S*):(\S*)", out) if m.captures[2] != "Z"]   # a zombie is ended
+    isempty(left) ||
+        _rlog("reap: worker-$port on $host could not be ended: " *
+              join(("process $(l[1]) ($(l[2] == "D" ? "uninterruptible, " : "")$(l[3]))" for l in left), ", ") *
+              ". A process blocked in I/O ends only when the I/O returns.")
     return existed
 end

@@ -226,6 +226,7 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
     isempty(r.host) && error("region '$(r.name)' has no host")
     ref = _reference_env(isempty(strip(project)) ? r.preload : project)   # checked before anything runs
     host = r.host
+    _clear_start_hold!(host)   # a prepare is the deliberate retry after starts were held (`_start_held`)
     m = region_machine(r)
     facts = Dict{String,Any}()
     measured = Dict{String,Any}()
