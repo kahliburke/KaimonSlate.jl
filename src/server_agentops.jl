@@ -781,7 +781,7 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
     rej === nothing || return rej
     if !run
         _renew_floor!(nb, caller); _agent_push!(nb)
-        return "added id=$cid (NOT RUN) — $(_stale_note(nb))"
+        return "added id=$cid (NOT RUN) — $(_stale_note(nb))" * _parse_note(nb, cid)
     end
     # The cell is committed above, so its id is certain regardless of how the run goes — only the
     # WAIT is raced. A slow cell hands back a job id instead of holding the caller open.
@@ -804,6 +804,16 @@ paths), where running after every edit means N reactive cascades and N chances f
 transport with an idle timeout to be cut off mid-cascade; and editing a notebook whose upstream
 cells are mid-computation. Both end the same way: `agent_run!(nb)` to reconcile. Editing cells one
 at a time is the DEFAULT, and wanting the result back sooner is not a reason to skip the run."""
+# The parse error of cell `id`, as a line for a reply that did not run it; "" when it parses.
+function _parse_note(nb::LiveNotebook, id::AbstractString)
+    src = lock(nb.lock) do
+        i = findfirst(c -> c.id == id, nb.report.cells)
+        (i === nothing || nb.report.cells[i].kind != CODE) ? "" : nb.report.cells[i].source
+    end
+    msg = isempty(src) ? "" : ReportEngine.parse_error_text(src)
+    return isempty(msg) ? "" : "\n⚠ id=$id does not parse:\n$msg"
+end
+
 function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString;
                           tags::Union{Nothing,AbstractString} = nothing, caller::AbstractString = "",
                           expected_version::Int = -1,
@@ -828,7 +838,7 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
     rej === nothing || return rej
     if !run
         _renew_floor!(nb, caller); _agent_push!(nb)
-        return "edited id=$id (NOT RUN) — $(_stale_note(nb))"
+        return "edited id=$id (NOT RUN) — $(_stale_note(nb))" * _parse_note(nb, id)
     end
     r = _run_bg(nb, "edit_cell $id"; grace = background ? 0 : _scratch_grace()) do
         _eval!(nb; wait_for = id)        # wait OUTSIDE the lock — the agent wants the cell's result

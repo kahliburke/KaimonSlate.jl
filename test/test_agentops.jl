@@ -485,6 +485,14 @@ end
         timedwait(() -> cell(nb3, "c").state == RE_.BLOCKED, 10.0; pollint = 0.05)
         plain = (NS.agent_run!(nb3, "c"); NS._eval!(nb3; wait_all = true); cell(nb3, "b").state)
         @test occursin("run_locked=true", NS._cell_result_text(cell(nb3, "c")))   # the reply says how
+        # Code that does not parse fails with the parser's message, not a wait on the held cell above it.
+        bad = "y = \"n \$derived–\$(base)\""
+        added = NS.agent_add_cell!(nb3, bad; id = "p", run = false)
+        NS.agent_run!(nb3, "p"); NS._eval!(nb3; wait_all = true)
+        p = cell(nb3, "p")
+        @test occursin("does not parse", added) && occursin("line 1, column", added)
+        @test p.state == RE_.ERRORED && occursin("interpolated variable", p.output.exception)
+        NS.agent_delete_cell!(nb3, "p")
         NS.agent_run!(nb3, "c"; run_locked = true); NS._eval!(nb3; wait_all = true)
         @test (plain, cell(nb3, "b").state, cell(nb3, "c").output.value_repr) == (RE_.BLOCKED, RE_.FRESH, "21")
     finally

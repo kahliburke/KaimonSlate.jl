@@ -22,6 +22,29 @@ function _has_parse_error(ex)
     return any(_has_parse_error, ex.args)
 end
 
+"""
+    parse_error_text(src) -> String
+
+The parser's report for code that does not parse, naming the line and column; `""` when it parses.
+"""
+function parse_error_text(src::AbstractString)
+    top = try; Meta.parseall(src); catch e; return sprint(showerror, e); end
+    err = _first_parse_error(top)
+    err === nothing && return ""
+    a = isempty(err.args) ? nothing : err.args[1]
+    msg = a isa Meta.ParseError ? a.msg : a isa AbstractString ? String(a) : "syntax error ($(err.head))"
+    return replace(msg, r"# Error @ none:(\d+):(\d+)" => s"# Error at line \1, column \2")
+end
+function _first_parse_error(ex)
+    ex isa Expr || return nothing
+    (ex.head === :error || ex.head === :incomplete) && return ex
+    for a in ex.args
+        e = _first_parse_error(a)
+        e === nothing || return e
+    end
+    return nothing
+end
+
 # `include(...)` runs external code whose definitions aren't visible to static analysis, so a cell
 # containing one is a barrier (downstream cells conservatively depend on it).
 #

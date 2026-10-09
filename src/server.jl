@@ -4633,6 +4633,16 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
 end
 
 function _eval_one_run!(nb::LiveNotebook, cell::Cell)
+    # Code that does not parse fails now, with the parser's message. Its analysis is opaque, so it
+    # waits on every cell above it, and a wait there would hide the one thing wrong with it.
+    if cell.kind == CODE && :opaque in cell.flags
+        msg = ReportEngine.parse_error_text(cell.source)
+        isempty(msg) || return lock(nb.lock) do
+            ReportEngine.mark_errored!(cell, msg)
+            _broadcast_progress(nb, cell)
+            nothing
+        end
+    end
     # A cell whose input is waiting waits too, for the same thing. Run now it could only fail on a
     # name its upstream has not produced. Whatever re-runs the upstream re-runs this cell with it:
     # a granted node re-arms the region's dependents, and a run of the notebook takes up every wait.
