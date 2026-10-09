@@ -17,6 +17,7 @@ const _MODULES_LINE = raw"echo \"modules=$(type module >/dev/null 2>&1 && module
 const _PROBE_SCRIPT = replace(raw"""
 echo "arch=$(uname -m)"
 echo "cpu=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//')"
+CPU_KEY_LINE
 echo "cores=$(nproc 2>/dev/null)"
 echo "home=$HOME"
 MODULES_LINE
@@ -25,7 +26,7 @@ echo "julia=$(PATH="$HOME/.juliaup/bin:$PATH" julia --version 2>/dev/null)"
 echo "gpus=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
 echo "gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
 echo "scratch=${SCRATCH:-${PSCRATCH:-}}"
-""", "MODULES_LINE" => _MODULES_LINE)
+""", "MODULES_LINE" => _MODULES_LINE, "CPU_KEY_LINE" => _SYSIMAGE_CPU_SH * "; echo \"cpukey=\$CPU\"")
 
 function _parse_probe(out::AbstractString)
     d = Dict{String,String}()
@@ -534,11 +535,13 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
             nf = _parse_probe(out)
             facts["node"] = nf
             hf = get(facts, "host", Dict{String,String}())
-            same_cpu = get(hf, "cpu", "") == get(nf, "cpu", "")
+            # The same architecture, not the same model: compiled code runs alike on both (`_SYSIMAGE_CPU_SH`).
+            ck(f) = get(f, "cpukey", get(f, "cpu", ""))
+            same_cpu = ck(hf) == ck(nf)
             facts["same_cpu"] = same_cpu
             ("ok", join(filter(!isempty, [get(nf, "cpu", ""), get(nf, "cores", "") * " cores",
                                          get(nf, "gpus", "0") == "0" ? "" : get(nf, "gpus", "") * " × " * get(nf, "gpu", ""),
-                                         same_cpu ? "same CPU as $(r.host)" : "different CPU from $(r.host)"]), " · "))
+                                         same_cpu ? "same CPU architecture as $(r.host)" : "different CPU architecture from $(r.host)"]), " · "))
         end
         step("Home shared with $(r.host)") do
             mark = ".cache/kaimonslate/.prepare-$(bytes2hex(rand(UInt8, 4)))"

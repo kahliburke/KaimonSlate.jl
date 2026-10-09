@@ -24,14 +24,9 @@ import Pkg, TOML, SHA
 result(kind, rest = "") = (println("[sysimg] result=", kind, isempty(rest) ? "" : " " * rest); flush(stdout))
 mkpath(STORE)
 
-# The CPU, spelled as the boot line's shell spells it, so both name the same pointer. An ARM CPU names
-# no model in /proc/cpuinfo; its architecture is the name then, as the shell falls back too.
-cpu = try
-    l = first(filter(x -> startswith(x, "model name"), readlines("/proc/cpuinfo")))
-    replace(strip(split(l, ':')[2]), r"[^A-Za-z0-9._-]" => "_")
-catch
-    ""
-end
+# The CPU as compiled code sees it, computed by the shell that started this build (`_SYSIMAGE_CPU_SH`),
+# the same line a worker's boot uses to find its image, so the two cannot name it differently.
+cpu = get(ENV, "SLATE_CPU", "")
 isempty(cpu) && (cpu = try; readchomp(`uname -m`); catch; ""; end)
 
 # What the notebook resolves, by name.

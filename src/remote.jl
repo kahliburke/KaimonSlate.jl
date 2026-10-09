@@ -1711,9 +1711,14 @@ function _sysimage_build_script(r, proj::AbstractString, spec; force::Bool = fal
     return head * read(joinpath(@__DIR__, "sysimage_build.jl"), String)
 end
 
-# The image a worker's shell boots is `<cpu>.so`, the CPU spelled as the build script spells it.
-const _SYSIMAGE_CPU_SH = "CPU=\$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//; s/ *\$//; s/[^A-Za-z0-9._-]/_/g'); " *
-                        "[ -n \"\$CPU\" ] || CPU=\$(uname -m)"
+# The CPU as compiled code sees it, in `$CPU`: what decides whether code compiled on one machine runs
+# and performs the same on another, and nothing else. On x86 the vendor, family and model numbers (one
+# microarchitecture) and a checksum of the instruction-set flags Julia compiles for; on ARM the
+# implementer, architecture and part, with a checksum of its feature flags. Core count, clock and the
+# model's name do not enter, so the login and compute nodes of one architecture share compiled code.
+# Names the image a worker boots (`<cpu>.so`, the build reads it from `$SLATE_CPU`) and keys the
+# precompile mark (`_precompiled_check_sh`). `$SLATE_CPUINFO` stands in for /proc/cpuinfo in tests.
+const _SYSIMAGE_CPU_SH = raw"""CPU=$(awk -F': *' '/^vendor_id/&&v==""{v=$2} /^cpu family/&&f==""{f=$2} /^model[ \t]*:/&&m==""{m=$2} /^flags/&&fl==""{fl=$2} /^CPU implementer/&&v==""{v=$2} /^CPU architecture/&&f==""{f=$2} /^CPU part/&&m==""{m=$2} /^Features/&&fl==""{fl=$2; arm=1} END{n=split(fl,a," "); s=""; for(i=1;i<=n;i++) if (arm || a[i] ~ /^(avx|sse|ssse|fma|bmi|f16c|aes|vaes|sha_ni|adx|movbe|popcnt|abm|xsave|pclmul|vpclmul|gfni|amx|rdrand|rdseed|clflushopt|clwb|lzcnt)/) s=s " " a[i]; if (v!="") print v "-" f "-" m "|" s}' "${SLATE_CPUINFO:-/proc/cpuinfo}" 2>/dev/null); if [ -n "$CPU" ]; then CPU="${CPU%%|*}-$(printf '%s' "${CPU#*|}" | cksum | cut -d' ' -f1)"; else CPU=$(uname -m); fi; CPU=$(printf '%s' "$CPU" | sed 's/[^A-Za-z0-9._-]/_/g')"""
 
 # The same path for the remote shell: a leading `~/` as `$HOME/`, which a quoted word does not expand.
 _shpath(p::AbstractString) = startswith(p, "~/") ? "\$HOME/" * p[3:end] : String(p)
@@ -1877,7 +1882,8 @@ function build_sysimage!(r, t::RemoteTarget, host::AbstractString; prologue::Abs
     spec = isempty(r.sysimage_pkgs) ? sysimage_candidates(t.origin_env) : r.sysimage_pkgs
     body = _sysimage_build_script(r, rel, spec; force)
     t0 = time()
-    ok, out = _ssh_julia!(host, body, "sysimage on $host"; stream = true, setup = t.setup * prologue)
+    ok, out = _ssh_julia!(host, body, "sysimage on $host"; stream = true,
+                          setup = t.setup * prologue * _SYSIMAGE_CPU_SH * "; export SLATE_CPU=\"\$CPU\"; ")
     st, detail, m = _sysimage_outcome(out, ok, round(Int, time() - t0))
     m["dir"] = isempty(get(m, "key", "")) ? "" : sysimage_store(r) * "/" * m["key"]; m["spec"] = sysimage_spec_key(r.sysimage_pkgs)
     m["listed"] = r.sysimage_pkgs; m["built_at"] = time()

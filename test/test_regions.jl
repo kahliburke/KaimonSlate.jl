@@ -2258,6 +2258,26 @@ end
         @test RE._worker_current(EnvInfoK(delete!(info(true), "env_rebuilt"), String[], 1, "nb"))   # an older worker
     end
 
+    @testset "compiled code is keyed by CPU architecture, not the chip's model" begin
+        # Perlmutter's login (EPYC 7713) and GPU nodes (EPYC 7763) are one microarchitecture: code
+        # compiled on either runs alike on both. A flag Julia does not compile for (`cpb`) does not split
+        # them; a different microarchitecture with AVX-512 does.
+        key(info) = mktempdir() do d
+            f = joinpath(d, "cpuinfo"); write(f, info)
+            readchomp(setenv(`sh -c $(RE._SYSIMAGE_CPU_SH * "; printf '%s' \"\$CPU\"")`, "SLATE_CPUINFO" => f, "PATH" => ENV["PATH"]))
+        end
+        amd(name, family, model, flags) = "vendor_id\t: AuthenticAMD\ncpu family\t: $family\nmodel\t\t: $model\n" *
+                                          "model name\t: $name\nflags\t\t: $flags\n"
+        milan = "fpu sse sse2 ssse3 sse4_1 sse4_2 avx avx2 fma bmi1 bmi2 aes vaes sha_ni"
+        login = key(amd("AMD EPYC 7713 64-Core Processor", 25, 1, milan))
+        node = key(amd("AMD EPYC 7763 64-Core Processor", 25, 1, milan * " cpb"))
+        genoa = key(amd("AMD EPYC 9654 96-Core Processor", 25, 17, milan * " avx512f avx512bw"))
+        @test login == node && startswith(login, "AuthenticAMD-25-1-")
+        @test genoa != login
+        arm = key("CPU implementer\t: 0x41\nCPU architecture: 8\nCPU part\t: 0xd0c\nFeatures\t: fp asimd sve\n")
+        @test startswith(arm, "0x41-8-0xd0c-")
+    end
+
     @testset "a worker that does not start says what it is waiting on" begin
         # The shape of the worker that hung on a scratch file system: blocked in the Lustre client
         # reading a compiled cache, beside a compile child waiting on it.
