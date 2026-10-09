@@ -2501,8 +2501,10 @@ function create_tools(GateTool::Type)
     `action="set"` creates or updates one from the arguments given (`host`, `kind` = slurm | pbs |
     exec, `account`, `root_remote` (its batch store, on scratch), `depot`, `julia`, `prologue`, the
     batch defaults `partition`, `walltime`, `cpus`, `mem`, `gpus`, `qos`, `directives` (scheduler
-    flags, one per line or `;`-separated), and `test_qos`); an empty argument leaves that field as it
-    is. `action="delete"` removes it.
+    flags, one per line or `;`-separated), `test_qos`, and `compile` (`node`, the default, compiles
+    packages on the granted node; `login` compiles them on the login node first, as NERSC asks, and a
+    node of the same CPU architecture reuses that); an empty argument leaves that field as it is.
+    `action="delete"` removes it.
 
     `action="list"` lists them; `"show"` gives one with what preparing found on its host (Julia,
     depot, the site's module fix, staleness) and the project environments that passed a test task
@@ -2517,17 +2519,21 @@ function create_tools(GateTool::Type)
                      host::String = "", kind::String = "", account::String = "", root_remote::String = "",
                      depot::String = "", julia::String = "", prologue::String = "", partition::String = "",
                      walltime::String = "", cpus::String = "", mem::String = "", gpus::String = "",
-                     qos::String = "", directives::String = "", test_qos::String = "")::String
+                     qos::String = "", directives::String = "", test_qos::String = "",
+                     compile::String = "")::String
         a = strip(action); n = strip(name)
         if a == "set"
             isempty(n) && return "Give the machine's name."
+            (isempty(strip(compile)) || lowercase(strip(compile)) in ("node", "login")) ||
+                return "`compile` is `node` or `login`."
             cur = something(ReportEngine.cluster_get(n), Dict{String,Any}())
             d = Dict{String,Any}(String(k) => v for (k, v) in cur)
             d["name"] = n
             for (k, v) in ("host" => host, "kind" => kind, "account" => account, "root_remote" => root_remote,
                            "depot" => depot, "julia" => julia, "prologue" => prologue, "partition" => partition,
                            "walltime" => walltime, "cpus" => cpus, "mem" => mem, "gpus" => gpus, "qos" => qos,
-                           "directives" => replace(directives, r"\s*;\s*" => "\n"), "test_qos" => test_qos)
+                           "directives" => replace(directives, r"\s*;\s*" => "\n"), "test_qos" => test_qos,
+                           "compile" => lowercase(compile))
                 isempty(strip(v)) || (d[k] = String(strip(v)))
             end
             haskey(d, "kind") || (d["kind"] = "slurm")
@@ -2559,7 +2565,8 @@ function create_tools(GateTool::Type)
             v = ReportEngine.machine_view(n)
             site = v["site"]
             io = IOBuffer()
-            println(io, "Machine '$n' on $(v["host"]) · depot $(isempty(v["depot"]) ? "~/.julia" : v["depot"])")
+            println(io, "Machine '$n' on $(v["host"]) · depot $(isempty(v["depot"]) ? "~/.julia" : v["depot"]) · compiles on the ",
+                    ReportEngine.machine_get(n).compile === :login ? "login node" : "granted node")
             if isempty(site)
                 println(io, "  not prepared")
             else

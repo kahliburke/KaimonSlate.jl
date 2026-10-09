@@ -15,14 +15,23 @@ struct Machine
     julia::String      # path to a julia binary; "" = juliaup at the hub's version, installed if missing
     depot::String      # Julia depot; "" = automatic (the site's scratch when preparing finds one)
     prologue::String   # the user's shell setup, run before every Julia here
+    # Where a prepare compiles packages: `:node`, the granted node its workers run on, or `:login`,
+    # the login node, which some sites (NERSC) ask for. Compiled code is reused wherever the CPU
+    # architecture is the same (`_SYSIMAGE_CPU_SH`), so a node of another architecture still compiles.
+    compile::Symbol
 end
+
+Machine(name, host, kind, account, julia, depot, prologue) =
+    Machine(name, host, kind, account, julia, depot, prologue, :node)
+
+_machine_compile(v) = (s = lowercase(strip(String(v))); s == "login" ? :login : :node)
 
 _machine_kind(k) = (s = lowercase(strip(String(k))); s in ("slurm", "pbs") ? Symbol(s) : :exec)
 
 machine_from(d::AbstractDict) = Machine(String(get(d, "name", "")), String(get(d, "host", "")),
     _machine_kind(get(d, "kind", "slurm")), String(get(d, "account", "")),
     String(strip(String(get(d, "julia", "")))), _home_tilde(strip(String(get(d, "depot", "")))),
-    String(get(d, "prologue", "")))
+    String(get(d, "prologue", "")), _machine_compile(get(d, "compile", "node")))
 
 # `$HOME/x` and `~/x` are the same place; the shell quoting used everywhere expands only `~/`.
 _home_tilde(p::AbstractString) = startswith(p, "\$HOME/") ? "~/" * p[7:end] : String(p)
@@ -46,7 +55,7 @@ implicit machine on that host with every setting automatic.
 function region_machine(r)
     m = isempty(r.machine) ? nothing : machine_get(r.machine)
     m === nothing || return m
-    return Machine("", r.host, _kind_of_scheduler(r.scheduler), r.account, "", "", "")
+    return Machine("", r.host, _kind_of_scheduler(r.scheduler), r.account, "", "", "", :node)
 end
 
 # ── What a machine asks the scheduler for ───────────────────────────────────────────────────

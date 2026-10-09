@@ -306,6 +306,17 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
                 ("ok", "")
             end
         end
+        # Compiled here as well when the machine says so (`Machine.compile = :login`): some sites, NERSC
+        # among them, want compiles on login nodes rather than on granted ones. The record it leaves keys
+        # on the CPU architecture, so the node's own compile step finds it current when the node's
+        # architecture is the same and compiles for itself when it is not. A region that boots from a
+        # sysimage compiles on the node, against its image.
+        if !isempty(ref[1]) && _compiles_on_login(r)
+            step("Compile $(basename(ref[1])) on $host") do
+                _compile_env!(r, _region_target(r; origin_env = ref[1], at = (String(host), "")), ref, host,
+                              _region_prologue(r.name) * "JOPT=''")
+            end
+        end
         run_node = node === nothing ? (r.scheduler !== :none && isempty(r.readiness)) : node
         if r.scheduler === :none
             _prepare_env!(r, step, measured, ref, host, _region_prologue(r.name); worker, rebuild_sysimage)
@@ -625,6 +636,32 @@ _precompiled_mark_snippet(mark::AbstractString) = """
     end
     """
 
+"Whether a prepare of region `r` compiles on its login node as well as on the node (`Machine.compile`)."
+_compiles_on_login(r) = r.scheduler !== :none && region_machine(r).compile === :login && !r.sysimage
+
+# Compile environment `ref` for target `t` on `host`, in the shell `t.setup * pre` (which sets `$JOPT`),
+# unless the record beside its stamp (`_precompiled_check_sh`) says it is compiled already for this CPU
+# architecture, image and sources. Returns a step's `(status, detail)`. The prepare runs it on the node,
+# and first on the login node when the machine compiles there (`Machine.compile`).
+function _compile_env!(r, t, ref, host, pre::AbstractString)
+    name = basename(ref[1])
+    rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
+    mark = _env_stamp_path(t) * ".pc"
+    ok, out = _ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.precompile(); " *
+                                "println(\"@@JULIA julia version \", VERSION)\n" * _precompiled_mark_snippet(mark),
+                          "precompile $name on $host"; stream = true, jopt = true,
+                          setup = t.setup * pre * "; " *
+                                  _precompiled_check_sh(t, mark; sources = _dev_sources_digest(ref[1]) *
+                                                                     "." * _payload_sha() * "." * _seb_sha()))
+    ok || return ("fail", first(strip(out), 400))   # the step shows its own time
+    occursin("@@PRECOMPILED current", out) && return ("ok", "compiled already for this CPU architecture, image and environment")
+    # Compiled now, so a start finds the environment complete and builds nothing.
+    m = match(r"@@JULIA (julia version \S+)", out)
+    m === nothing || stamp_env_precompiled!(t, ref[2], m.captures[1]) ||
+        _rlog("prepare[$(r.name)]: could not record the environment as compiled on $host")
+    return ("ok", "")
+end
+
 # Install the reference project's environment where its workers will run, load every package in it
 # with timing, and check CUDA when it is among them. On a scheduler region `host` is the granted node;
 # elsewhere it is the host itself. The environment stays installed, stamped, for the project's start.
@@ -656,20 +693,7 @@ function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothi
     # the load time below is what every start pays, which is what the liveness grace is made from. Not
     # run again for the node type, image and environment it last compiled.
     step("Precompile $name") do
-        mark = _env_stamp_path(t) * ".pc"
-        ok, out = _ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.precompile(); " *
-                                    "println(\"@@JULIA julia version \", VERSION)\n" * _precompiled_mark_snippet(mark),
-                              "precompile $name on $host"; stream = true, jopt = true,
-                              setup = t.setup * pro * _sysimage_jopt_sh(t) * "; " *
-                                      _precompiled_check_sh(t, mark; sources = _dev_sources_digest(ref[1]) *
-                                                                         "." * _payload_sha() * "." * _seb_sha()))
-        ok || return ("fail", first(strip(out), 400))   # the step shows its own time
-        occursin("@@PRECOMPILED current", out) && return ("ok", "compiled already for this node, image and environment")
-        # Compiled now, so a start finds the environment complete and builds nothing.
-        m = match(r"@@JULIA (julia version \S+)", out)
-        m === nothing || stamp_env_precompiled!(t, ref[2], m.captures[1]) ||
-            _rlog("prepare[$(r.name)]: could not record the environment as compiled on $host")
-        ("ok", "")
+        _compile_env!(r, t, ref, host, pro * _sysimage_jopt_sh(t))
     end
     worker === nothing || return _prepare_in_worker!(step, measured, name, worker)
     step("Load $name") do

@@ -48,6 +48,19 @@ const RE = KaimonSlate.ReportEngine
             @test m.name == "" && m.host == "box" && m.kind === :exec && m.depot == ""
         end
 
+        @testset "a machine says where a prepare compiles" begin
+            RE.cluster_set!(Dict("name" => "pmc", "host" => "perlmutter", "kind" => "slurm"))
+            @test RE.machine_get("pmc").compile === :node                       # the granted node, as before
+            RE.cluster_set!(Dict("name" => "pmc", "host" => "perlmutter", "kind" => "slurm", "compile" => "login"))
+            @test RE.machine_get("pmc").compile === :login
+            @test RE._compiles_on_login(RE.region_set!("pmcr"; machine = "pmc"))
+            # A region booting from a sysimage compiles against it, on the node; a plain host has one place.
+            @test !RE._compiles_on_login(RE.region_set!("pmcr"; sysimage = true))
+            @test !RE._compiles_on_login(RE.region_set!("wsc"; host = "box"))
+            @test RE.machine_from(Dict("name" => "x", "compile" => "LOGIN")).compile === :login
+            @test RE.machine_from(Dict("name" => "x", "compile" => "elsewhere")).compile === :node
+        end
+
         @testset "a machine is a region, and a region varies its machine" begin
             RE.cluster_set!(Dict("name" => "mx", "host" => "mxhost", "kind" => "slurm", "account" => "acc",
                                  "partition" => "gpu", "walltime" => "00:30:00", "gpus" => "4",
