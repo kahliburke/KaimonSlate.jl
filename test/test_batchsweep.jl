@@ -627,6 +627,32 @@ end
                        try; Sweep._unsupported_scheduler(:k8s); catch e; e.msg; end)
     end
 
+    @testset "scheduler commands sent to a host are counted, by command and caller" begin
+        # What is a scheduler call: a client run by the script. Not a check that the tool exists, not a
+        # batch script's own lines (they run later, on the node), not a word that merely contains one.
+        @test Sweep.sched_commands("squeue -h -n x; scancel -n x") == ["squeue", "scancel"]
+        @test Sweep.sched_commands("command -v sinfo >/dev/null && sinfo -h") == ["sinfo"]
+        @test Sweep.sched_commands("cat > j <<'EOF'\nsrun hostname\nEOF\nsbatch j") == ["sbatch"]
+        @test isempty(Sweep.sched_commands("ls ~/.cache/squeue-notes; echo srun_done"))
+        @test Sweep.sched_commands("srun --jobid=1 --overlap bash -c 'cat /proc/cpuinfo'") == ["srun"]
+        withenv("KAIMONSLATE_CACHE_HOME" => mktempdir(), "KAIMONSLATE_SCHED_BUDGET" => "1") do
+            lock(Sweep._SCHED_LOCK) do
+                empty!(Sweep._SCHED_TOTAL); empty!(Sweep._SCHED_RECENT); empty!(Sweep._SCHED_WARNED)
+                Sweep._SCHED_MINUTE[] = 0
+            end
+            asker() = Sweep.run_there("", "squeue --version >/dev/null 2>&1; true")
+            asker(); asker()
+            c = only(Sweep.sched_calls())
+            @test (c.host, c.last_minute, c.total) == ("local", 2, 2) && occursin("squeue ×2 (asker)", c.breakdown)
+            @test haskey(Sweep._SCHED_WARNED, "local")                   # over a budget of one a minute
+            # A finished minute goes to the history file, one line per host.
+            lock(Sweep._SCHED_LOCK) do; Sweep._flush_minute!(time() + 60); end
+            line = only(readlines(Sweep._sched_history_path()))
+            @test occursin("\"host\": \"local\"", line) && occursin("\"total\": 2", line) &&
+                  occursin("\"squeue asker\": 2", line)
+        end
+    end
+
     @testset "a queued request says when it expects to start, and a refused one why" begin
         mktempdir() do bin
             tool(nm, body) = (p = joinpath(bin, nm); write(p, "#!/bin/sh\n" * body * "\n"); chmod(p, 0o755))

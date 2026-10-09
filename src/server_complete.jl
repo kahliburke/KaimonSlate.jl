@@ -963,6 +963,7 @@ function _register_diag_gauges!(h)
     RE = ReportEngine
     reg(n, f) = SlateDiag.diag_gauge!(n, f)
     reg("notebooks",        () -> length(h.notebooks))
+    reg("sched_calls_1m",   () -> sum((c.last_minute for c in RE.Sweep.sched_calls()); init = 0))
     reg("region_kernels",   () -> length(_REGION_KERNELS))
     reg("region_last_used", () -> length(_REGION_LAST_USED))
     reg("walltime_warned",  () -> length(_WALLTIME_WARNED))

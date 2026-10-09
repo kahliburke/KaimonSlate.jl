@@ -2711,6 +2711,12 @@ function create_tools(GateTool::Type)
     id, the node, the walltime left and the idle time. `worker(action="release" | "keep",
     region=…)` acts on that allocation, and `worker(action="log", region=…)` returns the bring-up
     log of any region.
+
+    Last, the scheduler commands this hub has sent each cluster (`squeue`, `srun`, `sbatch`, `qstat`,
+    …): in the last minute and the last ten, by command and by the Slate function that sent them, and
+    since the hub started. Sites ask for a low aggregate rate (NERSC: one or two a minute); the hub
+    warns in its log above `KAIMONSLATE_SCHED_BUDGET` a minute (default 2), and keeps a per-minute
+    history in `sched_calls.jsonl` in its cache directory.
     """
     function regions()::String
         rs = ReportEngine.regions()
@@ -2740,6 +2746,15 @@ function create_tools(GateTool::Type)
             println(io, "Parked wires (live conns kept across close — reattach is ~0 network):")
             for p in parked
                 println(io, "  • $(p.label) → $(p.host):$(p.port)  (idle $(round(Int, time() - p.since))s)")
+            end
+        end
+        sc = ReportEngine.Sweep.sched_calls()
+        if !isempty(sc)
+            println(io, "Scheduler commands sent (budget $(ReportEngine.Sweep.sched_budget())/min):")
+            for c in sc
+                println(io, "  • $(c.host): $(c.last_minute) in the last minute, $(c.window) in the last ",
+                        round(Int, c.window_s / 60), " min, $(c.total) since the hub started")
+                isempty(c.breakdown) || println(io, "      ", c.breakdown)
             end
         end
         return String(take!(io))

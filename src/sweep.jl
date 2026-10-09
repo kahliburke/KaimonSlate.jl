@@ -41,6 +41,7 @@ end
 
 # Reaching a store the hub has no filesystem access to — the mirror and the transport that keeps it
 # in step. Separate because it is transport with no opinion about sweeps.
+Base.include(@__MODULE__, joinpath(@__DIR__, "schedcalls.jl"))   # counts the scheduler commands run_there sends
 Base.include(@__MODULE__, joinpath(@__DIR__, "remotestore.jl"))
 
 # The env-preparation policy shared by the notebook fork and the remote provisioner. envprep.jl is

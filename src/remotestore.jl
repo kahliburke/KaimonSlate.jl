@@ -258,6 +258,8 @@ to the hub, or a local run, gets the output at the end).
 """
 function run_there(host::AbstractString, script::AbstractString; timeout::Real = 120.0, online = nothing)
     _declare_volatile()          # running a command somewhere is never a function of the cell's source
+    # Counted where it runs: a worker hands its command to the hub, which counts it there.
+    has_delegate() || note_sched_calls!(host, script)
     if isempty(host)
         buf = IOBuffer()
         ok = try; run(pipeline(`sh -c $script`; stdout = buf, stderr = buf)); true; catch; false; end
