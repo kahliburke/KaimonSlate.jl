@@ -891,6 +891,19 @@ function _force_cell!(nb::LiveNotebook, id::AbstractString)
     return true
 end
 
+# What a run of the whole notebook left behind: the cells still waiting and what on, and how many failed.
+function _drain_text(nb::LiveNotebook)
+    waiting, failed = lock(nb.lock) do
+        ([(c.id, _cell_result_text(c)) for c in nb.report.cells if c.state == BLOCKED],
+         [c.id for c in nb.report.cells if c.state == ERRORED])
+    end
+    isempty(waiting) && isempty(failed) && return "ran stale cells; notebook is up to date"
+    out = "ran stale cells"
+    isempty(failed) || (out *= "; $(length(failed)) failed: " * join(failed, ", "))
+    isempty(waiting) || (out *= "; $(length(waiting)) waiting:\n" * join(("  $i $why" for (i, why) in waiting), "\n"))
+    return out
+end
+
 "Run one cell (or recompute all stale if `id` empty); return the result(s)."
 function agent_run!(nb::LiveNotebook, id::AbstractString = "";
                     caller::AbstractString = "", expected_version::Int = -1,
@@ -923,7 +936,7 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
         isempty(id) ? _drain!(nb) : _eval!(nb; wait_for = id)
         _renew_floor!(nb, caller)
         _agent_push!(nb)
-        isempty(id) ? "ran stale cells; notebook is up to date" :
+        isempty(id) ? _drain_text(nb) :
             (_cell_exists(nb, id) ? "id=$id →\n$(_result_of(nb, id))" : "(no cell id=$id)")
     end
     return r.text

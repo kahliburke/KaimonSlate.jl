@@ -468,6 +468,7 @@ end
         # A run of the notebook is not its ▶, and neither is the ▶ of a cell upstream: still held.
         NS._restale_blocked!(nb2); NS._eval!(nb2; wait_all = true)
         held_after_run = cell(nb2, "b").state
+        @test occursin("2 waiting:\n  b (locked; run it to compute)", NS._drain_text(nb2))   # not "up to date"
         NS.edit_cell!(nb2, "a", cell(nb2, "a").source; force = true)
         NS._eval!(nb2; wait_all = true)
         @test (held_after_run, cell(nb2, "b").state, cell(nb2, "a").state) == (RE_.BLOCKED, RE_.BLOCKED, RE_.FRESH)
