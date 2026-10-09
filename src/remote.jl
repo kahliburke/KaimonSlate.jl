@@ -3206,6 +3206,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
         _note_start!(host, :started)
+        _unmark_reaped!(host, port)
         _attach_record!(host, k.label; port = port, stream_port = stream_port,
                         transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip, job = t.job)
         _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host " *
@@ -3248,6 +3249,10 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     #    a live answer means reattach touches the network ZERO times before the first eval (a
     #    fresh dial is ~5 RTTs ≈ 370ms on a WAN link, measured). Dead → close, demote to record.
     parked = unpark_remote!(host, k.label)
+    if parked !== nothing && _reaped(host, parked.port)
+        _close_parked!(parked)
+        parked = nothing
+    end
     if parked !== nothing
         k.port = parked.port; k.stream_port = parked.stream_port
         k.conn = parked.conn; k.tunnel = parked.tunnel
@@ -3283,6 +3288,11 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
               ", not job $(t.job); not dialling it")
         rec = nothing
     end
+    if rec !== nothing && _reaped(host, rec.port)
+        _attach_clear!(host, k.label)
+        _rlog("reconnect: worker-$(rec.port) on $host is being reaped; not dialling it")
+        rec = nothing
+    end
     if rec !== nothing
         k.port = rec.port; k.stream_port = rec.stream_port
         r = dial(rec.port, rec.stream_port; deadline = _dial_deadline_record(),
@@ -3305,6 +3315,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     roster = survey === nothing ? nothing : survey.roster
     reattach = nothing
     try; reattach = _find_live_worker(host, k.label, k.parent; workers = roster); catch; end
+    reattach !== nothing && _reaped(host, reattach.port) && (reattach = nothing)
     lap("probe")
     if reattach !== nothing
         k.port = reattach.port; k.stream_port = reattach.stream_port
@@ -3333,6 +3344,10 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     #     set stops two notebooks opening concurrently from adopting the same worker.
     pool = nothing
     try; pool = _claim_region_worker!(t.region, host; project = t.project, transport = string(t.transport), workers = roster); catch e; _rlog("adopt: region scan failed ($(sprint(showerror, e)))"); end
+    if pool !== nothing && _reaped(host, pool.port)
+        _release_region_claim!(host, pool.port)
+        pool = nothing
+    end
     if pool !== nothing
         k.port = pool.port; k.stream_port = pool.stream_port
         _rlog("adopt: warm worker-$(pool.port) on $host for region '$(t.region)' — adopting for '$(k.label)'")
@@ -6451,8 +6466,27 @@ function _worker_node(host::AbstractString, port::Int)
     return ok ? _manifest_node(out, host) : String(host)
 end
 
+# A worker being reaped is not attached to again. A restart drops the worker's wire and re-arms its cells
+# before the kill lands, and those cells can ask for a worker in between: the record, a probe or the pool
+# would then hand back the process being killed. Marked before the wire is dropped; cleared when a fresh
+# worker starts on the port, or after `_REAPED_TTL` seconds.
+const _REAPED = Dict{Tuple{String,Int},Float64}()
+const _REAPED_LOCK = ReentrantLock()
+const _REAPED_TTL = 600.0
+_mark_reaped!(host, port::Integer) = (lock(_REAPED_LOCK) do; _REAPED[(String(host), Int(port))] = time(); end; nothing)
+_unmark_reaped!(host, port::Integer) = (lock(_REAPED_LOCK) do; delete!(_REAPED, (String(host), Int(port))); end; nothing)
+function _reaped(host, port::Integer; now::Float64 = time())
+    hosts = [String(host)]
+    v = via(String(host)); v === nothing || push!(hosts, String(v.host))
+    lock(_REAPED_LOCK) do
+        any(h -> now - get(_REAPED, (h, Int(port)), -Inf) < _REAPED_TTL, hosts)
+    end
+end
+
 function reap_remote_worker(host, port::Int)
+    _mark_reaped!(host, port)
     node = _worker_node(String(host), port)
+    node == host || _mark_reaped!(node, port)
     node == host || _rlog("reap: worker-$port is listed on $host and runs on $node")
     host = node
     _rlog("reap: killing worker-$port on $host (manual)")

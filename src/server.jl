@@ -2975,6 +2975,7 @@ end
 # The liveness sweep remains the safety net if this host/port match is imperfect (e.g. a remapped tunnel).
 function _drop_kernels_for_worker!(h, host::AbstractString, port::Integer)
     h === nothing && return 0   # the hub is PASSED IN — `_HUB` lives in the outer KaimonSlate module, not here
+    ReportEngine._mark_reaped!(host, port)   # before the re-armed cells can ask for a worker
     nbs = lock(h.lock) do; collect(values(h.notebooks)); end
     n = 0; seen = String[]
     for nb in nbs, k in _nb_kernels(nb)

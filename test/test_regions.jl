@@ -2278,6 +2278,16 @@ end
         @test startswith(arm, "0x41-8-0xd0c-")
     end
 
+    @testset "a worker being reaped is not attached to again" begin
+        RE._mark_reaped!("reapnode", 9311)
+        now = time()
+        @test RE._reaped("reapnode", 9311; now)
+        @test !RE._reaped("reapnode", 9312; now) && !RE._reaped("othernode", 9311; now)
+        @test !RE._reaped("reapnode", 9311; now = now + RE._REAPED_TTL + 1)
+        RE._unmark_reaped!("reapnode", 9311)            # a fresh worker started on the port
+        @test !RE._reaped("reapnode", 9311; now)
+    end
+
     @testset "a worker that does not start says what it is waiting on" begin
         # The shape of the worker that hung on a scratch file system: blocked in the Lustre client
         # reading a compiled cache, beside a compile child waiting on it.
