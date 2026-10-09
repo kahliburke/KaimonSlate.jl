@@ -2112,8 +2112,9 @@ end
 # The cells that were waiting on this region: mark them stale so the next drain picks them up.
 # BLOCKED is the state a wait leaves behind; ERRORED is included too because a cell that failed for
 # its own reasons simply fails again, which is cheaper than matching on error text that is free to
-# be reworded.
-_region_recoverable(c) = c.state == BLOCKED || c.state == ERRORED
+# be reworded. A wait on a held locked cell is not a region's: it ends when the locked cell is run, or
+# restored (`_rearm_locked!`).
+_region_recoverable(c) = (c.state == BLOCKED && c.blocked != WAIT_LOCKED) || c.state == ERRORED
 
 function _restale_region_cells!(nb::LiveNotebook, name::AbstractString)
     nb.closed && return 0
@@ -3330,8 +3331,8 @@ end
 # notebook — and nothing looks again, so the cell sits red holding a value nobody recomputed.
 #
 # Once the region cell is FRESH, a downstream cell still ERRORED or BLOCKED is stale by definition.
-# Re-armed ONCE per failure: a reader that fails again is failing for its own reasons, and retrying
-# it every tick would be a loop rather than a repair.
+# Re-armed ONCE until it next succeeds: a reader that fails again is failing for its own reasons, and
+# retrying it every tick would be a loop rather than a repair.
 const _READER_REARMED = Set{Tuple{String,String}}()
 
 function _reconcile_stranded_readers!(nb::LiveNotebook)
@@ -3344,10 +3345,8 @@ function _reconcile_stranded_readers!(nb::LiveNotebook)
         for c in nb.report.cells
             (c.id in blast && !(c.id in ready)) || continue
             key = (nb.id, c.id)
-            if c.state == FRESH || c.state == STALE || c.state == RUNNING
-                delete!(_READER_REARMED, key)             # recovered — a later failure gets its own go
-                continue
-            end
+            c.state == FRESH && (delete!(_READER_REARMED, key); continue)   # a later failure gets its own go
+            (c.state == STALE || c.state == RUNNING) && continue
             _region_recoverable(c) || continue
             key in _READER_REARMED && continue
             push!(_READER_REARMED, key)

@@ -907,6 +907,31 @@ end
                 @test (first_up, again, state_again, new_worker, c.state) == (1, 0, RE.BLOCKED, 1, RE.STALE)
             end
 
+            @testset "a failed reader is re-armed once, and a locked wait is left held" begin
+                rep = RE.parse_report("#%% code id=s region=gpu\nx = 1\n#%% code id=L locked region=gpu\ny = x + 1\n" *
+                                      "#%% code id=r\nz = y + 1\n#%% code id=e\nw = x + 2\n")
+                RE.build_dependencies!(rep)
+                nb = NS.LiveNotebook("stranded", joinpath(mktempdir(), "stranded.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                nb.closed = true
+                cell(id) = only(c for c in rep.cells if c.id == id)
+                try
+                    cell("s").state = RE.FRESH
+                    RE.mark_blocked!(cell("L"), NS.WAIT_LOCKED, "L")
+                    RE.mark_blocked!(cell("r"), NS.WAIT_LOCKED, "L")
+                    cell("e").state = RE.ERRORED
+                    NS._reconcile_stranded_readers!(nb)
+                    first = (cell("L").state, cell("r").state, cell("e").state)
+                    cell("e").state = RE.ERRORED                         # it failed again, for its own reasons
+                    NS._reconcile_stranded_readers!(nb)
+                    @test first == (RE.BLOCKED, RE.BLOCKED, RE.STALE)
+                    @test cell("e").state == RE.ERRORED
+                finally
+                    filter!(k -> k[1] != "stranded", NS._READER_REARMED)
+                end
+            end
+
             @testset "each completed run is kept with when it started and ended" begin
                 rep = RE.parse_report("#%% code id=q\n1\n")
                 nb = NS.LiveNotebook("runlog", joinpath(mktempdir(), "runlog.jl"), rep, RE.InProcessKernel(), 1,
