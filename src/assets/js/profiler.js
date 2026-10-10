@@ -1173,7 +1173,7 @@ function Details() {
   const plain = pf.value.plain && pf.value.plain.ms > 0 ? pf.value.plain : null;
   const facts = [['mode', P.mode || 'cpu'], ['ran', ms(P.duration_ms)],
     P.unit === 'bytes' ? ['recorded', (P.allocs || 0).toLocaleString() + ' allocations, ' + pct(P.alloc_rate) + ' of them']
-                       : ['sampled', Number(P.samples).toLocaleString() + ' samples, every ' + ms(P.delay_ms) + (P.threads > 1 ? ', on ' + P.threads + ' threads' : '')],
+                       : ['sampled', Number(P.samples).toLocaleString() + ' samples, every ' + ms(achieved(P)) + (achieved(P) > 1.5 * P.delay_ms ? ' (' + ms(P.delay_ms) + ' asked; each tick stops all ' + P.sampled_threads + ' threads in turn)' : '') + (P.threads > 1 ? ', on ' + P.threads + ' threads' : '')],
     ['compiling', ms(P.compile_ms) || '0 ms'], ['GC', ms(P.gc_ms) || '0 ms'],
     ...(dr.length ? [['left out', dr.map(([k, v]) => v.toLocaleString() + ' ' + k).join(', ')]] : []),
     ...(P.buffer_full ? [['buffer', 'full: the end of the run is missing']] : []),
@@ -1181,7 +1181,7 @@ function Details() {
     ...(P.error ? [['threw', String(P.error).split('\n')[0]]] : []),
     ...(P.waiting ? [['waiting', pct(P.waiting / Math.max(1, P.samples)) + ' of the samples' + (P.waiting_gpu ? ', ' + pct(P.waiting_gpu / Math.max(1, P.samples)) + ' on the GPU' : '')]] : []),
     ...(plain ? [['unprofiled', ms(plain.ms) + ' at ' + when(plain.at) + ' · profiled ' + ratio(P.duration_ms, plain.ms)]] : []),
-    ...(g && g.callbacks ? [['CUPTI', g.callbacks.toLocaleString() + ' driver calls, ' + ms(g.callback_ms) + ' in its callback']] : [])];
+    ...(g && g.callbacks ? [['CUPTI', g.callbacks.toLocaleString() + ' driver calls, ' + ms(g.callback_ms) + ' in its callback' + (g.setup_ms != null ? ', ' + ms(g.setup_ms) + ' to start before the clock' : '')]] : [])];
   // Per notebook line: what the GPU ran for it, and what it spent waiting on the GPU, allocating its
   // memory and copying. Each CUDA call is placed by its own stack.
   const nl = (n, t) => n ? n.toLocaleString() + ' · ' + ms(t) : '';
@@ -1407,6 +1407,8 @@ function Hot() {
 
 // Fewer samples than this rank lines by noise.
 const FEW_SAMPLES = 100;
+// The sampler's real interval: it stops every thread in turn on each tick, and falls behind with many.
+const achieved = (P) => P.ticks > 0 ? Math.max(P.delay_ms, P.duration_ms / P.ticks) : P.delay_ms;
 // `a` against `b`: "+2%", "−5%", or "1.8× as long".
 const ratio = (a, b) => { const r = a / b; return r >= 2 ? r.toFixed(1) + '× as long' : (r >= 1 ? '+' : '−') + Math.round(100 * Math.abs(r - 1)) + '%'; };
 
@@ -1423,11 +1425,12 @@ function Facts() {
       ${fig(ms(pr.duration_ms), B ? 'run · was ' + ms(B.duration_ms) : 'run')}
       ${pr.unit === 'bytes' ? fig('≈ ' + bytes(pr.samples / (pr.alloc_rate || 1)), 'allocated', '', (pr.allocs || 0).toLocaleString() + ' recorded, ' + pct(pr.alloc_rate) + ' of them')
         : html`${pr.samples < FEW_SAMPLES
-                 ? html`<span class="pfwarn" title=${'Too few samples to rank lines by: profile a longer run (more iterations), or sample more often. One every ' + ms(pr.delay_ms) + '.'}>only ${pr.samples} samples</span>`
-                 : fig(Number(pr.samples).toLocaleString(), 'samples', '', 'one every ' + ms(pr.delay_ms))}${pr.threads > 1 ? fig(pr.threads, 'threads') : null}
+                 ? html`<span class="pfwarn" title=${'Too few samples to rank lines by: profile a longer run (more iterations). One every ' + ms(achieved(pr)) + (achieved(pr) > 1.5 * pr.delay_ms ? ', not the ' + ms(pr.delay_ms) + ' asked: each tick stops all ' + pr.sampled_threads + ' threads in turn' : '') + '.'}>only ${pr.samples} samples</span>`
+                 : fig(Number(pr.samples).toLocaleString(), 'samples', '', 'one every ' + ms(achieved(pr)))}${pr.threads > 1 ? fig(pr.threads, 'threads') : null}
                ${pr.waiting ? fig(pct(pr.waiting / Math.max(1, pr.samples)), pr.waiting_gpu ? 'waiting · ' + pct(pr.waiting_gpu / Math.max(1, pr.samples)) + ' on the GPU' : 'waiting', 'dim',
                                   'samples where the host waited; the hot lines leave them out') : null}
                ${pr.gpu && pr.gpu.util ? fig(pct(pr.gpu.util.util), 'GPU busy', '', ms(pr.gpu.util.busy_ms) + ' busy of ' + ms(pr.gpu.util.span_ms) + ' from its first work to its last') : null}
+               ${pr.gpu && pr.gpu.wait && pr.gpu.wait.n ? fig(ms(pr.gpu.wait.ms), 'waiting on the GPU', 'g', pr.gpu.wait.n + ' waits inside the code; ' + (pr.gpu.wait.drain_n ? ms(pr.gpu.wait.drain_ms) + ' more draining at the end' : 'none at the end')) : null}
                ${P.plain && P.plain.ms > 0 ? fig(ms(P.plain.ms), 'unprofiled', 'dim', 'the last run without the profiler, at ' + when(P.plain.at)) : null}`}
       ${pr.compile_ms > 0.5 ? fig(ms(pr.compile_ms), 'compiling' + share(pr.compile_ms), 'c') : null}
       ${pr.gc_ms > 0.5 ? fig(ms(pr.gc_ms), 'GC' + share(pr.gc_ms), 'g') : null}

@@ -429,6 +429,15 @@ end
 # `a` against `b`: "+2%", "−5%", or "1.8× as long".
 _pratio(a::Real, b::Real) = b <= 0 ? "" : (r = a / b; r >= 2 ? string(round(r; digits = 1), "× as long") :
                                             string(r >= 1 ? "+" : "−", round(Int, 100abs(r - 1)), "%"))
+# The interval asked for, and the one the sampler kept when it fell behind: each tick stops every
+# thread in the process in turn.
+function _psampling(P)
+    asked = get(P, "delay_ms", 1.0); ticks = get(P, "ticks", 0)
+    got = ticks > 0 ? P["duration_ms"] / ticks : asked
+    got < 1.5asked && return string(", one every ", _pms_fine(asked))
+    return string(", one every ", _pms_fine(got), " (", _pms_fine(asked), " asked; each tick stops all ",
+                  get(P, "sampled_threads", 0), " threads in turn)")
+end
 # Fewer samples than this rank lines by noise.
 const _PROF_FEW = 100
 # A file as the specialist should name it back: a cell's as it is, anything else by its last two parts.
@@ -477,7 +486,7 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
             bytes ? string("about ", Base.format_bytes(round(Int, P["samples"] / get(P, "alloc_rate", 1.0))),
                            " allocated (from ", get(P, "allocs", 0), " recorded, ", round(100 * get(P, "alloc_rate", 1.0); sigdigits = 2), "% of them)") :
                     string(P["samples"], " samples", get(P, "threads", 0) > 1 ? " on $(P["threads"]) threads" : ""),
-            bytes ? "" : string(", one every ", _pms_fine(get(P, "delay_ms", 1.0))),
+            bytes ? "" : _psampling(P),
             ", compiling ", _pms(P["compile_ms"]), ", GC ", _pms(P["gc_ms"]), ".")
     !bytes && P["samples"] < _PROF_FEW &&
         println(io, "Only ", P["samples"], " samples: too few to rank lines by. Profile a longer run (more iterations), or sample more often.")
@@ -549,11 +558,13 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
         end
         w = get(g, "wait", nothing)
         if w isa AbstractDict
-            println(io, "\nWaiting for the GPU inside the cell's code: ", w["n"] == 0 ? "none" : string(w["n"], " waits, ", _pms_fine(w["ms"])),
+            share(x) = P["duration_ms"] > 0 ? string(" (", _ppct(x / P["duration_ms"]), " of the run)") : ""
+            println(io, "\nWaiting for the GPU inside the cell's code: ", w["n"] == 0 ? "none" : string(w["n"], " waits, ", _pms_fine(w["ms"]), share(w["ms"])),
                     w["drain_n"] > 0 ? string(". Draining its work at the end: ", w["drain_n"] == 1 ? "1 wait" : string(w["drain_n"], " waits"), ", ", _pms_fine(w["drain_ms"])) : "",
                     w["tail_ms"] > 0 ? string(". Still running after the cell returned: ", _pms_fine(w["tail_ms"])) : "", ".")
         end
-        haskey(g, "callbacks") && println(io, "CUPTI saw ", g["callbacks"], " driver calls; its callback took ", _pms_fine(g["callback_ms"]), " of the run.")
+        haskey(g, "callbacks") && println(io, "The profiler's share: CUPTI's callback ran for ", g["callbacks"], " driver calls and took ",
+                                          _pms_fine(g["callback_ms"]), haskey(g, "setup_ms") ? string("; starting CUPTI took ", _pms_fine(g["setup_ms"]), " before the clock started") : "", ".")
         if haskey(g, "lines")
             println(io, "\nOn the GPU, by notebook line (each CUDA call placed by its own stack):")
             for e in g["lines"]

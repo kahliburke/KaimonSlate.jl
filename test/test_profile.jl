@@ -255,7 +255,7 @@ end
     @testset "GPU mode keeps the cell's own error and runs the cell if the profiler cannot" begin
         # Without CUPTI bindings the cell still runs, and the profile says why.
         out = Dict{String,Any}()
-        @test RE._with_cupti(() -> 42, out, RE._cupti_prepare(Module(:NoCUPTI)), time_ns()) == 42 && occursin("CUPTI", out["error"])
+        @test RE._with_cupti(() -> 42, out, RE._cupti_prepare(Module(:NoCUPTI)), () -> Int64(time_ns())) == 42 && occursin("CUPTI", out["error"])
         # A stand-in CUDA whose CUPTI records nothing: the run goes through, and the cell's error is its own.
         fake = Module(:FakeCUDA)
         Core.eval(fake, :(synchronize() = nothing))
@@ -264,7 +264,11 @@ end
                 const CUPTI_ACTIVITY_KIND_DRIVER = 1; const CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL = 2
                 const CUPTI_ACTIVITY_KIND_KERNEL = 3; const CUPTI_ACTIVITY_KIND_MEMCPY = 4; const CUPTI_ACTIVITY_KIND_MEMSET = 5
                 unchecked_cuptiGetCallbackName(d, id, ref) = 1
-                CallbackConfig(cb, kinds) = (cb, kinds)
+                const CUpti_SubscriberHandle = Ptr{Cvoid}
+                struct CUpti_CallbackData; callbackSite::UInt32; correlationId::UInt32; end
+                cuptiSubscribe(r, cb, ud) = (r[] = C_NULL; nothing)
+                cuptiEnableCallback(on, sub, domain, id) = nothing
+                cuptiUnsubscribe(sub) = nothing
                 ActivityConfig(kinds) = kinds
                 cuptiGetTimestamp(r) = (r[] = 0; nothing)
                 enable!(f, cfg) = f()
@@ -272,11 +276,11 @@ end
             end))
         g = Dict{String,Any}()
         RE._CUPTI_NAMES[] = nothing
-        @test RE._with_cupti(() -> 42, g, RE._cupti_prepare(fake), time_ns()) == 42 && !haskey(g, "source")
+        @test RE._with_cupti(() -> 42, g, RE._cupti_prepare(fake), () -> Int64(time_ns())) == 42 && !haskey(g, "source")
         @test RE._cupti_finish!(g)["source"] == "cupti" && isempty(g["kernels"]) && !haskey(g, "__finish")
         # A cell that throws keeps its own error, and what it did on the GPU is still summarised.
         gt = Dict{String,Any}()
-        @test_throws ErrorException("boom") RE._with_cupti(() -> error("boom"), gt, RE._cupti_prepare(fake), time_ns())
+        @test_throws ErrorException("boom") RE._with_cupti(() -> error("boom"), gt, RE._cupti_prepare(fake), () -> Int64(time_ns()))
         @test RE._cupti_finish!(gt)["source"] == "cupti"
         RE._CUPTI_NAMES[] = nothing
     end

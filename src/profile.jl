@@ -98,6 +98,9 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
         o.mode == "alloc" || _warm_sampler!(o, cupti)
         Base.cumulative_compile_timing(true)
         c0 = Base.cumulative_compile_time_ns()[1]; g0 = Base.gc_num().total_time; t0 = time_ns(); cy0 = _cycles()
+        # GPU mode starts the clock again once CUPTI is running: starting it is the profiler's work.
+        restart!() = (c0 = Base.cumulative_compile_time_ns()[1]; g0 = Base.gc_num().total_time; t0 = time_ns();
+                      cy0 = _cycles(); Int64(t0))
         task = UInt(pointer_from_objref(current_task()))
         others = delete!(Set{UInt}(_PROF_OTHER_TASKS[]()), task)
         traced = Dict{String,Any}()
@@ -130,10 +133,10 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
                 v = Profile.Allocs.@profile sample_rate = o.alloc_rate run()
             else
                 Profile.clear(); Profile.init(n = o.buffer, delay = o.delay_ms / 1000)
-                # GPU work is mostly the host waiting on the device, which a CPU-time sampler barely
-                # sees (on Linux it ticks with the process's CPU time), so GPU mode samples wall time.
+                # GPU mode samples CPU time: CUPTI times the host's waits for the device exactly, and
+                # wall time spreads its samples over every task in the process, few of them the cell's.
                 v = o.mode == "wall" ? Profile.@profile_walltime(run()) :
-                    o.mode == "gpu" ? _with_cupti(() -> Profile.@profile_walltime(run()), gpu, cupti, t0) : Profile.@profile(run())
+                    o.mode == "gpu" ? _with_cupti(() -> Profile.@profile(run()), gpu, cupti, restart!) : Profile.@profile(run())
             end
         catch e
             fx = facts(); done()
@@ -381,7 +384,72 @@ end
 
 # Driver calls are timed by the callback rather than recorded as activity: a CUDA.jl program makes
 # hundreds of driver calls per array operation, almost all of them queries, and recording each one
-# costs more than the run.
+# costs more than the run. The callback is enabled only for the calls it records.
+#
+# CUPTI calls it on the thread making each driver call, as a plain function over typed state, so a
+# call costs no allocation: it reads the two fields it needs from CUPTI's callback data where the
+# bindings' struct puts them.
+mutable struct _CuptiState
+    calls::_CuptiCalls
+    want::Vector{Bool}          # by callback id: calls whose stacks are taken
+    query::Vector{Bool}         # by callback id: queries
+    enter::UInt32
+    exit::UInt32
+    site::Int                   # offsets of `callbackSite` and `correlationId` in CUpti_CallbackData
+    corr::Int
+end
+const _CUPTI_STATE = Ref{_CuptiState}()
+
+_flag(v::Vector{Bool}, id::UInt32) = 0 < id <= length(v) && @inbounds v[id]
+
+function _cupti_callback(::Ptr{Cvoid}, ::UInt32, id::UInt32, data::Ptr{Cvoid})
+    t = Int64(time_ns())
+    st = _CUPTI_STATE[]
+    calls = st.calls
+    site = unsafe_load(Ptr{UInt32}(data + st.site))
+    corr = unsafe_load(Ptr{UInt32}(data + st.corr))
+    if _flag(st.want, id)
+        if site == st.enter
+            sid = _record_stack!(calls)
+            lock(calls.lock); _push_call!(calls, corr, id, t, sid); calls.query[] = 0; unlock(calls.lock)
+        elseif site == st.exit
+            lock(calls.lock); calls.ends[corr] = t; unlock(calls.lock)
+        end
+    elseif _flag(st.query, id)
+        # A run of queries is one call: the first one's stack, until the last one returns.
+        if site == st.enter
+            if calls.query[] == 0 || t - calls.qend[] > _QUERY_GAP_NS
+                sid = _record_stack!(calls)
+                lock(calls.lock); _push_call!(calls, corr, id, t, sid); calls.query[] = corr; calls.qend[] = t
+                unlock(calls.lock)
+            end
+        elseif site == st.exit && calls.query[] != 0
+            lock(calls.lock); calls.ends[calls.query[]] = t; calls.qend[] = t; unlock(calls.lock)
+        end
+    end
+    Threads.atomic_add!(calls.cost, Int64(time_ns()) - t); Threads.atomic_add!(calls.ncalls, 1)
+    return
+end
+
+_push_call!(c::_CuptiCalls, corr, id, t, sid) =
+    (push!(c.corr, corr); push!(c.cbid, id); push!(c.t, t); push!(c.sid, sid); nothing)
+
+# Runs `f` with the callback subscribed for the recorded calls. CUPTI takes one subscriber at a time.
+function _with_callbacks(f, cx)
+    il = Base.invokelatest
+    K(k) = il(getproperty, cx.CU, k)
+    sub = Ref{K(:CUpti_SubscriberHandle)}()
+    il(K(:cuptiSubscribe), sub, @cfunction(_cupti_callback, Cvoid, (Ptr{Cvoid}, UInt32, UInt32, Ptr{Cvoid})), C_NULL)
+    try
+        for id in cx.ids
+            il(K(:cuptiEnableCallback), UInt32(1), sub[], cx.drv, id)
+        end
+        return f()
+    finally
+        il(K(:cuptiUnsubscribe), sub[])
+    end
+end
+
 # Everything a GPU-mode run needs, done before its clock starts: CUPTI's call names (looked up once
 # per process), the configurations, and one empty collection with them, which compiles the callback
 # and pays CUPTI's first enable of each. A string says why there is no CUPTI.
@@ -395,54 +463,36 @@ function _cupti_prepare(m)
     K(k) = il(getproperty, CU, k)
     try
         drv = K(:CUPTI_CB_DOMAIN_DRIVER_API)
-        enter, exit_ = K(:CUPTI_API_ENTER), K(:CUPTI_API_EXIT)
         _CUPTI_NAMES[] === nothing && (_CUPTI_NAMES[] = _cupti_names(CU, drv))
         names = _CUPTI_NAMES[]
-        want = Set{UInt32}(id for (id, n) in names if occursin(_CUPTI_CALLS, n))
-        query = Set{UInt32}(id for (id, n) in names if occursin(_CUPTI_QUERIES, n))
-        calls = _CuptiCalls()
-        push_call!(data, id, t, sid) = (push!(calls.corr, data.correlationId); push!(calls.cbid, UInt32(id));
-                                        push!(calls.t, t); push!(calls.sid, sid))
-        cb = (domain, id, data) -> begin
-            t = Int64(time_ns())
-            i = UInt32(id)
-            if i in want
-                if data.callbackSite == enter
-                    sid = _record_stack!(calls)
-                    lock(calls.lock); push_call!(data, i, t, sid); calls.query[] = 0; unlock(calls.lock)
-                elseif data.callbackSite == exit_
-                    lock(calls.lock); calls.ends[data.correlationId] = t; unlock(calls.lock)
-                end
-            elseif i in query
-                # A run of queries is one call: the first one's stack, until the last one returns.
-                if data.callbackSite == enter
-                    if calls.query[] == 0 || t - calls.qend[] > _QUERY_GAP_NS
-                        sid = _record_stack!(calls)
-                        lock(calls.lock); push_call!(data, i, t, sid); calls.query[] = data.correlationId; calls.qend[] = t
-                        unlock(calls.lock)
-                    end
-                elseif data.callbackSite == exit_ && calls.query[] != 0
-                    lock(calls.lock); calls.ends[calls.query[]] = t; calls.qend[] = t; unlock(calls.lock)
-                end
-            end
-            Threads.atomic_add!(calls.cost, Int64(time_ns()) - t); Threads.atomic_add!(calls.ncalls, 1)
-            return
+        n = maximum(keys(names); init = UInt32(0))
+        want = fill(false, n); query = fill(false, n)
+        for (id, nm) in names
+            occursin(_CUPTI_CALLS, nm) && (want[id] = true)
+            occursin(_CUPTI_QUERIES, nm) && (query[id] = true)
         end
+        T = K(:CUpti_CallbackData)
+        off(f) = Int(fieldoffset(T, findfirst(==(f), fieldnames(T))))
+        calls = _CuptiCalls()
+        _CUPTI_STATE[] = _CuptiState(calls, want, query, UInt32(K(:CUPTI_API_ENTER)), UInt32(K(:CUPTI_API_EXIT)),
+                                     off(:callbackSite), off(:correlationId))
+        ids = UInt32[id for id in UInt32(1):UInt32(n) if want[id] || query[id]]
         kinds = (kernel = K(:CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL), copy = K(:CUPTI_ACTIVITY_KIND_MEMCPY),
                  set = K(:CUPTI_ACTIVITY_KIND_MEMSET))
         sync = getproperty(m, :synchronize)
-        ccfg = il(K(:CallbackConfig), cb, [drv])
         acfg = il(K(:ActivityConfig), collect(values(kinds)))
-        il(K(:enable!), () -> il(K(:enable!), () -> il(sync), acfg), ccfg)
+        cx = (; CU, calls, names, kinds, sync, acfg, drv, ids)
+        _with_callbacks(() -> il(K(:enable!), () -> il(sync), acfg), cx)
         il(K(:process), (ctx, sid, r) -> nothing, acfg)
         _clear!(calls)
-        return (; CU, calls, names, kinds, sync, ccfg, acfg)
+        return cx
     catch e
         return "CUPTI: " * first(sprint(showerror, e), 300)
     end
 end
 
-function _with_cupti(f, out::Dict{String,Any}, cx, t0::Integer)
+# `restart!` starts the run's clock and returns its start (`time_ns()`), called once CUPTI is running.
+function _with_cupti(f, out::Dict{String,Any}, cx, restart!)
     cx isa AbstractString && (out["error"] = cx; return f())
     il = Base.invokelatest
     K(k) = il(getproperty, cx.CU, k)
@@ -450,6 +500,8 @@ function _with_cupti(f, out::Dict{String,Any}, cx, t0::Integer)
     val = Ref{Any}(nothing); started = Ref(false); finished = Ref(false)
     # When the cell returned. The profiler's own wait for the device, after it, is not the cell's.
     stop = Ref{Int64}(typemax(Int64))
+    t0 = Ref{Int64}(Int64(time_ns()))
+    asked = t0[]
     try
         il(cx.sync)
         ts = Ref{UInt64}(0); il(K(:cuptiGetTimestamp), ts); off = Int64(ts[]) - Int64(time_ns())
@@ -458,13 +510,15 @@ function _with_cupti(f, out::Dict{String,Any}, cx, t0::Integer)
         # keeps what it did on the GPU before it threw.
         out["__finish"] = () -> begin
             il(K(:process), (ctx, sid, r) -> (x = _cupti_record(r, cx.kinds); x === nothing || push!(recs, x)), cx.acfg)
-            _cupti_summary!(out, cx.calls, cx.names, recs, off, Int64(t0); stop = stop[])
+            _cupti_summary!(out, cx.calls, cx.names, recs, off, t0[]; stop = stop[])
             out["callbacks"] = cx.calls.ncalls[]
             out["callback_ms"] = round(cx.calls.cost[] / 1e6; digits = 3)
             out["source"] = "cupti"
         end
         body = () -> begin
             started[] = true
+            t0[] = restart!()
+            out["setup_ms"] = round((t0[] - asked) / 1e6; digits = 3)
             try
                 val[] = f()
             finally
@@ -474,7 +528,7 @@ function _with_cupti(f, out::Dict{String,Any}, cx, t0::Integer)
             il(cx.sync)                  # every launch's activity is in before collection ends
             nothing
         end
-        il(K(:enable!), () -> il(K(:enable!), body, cx.acfg), cx.ccfg)
+        _with_callbacks(() -> il(K(:enable!), body, cx.acfg), cx)
     catch e
         started[] && !finished[] && rethrow()
         delete!(out, "__finish")
@@ -1071,7 +1125,7 @@ its waiting is time like any other.
 """
 function _profile_build(cid::String, task::UInt, facts; error = nothing, others::Set{UInt} = Set{UInt}(),
                         marks::Vector{Tuple{Int,Int}} = Tuple{Int,Int}[])
-    wall = facts.opts.mode in ("wall", "gpu")
+    wall = facts.opts.mode == "wall"
     data = Profile.fetch(include_meta = true, limitwarn = false)   # a full buffer is reported as `buffer_full`
     lidict = Profile.getdict(data)
     cellfile = "cell:" * cid
@@ -1087,6 +1141,12 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
     samples = _profile_samples(data)
     # The run's span on the sampler's clock, from every sample (idle ones too), for the timeline.
     cspan = isempty(samples) ? (UInt(0), UInt(0)) : extrema(s -> s.clock, samples)
+    # How often the sampler came round: each tick samples every thread in turn, so the thread
+    # sampled most often was sampled once a tick. With many threads a tick takes longer than the
+    # interval asked for.
+    pert = Dict{UInt,Int}()
+    for s in samples; pert[s.thread] = get(pert, s.thread, 0) + 1; end
+    ticks = isempty(pert) ? 0 : maximum(values(pert))
     for s in samples
         while mi < length(marks) && marks[mi + 1][1] < first(s.ips); mi += 1; end
         stmt0 = mi == 0 ? 0 : marks[mi][1]
@@ -1174,6 +1234,7 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
     r["compile_ms"] = kept > 0 ? round(facts.ms * cs / kept; digits = 1) : 0.0
     r["compile_ms_process"] = round(facts.compile_ms; digits = 1)
     r["dropped"] = dropped; r["threads"] = length(threads)
+    r["ticks"] = ticks; r["sampled_threads"] = length(pert)
     r["buffer_full"] = try; Profile.is_buffer_full(); catch; false; end
     r["stalls"], r["stalled_ms"] = _stalls(samples, cspan, facts.ms)
     r["timeline"] = _timeline(tl_thread, tl_clock, tl_node, tree.map, facts.ms, facts.opts.delay_ms, cspan;
