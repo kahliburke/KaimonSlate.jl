@@ -103,7 +103,9 @@ function _profiled(f, cid::AbstractString; mod::Union{Module,Nothing} = nothing)
         traced = Dict{String,Any}()
         # `clock` reads the sampler's clock beside `time_ns()` at the start and now: the samples go on the
         # same clock as everything else timed from `t0` (the GPU's work, for one).
-        facts() = (; opts = o, ms = (time_ns() - t0) / 1e6, clock = (cy0, Int64(t0), _cycles(), Int64(time_ns())),
+        # A GPU-mode run ends when the cell returns, before the profiler waits for the device.
+        facts() = (; opts = o, ms = (something(pop!(gpu, "__stop", nothing), Int64(time_ns())) - Int64(t0)) / 1e6,
+                     clock = (cy0, Int64(t0), _cycles(), Int64(time_ns())),
                      compile_ms = (Base.cumulative_compile_time_ns()[1] - c0) / 1e6,
                      gc_ms = (Base.gc_num().total_time - g0) / 1e6)
         marks = Tuple{Int,Int}[]
@@ -307,6 +309,12 @@ end
 # The driver calls whose stacks are taken: what starts work on the device, moves or allocates memory,
 # or waits for the device.
 const _CUPTI_CALLS = r"^cu(Launch|Memcpy|Memset|MemAlloc|MemFree|MemHostAlloc|StreamSynchronize|CtxSynchronize|EventSynchronize|StreamWaitEvent)"
+# Asking whether the device is done. CUDA.jl's `synchronize` asks in a loop on the caller's thread
+# before it hands the wait to a thread of its own, so a run of these, kept as one call, is where a
+# wait began and on whose stack.
+const _CUPTI_QUERIES = r"^cu(StreamQuery|EventQuery)"
+# Queries further apart than this are separate runs.
+const _QUERY_GAP_NS = 1_000_000
 
 # One recorded driver call, kernel or copy: when it started (`time_ns()`), what, and how long.
 struct _GpuEvent
@@ -320,7 +328,9 @@ end
 # What the callback collects, per driver call it takes a stack for, in call order: its correlation
 # id, callback id, entry time and stack id, and its exit time by correlation id. Times are
 # `time_ns()`. A loop makes the same call from the same place over and over, so each distinct stack
-# is kept once (`stacks`), found again by a fingerprint of its return addresses (`ids`).
+# is kept once (`stacks`), found again by a fingerprint of its return addresses (`ids`). `query` is
+# the correlation id of the run of queries in progress (0 for none) and `qend` when its last query
+# returned; `cost` is the time spent in the callback, all calls counted.
 struct _CuptiCalls
     lock::Threads.SpinLock
     corr::Vector{UInt32}
@@ -330,12 +340,18 @@ struct _CuptiCalls
     stacks::Vector{Any}
     ids::Dict{UInt64,Int32}
     ends::Dict{UInt32,Int64}
+    query::Base.RefValue{UInt32}
+    qend::Base.RefValue{Int64}
+    cost::Threads.Atomic{Int64}
+    ncalls::Threads.Atomic{Int64}
 end
 _CuptiCalls() = _CuptiCalls(Threads.SpinLock(), UInt32[], UInt32[], Int64[], Int32[], Any[],
-                            Dict{UInt64,Int32}(), Dict{UInt32,Int64}())
+                            Dict{UInt64,Int32}(), Dict{UInt32,Int64}(), Ref(UInt32(0)), Ref(Int64(0)),
+                            Threads.Atomic{Int64}(0), Threads.Atomic{Int64}(0))
 
 function _clear!(c::_CuptiCalls)
     empty!(c.corr); empty!(c.cbid); empty!(c.t); empty!(c.sid); empty!(c.stacks); empty!(c.ids); empty!(c.ends)
+    c.query[] = 0; c.qend[] = 0; c.cost[] = 0; c.ncalls[] = 0
     return c
 end
 
@@ -383,20 +399,33 @@ function _cupti_prepare(m)
         _CUPTI_NAMES[] === nothing && (_CUPTI_NAMES[] = _cupti_names(CU, drv))
         names = _CUPTI_NAMES[]
         want = Set{UInt32}(id for (id, n) in names if occursin(_CUPTI_CALLS, n))
+        query = Set{UInt32}(id for (id, n) in names if occursin(_CUPTI_QUERIES, n))
         calls = _CuptiCalls()
+        push_call!(data, id, t, sid) = (push!(calls.corr, data.correlationId); push!(calls.cbid, UInt32(id));
+                                        push!(calls.t, t); push!(calls.sid, sid))
         cb = (domain, id, data) -> begin
-            UInt32(id) in want || return
-            if data.callbackSite == enter
-                t = Int64(time_ns())
-                sid = _record_stack!(calls)
-                lock(calls.lock)
-                push!(calls.corr, data.correlationId); push!(calls.cbid, UInt32(id))
-                push!(calls.t, t); push!(calls.sid, sid)
-                unlock(calls.lock)
-            elseif data.callbackSite == exit_
-                t = Int64(time_ns())
-                lock(calls.lock); calls.ends[data.correlationId] = t; unlock(calls.lock)
+            t = Int64(time_ns())
+            i = UInt32(id)
+            if i in want
+                if data.callbackSite == enter
+                    sid = _record_stack!(calls)
+                    lock(calls.lock); push_call!(data, i, t, sid); calls.query[] = 0; unlock(calls.lock)
+                elseif data.callbackSite == exit_
+                    lock(calls.lock); calls.ends[data.correlationId] = t; unlock(calls.lock)
+                end
+            elseif i in query
+                # A run of queries is one call: the first one's stack, until the last one returns.
+                if data.callbackSite == enter
+                    if calls.query[] == 0 || t - calls.qend[] > _QUERY_GAP_NS
+                        sid = _record_stack!(calls)
+                        lock(calls.lock); push_call!(data, i, t, sid); calls.query[] = data.correlationId; calls.qend[] = t
+                        unlock(calls.lock)
+                    end
+                elseif data.callbackSite == exit_ && calls.query[] != 0
+                    lock(calls.lock); calls.ends[calls.query[]] = t; calls.qend[] = t; unlock(calls.lock)
+                end
             end
+            Threads.atomic_add!(calls.cost, Int64(time_ns()) - t); Threads.atomic_add!(calls.ncalls, 1)
             return
         end
         kinds = (kernel = K(:CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL), copy = K(:CUPTI_ACTIVITY_KIND_MEMCPY),
@@ -419,6 +448,8 @@ function _with_cupti(f, out::Dict{String,Any}, cx, t0::Integer)
     K(k) = il(getproperty, cx.CU, k)
     recs = Tuple{Symbol,String,Int64,Int64,UInt32,Int,Int}[]
     val = Ref{Any}(nothing); started = Ref(false); finished = Ref(false)
+    # When the cell returned. The profiler's own wait for the device, after it, is not the cell's.
+    stop = Ref{Int64}(typemax(Int64))
     try
         il(cx.sync)
         ts = Ref{UInt64}(0); il(K(:cuptiGetTimestamp), ts); off = Int64(ts[]) - Int64(time_ns())
@@ -427,11 +458,19 @@ function _with_cupti(f, out::Dict{String,Any}, cx, t0::Integer)
         # keeps what it did on the GPU before it threw.
         out["__finish"] = () -> begin
             il(K(:process), (ctx, sid, r) -> (x = _cupti_record(r, cx.kinds); x === nothing || push!(recs, x)), cx.acfg)
-            _cupti_summary!(out, cx.calls, cx.names, recs, off, Int64(t0))
+            _cupti_summary!(out, cx.calls, cx.names, recs, off, Int64(t0); stop = stop[])
+            out["callbacks"] = cx.calls.ncalls[]
+            out["callback_ms"] = round(cx.calls.cost[] / 1e6; digits = 3)
             out["source"] = "cupti"
         end
         body = () -> begin
-            started[] = true; val[] = f(); finished[] = true
+            started[] = true
+            try
+                val[] = f()
+            finally
+                stop[] = Int64(time_ns()); out["__stop"] = stop[]
+            end
+            finished[] = true
             il(cx.sync)                  # every launch's activity is in before collection ends
             nothing
         end
@@ -521,60 +560,93 @@ end
     return h == 0 ? UInt64(1) : h
 end
 
-# The deepest notebook frame on a stack, each address looked up once: ("", 0) for a stack with none.
-# A frame-pointer chain holds return addresses, looked up one byte back so they land in the call;
-# a `backtrace()` already holds the calls.
-function _notebook_frame(bt, cache::Dict{Any,Tuple{String,Int}})
+# The deepest notebook frame on a stack and what it called there, each address looked up once:
+# (file, line, "func file:line") or ("", 0, "") for a stack with none. A frame-pointer chain holds
+# return addresses, looked up one byte back so they land in the call; a `backtrace()` already holds
+# the calls. An address looks up to its inlined frames innermost first, so the callee is the frame
+# before the notebook's, or the outermost one of the address before.
+function _notebook_frame(bt, cache::AbstractDict = Dict{Any,NTuple{4,Any}}())
+    callee = ""
     for ip in bt
         r = get!(cache, ip) do
             fr = Base.StackTraces.lookup(ip isa UInt64 ? Ptr{Cvoid}(ip - 1) : ip)
+            isempty(fr) && return ("", 0, "", "")
             k = findfirst(x -> startswith(_ffile(x), "cell:"), fr)
-            k === nothing ? ("", 0) : (_ffile(fr[k]), Int(fr[k].line))
+            k === nothing ? ("", 0, "", _frame_label(fr[end])) :
+                            (_ffile(fr[k]), Int(fr[k].line), k > 1 ? _frame_label(fr[k-1]) : "", "")
         end
-        isempty(r[1]) || return r
+        isempty(r[1]) || return (r[1], r[2], isempty(r[3]) ? callee : r[3])
+        callee = r[4]
     end
-    return ("", 0)
+    return ("", 0, "")
 end
+_frame_label(fr) = string(fr.func, " ", basename(_ffile(fr)), ":", fr.line)
 
-# Each correlation id's notebook line. A call made where no notebook frame is on the stack is CUDA.jl
-# waiting for a stream on a task of its own, on behalf of a line that is blocked until it returns:
-# that line's next call is the first one after it, so the wait takes the line of the next call that
-# has one (the previous one at the end of a run).
-function _cupti_lines(calls::_CuptiCalls; frame = _notebook_frame)
-    cache = Dict{Any,Tuple{String,Int}}()
+# Each recorded call's notebook line and what the line called there, by its own stack. A wait for
+# the device starts with a run of queries on the waiting line's own stack; the blocking call that
+# follows (on CUDA.jl's own thread when the device is not done yet, with no notebook frame) is part
+# of the same wait and takes its line. Any other call made where no notebook frame is on the stack
+# takes the line of the next call that has one, else the one before. Returns per call (in the order
+# of `keep`) its (file, line), callee and kind, and the waits.
+function _cupti_lines(calls::_CuptiCalls, names, keep = eachindex(calls.t); frame = _notebook_frame)
+    cache = Dict{Any,NTuple{4,Any}}()
     bystack = [frame(bt, cache) for bt in calls.stacks]
-    own = [bystack[s] for s in calls.sid]
+    n = length(keep)
+    own = [bystack[calls.sid[i]] for i in keep]
+    line = Tuple{String,Int}[(o[1], o[2]) for o in own]
+    via = String[length(o) > 2 ? o[3] : "" for o in own]
+    kind = Symbol[(x = get(names, calls.cbid[i], ""); occursin(_CUPTI_QUERIES, x) ? :query :
+                   occursin("Synchronize", x) ? :sync : startswith(x, "cuLaunch") ? :launch : :other) for i in keep]
+    waits = Vector{Int}[]           # each wait's calls, by position in `keep`
+    cur = 0
+    for j in 1:n
+        if kind[j] === :query || (kind[j] === :sync && cur == 0)
+            push!(waits, [j]); cur = length(waits)
+        elseif kind[j] === :sync
+            push!(waits[cur], j)
+            isempty(line[j][1]) && (line[j] = line[waits[cur][1]]; via[j] = via[waits[cur][1]])
+        else
+            cur = 0
+        end
+    end
     next = ("", 0)
-    for i in length(own):-1:1
-        isempty(own[i][1]) ? (own[i] = next) : (next = own[i])
+    for j in n:-1:1
+        isempty(line[j][1]) ? (line[j] = next) : (next = line[j])
     end
     last = ("", 0)
-    for i in eachindex(own)
-        isempty(own[i][1]) ? (own[i] = last) : (last = own[i])
+    for j in 1:n
+        isempty(line[j][1]) ? (line[j] = last) : (last = line[j])
     end
-    return Dict{UInt32,Tuple{String,Int}}(zip(calls.corr, own))
+    return (; line, via, kind, waits)
 end
 
-# The GPU's work for `out`: by name, by notebook line, and as a timeline on the run's clock (ms from
-# `t0`). The calls are on `time_ns()`; `off` takes CUPTI's timestamps there.
+# The GPU's work for `out`: by name, by notebook line, the waits for it, how busy it was, and a
+# timeline on the run's clock (ms from `t0`). The calls are on `time_ns()`; `off` takes CUPTI's
+# timestamps there. Calls from `stop` on are the profiler's, after the cell returned.
 function _cupti_summary!(out::Dict{String,Any}, calls::_CuptiCalls, names, recs, off::Int64, t0::Int64;
-                         at = _cupti_lines(calls))
+                         stop::Int64 = typemax(Int64), frame = _notebook_frame)
+    keep = findall(<(stop), calls.t)
+    L = _cupti_lines(calls, names, keep; frame)
     ev = _GpuEvent[]; files = String[]; lns = Int[]
     tl = Dict{String,Any}("names" => String[], "lines" => Any[], "gpu" => Any[], "calls" => Any[])
     nid = Dict{String,Int}(); lid = Dict{Tuple{String,Int},Int}()
     ni(n) = get!(() -> (push!(tl["names"], n); length(tl["names"])), nid, n)
     li(l) = isempty(l[1]) ? 0 : get!(() -> (push!(tl["lines"], [l[1], l[2]]); length(tl["lines"])), lid, l)
     ms(t) = round((t - t0) / 1e6; digits = 3)
-    for (c, id, a) in zip(calls.corr, calls.cbid, calls.t)
-        name = get(names, id, "cbid $id"); b = get(calls.ends, c, a); l = get(at, c, ("", 0))
+    at = Dict{UInt32,Tuple{String,Int}}()
+    te = Int64[]
+    for (j, i) in enumerate(keep)
+        c, id, a = calls.corr[i], calls.cbid[i], calls.t[i]
+        name = get(names, id, "cbid $id"); b = get(calls.ends, c, a); l = L.line[j]
+        at[c] = l; push!(te, b)
         push!(tl["calls"], Any[ms(a), ms(b), ni(name), li(l)])
         push!(ev, _GpuEvent(a, :api, name, b - a, 0)); push!(files, l[1]); push!(lns, l[2])
     end
-    dev = 0
+    dev = 0; last_end = typemin(Int64)
     tot = Dict{String,Vector{Float64}}()
     for (kind, name, a, b, corr, stream, bytes) in recs
         l = get(at, corr, ("", 0))
-        dev += b - a
+        dev += b - a; last_end = max(last_end, b - off)
         t = get!(() -> [0.0, 0.0], tot, name); t[1] += 1; t[2] += (b - a) / 1e6
         push!(tl["gpu"], Any[ms(a - off), ms(b - off), stream, ni(name), li(l)])
         push!(ev, _GpuEvent(a - off, kind, name, b - a, bytes)); push!(files, l[1]); push!(lns, l[2])
@@ -583,14 +655,67 @@ function _cupti_summary!(out::Dict{String,Any}, calls::_CuptiCalls, names, recs,
     out["kernels"] = [[n, c, round(t; digits = 3)] for (n, c, t) in Iterators.take(rows, 200)]
     out["device_ms"] = round(dev / 1e6; digits = 3)
     out["timeline"] = tl
-    return _gpu_lines!(out, ev, files, lns)
+    # A wait with no launch after it drains what the cell queued before it returned.
+    lastlaunch = maximum((calls.t[keep[j]] for j in eachindex(keep) if L.kind[j] === :launch); init = typemin(Int64))
+    waits = [(file = L.line[w[1]][1], line = L.line[w[1]][2], via = L.via[w[1]], at = calls.t[keep[w[1]]],
+              ns = maximum(te[j] for j in w) - calls.t[keep[w[1]]], drain = calls.t[keep[w[1]]] > lastlaunch)
+             for w in L.waits]
+    r3(x) = round(x; digits = 3)
+    out["wait"] = Dict{String,Any}(
+        "n" => count(w -> !w.drain, waits), "ms" => r3(sum((w.ns for w in waits if !w.drain); init = 0) / 1e6),
+        "drain_n" => count(w -> w.drain, waits), "drain_ms" => r3(sum((w.ns for w in waits if w.drain); init = 0) / 1e6),
+        # The device still working after the cell returned: what the profiler waited for.
+        "tail_ms" => stop == typemax(Int64) || last_end == typemin(Int64) ? 0.0 : r3(max(0, last_end - stop) / 1e6))
+    out["waits"] = [Any[ms(w.at), r3(w.ns / 1e6), w.file, w.line, w.via, w.drain]
+                    for w in Iterators.take(sort(waits; by = w -> -w.ns), 50)]
+    util = _gpu_util(recs, off, t0, at)
+    util === nothing || (out["util"] = util)
+    return _gpu_lines!(out, ev, files, lns, waits)
 end
 
-# Events summed by the notebook line each belongs to (`files`, `lines` alongside `ev`; "" for none).
-function _gpu_lines!(out::Dict{String,Any}, ev::Vector{_GpuEvent}, files::Vector{String}, lns::Vector{Int})
+# How busy the device was between its first piece of work and its last: the time something ran
+# (work on several streams at once counted once), the gaps between, binned by length, and the
+# longest gaps with what ran either side of them.
+const _GAP_BINS = ((5_000, "under 5 µs"), (20_000, "5–20 µs"), (100_000, "20–100 µs"), (1_000_000, "0.1–1 ms"),
+                   (typemax(Int64), "over 1 ms"))
+
+function _gpu_util(recs, off::Int64, t0::Int64, at)
+    isempty(recs) && return nothing
+    iv = sort!([(a - off, b - off, name, corr) for (_, name, a, b, corr, _, _) in recs]; by = first)
+    busy = 0; gaps = Tuple{Int64,Int64,Int,Int}[]       # (length, start, before, after) as record indices
+    s, e, ei = iv[1][1], iv[1][2], 1
+    for k in 2:length(iv)
+        a, b = iv[k][1], iv[k][2]
+        if a > e
+            busy += e - s; push!(gaps, (a - e, e, ei, k)); s = a
+        end
+        b > e && (e = b; ei = k)
+    end
+    busy += e - s
+    span = e - iv[1][1]
+    hist = [Any[label, 0, 0.0] for (_, label) in _GAP_BINS]
+    for g in gaps
+        h = hist[findfirst(x -> g[1] < x[1], _GAP_BINS)]; h[2] += 1; h[3] += g[1] / 1e6
+    end
+    r3(x) = round(x; digits = 3)
+    foreach(h -> h[3] = r3(h[3]), hist)
+    line(k) = (l = get(at, iv[k][4], ("", 0)); Any[l[1], l[2]])
+    longest = [Any[r3((g[2] - t0) / 1e6), r3(g[1] / 1e6), iv[g[3]][3], iv[g[4]][3], line(g[4])]
+               for g in Iterators.take(sort!(gaps; by = g -> -g[1]), 8)]
+    return Dict{String,Any}("first_ms" => r3((iv[1][1] - t0) / 1e6), "span_ms" => r3(span / 1e6),
+                            "busy_ms" => r3(busy / 1e6), "idle_ms" => r3((span - busy) / 1e6),
+                            "util" => span > 0 ? round(busy / span; digits = 4) : 1.0,
+                            "gaps" => hist, "ngaps" => length(gaps), "longest" => longest)
+end
+
+# Events summed by the notebook line each belongs to (`files`, `lines` alongside `ev`; "" for none),
+# with the waits for the device that started on each: inside the cell's code (`sync`), or draining
+# its work at the end (`drain`), and what the line called that waited.
+function _gpu_lines!(out::Dict{String,Any}, ev::Vector{_GpuEvent}, files::Vector{String}, lns::Vector{Int}, waits = ())
     acc = Dict{Tuple{String,Int},Dict{String,Any}}()
     entry(file, ln) = get!(acc, (file, ln)) do
-        Dict{String,Any}("file" => file, "line" => ln, "api_ms" => 0.0, "sync" => [0, 0.0], "alloc" => [0, 0.0],
+        Dict{String,Any}("file" => file, "line" => ln, "api_ms" => 0.0, "sync" => [0, 0.0], "drain" => [0, 0.0],
+                         "via" => Dict{String,Float64}(), "alloc" => [0, 0.0],
                          "launches" => 0, "kernel_ms" => 0.0, "copy_ms" => 0.0, "copy_bytes" => 0,
                          "api" => Dict{String,Vector{Float64}}(), "gpu" => Dict{String,Vector{Float64}}())
     end
@@ -599,13 +724,17 @@ function _gpu_lines!(out::Dict{String,Any}, ev::Vector{_GpuEvent}, files::Vector
         if e.kind === :api
             d["api_ms"] += ms
             a = get!(() -> [0.0, 0.0], d["api"], e.name); a[1] += 1; a[2] += ms
-            occursin("Synchronize", e.name) && (d["sync"][1] += 1; d["sync"][2] += ms)
             occursin("MemAlloc", e.name) && (d["alloc"][1] += 1; d["alloc"][2] += ms)
-            occursin("Launch", e.name) && (d["launches"] += 1)
+            startswith(e.name, "cuLaunch") && (d["launches"] += 1)
         else
             e.kind === :copy ? (d["copy_ms"] += ms; d["copy_bytes"] += e.bytes) : (d["kernel_ms"] += ms)
             a = get!(() -> [0.0, 0.0], d["gpu"], e.name); a[1] += 1; a[2] += ms
         end
+    end
+    for w in waits
+        d = entry(w.file, w.line); k = w.drain ? "drain" : "sync"
+        d[k][1] += 1; d[k][2] += w.ns / 1e6
+        isempty(w.via) || (d["via"][w.via] = get(d["via"], w.via, 0.0) + w.ns)
     end
     r3(x) = round(x; digits = 3)
     for d in values(acc)
@@ -613,11 +742,12 @@ function _gpu_lines!(out::Dict{String,Any}, ev::Vector{_GpuEvent}, files::Vector
             rows = sort!([(n, Int(a[1]), a[2]) for (n, a) in d[k]]; by = x -> -x[3])
             d[k] = [[n, c, r3(t)] for (n, c, t) in Iterators.take(rows, 20)]
         end
-        d["sync"] = Any[Int(d["sync"][1]), r3(d["sync"][2])]; d["alloc"] = Any[Int(d["alloc"][1]), r3(d["alloc"][2])]
+        d["via"] = isempty(d["via"]) ? "" : first(argmax(last, d["via"]))
+        for k in ("sync", "drain", "alloc"); d[k] = Any[Int(d[k][1]), r3(d[k][2])]; end
         for k in ("api_ms", "kernel_ms", "copy_ms"); d[k] = r3(d[k]); end
     end
     # Heaviest on the GPU first; work no notebook line made (before the first, or CUDA.jl's own) last.
-    out["lines"] = sort!(collect(values(acc)); by = d -> (isempty(d["file"]), -(d["kernel_ms"] + d["copy_ms"] + d["sync"][2])))
+    out["lines"] = sort!(collect(values(acc)); by = d -> (isempty(d["file"]), -(d["kernel_ms"] + d["copy_ms"] + d["sync"][2] + d["drain"][2])))
     return out
 end
 
@@ -761,10 +891,12 @@ mutable struct _Acc
     seen::Set{Tuple{Int,Int}}
     path::Vector{Int}; pathfn::Vector{Symbol}   # the line nodes the last path went through
     alloc::Bool                                 # stacks of allocations, which end in the allocator
+    waiting::Int; waiting_gpu::Int              # weight of the paths that ended waiting, and on the GPU
 end
 _Acc(t, cellfile; alloc = false) = _Acc(t, cellfile, Dict{Tuple{Int,Int},Vector{Int}}(), Dict{String,String}(),
-                                        Set{Tuple{Int,Int}}(), Int[], Symbol[], alloc)
-_lrow(a::_Acc, key) = get!(() -> zeros(Int, 5), a.lines, key)
+                                        Set{Tuple{Int,Int}}(), Int[], Symbol[], alloc, 0, 0)
+# (file, line) → [incl, self, dispatch, gc, compile, waiting]
+_lrow(a::_Acc, key) = get!(() -> zeros(Int, 6), a.lines, key)
 
 """
     _add!(acc, frames, start, cur, w) -> Int
@@ -808,6 +940,12 @@ function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
         end
         pkg = _frame_pkg(fr, a.cellfile)
         haskey(a.pkgfile, pkg) || (a.pkgfile[pkg] = _ffile(fr))
+        _wrapper_frame(fr, pkg) && continue
+        # Waiting for the device: the path ends at CUDA.jl's call that waits, however it waits.
+        if fr.func in _GPU_WAIT_FNS
+            cur = _node!(t, cur, "", 0, "waiting on the GPU", "", _K_SYNTH); t.total[cur] += w
+            break
+        end
         # A task switched out in the scheduler is waiting (a wall-time sample of one): the path
         # ends where the scheduler's own frames begin, under the call that waits.
         if pkg == "Base" && _parked_tail(frames, j)
@@ -828,9 +966,32 @@ function _add!(a::_Acc, frames, start::Int, cur::Int, w::Int)
         leaf = key
     end
     t.self[cur] += w
-    leaf[1] > 0 && (_lrow(a, leaf)[2] += w)
+    if t.kind[cur] == _K_SYNTH && startswith(t.strings[t.func[cur]], "waiting")
+        # Waiting is no line's own time: each line on the path is marked as having waited instead.
+        a.waiting += w
+        t.strings[t.func[cur]] == "waiting on the GPU" && (a.waiting_gpu += w)
+        for key in a.seen; _lrow(a, key)[6] += w; end
+    else
+        leaf[1] > 0 && (_lrow(a, leaf)[2] += w)
+    end
     return cur
 end
+
+# CUDA.jl's calls that wait for the device: blocking in the driver, polling it, or handing the wait
+# to a thread of its own and sleeping until it answers.
+const _GPU_WAIT_FNS = (:nonblocking_synchronize, :spinning_synchronization, :cuStreamSynchronize, :cuEventSynchronize,
+                       :cuCtxSynchronize, :unchecked_cuStreamSynchronize, :unchecked_cuEventSynchronize,
+                       :unchecked_cuCtxSynchronize)
+
+# Threads a library keeps to do its waiting for it. CUDA.jl's synchronization threads are idle, or
+# blocked in the driver on a wait the task that asked shows as its own.
+const _HELPER_LOOPS = (:synchronization_worker,)
+
+# A frame that only passes the call through: CUDA.jl's library wrappers check each call's result and
+# retry it after freeing memory if the device ran out (`retry_reclaim`). What the retry does, when it
+# happens, shows under the call.
+_wrapper_frame(fr, pkg) = startswith(lowercase(pkg), "cu") &&
+    (fr.func === :retry_reclaim || (fr.func === :check && occursin(r"lib\w+\.jl$", _ffile(fr))))
 
 const _PARKED_FNS = (:wait, :_wait, :_wait2, :try_yieldto, :yieldto, :poptask, :wait_forever, :task_get_next)
 # From `j` on, nothing but the scheduler's waiting and the runtime under it. A parked task's stack
@@ -975,6 +1136,7 @@ function _profile_build(cid::String, task::UInt, facts; error = nothing, others:
         else
             any(fr -> !fr.from_c && _frame_pkg(fr, cellfile) in _INFRA_PKGS, frames) &&
                 (dropped["worker"] += 1; continue)
+            any(fr -> fr.func in _HELPER_LOOPS, frames) && (dropped["idle"] += 1; continue)
             _other_cells(frames, cellfile) && _parked(frames) && (dropped["other cells"] += 1; continue)
             # From the first frame of real work: past the task entry and Base's scheduling. A thread
             # with nothing else on it is waiting for work.
@@ -1082,7 +1244,8 @@ function _profile_result(a::_Acc, cid::String, facts, total::Int; error = nothin
             "file" => [k[1] for k in keys(L)], "line" => [k[2] for k in keys(L)],
             "incl" => [v[1] for v in values(L)], "self" => [v[2] for v in values(L)],
             "dispatch" => [v[3] for v in values(L)], "gc" => [v[4] for v in values(L)],
-            "compile" => [v[5] for v in values(L)])), tree
+            "compile" => [v[5] for v in values(L)], "wait" => [v[6] for v in values(L)]),
+        "waiting" => a.waiting, "waiting_gpu" => a.waiting_gpu), tree
 end
 
 # Pauses of half a second or more with no sample from any thread. On Linux the sampler signals

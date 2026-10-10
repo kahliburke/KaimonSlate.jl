@@ -176,6 +176,12 @@ function _collect_requested_profile!(nb::LiveNotebook, cell, kernel, side::Abstr
     end
     payload = Dict{String,Any}("kind" => "result", "cell" => String(cell.id), "side" => String(side),
                                "source" => String(src), "profile" => r, "hub_at" => time())
+    # The cell's last run without the profiler, to read the profiled time against.
+    plain = lock(_CELL_STATS_LOCK) do
+        s = get(get(_CELL_STATS, nb.id, Dict{String,CellStats}()), String(cell.id), nothing)
+        s === nothing || s.plain_ts == 0 ? nothing : Dict{String,Any}("ms" => s.plain_ms, "at" => s.plain_ts)
+    end
+    plain === nothing || (payload["plain"] = plain)
     lock(_PROF_HUB_LOCK) do; _PROF_LAST[(nb.id, String(cell.id))] = payload; end
     id = try; _profile_save!(nb, cell.id, payload); catch e; @warn "slate: could not keep a profile" cell = cell.id exception = e; ""; end
     payload["id"] = id
@@ -298,10 +304,13 @@ function last_profile(nb::LiveNotebook, cid::AbstractString)
     return p
 end
 
-"The profile of `cid` before the latest, or `nothing`."
+"The profile of `cid` before the latest taken the same way (mode and side), or `nothing`."
 function previous_profile(nb::LiveNotebook, cid::AbstractString)
     h = profile_history(nb, cid)
-    return length(h) < 2 ? nothing : profile_load(nb, cid, String(h[2]["id"]))
+    length(h) < 2 && return nothing
+    same(e) = get(e, "mode", "cpu") == get(h[1], "mode", "cpu") && get(e, "side", "") == get(h[1], "side", "")
+    i = findnext(same, h, 2)
+    return i === nothing ? nothing : profile_load(nb, cid, String(h[i]["id"]))
 end
 
 # Only a file some profile of the cell went through is read: the route takes any path otherwise.
@@ -411,6 +420,17 @@ end
 
 _ppct(x) = x >= 0.1 ? string(round(Int, 100x), "%") : string(round(100x; digits = 1), "%")
 _pms(x) = x >= 1000 ? string(round(x / 1000; digits = 2), " s") : string(round(Int, x), " ms")
+_pms_fine(x) = x >= 10 ? _pms(x) : x >= 1 ? string(round(x; sigdigits = 3), " ms") : string(round(Int, 1000x), " µs")
+# When a run was, by the clock: the time alone for today.
+function _pwhen(at::Real)
+    d = Dates.unix2datetime(at) + Dates.Minute(round(Int, Dates.value(Dates.now() - Dates.now(Dates.UTC)) / 60_000))
+    return Dates.format(d, Dates.Date(d) == Dates.today() ? "HH:MM:SS" : "yyyy-mm-dd HH:MM")
+end
+# `a` against `b`: "+2%", "−5%", or "1.8× as long".
+_pratio(a::Real, b::Real) = b <= 0 ? "" : (r = a / b; r >= 2 ? string(round(r; digits = 1), "× as long") :
+                                            string(r >= 1 ? "+" : "−", round(Int, 100abs(r - 1)), "%"))
+# Fewer samples than this rank lines by noise.
+const _PROF_FEW = 100
 # A file as the specialist should name it back: a cell's as it is, anything else by its last two parts.
 _pshort(f::AbstractString) = startswith(f, "cell:") || isempty(f) ? String(f) : join(last(splitpath(f), 2), "/")
 function _pmarks(d, g, c, T)
@@ -436,6 +456,10 @@ function _cell_line_text(nb::LiveNotebook, file::AbstractString, line::Integer, 
     return 1 <= line <= length(ls) ? strip(ls[line]) : ""
 end
 
+# A notebook line as the GPU section names it: "line 12  <its text>", or "other:12  …" in another cell.
+_gpu_line_label(nb, cid, P, file::AbstractString, ln::Integer) =
+    (file == "cell:" * String(cid) ? "line $ln" : "$(file[6:end]):$ln") * "  " * _cell_line_text(nb, file, ln, P)
+
 """
     profile_summary_text(nb, cid) -> String
 
@@ -453,23 +477,41 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
             bytes ? string("about ", Base.format_bytes(round(Int, P["samples"] / get(P, "alloc_rate", 1.0))),
                            " allocated (from ", get(P, "allocs", 0), " recorded, ", round(100 * get(P, "alloc_rate", 1.0); sigdigits = 2), "% of them)") :
                     string(P["samples"], " samples", get(P, "threads", 0) > 1 ? " on $(P["threads"]) threads" : ""),
+            bytes ? "" : string(", one every ", _pms_fine(get(P, "delay_ms", 1.0))),
             ", compiling ", _pms(P["compile_ms"]), ", GC ", _pms(P["gc_ms"]), ".")
+    !bytes && P["samples"] < _PROF_FEW &&
+        println(io, "Only ", P["samples"], " samples: too few to rank lines by. Profile a longer run (more iterations), or sample more often.")
     get(P, "buffer_full", false) === true && println(io, "The sample buffer filled: the end of the run is missing. Profile again with a larger buffer or a longer interval.")
     P["error"] === nothing || println(io, "The run threw: ", first(split(String(P["error"]), '\n')))
+    W = bytes ? 0 : get(P, "waiting", 0)
+    if W > 0
+        wg = get(P, "waiting_gpu", 0)
+        println(io, "Waiting: ", _ppct(W / T), " of the samples", wg > 0 ? string(" (", _ppct(wg / T), " on the GPU)") : "",
+                ". Lines below are ranked over the other ", _ppct((T - W) / T), ".")
+    end
+    pl = get(p, "plain", nothing)
+    if pl isa AbstractDict && pl["ms"] > 0
+        println(io, "Without the profiler the cell last took ", _pms(pl["ms"]), " (", _pwhen(pl["at"]), "); profiled, ",
+                _pms(P["duration_ms"]), " (", _pratio(P["duration_ms"], pl["ms"]), ").")
+    end
     prev = previous_profile(nb, cid)
     if prev !== nothing
         Q = prev["profile"]
-        println(io, "The run before took ", _pms(Q["duration_ms"]), " (", round(P["duration_ms"] / max(1e-9, Q["duration_ms"]); digits = 2), "× now).")
+        println(io, "The ", get(Q, "mode", "cpu"), " profile before this (", _pwhen(Q["at"]), ") took ", _pms(Q["duration_ms"]),
+                " (this run ", _pratio(P["duration_ms"], Q["duration_ms"]), ").")
     end
     L = P["lines"]; S = P["strings"]
-    rows = [(file = String(S[L["file"][i]]), line = L["line"][i], incl = L["incl"][i], self = L["self"][i],
-             d = L["dispatch"][i], g = L["gc"][i], c = L["compile"][i]) for i in eachindex(L["file"])]
+    wcol = get(L, "wait", nothing)
+    rows = [(file = String(S[L["file"][i]]), line = L["line"][i], incl = L["incl"][i] - (wcol === nothing ? 0 : wcol[i]),
+             self = L["self"][i], d = L["dispatch"][i], g = L["gc"][i], c = L["compile"][i]) for i in eachindex(L["file"])]
     sort!(rows; by = r -> -r.self)
-    println(io, bytes ? "\nLines by what they allocate themselves (self / total):" : "\nLines by their own time (self / total):")
+    TL = max(1, T - W)
+    println(io, bytes ? "\nLines by what they allocate themselves (self / total):" :
+                W > 0 ? "\nLines by their own time, not counting waiting (self / total):" : "\nLines by their own time (self / total):")
     for r in Iterators.take(filter(r -> r.self > 0, rows), 12)
-        println(io, "  ", lpad(_ppct(r.self / T), 6), " / ", lpad(_ppct(r.incl / T), 5), "  ",
+        println(io, "  ", lpad(_ppct(r.self / TL), 6), " / ", lpad(_ppct(r.incl / TL), 5), "  ",
                 _pshort(r.file), ":", r.line, (t = _cell_line_text(nb, r.file, r.line, p); isempty(t) ? "" : "  " * t),
-                _pmarks(r.d, r.g, r.c, T))
+                _pmarks(r.d, r.g, r.c, TL))
     end
     if haskey(P, "types") && !isempty(P["types"])
         println(io, "\nWhat was allocated (type, count, bytes):")
@@ -492,6 +534,26 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
     if haskey(P, "gpu")
         g = P["gpu"]
         haskey(g, "error") && println(io, "\nGPU: ", g["error"])
+        u = get(g, "util", nothing)
+        if u isa AbstractDict
+            println(io, "\nThe GPU was busy ", _ppct(u["util"]), " of the ", _pms(u["span_ms"]), " from its first work to its last (",
+                    _pms(u["busy_ms"]), " busy, ", _pms(u["idle_ms"]), " idle in ", u["ngaps"], " gaps); its first work started ",
+                    _pms(u["first_ms"]), " into the run.")
+            hs = [string(h[2], " ", h[1], " (", _pms_fine(h[3]), ")") for h in u["gaps"] if h[2] > 0]
+            isempty(hs) || println(io, "  Gaps: ", join(hs, ", "), ".")
+            for (at, ms, before, after, l) in Iterators.take(u["longest"], 3)
+                ms >= 0.1 || break
+                println(io, "  ", lpad(_pms_fine(ms), 8), " idle at ", _pms(at), ", after ", before, ", before ", after,
+                        isempty(l[1]) ? "" : " (" * _gpu_line_label(nb, cid, P, String(l[1]), l[2]) * ")")
+            end
+        end
+        w = get(g, "wait", nothing)
+        if w isa AbstractDict
+            println(io, "\nWaiting for the GPU inside the cell's code: ", w["n"] == 0 ? "none" : string(w["n"], " waits, ", _pms_fine(w["ms"])),
+                    w["drain_n"] > 0 ? string(". Draining its work at the end: ", w["drain_n"] == 1 ? "1 wait" : string(w["drain_n"], " waits"), ", ", _pms_fine(w["drain_ms"])) : "",
+                    w["tail_ms"] > 0 ? string(". Still running after the cell returned: ", _pms_fine(w["tail_ms"])) : "", ".")
+        end
+        haskey(g, "callbacks") && println(io, "CUPTI saw ", g["callbacks"], " driver calls; its callback took ", _pms_fine(g["callback_ms"]), " of the run.")
         if haskey(g, "lines")
             println(io, "\nOn the GPU, by notebook line (each CUDA call placed by its own stack):")
             for e in g["lines"]
@@ -500,14 +562,15 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
                 gt = e["kernel_ms"] + e["copy_ms"]
                 gt > 0 && push!(what, _pms(gt) * " on the GPU")
                 e["launches"] > 0 && push!(what, string(e["launches"], " launches"))
-                e["sync"][1] > 0 && push!(what, string(e["sync"][1], " waits for the GPU, ", _pms(e["sync"][2])))
+                via = isempty(get(e, "via", "")) ? "" : " in " * e["via"]
+                e["sync"][1] > 0 && push!(what, string(e["sync"][1], " waits for the GPU", via, ", ", _pms_fine(e["sync"][2])))
+                d = get(e, "drain", [0, 0.0])
+                d[1] > 0 && push!(what, string("draining at the end", e["sync"][1] > 0 ? "" : via, ", ", _pms_fine(d[2])))
                 e["alloc"][1] > 0 && push!(what, string(e["alloc"][1], " allocations, ", _pms(e["alloc"][2])))
                 e["copy_bytes"] > 0 && push!(what, string(Base.format_bytes(e["copy_bytes"]), " copied"))
                 isempty(what) && continue
                 file = String(e["file"])
-                where_ = ln <= 0 || isempty(file) ? "no notebook line on the stack" :
-                         (file == "cell:" * String(cid) ? "line $ln" : "$(file[6:end]):$ln") * "  " *
-                         _cell_line_text(nb, file, ln, P)
+                where_ = ln <= 0 || isempty(file) ? "no notebook line on the stack" : _gpu_line_label(nb, cid, P, file, ln)
                 println(io, "  ", where_, "\n      ", join(what, "; "))
                 for (n, c, t) in Iterators.take(e["gpu"], 3)
                     println(io, "      ", lpad(_pms(t), 8), "  ×", c, "  ", n)

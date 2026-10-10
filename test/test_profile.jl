@@ -162,6 +162,23 @@ end
         p = RE.profile_result("pw")
         nd = nodes(p)
         @test p["mode"] == "wall" && any(i -> nd["parent"][i] == 1 && nd["line"][i] == 1, eachindex(nd["parent"]))
+        # The waiting is counted apart, and on the line that waited rather than as its own time.
+        @test p["waiting"] > 0 && sum(p["lines"]["wait"]) > 0
+    end
+
+    @testset "waiting on the GPU is its own node, and library wrapper frames pass through" begin
+        sf(f, file, l = 1) = Base.StackTraces.StackFrame(Symbol(f), Symbol(file), l, nothing, false, false, 0)
+        cu(f, file, l = 1) = sf(f, "/d/packages/CUDACore/abc/lib/cudadrv/" * file, l)
+        ff(f, l) = sf(f, "/d/packages/cuFFT/abc/src/libcufft.jl", l)
+        t = RE._ProfTree(); a = RE._Acc(t, "cell:g")
+        root = RE._node!(t, 0, "cell:g", 0, "cell g", "cell", RE._K_SYNTH)
+        leaf = RE._add!(a, [sf("top", "cell:g", 3), cu("synchronize", "events.jl", 130),
+                            cu("nonblocking_synchronize", "synchronization.jl"), sf("put!", "./channels.jl")], 1, root, 1)
+        @test t.strings[t.func[leaf]] == "waiting on the GPU" && a.waiting == 1 && a.waiting_gpu == 1
+        @test all(v -> v[2] == 0 && v[6] == 1, values(a.lines))
+        leaf2 = RE._add!(a, [sf("top", "cell:g", 4), ff("cufftXtExec", 9), ff("check", 21),
+                             cu("retry_reclaim", "memory.jl", 506), ff("#cufftXtExec##0", 9)], 1, root, 1)
+        @test t.strings[t.func[t.parent[leaf2]]] == "cufftXtExec"
     end
 
     @testset "a profile exports to speedscope and pprof" begin
@@ -269,40 +286,54 @@ end
         m = Module(:CuptiStack)
         Core.eval(m, Meta.parseall("f() = backtrace()\n"; filename = "cell:k1"))
         bt = Base.invokelatest(m.f)
-        @test RE._notebook_frame(bt, Dict{Any,Tuple{String,Int}}()) == ("cell:k1", 1)
-        @test RE._notebook_frame(backtrace(), Dict{Any,Tuple{String,Int}}()) == ("", 0)
-        # The frame-pointer chain finds the same line, from the same place.
+        @test RE._notebook_frame(bt)[1:2] == ("cell:k1", 1)
+        @test RE._notebook_frame(backtrace()) == ("", 0, "")
+        # The frame-pointer chain finds the same line, from the same place, and what the line called.
         Core.eval(m, Meta.parseall("g(h) = h()\n"; filename = "cell:k2"))
         chain = UInt64[]
         h = Base.invokelatest(m.g, () -> RE._fp_walk(chain))
-        @test h != 0 && RE._notebook_frame(chain, Dict{Any,Tuple{String,Int}}()) == ("cell:k2", 1)
+        nf = RE._notebook_frame(chain)
+        @test h != 0 && nf[1:2] == ("cell:k2", 1) && !isempty(nf[3])
         # Recording the same call site twice keeps one stack.
         calls0 = RE._CuptiCalls()
         site() = RE._record_stack!(calls0)
         ids = Int32[]
         for _ in 1:3; push!(ids, Base.invokelatest(m.g, site)); end
         @test allequal(ids) && length(calls0.stacks) == 1
-        # Stacks stand in as symbols: a call with no notebook frame (a sync on CUDA.jl's own task)
-        # takes the line of the call after it, the line that waited for it.
+        # Stacks stand in as symbols. A wait starts with queries on the waiting line's stack; the
+        # blocking call on CUDA.jl's own thread (no notebook frame) is part of it. A wait with no
+        # launch after it drains the cell's work. The profiler's own call after `stop` is left out.
         ms = 1_000_000
         calls = RE._CuptiCalls()
-        append!(calls.corr, UInt32[1, 2, 3]); append!(calls.cbid, UInt32[10, 11, 12])
-        append!(calls.t, Int64[10ms, 62ms, 99ms]); append!(calls.sid, Int32[1, 2, 3]); append!(calls.stacks, Any[:launch, :sync, :copy])
-        calls.ends[1] = 11ms; calls.ends[2] = 100ms; calls.ends[3] = 103ms
-        frame(bt, _) = bt === :launch ? ("cell:draft", 3) : bt === :copy ? ("cell:draft", 15) : ("", 0)
-        at = RE._cupti_lines(calls; frame = frame)
-        @test at[1] == ("cell:draft", 3) && at[2] == ("cell:draft", 15) && at[3] == ("cell:draft", 15)
-        # Kernels and copies join their launching call by correlation id; times are ms on the run's clock.
-        names = Dict(UInt32(10) => "cuLaunchKernel", UInt32(11) => "cuStreamSynchronize", UInt32(12) => "cuMemcpyDtoHAsync_v2")
-        recs = [(:kernel, "stencil", 12ms, 62ms, UInt32(1), 14, 0), (:copy, "[CUDA memcpy DtoH]", 100ms, 102ms, UInt32(3), 14, 4096)]
-        g = RE._cupti_summary!(Dict{String,Any}(), calls, names, recs, Int64(0), Int64(10ms); at = at)
+        stacks = Dict(:launch => ("cell:draft", 3, "launch"), :query => ("cell:draft", 15, "synchronize events.jl:130"),
+                      :worker => ("", 0, ""), :copy => ("cell:draft", 15, "Array"), :launch20 => ("cell:draft", 20, "k2"),
+                      :query22 => ("cell:draft", 22, "synchronize"), :sync22 => ("cell:draft", 22, "synchronize"))
+        seq = [(10, 10, 11, :launch), (13, 60, 61, :query), (11, 61.5, 100, :worker), (12, 100.5, 103, :copy),
+               (10, 104, 105, :launch20), (13, 106, 107, :query22), (11, 107.5, 140, :sync22), (11, 150, 151, :worker)]
+        for (k, (cb, a, b, st)) in enumerate(seq)
+            push!(calls.corr, UInt32(k)); push!(calls.cbid, UInt32(cb)); push!(calls.t, round(Int64, a * ms))
+            push!(calls.stacks, st); push!(calls.sid, Int32(k)); calls.ends[UInt32(k)] = round(Int64, b * ms)
+        end
+        frame(bt, _) = stacks[bt]
+        names = Dict(UInt32(10) => "cuLaunchKernel", UInt32(11) => "cuStreamSynchronize",
+                     UInt32(12) => "cuMemcpyDtoHAsync_v2", UInt32(13) => "cuStreamQuery")
+        recs = [(:kernel, "stencil", 12ms, 62ms, UInt32(1), 14, 0), (:copy, "[CUDA memcpy DtoH]", 100ms, 102ms, UInt32(4), 14, 4096),
+                (:kernel, "k2", 105ms, 147ms, UInt32(5), 14, 0)]
+        g = RE._cupti_summary!(Dict{String,Any}(), calls, names, recs, Int64(0), Int64(10ms); stop = Int64(145ms), frame = frame)
         L = Dict((d["file"], d["line"]) => d for d in g["lines"])
         @test L[("cell:draft", 3)]["launches"] == 1 && L[("cell:draft", 3)]["kernel_ms"] == 50.0 &&
-              L[("cell:draft", 15)]["sync"] == [1, 38.0] && L[("cell:draft", 15)]["copy_bytes"] == 4096 &&
-              g["kernels"][1] == ["stencil", 1, 50.0] && g["device_ms"] == 52.0
+              L[("cell:draft", 15)]["sync"] == [1, 40.0] && L[("cell:draft", 15)]["via"] == "synchronize events.jl:130" &&
+              L[("cell:draft", 15)]["copy_bytes"] == 4096 &&
+              L[("cell:draft", 22)]["drain"] == [1, 34.0] && L[("cell:draft", 22)]["sync"] == [0, 0.0] &&
+              g["kernels"][1] == ["stencil", 1, 50.0] && g["device_ms"] == 94.0
+        @test g["wait"]["n"] == 1 && g["wait"]["ms"] == 40.0 && g["wait"]["drain_n"] == 1 && g["wait"]["tail_ms"] == 2.0
         tl = g["timeline"]
-        @test length(tl["calls"]) == 3 && tl["gpu"][1][1:3] == [2.0, 52.0, 14] &&
+        @test length(tl["calls"]) == 7 && tl["gpu"][1][1:3] == [2.0, 52.0, 14] &&
               tl["lines"][tl["gpu"][1][5]] == ["cell:draft", 3]
+        # The device was busy 94 of the 135 ms from its first work to its last, with two gaps.
+        u = g["util"]
+        @test u["span_ms"] == 135.0 && u["busy_ms"] == 94.0 && u["idle_ms"] == 41.0 && u["ngaps"] == 2 &&
+              u["gaps"][end][2] == 2 && u["longest"][1][2] == 38.0 && u["longest"][1][3:4] == ["stencil", "[CUDA memcpy DtoH]"]
         @test RE._kernel_name("_Z19gpu_getindex_kernel16CompilerMetadataI11DynamicSize") == "gpu_getindex_kernel" &&
               RE._kernel_name("my_kernel") == "my_kernel"
     end

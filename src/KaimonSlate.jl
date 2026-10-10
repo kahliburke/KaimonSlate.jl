@@ -1802,9 +1802,13 @@ function create_tools(GateTool::Type)
     """
         prof_summary(notebook, cell) -> String
 
-    The last profile of `cell`: how long it ran, the lines that took the most time of their own
-    (with their total, and whether that time was runtime dispatch, GC or compiling), and the hot
-    path under each of the cell's heaviest lines.
+    The last profile of `cell`: how long it ran (beside its last run without the profiler and the
+    last profile taken the same way), the sampling period, the share of samples spent waiting, the
+    lines that took the most time of their own over the rest (with their total, and whether that
+    time was runtime dispatch, GC or compiling), and the hot path under each of the cell's heaviest
+    lines. A GPU profile adds how busy the device was and its idle gaps, the waits for it (inside
+    the cell's code, or draining its work at the end, each on the line and call that waited), and
+    the kernels by line and by name.
     """
     function prof_summary(notebook::String, cell::String)::String
         nb, err = _nb(notebook); nb === nothing && return err

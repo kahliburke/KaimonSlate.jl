@@ -1037,8 +1037,10 @@ mutable struct CellStats
     ran_on::String          # "" (never ran) | "local" | the region host — WHERE the last run executed
     xfer_bytes::Int         # session total: boundary bytes moved FOR this cell's inputs
     last_xfer::String       # latest boundary move, human-readable ("<name> <size> in <time> ← <host>")
+    plain_ms::Float64       # the last computation that ran without the profiler, and when
+    plain_ts::Float64
 end
-CellStats() = CellStats(0, 0, 0, 0.0, 0.0, Inf, 0.0, Float64[], 0.0, 0.0, "", "", 0, "")
+CellStats() = CellStats(0, 0, 0, 0.0, 0.0, Inf, 0.0, Float64[], 0.0, 0.0, "", "", 0, "", 0.0, 0.0)
 const _CELL_STATS = Dict{String,Dict{String,CellStats}}()   # nb.id → cell.id → stats
 const _CELL_STATS_LOCK = ReentrantLock()
 
@@ -1057,7 +1059,8 @@ end
 
 # Record a completed run. Called at the merge points (serial + parallel) BEFORE the celldone
 # broadcast, so the pushed cell_json already carries the fresh numbers. Callers hold nb.lock.
-function _stats_record!(nb::LiveNotebook, cell)
+# `profiled`: the run was under the profiler, so it is not the cell's plain time.
+function _stats_record!(nb::LiveNotebook, cell; profiled::Bool = false)
     out = cell.output; out === nothing && return nothing
     lock(_CELL_STATS_LOCK) do
         stats = get!(Dict{String,CellStats}, _CELL_STATS, nb.id)
@@ -1071,6 +1074,7 @@ function _stats_record!(nb::LiveNotebook, cell)
             s.min_ms = min(s.min_ms, out.duration_ms); s.max_ms = max(s.max_ms, out.duration_ms)
             push!(s.recent, out.duration_ms)
             length(s.recent) > 64 && popfirst!(s.recent)
+            (profiled || out.exception !== nothing) || (s.plain_ms = out.duration_ms; s.plain_ts = s.last_ts)
         end
         if out.memo != "restored" && out.exception === nothing
             for up in _upstream_closure(nb.report, cell.id)
@@ -1129,6 +1133,7 @@ function _cell_stats_json(nbid::AbstractString, cid::AbstractString)
             "min_ms" => n > 0 ? r1(s.min_ms) : 0.0, "max_ms" => r1(s.max_ms),
             "p50_ms" => r1(pct(0.5)), "p90_ms" => r1(pct(0.9)),
             "last_ms" => r1(s.last_ms), "last_ts" => r1(s.last_ts), "memo" => s.last_memo,
+            "plain_ms" => r1(s.plain_ms), "plain_ts" => r1(s.plain_ts),
             "recent" => [r1(x) for x in s.recent])   # the raw ring — the stats card's sparkline
         # Region provenance (absent for a plain local notebook): where the last run executed and
         # what its inputs cost to move — the badges/stats the mental model needs (a user watched
@@ -4823,7 +4828,7 @@ function _eval_one_run!(nb::LiveNotebook, cell::Cell)
         _dirty && ReportEngine.restale!(c)
         c.binds = out.binds
         _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
-        _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
+        _stats_record!(nb, c; profiled = armed !== nothing)   # before the broadcast — the push carries fresh stats
         _run_log!(nb, isempty(side) ? "local" : side, c; profile = profiled)   # the side as `_kernel_side_label` names it
         _broadcast_progress(nb, c)
         # A successful `locked` run freezes ON this key: persist it (surviving a restart — the `.jl`
