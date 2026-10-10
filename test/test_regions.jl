@@ -2291,6 +2291,12 @@ end
         @test !RE._worker_current(EnvInfoK(info(true), String[], 1, "nb"))
         @test RE._worker_current(EnvInfoK(info(true), ["cell1"], 1, "nb"))          # its running cell is kept
         @test RE._worker_current(EnvInfoK(delete!(info(true), "env_rebuilt"), String[], 1, "nb"))   # an older worker
+        # One that takes the connection but never answers is wedged: asked again with a longer wait, then replaced.
+        @eval struct SilentK; asked::Vector{Float64}; port::Int; label::String; end
+        @eval RE._tool(k::SilentK, name::String, args::Dict; timeout::Float64 = 0.0) =
+            (push!(k.asked, timeout); error("Caller timeout after $(timeout)s"))
+        s = SilentK(Float64[], 1, "nb")
+        @test !RE._worker_current(s) && s.asked == [6.0, 20.0]
     end
 
     @testset "compiled code is keyed by CPU architecture, not the chip's model" begin

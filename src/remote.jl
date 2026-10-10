@@ -2926,10 +2926,16 @@ function _worker_current(k, job::AbstractString = "")::Bool
     # `_tool` errors cleanly (not a MethodError) if a best-effort caller hits the transient nil-conn window.
     # The job is checked whatever that switch says.
     payload = get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") != "1"
-    info = try
-        _tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0)
-    catch
-        return true
+    # The gate answers on the worker's interactive thread, so a worker busy with a cell still answers.
+    # One that takes the connection and stays silent is wedged, and is replaced.
+    info = nothing
+    for timeout in (6.0, 20.0)
+        info = try; _tool(k, "__slate_env_info", Dict{String,Any}(); timeout); catch; nothing; end
+        info === nothing || break
+    end
+    if info === nothing
+        _rlog("worker-$(k.port) for '$(k.label)' takes connections but does not answer; replacing it")
+        return false
     end
     # The job first: a worker outside the kernel's allocation is replaced even while it computes, since
     # keeping it is running work on a node the job does not hold.
