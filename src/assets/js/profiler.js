@@ -1179,8 +1179,8 @@ function Details() {
     ...(P.buffer_full ? [['buffer', 'full: the end of the run is missing']] : []),
     ...(P.stalls ? [['stalled', ms(P.stalled_ms) + ' unsampled, in ' + P.stalls + ' pauses']] : []),
     ...(P.error ? [['threw', String(P.error).split('\n')[0]]] : []),
-    ...(P.waiting ? [['waiting', pct(P.waiting / Math.max(1, P.samples)) + ' of the samples' + (P.waiting_gpu ? ', ' + pct(P.waiting_gpu / Math.max(1, P.samples)) + ' on the GPU' : '')]] : []),
-    ...(plain ? [['unprofiled', ms(plain.ms) + ' at ' + when(plain.at) + ' · profiled ' + ratio(P.duration_ms, plain.ms)]] : []),
+    ...(P.waiting && !(g && g.wait) ? [['waiting', pct(P.waiting / Math.max(1, P.samples)) + ' of the samples' + (P.waiting_gpu ? ', ' + pct(P.waiting_gpu / Math.max(1, P.samples)) + ' on the GPU' : '')]] : []),
+    ...(plain ? [['unprofiled', ms(plain.ms) + ' at ' + when(plain.at) + (plain.n > 1 ? ', the fastest of ' + plain.n + ' runs' : ', its only run') + ' since the code changed · profiled ' + ratio(P.duration_ms, plain.ms)]] : []),
     ...(g && g.callbacks ? [['CUPTI', g.callbacks.toLocaleString() + ' driver calls, ' + ms(g.callback_ms) + ' in its callback' + (g.setup_ms != null ? ', ' + ms(g.setup_ms) + ' to start before the clock' : '')]] : [])];
   // Per notebook line: what the GPU ran for it, and what it spent waiting on the GPU, allocating its
   // memory and copying. Each CUDA call is placed by its own stack.
@@ -1192,7 +1192,7 @@ function Details() {
   const u = g && g.util, w = g && g.wait;
   const busy = u ? [['busy', pct(u.util) + ' of ' + ms(u.span_ms) + ' · ' + ms(u.busy_ms) + ' busy, ' + ms(u.idle_ms) + ' idle in ' + u.ngaps.toLocaleString() + ' gaps'],
                     ['first work', ms(u.first_ms) + ' into the run'],
-                    ...u.gaps.filter(h => h[1] > 0).map(([label, n, t]) => ['gaps ' + label, n.toLocaleString() + ' · ' + ms(t)])] : [];
+                    ...u.gaps.filter(h => h[1] > 0).map(([label, n, t]) => [label, n.toLocaleString() + ' gaps · ' + ms(t)])] : [];
   const waits = w ? [['in the code', w.n ? w.n.toLocaleString() + ' · ' + ms(w.ms) : 'none'],
                      ...(w.drain_n ? [['at the end', w.drain_n.toLocaleString() + ' · ' + ms(w.drain_ms)]] : []),
                      ...(w.tail_ms > 0 ? [['after return', ms(w.tail_ms) + ' still running']] : [])] : [];
@@ -1206,8 +1206,8 @@ function Details() {
                     P.types.map(([t, c, b]) => [bytes(b), c.toLocaleString(), t]), 'nothing recorded') : null}
     ${kv('The GPU', busy)}
     ${kv('Waiting for the GPU', waits)}
-    ${u && u.longest.length ? tbl('Longest idle gaps', ['idle', 'at', 'after', 'before', 'line'],
-        u.longest.map(([at, t, a, b, l]) => [ms(t), ms(at), a, b, l[0] ? lineLabel(l[0], l[1], P) : '']), '') : null}
+    ${u && u.longest.length ? tbl('Longest idle gaps', ['idle', 'at', 'between'],
+        u.longest.map(([at, t, a, b, l]) => [ms(t), ms(at), a + '  →  ' + b + (l[0] ? '   · ' + lineLabel(l[0], l[1], P) : '')]), '') : null}
     ${byLine ? tbl('On the GPU, by line', ['GPU time', 'launches', 'waits', 'at the end', 'allocations', 'copied', 'line'], byLine, 'no GPU work recorded') : null}
     ${g ? tbl('On the GPU' + (g.device_ms ? ' · ' + ms(g.device_ms) + ' of device time' : ''), ['time', 'calls', 'kernel or copy'],
               (g.kernels || []).map(([n, c, t]) => [ms(t), c, n]), g.error || 'no device work recorded') : null}
@@ -1427,11 +1427,13 @@ function Facts() {
         : html`${pr.samples < FEW_SAMPLES
                  ? html`<span class="pfwarn" title=${'Too few samples to rank lines by: profile a longer run (more iterations). One every ' + ms(achieved(pr)) + (achieved(pr) > 1.5 * pr.delay_ms ? ', not the ' + ms(pr.delay_ms) + ' asked: each tick stops all ' + pr.sampled_threads + ' threads in turn' : '') + '.'}>only ${pr.samples} samples</span>`
                  : fig(Number(pr.samples).toLocaleString(), 'samples', '', 'one every ' + ms(achieved(pr)))}${pr.threads > 1 ? fig(pr.threads, 'threads') : null}
-               ${pr.waiting ? fig(pct(pr.waiting / Math.max(1, pr.samples)), pr.waiting_gpu ? 'waiting · ' + pct(pr.waiting_gpu / Math.max(1, pr.samples)) + ' on the GPU' : 'waiting', 'dim',
+               ${pr.waiting && !(pr.gpu && pr.gpu.wait) ? fig(pct(pr.waiting / Math.max(1, pr.samples)), pr.waiting_gpu ? 'waiting · ' + pct(pr.waiting_gpu / Math.max(1, pr.samples)) + ' on the GPU' : 'waiting', 'dim',
                                   'samples where the host waited; the hot lines leave them out') : null}
                ${pr.gpu && pr.gpu.util ? fig(pct(pr.gpu.util.util), 'GPU busy', '', ms(pr.gpu.util.busy_ms) + ' busy of ' + ms(pr.gpu.util.span_ms) + ' from its first work to its last') : null}
-               ${pr.gpu && pr.gpu.wait && pr.gpu.wait.n ? fig(ms(pr.gpu.wait.ms), 'waiting on the GPU', 'g', pr.gpu.wait.n + ' waits inside the code; ' + (pr.gpu.wait.drain_n ? ms(pr.gpu.wait.drain_ms) + ' more draining at the end' : 'none at the end')) : null}
-               ${P.plain && P.plain.ms > 0 ? fig(ms(P.plain.ms), 'unprofiled', 'dim', 'the last run without the profiler, at ' + when(P.plain.at)) : null}`}
+               ${pr.gpu && pr.gpu.wait && (pr.gpu.wait.ms + pr.gpu.wait.drain_ms) > 0
+                 ? fig(pct((pr.gpu.wait.ms + pr.gpu.wait.drain_ms) / pr.duration_ms), 'waiting on the GPU', 'dim',
+                       ms(pr.gpu.wait.ms) + ' in ' + pr.gpu.wait.n + ' waits inside the code, ' + ms(pr.gpu.wait.drain_ms) + ' draining at the end') : null}
+               ${P.plain && P.plain.ms > 0 ? fig(ms(P.plain.ms), 'unprofiled', 'dim', 'the fastest run without the profiler since the code changed (' + (P.plain.n || 1) + ' runs), at ' + when(P.plain.at)) : null}`}
       ${pr.compile_ms > 0.5 ? fig(ms(pr.compile_ms), 'compiling' + share(pr.compile_ms), 'c') : null}
       ${pr.gc_ms > 0.5 ? fig(ms(pr.gc_ms), 'GC' + share(pr.gc_ms), 'g') : null}
       ${left ? fig(left.toLocaleString(), 'left out', 'dim', dr.map(([k, v]) => v + ' ' + k).join(', ')) : null}

@@ -193,6 +193,17 @@ end
         @test length(b) > 100 && b[1] == 0x0a          # field 1 (sample_type), length-delimited
     end
 
+    @testset "the unprofiled time to compare with is the fastest run since the code changed" begin
+        NS = KaimonSlate.NotebookServer
+        s = NS.CellStats()
+        NS._note_plain!(s, 9000.0, 1.0, UInt64(7))          # the first run compiles
+        NS._note_plain!(s, 3000.0, 2.0, UInt64(7))
+        NS._note_plain!(s, 3500.0, 3.0, UInt64(7))
+        @test (s.plain_ms, s.plain_ts, s.plain_n) == (3000.0, 2.0, 3)
+        NS._note_plain!(s, 5000.0, 4.0, UInt64(8))          # edited: the earlier runs are another cell's
+        @test (s.plain_ms, s.plain_ts, s.plain_n) == (5000.0, 4.0, 1)
+    end
+
     @testset "arming clears the last result, and the sampler is set back afterwards" begin
         before = RE._profile_settings()
         _, p = profile_cell(ProfNS, "ps", "r = work(n ÷ 4)\n")
@@ -269,7 +280,8 @@ end
                 cuptiSubscribe(r, cb, ud) = (r[] = C_NULL; nothing)
                 cuptiEnableCallback(on, sub, domain, id) = nothing
                 cuptiUnsubscribe(sub) = nothing
-                ActivityConfig(kinds) = kinds
+                struct AC; kinds; available_buffers::Vector{Vector{UInt8}}; end
+                ActivityConfig(kinds) = AC(kinds, Vector{UInt8}[])
                 cuptiGetTimestamp(r) = (r[] = 0; nothing)
                 enable!(f, cfg) = f()
                 process(f, cfg) = nothing
@@ -312,17 +324,21 @@ end
         stacks = Dict(:launch => ("cell:draft", 3, "launch"), :query => ("cell:draft", 15, "synchronize events.jl:130"),
                       :worker => ("", 0, ""), :copy => ("cell:draft", 15, "Array"), :launch20 => ("cell:draft", 20, "k2"),
                       :query22 => ("cell:draft", 22, "synchronize"), :sync22 => ("cell:draft", 22, "synchronize"))
-        seq = [(10, 10, 11, :launch), (13, 60, 61, :query), (11, 61.5, 100, :worker), (12, 100.5, 103, :copy),
-               (10, 104, 105, :launch20), (13, 106, 107, :query22), (11, 107.5, 140, :sync22), (11, 150, 151, :worker)]
+        # The two runs of queries from line 15 are one wait: the polling yielded between them.
+        seq = [(10, 10, 11, :launch), (13, 60, 60.5, :query), (13, 58 + 3.2, 61.3, :query), (11, 61.5, 100, :worker),
+               (12, 100.5, 103, :copy), (10, 104, 105, :launch20), (13, 106, 107, :query22), (11, 107.5, 140, :sync22),
+               (11, 150, 151, :worker)]
+        sids = Dict{Symbol,Int32}()
         for (k, (cb, a, b, st)) in enumerate(seq)
             push!(calls.corr, UInt32(k)); push!(calls.cbid, UInt32(cb)); push!(calls.t, round(Int64, a * ms))
-            push!(calls.stacks, st); push!(calls.sid, Int32(k)); calls.ends[UInt32(k)] = round(Int64, b * ms)
+            sid = get!(() -> (push!(calls.stacks, st); Int32(length(calls.stacks))), sids, st)
+            push!(calls.sid, sid); calls.ends[UInt32(k)] = round(Int64, b * ms)
         end
         frame(bt, _) = stacks[bt]
         names = Dict(UInt32(10) => "cuLaunchKernel", UInt32(11) => "cuStreamSynchronize",
                      UInt32(12) => "cuMemcpyDtoHAsync_v2", UInt32(13) => "cuStreamQuery")
-        recs = [(:kernel, "stencil", 12ms, 62ms, UInt32(1), 14, 0), (:copy, "[CUDA memcpy DtoH]", 100ms, 102ms, UInt32(4), 14, 4096),
-                (:kernel, "k2", 105ms, 147ms, UInt32(5), 14, 0)]
+        recs = [(:kernel, "stencil", 12ms, 62ms, UInt32(1), 14, 0), (:copy, "[CUDA memcpy DtoH]", 100ms, 102ms, UInt32(5), 14, 4096),
+                (:kernel, "k2", 105ms, 147ms, UInt32(6), 14, 0)]
         g = RE._cupti_summary!(Dict{String,Any}(), calls, names, recs, Int64(0), Int64(10ms); stop = Int64(145ms), frame = frame)
         L = Dict((d["file"], d["line"]) => d for d in g["lines"])
         @test L[("cell:draft", 3)]["launches"] == 1 && L[("cell:draft", 3)]["kernel_ms"] == 50.0 &&
@@ -332,7 +348,7 @@ end
               g["kernels"][1] == ["stencil", 1, 50.0] && g["device_ms"] == 94.0
         @test g["wait"]["n"] == 1 && g["wait"]["ms"] == 40.0 && g["wait"]["drain_n"] == 1 && g["wait"]["tail_ms"] == 2.0
         tl = g["timeline"]
-        @test length(tl["calls"]) == 7 && tl["gpu"][1][1:3] == [2.0, 52.0, 14] &&
+        @test length(tl["calls"]) == 8 && tl["gpu"][1][1:3] == [2.0, 52.0, 14] &&
               tl["lines"][tl["gpu"][1][5]] == ["cell:draft", 3]
         # The device was busy 94 of the 135 ms from its first work to its last, with two gaps.
         u = g["util"]

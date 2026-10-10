@@ -454,6 +454,7 @@ end
 # per process), the configurations, and one empty collection with them, which compiles the callback
 # and pays CUPTI's first enable of each. A string says why there is no CUPTI.
 const _CUPTI_NAMES = Ref{Any}(nothing)
+const _CUPTI_BUFFER = 64 << 20     # bytes per activity buffer: a few hundred thousand kernel records
 
 function _cupti_prepare(m)
     m === nothing && return "CUDA is not in this notebook's environment"
@@ -481,6 +482,14 @@ function _cupti_prepare(m)
                  set = K(:CUPTI_ACTIVITY_KIND_MEMSET))
         sync = getproperty(m, :synchronize)
         acfg = il(K(:ActivityConfig), collect(values(kinds)))
+        # CUPTI hands over a full buffer from a thread of its own, which calls into Julia and is
+        # adopted by it mid-run, stalling the sampler. Buffers this size are not filled by a typical
+        # run, so the records come out at the flush, after the clock. They are malloc'd, so the
+        # collector does not count them toward its next collection, and untouched pages cost nothing.
+        empty!(acfg.available_buffers)
+        for _ in 1:2
+            push!(acfg.available_buffers, unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(Libc.malloc(_CUPTI_BUFFER)), _CUPTI_BUFFER; own = true))
+        end
         cx = (; CU, calls, names, kinds, sync, acfg, drv, ids)
         _with_callbacks(() -> il(K(:enable!), () -> il(sync), acfg), cx)
         il(K(:process), (ctx, sid, r) -> nothing, acfg)
@@ -654,7 +663,11 @@ function _cupti_lines(calls::_CuptiCalls, names, keep = eachindex(calls.t); fram
     waits = Vector{Int}[]           # each wait's calls, by position in `keep`
     cur = 0
     for j in 1:n
-        if kind[j] === :query || (kind[j] === :sync && cur == 0)
+        # CUDA.jl's polling yields to other tasks, so one wait can be several runs of queries from
+        # the same place with nothing between them.
+        if kind[j] === :query && cur > 0 && calls.sid[keep[j]] == calls.sid[keep[waits[cur][1]]]
+            push!(waits[cur], j)
+        elseif kind[j] === :query || (kind[j] === :sync && cur == 0)
             push!(waits, [j]); cur = length(waits)
         elseif kind[j] === :sync
             push!(waits[cur], j)

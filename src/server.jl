@@ -1037,10 +1037,12 @@ mutable struct CellStats
     ran_on::String          # "" (never ran) | "local" | the region host — WHERE the last run executed
     xfer_bytes::Int         # session total: boundary bytes moved FOR this cell's inputs
     last_xfer::String       # latest boundary move, human-readable ("<name> <size> in <time> ← <host>")
-    plain_ms::Float64       # the last computation that ran without the profiler, and when
-    plain_ts::Float64
+    plain_ms::Float64       # the fastest computation without the profiler since the source last
+    plain_ts::Float64       # changed (a first run compiles), when, and of how many
+    plain_n::Int
+    plain_src::UInt64
 end
-CellStats() = CellStats(0, 0, 0, 0.0, 0.0, Inf, 0.0, Float64[], 0.0, 0.0, "", "", 0, "", 0.0, 0.0)
+CellStats() = CellStats(0, 0, 0, 0.0, 0.0, Inf, 0.0, Float64[], 0.0, 0.0, "", "", 0, "", 0.0, 0.0, 0, UInt64(0))
 const _CELL_STATS = Dict{String,Dict{String,CellStats}}()   # nb.id → cell.id → stats
 const _CELL_STATS_LOCK = ReentrantLock()
 
@@ -1055,6 +1057,14 @@ function _upstream_closure(report, id::String)
         end
     end
     return seen
+end
+
+# A run without the profiler: the fastest since the source last changed is kept.
+function _note_plain!(s::CellStats, ms::Real, at::Real, src::UInt64)
+    s.plain_src == src || (s.plain_n = 0; s.plain_src = src)
+    s.plain_n += 1
+    (s.plain_n == 1 || ms < s.plain_ms) && (s.plain_ms = ms; s.plain_ts = at)
+    return s
 end
 
 # Record a completed run. Called at the merge points (serial + parallel) BEFORE the celldone
@@ -1074,7 +1084,7 @@ function _stats_record!(nb::LiveNotebook, cell; profiled::Bool = false)
             s.min_ms = min(s.min_ms, out.duration_ms); s.max_ms = max(s.max_ms, out.duration_ms)
             push!(s.recent, out.duration_ms)
             length(s.recent) > 64 && popfirst!(s.recent)
-            (profiled || out.exception !== nothing) || (s.plain_ms = out.duration_ms; s.plain_ts = s.last_ts)
+            (profiled || out.exception !== nothing) || _note_plain!(s, out.duration_ms, s.last_ts, cell.src_hash)
         end
         if out.memo != "restored" && out.exception === nothing
             for up in _upstream_closure(nb.report, cell.id)
@@ -1133,7 +1143,7 @@ function _cell_stats_json(nbid::AbstractString, cid::AbstractString)
             "min_ms" => n > 0 ? r1(s.min_ms) : 0.0, "max_ms" => r1(s.max_ms),
             "p50_ms" => r1(pct(0.5)), "p90_ms" => r1(pct(0.9)),
             "last_ms" => r1(s.last_ms), "last_ts" => r1(s.last_ts), "memo" => s.last_memo,
-            "plain_ms" => r1(s.plain_ms), "plain_ts" => r1(s.plain_ts),
+            "plain_ms" => r1(s.plain_ms), "plain_ts" => r1(s.plain_ts), "plain_n" => s.plain_n,
             "recent" => [r1(x) for x in s.recent])   # the raw ring — the stats card's sparkline
         # Region provenance (absent for a plain local notebook): where the last run executed and
         # what its inputs cost to move — the badges/stats the mental model needs (a user watched

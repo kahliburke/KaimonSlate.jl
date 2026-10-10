@@ -179,7 +179,8 @@ function _collect_requested_profile!(nb::LiveNotebook, cell, kernel, side::Abstr
     # The cell's last run without the profiler, to read the profiled time against.
     plain = lock(_CELL_STATS_LOCK) do
         s = get(get(_CELL_STATS, nb.id, Dict{String,CellStats}()), String(cell.id), nothing)
-        s === nothing || s.plain_ts == 0 ? nothing : Dict{String,Any}("ms" => s.plain_ms, "at" => s.plain_ts)
+        s === nothing || s.plain_n == 0 || s.plain_src != cell.src_hash ? nothing :
+            Dict{String,Any}("ms" => s.plain_ms, "at" => s.plain_ts, "n" => s.plain_n)
     end
     plain === nothing || (payload["plain"] = plain)
     lock(_PROF_HUB_LOCK) do; _PROF_LAST[(nb.id, String(cell.id))] = payload; end
@@ -493,14 +494,23 @@ function profile_summary_text(nb::LiveNotebook, cid::AbstractString)
     get(P, "buffer_full", false) === true && println(io, "The sample buffer filled: the end of the run is missing. Profile again with a larger buffer or a longer interval.")
     P["error"] === nothing || println(io, "The run threw: ", first(split(String(P["error"]), '\n')))
     W = bytes ? 0 : get(P, "waiting", 0)
-    if W > 0
+    gw = haskey(P, "gpu") ? get(P["gpu"], "wait", nothing) : nothing
+    if gw isa AbstractDict && P["duration_ms"] > 0
+        # GPU mode samples CPU time, where a task waiting is not sampled: CUPTI times the waits.
+        t = gw["ms"] + gw["drain_ms"]
+        println(io, "Waiting for the GPU: ", _pms_fine(t), ", ", _ppct(t / P["duration_ms"]), " of the run (",
+                _pms_fine(gw["ms"]), " inside the code, ", _pms_fine(gw["drain_ms"]), " draining at the end).",
+                W > 0 ? " Lines below leave out the samples that waited." : "")
+    elseif W > 0
         wg = get(P, "waiting_gpu", 0)
         println(io, "Waiting: ", _ppct(W / T), " of the samples", wg > 0 ? string(" (", _ppct(wg / T), " on the GPU)") : "",
                 ". Lines below are ranked over the other ", _ppct((T - W) / T), ".")
     end
     pl = get(p, "plain", nothing)
     if pl isa AbstractDict && pl["ms"] > 0
-        println(io, "Without the profiler the cell last took ", _pms(pl["ms"]), " (", _pwhen(pl["at"]), "); profiled, ",
+        n = get(pl, "n", 1)
+        println(io, "Without the profiler the cell took ", _pms(pl["ms"]), " (", _pwhen(pl["at"]),
+                n > 1 ? ", the fastest of $n runs" : ", its only run", " since its code last changed); profiled, ",
                 _pms(P["duration_ms"]), " (", _pratio(P["duration_ms"], pl["ms"]), ").")
     end
     prev = previous_profile(nb, cid)
