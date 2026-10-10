@@ -334,7 +334,7 @@ async function showKept(id) {
   try {
     const r = await A('GET', '/api/profile/load?cell=' + encodeURIComponent(P.cell) + '&id=' + encodeURIComponent(id));
     if (r && r.profile) {
-      pf.value = { ...pf.value, profile: r.profile, source: r.source || P.source, shownId: id, status: 'done' };
+      pf.value = { ...pf.value, profile: r.profile, plain: r.plain || null, source: r.source || P.source, shownId: id, status: 'done' };
       if (base.value && base.value.id === id) base.value = null;
       resetView(P.cell);
     }
@@ -361,7 +361,7 @@ function apply(p) {
   else if (p.kind === 'result') {
     // A new profile is compared with the one shown before it, which is usually the question.
     const was = cur.profile && cur.status === 'done' ? { id: String(Math.round(cur.profile.at * 1000)), profile: cur.profile } : null;
-    Object.assign(next, { status: 'done', profile: p.profile, source: p.source || cur.source, error: null,
+    Object.assign(next, { status: 'done', profile: p.profile, plain: p.plain || null, source: p.source || cur.source, error: null,
                           shownId: String(Math.round(p.profile.at * 1000)) });
     if (was && !base.value) base.value = was;
     resetView(cur.cell);
@@ -1192,7 +1192,8 @@ function Details() {
   const u = g && g.util, w = g && g.wait;
   const busy = u ? [['busy', pct(u.util) + ' of ' + ms(u.span_ms) + ' · ' + ms(u.busy_ms) + ' busy, ' + ms(u.idle_ms) + ' idle in ' + u.ngaps.toLocaleString() + ' gaps'],
                     ['first work', ms(u.first_ms) + ' into the run'],
-                    ...u.gaps.filter(h => h[1] > 0).map(([label, n, t]) => [label, n.toLocaleString() + ' gaps · ' + ms(t)])] : [];
+                    ...u.gaps.filter(h => h[1] > 0).map(([label, n, t]) => [label, n.toLocaleString() + (n === 1 ? ' gap · ' : ' gaps · ') + ms(t)])] : [];
+  const longest = u ? u.longest.filter(g => g[1] >= 0.1) : [];
   const waits = w ? [['in the code', w.n ? w.n.toLocaleString() + ' · ' + ms(w.ms) : 'none'],
                      ...(w.drain_n ? [['at the end', w.drain_n.toLocaleString() + ' · ' + ms(w.drain_ms)]] : []),
                      ...(w.tail_ms > 0 ? [['after return', ms(w.tail_ms) + ' still running']] : [])] : [];
@@ -1206,8 +1207,8 @@ function Details() {
                     P.types.map(([t, c, b]) => [bytes(b), c.toLocaleString(), t]), 'nothing recorded') : null}
     ${kv('The GPU', busy)}
     ${kv('Waiting for the GPU', waits)}
-    ${u && u.longest.length ? tbl('Longest idle gaps', ['idle', 'at', 'between'],
-        u.longest.map(([at, t, a, b, l]) => [ms(t), ms(at), a + '  →  ' + b + (l[0] ? '   · ' + lineLabel(l[0], l[1], P) : '')]), '') : null}
+    ${longest.length ? tbl('Longest idle gaps', ['idle', 'at', 'between'],
+        longest.map(([at, t, a, b, l]) => [ms(t), ms(at), a + '  →  ' + b + (l[0] ? '   · ' + lineLabel(l[0], l[1], P) : '')]), '') : null}
     ${byLine ? tbl('On the GPU, by line', ['GPU time', 'launches', 'waits', 'at the end', 'allocations', 'copied', 'line'], byLine, 'no GPU work recorded') : null}
     ${g ? tbl('On the GPU' + (g.device_ms ? ' · ' + ms(g.device_ms) + ' of device time' : ''), ['time', 'calls', 'kernel or copy'],
               (g.kernels || []).map(([n, c, t]) => [ms(t), c, n]), g.error || 'no device work recorded') : null}
