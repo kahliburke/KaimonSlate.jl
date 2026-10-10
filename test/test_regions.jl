@@ -408,6 +408,28 @@ end
                 @test [c.state for c in rep.cells] == [RE.STALE, RE.STALE, RE.STALE, RE.FRESH]
             end
 
+            @testset "stop reaches every worker with a cell running" begin
+                # A region cell runs in its region's worker: the stop goes there as well as to the main
+                # kernel. A region with no kernel has nothing running; a cell not running is left alone.
+                rep = RE.parse_report("#%% code id=a\nsleep(1)\n#%% code id=g region=gpu\nsleep(1)\n" *
+                                      "#%% code id=h region=gpu\n1\n#%% code id=z region=cpu\nsleep(1)\n")
+                RE.build_dependencies!(rep)
+                nb = NS.LiveNotebook("stopall", joinpath(mktempdir(), "stopall.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                for c in rep.cells; c.state = c.id == "h" ? RE.FRESH : RE.RUNNING; end
+                lock(NS._REGION_LOCK) do; NS._REGION_KERNELS[("stopall", "gpu")] = :gpu_kernel; end
+                try
+                    running = lock(nb.lock) do; NS._running_kernels(nb); end
+                    @test [(side, ids) for (side, _, ids) in running] == [("", ["a"]), ("gpu", ["g"])]
+                    asked = Any[]
+                    NS.cancel_run!(nb; cancel = k -> (push!(asked, k); k === :gpu_kernel ? 1 : -1))
+                    @test length(asked) == 2 && asked[1] isa RE.InProcessKernel && asked[2] === :gpu_kernel
+                finally
+                    lock(NS._REGION_LOCK) do; delete!(NS._REGION_KERNELS, ("stopall", "gpu")); end
+                end
+            end
+
             @testset "a new allocation on the same node rebuilds the region kernel" begin
                 rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
                 nb = NS.LiveNotebook("alloc", joinpath(mktempdir(), "alloc.jl"), rep, RE.InProcessKernel(), 1,

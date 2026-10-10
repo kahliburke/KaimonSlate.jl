@@ -106,24 +106,39 @@ end
 # Restart a notebook's kernel: kill its worker (a gate worker is a real subprocess;
 # no-op in-process), then re-evaluate from a fresh namespace. The gate kernel
 # respawns a worker on the next `prepare!`.
-# Graceful stop: interrupt the worker's running cells WITHOUT killing the namespace. Only meaningful
-# for a gate worker with cells in flight; the interrupted cells stream back as errors (via celldone)
-# and the namespace + every already-finished result survives. Falls back to a full worker restart when
-# there's nothing to gracefully interrupt (in-process kernel, no live worker, or no running cells) —
-# matching the old stop-button behaviour. Returns the notebook.
-function cancel_run!(nb::LiveNotebook)
-    k = nb.kernel
+# Graceful stop: interrupt the running cells WITHOUT killing any namespace, on every worker that has
+# one running: the main kernel and each region's. The interrupted cells stream back as errors and
+# every already-finished result survives. Falls back to a full restart when no worker acknowledges
+# (in-process kernel, no live worker, nothing running), matching the old stop-button behaviour.
+# `cancel` interrupts one kernel's running cells and returns how many, or -1 for no answer.
+function cancel_run!(nb::LiveNotebook; cancel = k -> k isa ReportEngine.GateKernel ? ReportEngine.cancel_eval(k) : -1)
     _PARALLEL_CANCEL[nb.id] = true            # stop the parallel scheduler from starting not-yet-run cells
-    hasrunning = lock(nb.lock) do; any(c -> c.state == RUNNING, nb.report.cells); end
-    if k isa ReportEngine.GateKernel && hasrunning
-        n = ReportEngine.cancel_eval(k)
-        if n >= 0
-            @info "slate: run cancelled (namespace preserved)" notebook = nb.id interrupted = n
-            try; _broadcast(nb, "cancelled:$n"); catch; end
-            return nb
-        end
+    running = lock(nb.lock) do; _running_kernels(nb); end
+    acked = [(side, cancel(k)) for (side, k, _) in running]
+    if any(a -> a[2] >= 0, acked)
+        n = sum((c for (_, c) in acked if c >= 0); init = 0)
+        missed = [isempty(side) ? "main" : side for (side, c) in acked if c < 0]
+        @info "slate: run cancelled (namespace preserved)" notebook = nb.id interrupted = n unanswered = join(missed, ", ")
+        try; _broadcast(nb, "cancelled:$n"); catch; end
+        return nb
     end
     return restart_kernel!(nb)
+end
+
+# The kernels running a cell now, as (side, kernel, cell ids): the main kernel ("") and each region
+# kernel, by the side each running cell executes on. A region with no kernel is skipped: nothing of it
+# is running. Callers hold nb.lock.
+function _running_kernels(nb::LiveNotebook, cells = nb.report.cells)
+    bySide = Dict{String,Vector{String}}()
+    for c in cells
+        c.kind == CODE && c.state == RUNNING && push!(get!(Vector{String}, bySide, _cell_side(nb, c)), c.id)
+    end
+    out = Tuple{String,Any,Vector{String}}[]
+    for (side, ids) in sort!(collect(bySide); by = first)
+        k = isempty(side) ? nb.kernel : lock(() -> get(_REGION_KERNELS, (nb.id, side), nothing), _REGION_LOCK)
+        k === nothing || push!(out, (side, k, ids))
+    end
+    return out
 end
 
 # Interrupt whatever is evaluating RIGHT NOW, without restarting or clearing the namespace — used just

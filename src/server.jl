@@ -5028,11 +5028,15 @@ _preempt_victims(cells) = String[c.id for c in cells
 function _preempt_superseded!(nb::LiveNotebook, cells)
     victims = _preempt_victims(cells)
     isempty(victims) && return nothing
-    n = try
-        ReportEngine.cancel_cells(nb.kernel, nb.report, victims)
-    catch e
-        @debug "slate: preempt failed (discard-on-completion still applies)" exception = e
-        0
+    n = 0
+    # Each on the worker it runs on: a region cell's evaluator is in its region's worker.
+    for (_, k, ids) in _running_kernels(nb, [c for c in cells if c.id in victims])
+        n += try
+            ReportEngine.cancel_cells(k, nb.report, ids)
+        catch e
+            @debug "slate: preempt failed (discard-on-completion still applies)" exception = e
+            0
+        end
     end
     n > 0 && @info "slate: preempted superseded in-flight cells" notebook = nb.id cells = join(victims, ",")
     return nothing
