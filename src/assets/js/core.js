@@ -1004,17 +1004,31 @@ function _bindOwner(name) {
 // chrome and the persisted value all stay in agreement. Writing to the worker directly would move
 // the value without the host ever learning, and the two copies would drift silently.
 //
+// The caller names the bound VARIABLE, not a cell. This function finds the cell that declares the
+// control, so a custom visualisation does not have to know which cell that is.
+//
 // Coalesced per control, like the native widget path: a dragged control fires far faster than a
 // round trip completes, and without this the queue grows for as long as the drag lasts and the
-// figure keeps animating after the reader lets go. Only the LAST value of a burst matters.
+// figure keeps animating after the reader lets go. Only the LAST value of a burst matters. When the
+// held value and the new value are both plain objects, the new keys merge into the held object, so
+// a control that sends one field per call loses no field.
+//
+// Returns a promise. It resolves to the ack of the POST, or to `null` when no control has this
+// name, when the value is held for the next POST, or when the POST fails.
 const _extBindQueue = new Map();   // name → { inflight, pending }
+
+const _isPlainObject = v => v !== null && typeof v === 'object' &&
+  (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
 
 function slateSetBind(name, value) {
   const own = _bindOwner(name);
   if (!own) return Promise.resolve(null);          // not declared (yet) — nothing to drive
   let q = _extBindQueue.get(name);
   if (!q) { q = { inflight: false, pending: null }; _extBindQueue.set(name, q); }
-  if (q.inflight) { q.pending = value; return Promise.resolve(null); }
+  if (q.inflight) {
+    q.pending = _isPlainObject(q.pending) && _isPlainObject(value) ? { ...q.pending, ...value } : value;
+    return Promise.resolve(null);
+  }
   q.inflight = true;
   const send = v => api('POST', '/api/bind/' + own.cell, { name, value: v })
     .then(s => { (window.slateApplyAck || window.updateStates)(s); return s; })

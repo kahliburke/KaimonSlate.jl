@@ -12,6 +12,13 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Fixed
+
+- `window.slateSetBind` coalesces calls per control again. A second definition replaced the
+  coalescing one, so each call sent its own request, and a fast drag built a backlog that moved the
+  figure after the reader let go. When the held value and the new value are both plain objects,
+  the new keys merge into the held object.
+
 ## [1.11.1] - 2026-10-08
 
 ### Changed

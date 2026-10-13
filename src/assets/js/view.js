@@ -665,18 +665,6 @@ function _pickToData(frac, lim, scale) {
 const _pickOwner = name => ((nbState && nbState.cells) || [])
   .find(c => (c.binds || []).some(b => b.name === name));
 
-// `slateSetBind(name, value)` — drive one of the notebook's own controls from front-end JS, by the
-// bound VARIABLE name. The JS counterpart of `set_bind(:name, v)` in cell code, and the same path a
-// dragged slider takes (coerce → restale readers → sync the widget → persist), so a value set from
-// a web cell's canvas is indistinguishable from one the reader dialled in. Resolving the declaring
-// cell here is the point: a custom visualisation shouldn't have to know which cell happens to
-// declare the control it drives. Returns a promise; resolves false if no such control exists.
-window.slateSetBind = function (name, value) {
-  const owner = _pickOwner(name);
-  if (!owner) return Promise.resolve(false);
-  return api('POST', '/api/bind/' + owner.id, { name, value }).then(applyAck).then(() => true);
-};
-
 function mountPicks(c, cell) {
   const picks = c.picks || [];
   if (!picks.length) return;
