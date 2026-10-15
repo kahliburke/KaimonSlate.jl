@@ -3185,6 +3185,10 @@ body.presenting { overflow: hidden; }
 #nb .md .columns { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
 #nb .md .columns > .column { flex: 1 1 240px; min-width: 0; }
 #nb .md .pause { border-top: 1px dashed var(--border); margin: 6px 0; opacity: .6; }
+/* Build blocks are invisible in prose; a faint edge shows the author where a slide's steps are. */
+#nb .md .step, #nb .md .incremental { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 40%, transparent);
+  padding-left: 10px; }
+body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; padding-left: 0; }
 .deck-slide .md .pause { display: none; }
 
 /* Layouts. */
