@@ -519,8 +519,9 @@ function _media_from_img(html::AbstractString)
         attrs = String[]
         "nocontrols" in flags || push!(attrs, "controls")
         "loop" in flags && push!(attrs, "loop")
-        # A clip that starts itself must be muted, or the browser refuses to play it without a click.
-        ("muted" in flags || ("autoplay" in flags && kind == "video")) && push!(attrs, "muted")
+        # `autoplay` is played by the deck (a slide coming up follows a keypress, which lets sound play),
+        # not by the `autoplay` attribute, so a clip keeps its sound unless the author mutes it.
+        "muted" in flags && push!(attrs, "muted")
         "autoplay" in flags && push!(attrs, "data-autoplay")
         kind == "video" && push!(attrs, "playsinline", "preload=\"metadata\"")
         style === nothing || push!(attrs, "style=\"" * style.captures[1] * "\"")

@@ -471,7 +471,11 @@
     for (const m of slide.querySelectorAll('.slide-body [data-autoplay]')) {
       const hidden = m.closest('.step:not(.on)');
       if (hidden) { if (!m.paused) m.pause(); continue; }
-      if (m.paused && !m._deckPlayed) { m._deckPlayed = true; m.currentTime = 0; m.play().catch(() => {}); }
+      // With sound if the browser allows it (it does after a keypress); muted rather than not at all.
+      if (m.paused && !m._deckPlayed) {
+        m._deckPlayed = true; m.currentTime = 0;
+        m.play().catch(() => { m.muted = true; m.play().catch(() => {}); });
+      }
     }
   }
 

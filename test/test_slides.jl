@@ -191,7 +191,9 @@ end
     @testset "media from image syntax" begin
         v = R.markdown_html("![autoplay loop](clips/a.mp4){width=600}")
         @test occursin("<video src=\"clips/a.mp4\"", v)
-        @test all(occursin(v), ("controls", "loop", "muted", "data-autoplay", "playsinline", "width:600px"))
+        @test all(occursin(v), ("controls", "loop", "data-autoplay", "playsinline", "width:600px"))
+        @test !occursin("muted", v)                                   # autoplay keeps its sound
+        @test occursin(" muted", R.markdown_html("![autoplay muted](a.mp4)"))
         a = R.markdown_html("![nocontrols](sound.m4a)")
         @test occursin("<audio src=\"sound.m4a\"", a) && !occursin("controls", a)
         @test occursin("<img", R.markdown_html("![plot](fig.png)"))
