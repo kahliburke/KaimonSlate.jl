@@ -874,7 +874,7 @@
   const _HELP = [
     ['→  space', 'next step / slide'], ['←', 'previous'], ['⇧→  ⇧←', 'next / previous slide'],
     ['Home  End', 'first / last slide'], ['3 ⏎', 'go to slide 3'], ['a', 'autoplay'], ['p', 'pause timing'],
-    ['b', 'black screen'], ['l', 'laser pointer'], ['d', 'draw · x clears'], ['c', 'show code'],
+    ['?', 'this list'], ['b', 'black screen'], ['l', 'laser pointer'], ['d', 'draw · x clears'], ['c', 'show code'],
     ['o', 'overview'], ['t', 'rehearse timings'], ['r', 'record'], ['v', 'camera bubble'],
     ['s', 'presenter window'], ['f', 'fullscreen'], ['Esc', 'exit'],
   ];
@@ -913,8 +913,11 @@
   }
   function deckHelp() {
     const h = document.getElementById('deckhelp');
-    if (!h.innerHTML) h.innerHTML = '<div class="deck-help-card">' +
-      _HELP.map(([k, v]) => '<div><kbd>' + k + '</kbd><span>' + v + '</span></div>').join('') + '</div>';
+    if (!h.innerHTML) {
+      h.innerHTML = '<div class="deck-help-card">' +
+        _HELP.map(([k, v]) => '<div><kbd>' + k + '</kbd><span>' + v + '</span></div>').join('') + '</div>';
+      h.addEventListener('click', e => { if (e.target === h) h.classList.remove('on'); });
+    }
     h.classList.toggle('on');
   }
 
@@ -1015,6 +1018,10 @@
       return;
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) return;
+    // A held key auto-repeats; for a toggle that flips it on and off many times a second. Only the
+    // navigation keys repeat, which is how holding → pages through.
+    if (e.repeat && !['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', ' '].includes(e.key)) { e.preventDefault(); return; }
     if (/^[0-9]$/.test(e.key)) { D.goto += e.key; _flash('go to ' + D.goto); e.preventDefault(); return; }
     if (e.key === 'Enter' && D.goto) { const n = parseInt(D.goto, 10); D.goto = ''; if (n > 0) _go(n - 1, null, false); e.preventDefault(); return; }
     D.goto = '';
