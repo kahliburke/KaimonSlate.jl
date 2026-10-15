@@ -249,3 +249,10 @@ end
     @test f(raw"\focusat{4}{0}") == raw"{0}"
     @test f(raw"x = 0 \qquad \note{divide by m}") == raw"x = 0 \qquad \text{divide by m}"
 end
+
+@testset "the slides template defines every helper shared output calls" begin
+    pre = NS._typst_preamble_slides("T")
+    for h in ("codeblock", "outblock", "valblock", "errblock", "figureimg", "notefig", "figcaption", "paramblock")
+        @test occursin("#let $h(", pre)
+    end
+end

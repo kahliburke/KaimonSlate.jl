@@ -377,6 +377,8 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
     #let valblock(s) = block(width: 100%, inset: 7pt, fill: $(p.valbg), radius: 3pt, text(size: 0.7em, fill: $(p.valfg), raw(s)))
     #let errblock(s) = block(width: 100%, inset: 7pt, fill: $(p.errbg), radius: 3pt, text(size: 0.7em, fill: $(p.errfg), raw(s)))
     #let figureimg(p, width: none) = align(center, if width == none { image(p, height: 62%) } else { image(p, width: width) })
+    #let notefig(s) = block(width: 100%, inset: 7pt, text(size: 0.7em, style: "italic", fill: $(p.parlabel), s))
+    #let figcaption(lbl, body) = block(width: 100%, inset: (x: 24pt, y: 4pt), text(size: 0.7em, fill: $(p.parlabel))[#text(weight: "bold")[#lbl.] #body])
     #let paramblock(items) = block(width: 100%, inset: (x: 8pt, y: 5pt), fill: $(p.parbg), radius: 3pt, stroke: 0.5pt + $(p.parborder),
       text(size: 0.7em)[#text(fill: $(p.parlabel), weight: "bold")[parameters] #h(6pt) #items.map(it => [#raw(it.at(0)) = #text(weight: "bold", it.at(1))]).join([#h(10pt)])])
     // One slide = one page. Measure the body at full content width; if it's taller than the page,
