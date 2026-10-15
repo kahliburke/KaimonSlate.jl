@@ -63,6 +63,15 @@
         border-radius: 50%; object-fit: cover; transform: scaleX(-1); cursor: grab; touch-action: none;
         box-shadow: 0 6px 24px rgba(0,0,0,.45); border: 3px solid rgba(255,255,255,.85); }
       .deck-cam.big { width: 320px; height: 320px; }
+      .deck-rec-opts { position: fixed; right: 18px; bottom: 64px; z-index: 10070; min-width: 220px; padding: 12px 14px;
+        background: var(--bg2, #1b1f2a); color: var(--text, #ddd); border: 1px solid var(--border, #333); border-radius: 12px;
+        font: 14px/1.5 var(--ui-font, system-ui); box-shadow: 0 10px 30px rgba(0,0,0,.45); }
+      .deck-rec-opts .hd { font-weight: 600; margin-bottom: 6px; }
+      .deck-rec-opts label { display: flex; gap: 8px; align-items: center; padding: 3px 0; cursor: pointer; }
+      .deck-rec-opts .bt { display: flex; gap: 8px; margin-top: 10px; }
+      .deck-rec-opts button { flex: 1; padding: 6px; border-radius: 8px; border: 1px solid var(--border, #333);
+        background: var(--bg3, #262b38); color: inherit; cursor: pointer; font: inherit; }
+      .deck-rec-opts button.go { background: #e5484d; border-color: #e5484d; color: #fff; }
       .deck-cam.cam-dragging { cursor: grabbing; }
       body.is-presenter .deck-rec-pill { opacity: 1; pointer-events: auto; top: auto; bottom: 12px; left: 12px;
         background: #2a1215; border: 1px solid #e5484d; font-size: 13px; padding: 6px 10px; }
@@ -72,10 +81,12 @@
   }
 
   // ── Recorder ────────────────────────────────────────────────────────────────
-  function _pickMime() {
+  function _pickMime(withAudio) {
     const MR = window.MediaRecorder;
-    for (const m of ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus',
-                     'video/webm;codecs=vp8,opus', 'video/webm']) {
+    const kinds = withAudio
+      ? ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+      : ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    for (const m of kinds) {
       if (MR && MR.isTypeSupported(m)) return m;
     }
     return '';
@@ -92,6 +103,8 @@
   }
 
   function _mixAudio(display, mic) {
+    const sources = [display, mic].filter(s => s && s.getAudioTracks().length);
+    if (!sources.length) { R.ctx = null; R.analyser = null; return []; }
     const ctx = new AudioContext();
     const dest = ctx.createMediaStreamDestination();
     const analyser = ctx.createAnalyser();
@@ -123,8 +136,21 @@
     });
   }
 
-  async function start() {
+  // What a recording captures besides the slides: the microphone, and the sound the slides themselves
+  // play (a clip on a slide). Chosen in the options panel and remembered for the next recording.
+  const PREF_KEY = 'slate-record-audio';
+  function _prefs() {
+    try { return Object.assign({ mic: true, tab: true }, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); }
+    catch (e) { return { mic: true, tab: true }; }
+  }
+  function _savePrefs(p) { try { localStorage.setItem(PREF_KEY, JSON.stringify(p)); } catch (e) {} }
+  function _describe(p) {
+    return p.mic && p.tab ? 'microphone and slide sound' : p.mic ? 'microphone only' : p.tab ? 'slide sound only' : 'no audio';
+  }
+
+  async function start(opts) {
     if (R.on || R.starting) return;
+    opts = opts || _prefs();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia || !window.MediaRecorder) {
       _note('This browser cannot record a tab.', 'err'); return;
     }
@@ -134,7 +160,7 @@
       // Display capture first: it needs the click's user activation, which an earlier await could spend.
       display = await navigator.mediaDevices.getDisplayMedia({
         video: { displaySurface: 'browser', frameRate: 30 },
-        audio: { suppressLocalAudioPlayback: false },
+        audio: opts.tab ? { suppressLocalAudioPlayback: false } : false,
         preferCurrentTab: true, selfBrowserSurface: 'include', surfaceSwitching: 'exclude',
       });
     } catch (e) {
@@ -142,12 +168,15 @@
       if (e && e.name !== 'NotAllowedError') _note('Recording could not start: ' + e.message, 'err');
       return;
     }
-    try {
-      mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-    } catch (e) {
-      _note('No microphone — recording without narration.');
+    if (opts.mic) {
+      try {
+        mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      } catch (e) {
+        _note('No microphone: recording without narration.');
+      }
     }
-    const mime = _pickMime();
+    const withAudio = !!(mic || (display && display.getAudioTracks().length));
+    const mime = _pickMime(withAudio);
     let info;
     try {
       const r = await fetch(API('/start'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -353,7 +382,33 @@
 
   window.addEventListener('beforeunload', e => { if (R.on) { e.preventDefault(); e.returnValue = ''; } });
 
-  window.deckRecordToggle = () => (R.on ? stop() : start());
+  // `r`: stop, or start with the remembered audio choice (said on screen, so it is never a surprise).
+  window.deckRecordToggle = () => {
+    if (R.on) return stop();
+    const p = _prefs();
+    _note('Recording with ' + _describe(p) + '  ·  ⇧R to change');
+    return start(p);
+  };
+  // ⇧R / the record button: choose what to capture, then start from the panel's button (that click is
+  // what lets the page ask to capture the tab).
+  window.deckRecordOptions = () => {
+    if (R.on) return stop();
+    const old = document.getElementById('deckrecopts'); if (old) { old.remove(); return; }
+    _injectStyle();
+    const p = _prefs();
+    const box = document.createElement('div');
+    box.id = 'deckrecopts'; box.className = 'deck-rec-opts';
+    box.innerHTML = '<div class="hd">Record</div>' +
+      '<label><input type="checkbox" data-k="mic"' + (p.mic ? ' checked' : '') + '> Microphone</label>' +
+      '<label><input type="checkbox" data-k="tab"' + (p.tab ? ' checked' : '') + '> Slide sound</label>' +
+      '<div class="bt"><button class="go">● Start</button><button class="no">Cancel</button></div>';
+    const read = () => ({ mic: box.querySelector('[data-k=mic]').checked, tab: box.querySelector('[data-k=tab]').checked });
+    box.querySelector('.go').onclick = () => { const q = read(); _savePrefs(q); box.remove(); start(q); };
+    box.querySelector('.no').onclick = () => box.remove();
+    box.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); box.remove(); } });
+    _host().appendChild(box);
+    box.querySelector('.go').focus();
+  };
   window.deckCameraToggle = cameraToggle;
   window.deckRecording = () => R.on;
 })();

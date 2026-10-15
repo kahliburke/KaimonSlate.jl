@@ -44,8 +44,11 @@ length and whether you are ahead or behind, and autoplay (`a`) advances on the r
 
 ### Recording
 
-Press `r` to record the deck with your microphone. The browser asks which tab or window to capture,
-a 3-2-1 countdown starts it, and `r` again stops it. The video is written beside the notebook in
+Press `r` to record the deck. The browser asks which tab or window to capture, a 3-2-1 countdown
+starts it, and `r` again stops it. What is recorded besides the slides is your choice: `⇧R` (or the ⏺
+button) opens a panel to switch the **microphone** and the **slide sound** (clips playing on slides) on
+or off, and starts from there. The choice is remembered, and `r` says which it is using as it starts.
+With both off the video has no audio track. The video is written beside the notebook in
 `recordings/`, with a chapters file (`.vtt`) marking each slide and a `.json` of the step timings.
 Press `v` for a camera bubble, which is part of the recording; drag it to move it, double-click to
 enlarge it. The presenter window shows the recording time and a stop button.

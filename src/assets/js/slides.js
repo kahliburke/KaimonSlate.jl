@@ -117,7 +117,7 @@
         '<button title="laser pointer (l)" onclick="deckLaser()">◉</button>' +
         '<button title="draw on the slide (d · x clears)" onclick="deckDraw()">✎</button>' +
         '<button title="autoplay (a)" onclick="deckAutoplay()">⏵</button>' +
-        '<button title="record (r)" onclick="window.deckRecordToggle && deckRecordToggle()">⏺</button>' +
+        '<button title="record (r · ⇧R chooses audio)" onclick="window.deckRecordOptions && deckRecordOptions()">⏺</button>' +
         '<button title="camera bubble (v)" onclick="window.deckCameraToggle && deckCameraToggle()">◎</button>' +
         '<button title="presenter view (s)" onclick="openPresenter()">🪞</button>' +
         '<button title="fullscreen (f)" onclick="slideFullscreen()">⛶</button>' +
@@ -1056,7 +1056,7 @@
     ['→  space', 'next step / slide'], ['←', 'previous'], ['⇧→  ⇧←', 'next / previous slide'],
     ['Home  End', 'first / last slide'], ['3 ⏎', 'go to slide 3'], ['a', 'autoplay'], ['p', 'pause timing'],
     ['?', 'this list'], ['b', 'black screen'], ['l', 'laser pointer'], ['d', 'draw · x clears'], ['c', 'show code'],
-    ['o', 'overview'], ['t', 'rehearse timings'], ['r', 'record'], ['v', 'camera bubble'],
+    ['o', 'overview'], ['t', 'rehearse timings'], ['r  ⇧R', 'record · choose audio'], ['v', 'camera bubble'],
     ['s', 'presenter window'], ['f', 'fullscreen'], ['Esc', 'exit'],
   ];
   // Every slide as a card (number, title, first line), on its own background. Click or type a number
@@ -1231,7 +1231,9 @@
       case 'l': case 'L': deckLaser(); break;
       case 'd': case 'D': deckDraw(); break;
       case 'x': case 'X': _inkClear(); break;
-      case 'r': case 'R': if (window.deckRecordToggle) deckRecordToggle(); break;
+      case 'r': case 'R':
+        if (e.shiftKey ? window.deckRecordOptions : window.deckRecordToggle) (e.shiftKey ? deckRecordOptions : deckRecordToggle)();
+        break;
       case 'v': case 'V': if (window.deckCameraToggle) deckCameraToggle(); break;
       case '?': deckHelp(); break;
     }
