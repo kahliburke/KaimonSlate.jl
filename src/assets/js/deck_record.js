@@ -29,7 +29,10 @@
     cam: null, camStream: null,
   };
 
-  function _note(msg, kind) { if (window.toast) toast(msg, 6000, kind || ''); else console.log(msg); }
+  function _note(msg, kind) {
+    if (window.deckNotice && window.deckNotice(msg, 7000)) return;
+    if (window.toast) toast(msg, 6000, kind || ''); else console.log(msg);
+  }
 
   // Overlays must sit inside the fullscreen element or they are not painted at all.
   function _host() {
@@ -208,7 +211,7 @@
       });
       const out = r.ok ? await r.json() : null;
       if (!out) throw new Error('hub refused (' + r.status + ')');
-      _note('Recording saved: ' + (out.converting ? out.converting + ' (converting…)' : R.file) +
+      _note('Recording saved beside the notebook: ' + (out.converting ? out.converting + ' (converting…)' : R.file) +
             (R.lost ? ' — ' + R.lost + ' chunk(s) missing' : ''), R.lost ? 'err' : '');
     } catch (e) {
       _note('Recording finished but its chapters were not saved: ' + e.message, 'err');

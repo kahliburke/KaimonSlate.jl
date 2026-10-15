@@ -963,10 +963,10 @@
   }
   function _blackout() { document.getElementById('deck').classList.toggle('black-on'); }
   let _flashT = null;
-  function _flash(msg) {
+  function _flash(msg, ms) {
     const g = document.getElementById('deckgoto'); if (!g) return;
     g.textContent = msg; g.classList.add('on');
-    clearTimeout(_flashT); _flashT = setTimeout(() => g.classList.remove('on'), 1100);
+    clearTimeout(_flashT); _flashT = setTimeout(() => g.classList.remove('on'), ms || 1100);
   }
   const _HELP = [
     ['→  space', 'next step / slide'], ['←', 'previous'], ['⇧→  ⇧←', 'next / previous slide'],
@@ -1373,5 +1373,7 @@
   window.deckRehearse = deckRehearse;
   window._deckSettle = _deckSettle;
   window._deckOpen = () => D.open;
+  // A message for whoever is presenting: page toasts sit behind the deck, and outside it in fullscreen.
+  window.deckNotice = (msg, ms) => { if (!D.open) return false; _flash(msg, ms || 6000); return true; };
   window._deckPos = () => ({ idx: D.idx, step: D.step, title: _slideTitle(D.slides[D.idx]) });
 })();
