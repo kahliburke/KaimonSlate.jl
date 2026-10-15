@@ -191,6 +191,10 @@ echart(:line, t, x; steps = [(x = (0, 12),),                       # step 1: the
 A step with `band = true` keeps the view and shades that stretch of `x`. The figure's steps share the
 slide's step counter with its other builds.
 
+Tag a chart cell `ghost` and, while it is presented, changing a control leaves a faint copy of the
+figure as it was before the change. A drag compares against where it started, so a question answered
+live ("what if the damping doubles?") shows both curves at once.
+
 ### Media and morphing
 
 `![autoplay loop](clip.mp4)` is a video (and `![](talk.m4a)` audio). Flags in the alt text:

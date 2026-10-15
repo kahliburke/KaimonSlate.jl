@@ -604,7 +604,7 @@
     body.classList.remove('scroll');
     const charts = _slideCharts();
     const u = parseFloat(slide.style.getPropertyValue('--u')) || 1;
-    for (const c of charts) _presentChart(c.inst, u);
+    for (const c of charts) { _presentChart(c.inst, u); _ghostStart(c.inst); }
     const availH = body.clientHeight;
     for (const c of charts) {
       const host = c.dom.parentElement;
@@ -659,6 +659,7 @@
   // again only once the notebook is back on screen (`exitPresent`).
   function _restoreCellCharts(el) {
     for (const inst of _cellCharts(el)) {
+      inst.__ghostPrev = null; inst.__ghostSpec = null;
       // Left mid-morph: the chart still holds the previous slide's figure.
       if (inst.__morphing) { cancelAnimationFrame(inst.__morphing); inst.__morphing = 0; inst.__deckStyled = true; }
       inst.__morphUntil = 0;
@@ -808,12 +809,42 @@
   };
   const _restyle = window._onChartRendered;
   window._onChartRendered = inst => {
-    if (D.open && D.restore.some(r => _cellCharts(r.el).includes(inst))) {
+    const home = D.open && D.restore.find(r => _cellCharts(r.el).includes(inst));
+    if (home) {
       const slide = document.querySelector('#deckstage .deck-slide');
       _presentChart(inst, parseFloat(slide && slide.style.getPropertyValue('--u')) || 1);
     }
     _restyle(inst);
+    if (home) _ghost(inst, home.el);
   };
+
+  // Ghost. A chart cell tagged `ghost` keeps, while presented, a faint copy of how it looked before the
+  // current change, so a value dragged during a talk reads as a comparison. The copy is the last SETTLED
+  // state: renders that follow each other quickly (a drag) all compare against where the drag began.
+  const _GHOST_SETTLE = 700;
+  function _ghost(inst, cellEl) {
+    const cells = (nbState && nbState.cells) || [];
+    if (!_tagMap(cells.find(c => 'cell-' + c.id === cellEl.id)).ghost) return;
+    const cur = _specOf(inst); if (!cur) return;
+    const now = performance.now(), prev = inst.__ghostPrev;
+    if (prev && now - prev.t > _GHOST_SETTLE && prev.sig !== inst.__slateOptSig) inst.__ghostSpec = prev.spec;
+    inst.__ghostPrev = { spec: cur, sig: inst.__slateOptSig, t: now };
+    const g = inst.__ghostSpec; if (!g) return;
+    const dim = getComputedStyle(document.querySelector('.deck') || document.body).getPropertyValue('--deck-dim').trim() || '#8891a5';
+    const ghosts = (g.series || []).map((x, i) => Object.assign({}, x, {
+      id: '__ghost' + i, name: '', silent: true, z: 1, animation: false, showSymbol: false,
+      tooltip: { show: false }, emphasis: { disabled: true }, label: { show: false },
+      lineStyle: Object.assign({}, x.lineStyle, { color: dim, opacity: 0.5 }),
+      itemStyle: Object.assign({}, x.itemStyle, { color: dim, opacity: 0.3 }),
+      areaStyle: x.areaStyle ? { color: dim, opacity: 0.08 } : undefined,
+      markArea: undefined, markLine: undefined, markPoint: undefined,
+    }));
+    try { inst.setOption({ series: (cur.series || []).map(() => ({})).concat(ghosts) }); } catch (e) {}
+  }
+  // The state a ghost compares against starts as the chart as it came up on the slide.
+  function _ghostStart(inst) {
+    if (!inst.__ghostPrev) inst.__ghostPrev = { spec: _specOf(inst), sig: inst.__slateOptSig, t: -1e9 };
+  }
 
   // Data morph. Chart cells on consecutive slides tagged with the same `morph=name` are one figure
   // changing form: the incoming chart is first drawn with the outgoing chart's option, then given its own

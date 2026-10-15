@@ -197,6 +197,20 @@ let t = collect(range(0, 12; length = 600)), γ = 0.25, ωd = 2.0
            steps = [(x = (0, 12),), (x = (7.5, 12), y = (-0.16, 0.16)), (x = (0, 3), band = true)])
 end
 
+#%% md id=live
+@md"""
+## Change the damping
+"""
+
+#%% code id=damping_bind
+@bind γd Slider(0.05:0.05:1.0; default = 0.25, label = "damping γ")
+
+#%% code id=live_plot ghost
+let t = collect(range(0, 12; length = 600)), ωd = 2.0
+    echart(series(:line, t, exp.(-γd .* t) .* cos.(ωd .* t); name = "x", showSymbol = false);
+           legend = false, height = 380, yAxis = (min = -1, max = 1))
+end
+
 #%% md id=draws
 @md"""
 ## Two hundred and forty draws

@@ -1252,7 +1252,8 @@ See also `save_asset`, `FileUpload`."""),
         into histogram bars, a line becoming columns). FIGURE STEPS: `echart(…; steps = [(x = (a, b),),
         (x = (c, d), y = (e, f)), (x = (g, h), band = true)])` moves the chart through those axis windows
         (or shades an x band) on the slide's build steps, animated. Charts on slides are restyled for
-        presentation (slide-sized text, heavier lines) and restored on exit. `class=serif` on a slide sets
+        presentation (slide-sized text, heavier lines) and restored on exit. A chart cell tagged `ghost`
+        keeps a faint copy of its previous settled state while a control on the slide changes it. `class=serif` on a slide sets
         its headings in a book face. REACTIVE builds:
         `@bind k SlideSteps(n)` follows the slide's step counter (0…n) so a figure can build from
         computed state. See also `SlideSteps`, `cell tags`, `front matter`."""),
