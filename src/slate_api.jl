@@ -1269,6 +1269,9 @@ See also `save_asset`, `FileUpload`."""),
           with an empty group so spacing stays binary: `m\\ddot x \\stepat{1}{{}+ \\term{damping}{c\\dot x}}`.
         - `\\hl{tex}` / `\\hlat{n}{tex}` light a piece up; `\\cancelat{n}{tex}` strikes it through on step n;
           `\\fadeat{n}{tex}` removes it on step n.
+        - `\\braceat{n}{tex}{label}` (`\\obraceat` above) draws a labelled brace under the piece on step n —
+          the way to say what a term IS. `\\focusat{n}{tex}` (or `::: {.step .focus}` for a block) dims the
+          rest of the slide on step n, keeping lit whatever arrives on that step.
         Derivation in place: a `::: derive` block holding display equations, one per paragraph (blank line
         between `\$\$…\$\$` lines). One equation shows at a time; each click turns it into the next. Terms that
         share a name in consecutive equations (matched by name and occurrence) glide to their new place; the

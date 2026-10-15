@@ -115,6 +115,17 @@ $\term{spring}{k\,x}$ pulls back, in proportion to displacement
 :::
 """
 
+#%% md id=reading layout=center
+@md raw"""
+## Reading the equation
+
+$$\braceat{1}{\term{inertia}{m\ddot x}}{inertia} + \braceat{2}{\term{damping}{c\,\dot x}}{friction} + \braceat{3}{\term{spring}{k\,x}}{restoring} = \focusat{4}{0}$$
+
+::: {.step .fade step=4}
+Nothing pushes from outside: the three forces balance
+:::
+"""
+
 #%% md id=derivation layout=center
 @md raw"""
 ## Looking for the motion

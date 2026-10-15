@@ -3250,7 +3250,7 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 .deck-slide .step.zoom { --step-from: scale(.6); --step-ease: cubic-bezier(.34, 1.4, .64, 1); transform-origin: left center; }
 .deck-slide:is([data-layout="center"], [data-layout="title"]) .step.zoom { transform-origin: center; }
 .deck-slide .step.blur { --step-from: none; --step-filter: blur(calc(var(--u) * 14)); }
-.deck-slide .step:not(.on):not(.highlight):not(.strike):not(.fade-out):not(.mcancel),
+.deck-slide .step:not(.on):not(.highlight):not(.strike):not(.fade-out):not(.mcancel):not(.brace):not(.focus),
 .deck-slide .step.fade-out.on {
   opacity: 0; transform: var(--step-from); filter: var(--step-filter); visibility: hidden;
   transition: opacity .4s ease, transform .5s ease, filter .4s ease, visibility 0s linear .5s; }
@@ -3274,6 +3274,15 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 .deck-slide .katex .highlight { border-radius: .15em; padding: 0 .08em; margin: 0 -.08em; }
 .deck-slide .mcancel svg { transition: opacity .35s ease, clip-path .5s ease; }
 .deck-slide .mcancel:not(.on) svg { opacity: 0; clip-path: inset(0 100% 0 0); }
+/* A brace under (or over) a term draws in on its step; the term is there all along. */
+.deck-slide .brace .stretchy, .deck-slide .brace .brace-label { transition: opacity .45s ease, clip-path .55s ease, transform .5s ease; }
+.deck-slide .brace:not(.on) .stretchy { opacity: 0; clip-path: inset(0 50% 0 50%); }
+.deck-slide .brace:not(.on) .brace-label { opacity: 0; transform: translateY(.3em); }
+.deck-slide .brace-label { color: var(--deck-dim); }
+.katex .brace-label { display: inline-block; }
+/* Spotlight: on a `focus` step everything but that item recedes. */
+.deck-slide .slide-body .spot-dim { opacity: .22; filter: saturate(.4); transition: opacity .45s ease, filter .45s ease; }
+.deck-slide .slide-body.spotlit .slide-num { opacity: .2; }
 /* `::: derive`: equations stacked in one place, one shown; stepping turns it into the next. */
 .deck-slide .derive { display: grid; justify-items: center; }
 .deck-slide .derive > .derive-eq { grid-area: 1 / 1; transition: none !important; }

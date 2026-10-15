@@ -661,10 +661,19 @@ function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{S
 end
 
 # The presentation macros (`\term`, `\step`, … — see SLATE_TEX_MACROS in core.js) mark up an equation
-# for the deck. Print shows the finished equation, so each becomes the math it wraps: the argument kept
-# is the last one, and `\cancelat` keeps its cancel line.
+# for the deck. Print shows the finished equation, so each becomes the math it wraps (its last argument);
+# `\cancelat` keeps its cancel line and the brace macros keep their brace and label.
 const _MATH_MACROS = Dict("term" => 2, "termc" => 3, "step" => 1, "stepat" => 2, "hl" => 1, "hlat" => 2,
-                          "cancelat" => 2, "fadeat" => 2)
+                          "cancelat" => 2, "fadeat" => 2, "focusat" => 2, "brace" => 2, "braceat" => 3,
+                          "obraceat" => 3)
+# The braces print as braces, with their label.
+function _print_math_macro(name, args)
+    name == "cancelat" && return string("\\cancel{", args[end], "}")
+    name == "brace"    && return string("\\underbrace{", args[1], "}_{\\text{", args[2], "}}")
+    name == "braceat"  && return string("\\underbrace{", args[2], "}_{\\text{", args[3], "}}")
+    name == "obraceat" && return string("\\overbrace{", args[2], "}^{\\text{", args[3], "}}")
+    return string("{", args[end], "}")
+end
 function _plain_math_macros(src::AbstractString)
     occursin('\\', src) || return String(src)
     s = String(src)
@@ -691,7 +700,7 @@ function _plain_math_macros(src::AbstractString)
                     j = nextind(s, k)
                 end
                 if length(args) == n
-                    print(io, m.captures[1] == "cancelat" ? string("\\cancel{", args[end], "}") : string("{", args[end], "}"))
+                    print(io, _print_math_macro(m.captures[1], args))
                     i = j; changed = true
                     continue
                 end

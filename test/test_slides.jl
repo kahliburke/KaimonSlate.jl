@@ -244,4 +244,7 @@ end
     @test f(raw"\termc{F}{red}{\step{F(t)}}") == raw"{{F(t)}}"
     @test f(raw"\termination{a} \text{b}") == raw"\termination{a} \text{b}"      # other commands untouched
     @test f(raw"\term{x}") == raw"\term{x}"                                       # missing argument: left alone
+    @test f(raw"\braceat{2}{c\dot x}{friction}") == raw"\underbrace{c\dot x}_{\text{friction}}"
+    @test f(raw"\obraceat{1}{m}{mass}") == raw"\overbrace{m}^{\text{mass}}"
+    @test f(raw"\focusat{4}{0}") == raw"{0}"
 end

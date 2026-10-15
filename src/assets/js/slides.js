@@ -398,7 +398,24 @@
       it.el.classList.toggle('on', it.idx <= s);
       it.el.classList.toggle('current', it.idx === s);
     }
+    _spotlight();
     for (const dv of _derives()) { const eq = _deriveTarget(dv, s); for (const c of dv.children) c.classList.toggle('derive-cur', c === eq); }
+  }
+  // A `focus` item on its step dims everything else on the slide, except what arrives on that same step
+  // (its caption, say). At each level from a lit item up to the slide body its siblings dim, so the item
+  // stays at full strength inside a dimmed equation or list.
+  function _spotlight() {
+    const body = document.querySelector('#deckstage .deck-slide .slide-body');
+    if (!body) return;
+    body.querySelectorAll('.spot-dim').forEach(n => n.classList.remove('spot-dim'));
+    const focus = body.querySelector('.focus.current');
+    body.classList.toggle('spotlit', !!focus);
+    if (!focus) return;
+    const lit = [...body.querySelectorAll('.current')];
+    const keep = new Set();
+    for (const el of lit) for (let n = el; n && n !== body; n = n.parentElement) keep.add(n);
+    for (const n of keep) for (const sib of (n.parentElement ? n.parentElement.children : []))
+      if (!keep.has(sib) && !lit.some(l => sib.contains(l) || l.contains(sib))) sib.classList.add('spot-dim');
   }
   function _derives() {
     const slide = document.querySelector('#deckstage .deck-slide');
