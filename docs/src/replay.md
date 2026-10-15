@@ -37,7 +37,7 @@ A control qualifies when its domain is finite and small enough to enumerate.
 | `Slider` | the min/max/step grid |
 | `NumberField` | the same grid, and only when it is bounded |
 | `Checkbox` / `Toggle` | `false`, `true` |
-| `Select` / `Radio` | the option values |
+| `Select` / `Radio` | the option values, or their [keys](widgets.md#Option-values) |
 | `RangeSlider` | the ordered low/high pairs |
 | `TableSelect` | the row indices, plus "nothing selected" |
 | `MultiSelect` / `MultiCheckBox` | the power set of the options |

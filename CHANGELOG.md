@@ -12,6 +12,26 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Changed
+
+- An option widget gives each option a key (`"#opt:…"`) unless every option value is a string,
+  symbol, `Bool`, character, date or finite number, with no two of the same text. The option values
+  of such a widget stay in the worker. `window.slateBindValue`, `slate_bind_value`, the `set_bind`
+  agent tool and the hub report the key. `set_bind` accepts the key or the option value, and a JSON
+  array names a tuple option.
+- The value mirror, the controls palette and the PDF parameter strip show the label of a key. The
+  palette escapes the value text.
+
+### Fixed
+
+- `Select`, `Radio`, `MultiSelect` and `MultiCheckBox` bind the picked option value when it is a
+  tuple, a vector, a `NamedTuple`, a `Dict`, `nothing`, a function or a struct of the notebook. Such
+  a pick reached the cell as text (`"dog,2"`), and a multiple choice lost its picks. A struct or a
+  function option made the `@bind` cell fail on a gate worker, and froze every `@replay` control of
+  the export.
+- Two options with the same text in the page, such as `Any[1, "1"]`, or with one value and two
+  labels, bind the picked option.
+
 ## [1.11.1] - 2026-10-08
 
 ### Changed

@@ -131,6 +131,22 @@ Pair a pick with [`hidden`](#Controls-drawn-somewhere-else) when the figure is t
 want on screen; otherwise the control strip shows a readout of the current value, since there is
 nothing to drag there.
 
+### Option values
+
+An option value of `Select`, `Radio`, `MultiSelect` or `MultiCheckBox` can be any Julia object: a
+string, a number, a tuple, a `NamedTuple`, a function, or a struct that the notebook defines. The
+cell always reads the option value.
+
+The page sends back only the text of an option. When every option value is a string, symbol, `Bool`,
+character, date or finite number, and no two options have the same text, the page gets the option
+values as they are. Any other option list gives each option a key such as `"#opt:Ebgc8oA1gwU"`, made
+from the hash of the option value, and the option values stay in the worker.
+
+Outside the cell, such a control holds the key: `window.slateBindValue`, the `set_bind` agent tool and
+the hub report it. `set_bind` from a cell, an agent or an extension accepts an option value or its
+key, and a JSON array names a tuple option. A struct or a function that the notebook defines gets
+another key in a new worker, so after a worker restart its control goes back to the default.
+
 ### Labelled options
 
 Any option may be a bare value or a `value => label` pair. As soon as one is a pair, the bound

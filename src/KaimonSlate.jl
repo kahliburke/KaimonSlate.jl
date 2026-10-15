@@ -1554,6 +1554,9 @@ function create_tools(GateTool::Type)
 
     `name` is the bound variable (e.g. "njobs"), NOT a cell id. `value` is JSON: a number ("42"),
     bool ("true"), string, or array ("[1,2]"); a bare word that isn't valid JSON is taken literally.
+    For Select/Radio/MultiSelect/MultiCheckBox, `value` is an option value, and an array names a
+    tuple option ("[\"dog\", 2]"). Some option lists (tuples, structs, two options with the same
+    text) give each option an `#opt:` key: the reply then shows the key, and `value` can also be a key.
     For a Button, OMIT `value` — a valueless set is a CLICK: the server increments the click count
     and fires the handler, so you never need to read (or race) the current count.
     """

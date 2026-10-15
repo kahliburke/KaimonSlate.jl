@@ -19,6 +19,7 @@
 # slate-owned worker_infra env on LOAD_PATH.
 import Markdown # stdlib — `@md` renders a standalone-run markdown cell (see `_populate_notebook_ns!`)
 import Base64   # stdlib — a replay sweep hands its packed bytes back to the export base64'd
+import Dates    # stdlib: a date option value reaches the page as its text (see `_plain_option`)
 using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, UploadedFile, indices, WebPage,
                            to_widget, register_kind!, coerce_bind, reconcile_bind, wrap_value,
                            # `@replay`: a control's finite domain, and data computed across it
@@ -415,10 +416,17 @@ TextArea(default::AbstractString = ""; rows::Int = 3, label = nothing) =
 # `value => label` pair — the bound variable takes `value`, while `label` is what's displayed (and
 # may carry `$math$`/markdown, rendered for Radio). Stored as `[{value,label}]`; the value keeps
 # its real Julia type so reconcile/coerce match on values, not the (possibly rich) labels.
-# Returns (specs, labeled): specs is `[{value,label}]`; labeled is true if ANY option was a
+# Returns (specs, labeled, values): specs is `[{value,label}]`; labeled is true if ANY option was a
 # `value => label` pair (→ the widget binds a `Choice` so the label is reachable).
+#
+# The page sends back only the TEXT of an option value. That text names the value only when the
+# widget is PLAIN: every value is a string, symbol, Bool, char, date or finite number, and no two
+# values have the same text. Any other option list makes a KEYED widget. Option `i` then holds the
+# key `"#opt:" * string(hash(v); base = 62)` in place of its value, and `values` holds the values
+# (`nothing` for a plain widget). `wrap` gives the cell the value of a key. The values stay in the
+# worker (`_wire_params`), because the hub cannot read a type that the notebook defines.
 function _norm_options(options)
-    specs = Dict{String,Any}[]; labeled = false
+    specs = Dict{String,Any}[]; vals = Any[]; labeled = false
     for o in options
         if o isa Pair
             labeled = true
@@ -426,32 +434,52 @@ function _norm_options(options)
         else
             push!(specs, Dict{String,Any}("value" => o, "label" => string(o)))
         end
+        push!(vals, specs[end]["value"])
     end
-    return specs, labeled
+    all(_plain_option, vals) && allunique(map(_browser_text, vals)) && return specs, labeled, nothing
+    seen = Set{String}()
+    for s in specs
+        k = "#opt:" * string(hash(s["value"]); base = 62)
+        while k in seen; k *= "'"; end             # an equal value, or a hash collision
+        push!(seen, k); s["value"] = k
+    end
+    return specs, labeled, vals
 end
+# A plain option value: JSON writes it as a string or a number (see `_norm_options`).
+_plain_option(v) = v isa Union{AbstractString,Symbol,Bool,Char,Dates.TimeType} ||
+                   (v isa Union{Integer,AbstractFloat} && isfinite(v))
+# The text of a plain option value in the page. Pairs that `_same_option` confuses, such as 1 and
+# "1", 1 and 1.0, :a and "a", or "01" and 1, get the same text here.
+_browser_text(v) = (n = v isa Real && !(v isa Bool) ? float(v) : tryparse(Float64, string(v));
+                    n === nothing ? string(v) : string(n))
 _opt_values(opts) = Any[o isa AbstractDict ? o["value"] : o for o in opts]
 _opt_default(default, vals) = default === nothing ? (isempty(vals) ? nothing : first(vals)) :
                               (default isa Pair ? default.first : default)
-_opt_params(label, specs, labeled) = begin
+_opt_params(label, specs, labeled, vals) = begin
     p = merge(_wparams(label), Dict{String,Any}("options" => specs))
     labeled && (p["labeled"] = true)   # bind a Choice (value + label) rather than the bare value
+    vals === nothing || (p["values"] = vals)   # a keyed widget (see `_norm_options`)
     p
 end
 function Select(options, default = nothing; label = nothing)
-    specs, labeled = _norm_options(options)
-    return Widget("select", _opt_params(label, specs, labeled), _opt_default(default, _opt_values(specs)))
+    specs, labeled, vals = _norm_options(options)
+    p = _opt_params(label, specs, labeled, vals)
+    return Widget("select", p, _key_of(p, _opt_default(default, something(vals, _opt_values(specs)))))
 end
 function Radio(options, default = nothing; label = nothing)
-    specs, labeled = _norm_options(options)
-    return Widget("radio", _opt_params(label, specs, labeled), _opt_default(default, _opt_values(specs)))
+    specs, labeled, vals = _norm_options(options)
+    p = _opt_params(label, specs, labeled, vals)
+    return Widget("radio", p, _key_of(p, _opt_default(default, something(vals, _opt_values(specs)))))
 end
 function MultiSelect(options, default = Any[]; label = nothing)   # compact multi-select dropdown (long lists)
-    specs, labeled = _norm_options(options)
-    return Widget("multiselect", _opt_params(label, specs, labeled), Any[d isa Pair ? d.first : d for d in default])
+    specs, labeled, vals = _norm_options(options)
+    p = _opt_params(label, specs, labeled, vals)
+    return Widget("multiselect", p, Any[_key_of(p, d isa Pair ? d.first : d) for d in default])
 end
 function MultiCheckBox(options, default = Any[]; label = nothing)  # checkbox list (small discrete sets)
-    specs, labeled = _norm_options(options)
-    return Widget("multicheck", _opt_params(label, specs, labeled), Any[d isa Pair ? d.first : d for d in default])
+    specs, labeled, vals = _norm_options(options)
+    p = _opt_params(label, specs, labeled, vals)
+    return Widget("multicheck", p, Any[_key_of(p, d isa Pair ? d.first : d) for d in default])
 end
 ColorPicker(default::AbstractString = "#3aa0ff"; label = nothing) = Widget("color", _wparams(label), String(default))
 DateField(default = ""; label = nothing) = Widget("date", _wparams(label), string(default))
@@ -803,7 +831,7 @@ function _lookup_option(w::Widget, v)
     end
     return (string(v), 0)
 end
-_choice(w::Widget, v) = (li = _lookup_option(w, v); Choice(v, li[1], li[2]))
+_choice(w::Widget, v) = (li = _lookup_option(w, v); Choice(_unkey(w, v), li[1], li[2]))
 
 # Does a browser-returned option value name this option? An `<option>` carries its value as TEXT,
 # so what comes back is a String and has to be matched against the real Julia value.
@@ -825,12 +853,67 @@ function _step_digits(st::Real)
     return clamp(ceil(Int, -log10(st)) + 1, 0, 10)
 end
 
+# A vector matches a tuple element by element, because JSON from an agent has no tuples:
+# `["dog", 2]` names `("dog", 2)`.
 function _same_option(v0, v)
+    if v0 isa Union{Tuple,AbstractVector} && v isa Union{Tuple,AbstractVector}
+        return length(v0) == length(v) && all(((a, b),) -> _same_option(a, b), zip(v0, v))
+    end
     string(v0) == string(v) && return true
     n0 = v0 isa Number ? float(v0) : tryparse(Float64, string(v0))
     n1 = v isa Number ? float(v) : tryparse(Float64, string(v))
     return n0 !== nothing && n1 !== nothing && n0 == n1
 end
+
+# ── Keyed option widgets (see `_norm_options`) ───────────────────────────────
+# The position of the option value `v` in `vals`, or 0. The first pass that finds an option wins:
+# `===`, so that `1.0` finds the option `1.0` before the option `1`; then `isequal`; then
+# `_same_option`, so that a vector from JSON finds a tuple option.
+function _value_index(vals, v)
+    i = findfirst(x -> x === v, vals)
+    i === nothing && (i = findfirst(x -> isequal(x, v), vals))
+    i === nothing && (i = findfirst(x -> _same_option(x, v), vals))
+    return something(i, 0)
+end
+# The registry value for the option value `v`: its key on a keyed widget with params `p`, else `v`.
+_key_of(p, v) = (vals = get(p, "values", nothing); i = vals === nothing ? 0 : _value_index(vals, v);
+                 i == 0 ? v : p["options"][i]["value"])
+# The option value of the key `k` on a keyed widget, else `k`.
+function _unkey(w::Widget, k)
+    vals = get(w.params, "values", nothing)
+    vals === nothing && return k
+    i = findfirst(o -> isequal(o["value"], k), w.params["options"])
+    return i === nothing ? k : vals[i]
+end
+# The registry value of the option that `v` names, else `nothing`. The page names an option by its
+# text (a key is text too). A cell, an agent or an extension can also give the value of an option
+# of a keyed widget. A plain option value is never `nothing`, and a key is a string.
+function _find_option(w::Widget, v)
+    for v0 in _opt_values(get(w.params, "options", ()))
+        _same_option(v0, v) && return v0
+    end
+    i = haskey(w.params, "values") ? _value_index(w.params["values"], v) : 0
+    return i == 0 ? nothing : w.params["options"][i]["value"]
+end
+function _coerce_option(w::Widget, v)
+    o = _find_option(w, v)
+    o === nothing || return o
+    # A key of no option comes from a page that shows an old option list.
+    return haskey(w.params, "values") && v isa AbstractString && startswith(v, "#opt:") ? w.default : v
+end
+# The registry value in the new widget `nw` for the old registry value `ov` of `ow`, else `nothing`
+# when the new list does not have the option. A key that is still in the list keeps its option.
+# Else the old option value finds its place in the new list, also between a plain and a keyed widget.
+function _carry_option(ow::Widget, ov, nw::Widget)
+    keep = _opt_values(get(nw.params, "options", ()))
+    ov in keep && return ov
+    k = _key_of(nw.params, _unkey(ow, ov))
+    return k in keep ? k : nothing
+end
+const _OPTION_KINDS = ("select", "radio", "multiselect", "multicheck")
+# The params that leave the worker: the option values of a keyed widget stay here.
+_wire_params(w::Widget) =
+    w.kind in _OPTION_KINDS && haskey(w.params, "values") ? delete!(copy(w.params), "values") : w.params
 
 # Register the value lifecycle for each built-in kind through SlateExtensionsBase's `register_kind!`
 # — the SAME seam a third-party widget uses. Hooks: coerce(w, v) (browser value → Julia value),
@@ -1096,17 +1179,13 @@ function _register_builtin_kinds!()
         end,
         wrap = (w, v) -> _row_namedtuple(w, v isa Integer ? v : 0))
     # Select / Radio — the browser sends the option's stringified value; map it back to the real
-    # value. A labeled option binds a `Choice` (value + label); a bare option stays its value.
+    # value. A labeled option binds a `Choice` (value + label); a bare option stays its value. A
+    # keyed widget (see `_norm_options`) holds the key of the option, and `wrap` gives its value.
     for k in ("select", "radio")
         register_kind!(k;
-            coerce = function (w, v)
-                for v0 in _opt_values(get(w.params, "options", ()))
-                    _same_option(v0, v) && return v0
-                end
-                return v
-            end,
-            reconcile = (ow, ov, nw) -> (ov in _opt_values(get(nw.params, "options", ()))) ? ov : nw.default,
-            wrap = (w, v) -> get(w.params, "labeled", false) === true ? _choice(w, v) : v)
+            coerce = _coerce_option,
+            reconcile = (ow, ov, nw) -> (o = _carry_option(ow, ov, nw); o === nothing ? nw.default : o),
+            wrap = (w, v) -> get(w.params, "labeled", false) === true ? _choice(w, v) : _unkey(w, v))
     end
     # MultiSelect / MultiCheckBox — a set of stringified values; keep those still in the option set.
     # Labeled → a `Selection` (value+label dict); bare → the value vector.
@@ -1115,13 +1194,15 @@ function _register_builtin_kinds!()
             coerce = function (w, v)
                 vals = _opt_values(get(w.params, "options", ()))
                 sel = v isa AbstractVector ? v : (v === nothing ? Any[] : Any[v])
+                haskey(w.params, "values") && (sel = Any[_find_option(w, s) for s in sel])   # keyed: each key
                 Any[v0 for v0 in vals if any(s -> _same_option(v0, s), sel)]
             end,
             reconcile = function (ow, ov, nw)
-                vals = _opt_values(get(nw.params, "options", ()))
-                ov isa AbstractVector ? [v for v in ov if v in vals] : nw.default
+                ov isa AbstractVector || return nw.default
+                [o for o in (_carry_option(ow, v, nw) for v in ov) if o !== nothing]
             end,
-            wrap = (w, v) -> get(w.params, "labeled", false) === true ? Selection(Choice[_choice(w, x) for x in v]) : v)
+            wrap = (w, v) -> get(w.params, "labeled", false) === true ? Selection(Choice[_choice(w, x) for x in v]) :
+                             haskey(w.params, "values") ? Any[_unkey(w, x) for x in v] : v)
     end
     return nothing
 end
@@ -1154,7 +1235,7 @@ function _do_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, n
         v
     end
     s = get(task_local_storage(), _BIND_SINK_KEY, nothing)
-    s === nothing || push!(s, (name = name, kind = w.kind, params = w.params, value = val))
+    s === nothing || push!(s, (name = name, kind = w.kind, params = _wire_params(w), value = val))
     return wrap_value(w, val)        # user gets a Choice for labeled option widgets; bare value otherwise
 end
 
@@ -1179,6 +1260,16 @@ function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLoc
         reg[name] = (w, cv)
         return cv
     end
+end
+
+# The value that a cell's `set_bind` sends to the host. On a keyed option control that this worker
+# holds, an option value goes as its key, because the hub cannot read a type that the notebook defines.
+function _cell_bind_value(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, name, value)
+    w = lock(reglock) do
+        e = get(reg, Symbol(name), nothing)
+        e === nothing ? nothing : e[1]
+    end
+    return w !== nothing && w.kind in _OPTION_KINDS && haskey(w.params, "values") ? coerce_bind(w, value) : value
 end
 
 # ── Drawing a control somewhere other than the notebook ───────────────────────
@@ -1846,11 +1937,6 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # INTERNAL (underscored — not part of the authoring surface): capture.jl's output-streaming
     # watchdog pushes a cooked frame of what the running cell has printed so far through here.
     Core.eval(m, :(const __slate_cellout = $slate_cellout))
-    # `set_bind(:name, value)` — the notebook driving one of its OWN controls. Takes the same path a
-    # browser change takes (coerce → restale readers → sync the widget → persist), so a value set
-    # from a cell is indistinguishable from one the reader typed. Without it a control can be left
-    # contradicting what the app is showing, with no way to correct it. Inert on a standalone run.
-    Core.eval(m, :(const set_bind = $set_bind))
     # code→Slate cell-effects channel: a cell (or a package it calls) DECLARES an effect, attributed to the
     # executing statement, harvested into the wire (`CellOutput.effects`). `slate_effect` is transport-free
     # (task-local push, same impl everywhere — unlike slate_emit). Ergonomic sugar `slate_everywhere(names…)`
@@ -1912,6 +1998,12 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # task-local (seeded by run_capture), so it needs no lock.
     reg = Dict{Symbol,Tuple{Widget,Any}}()
     reglock = ReentrantLock()
+    # `set_bind(:name, value)` — the notebook driving one of its OWN controls. Takes the same path a
+    # browser change takes (coerce → restale readers → sync the widget → persist), so a value set
+    # from a cell is indistinguishable from one the reader typed. Without it a control can be left
+    # contradicting what the app is showing, with no way to correct it. Inert on a standalone run.
+    # Defined after `reg`: a keyed option control sends the key (see `_cell_bind_value`).
+    Core.eval(m, :(const set_bind = $((name, value) -> set_bind(name, _cell_bind_value(reg, reglock, name, value)))))
     handlers = Dict{Symbol,Any}()                 # @onclick: button name → handler closure (event model)
     tokens = Dict{Symbol,Base.RefValue{Bool}}()   # button name → running handler's cancel token
     # The Slate execution context a fired @onclick/@onchange handler runs under, so it can STREAM

@@ -160,7 +160,9 @@ All five are no-ops outside a Slate cell, so package code can call them uncondit
 change back the same way a native control does, through `window.slateSetBind(name, value)` — that
 keeps the registry, the global, `@onchange`, the notebook's own chrome and the persisted value in
 step. If you reflect Slate's value back into your control, guard the echo by comparing against
-`window.slateBindValue(name)` and writing only on a genuine difference.
+`window.slateBindValue(name)` and writing only on a genuine difference. An option widget with
+[keyed options](widgets.md#Option-values) holds the key of an option (`params.options[i].value`) in
+`slateBindValue` and `slate_bind_value`, and `slateSetBind(name, key)` selects that option.
 
 Pair this with `hidden(…)` at the `@bind` site so the notebook draws no second copy. See
 [Widgets & @bind](widgets.md#Controls-drawn-somewhere-else).

@@ -5,6 +5,7 @@
 # (so dynamic args work), and the control is reported back through eval — not parsed.
 using ReTest
 import Base64                            # decode a swept table's packed row order
+import Dates                             # a date option value is plain
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
 const RE = ReportEngine
@@ -14,6 +15,19 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 # semantics of a write, so they register a no-op notifier and hand out its id.
 _noop_refresh(_) = nothing
 const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
+# An option value of a type that the notebook defines.
+struct OptPoint
+    x::Int
+    y::Int
+end
+# What a cell sees after the reader picks in the page: `i` is the position of one option, or a list
+# of positions. An `<option>` holds TEXT, so the page can send back an option value only when it is
+# a string: a key, for a keyed widget.
+function browser_pick(w, i)
+    sent(j) = (k = w.params["options"][j]["value"]; k isa AbstractString ? k :
+               error("the page cannot send back the option value $(repr(k))"))
+    return RE.wrap_value(w, RE.coerce_bind(w, i isa Integer ? sent(i) : map(sent, i)))
+end
 
 @testset "ReportEngine bind" begin
 
@@ -72,6 +86,194 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         @test RE.coerce_bind(w, "nope") == "nope"
         # Multi-select shares the matcher.
         @test RE.coerce_bind(RE.MultiSelect([1e4 => "soft", 1e7 => "stiff"]), ["10000000"]) == Any[1e7]
+    end
+
+    # An `<option>` carries only TEXT, and the text that JavaScript writes for a tuple (`"dog,2"`)
+    # or a NamedTuple (`"[object Object]"`) does not name the value. Such an option list makes a
+    # KEYED widget: each option gets a key, the page sends the key back, and the cell reads the
+    # option value.
+    @testset "keyed options: a picked key binds the option value" begin
+        @test browser_pick(RE.Select([("cat", 1), ("dog", 2)]), 2) === ("dog", 2)
+        @test browser_pick(RE.Radio([(a = 1, b = "x"), (a = 2, b = "y")]), 2) === (a = 2, b = "y")
+        @test browser_pick(RE.Select([OptPoint(1, 2) => "near", OptPoint(3, 4) => "far"]), 2).value ===
+              OptPoint(3, 4)
+        @test browser_pick(RE.Select([1, nothing]), 2) === nothing
+        @test browser_pick(RE.Select([missing, 1]), 1) === missing
+        sq = browser_pick(RE.Select([sin => "sin", (x -> x^2) => "square"]), 2)
+        @test sq.label == "square" && sq.value(3) == 9
+        # A labeled option binds a `Choice` with its own label and position.
+        c = browser_pick(RE.Select([("cat", 1) => "Cat", ("dog", 2) => "Dog"]), 2)
+        @test c.value === ("dog", 2) && c.label == "Dog" && c.index == 2
+        # The default is the key of the first option, or of the given default.
+        w = RE.Select([("cat", 1), ("dog", 2)])
+        @test w.default == w.params["options"][1]["value"]
+        @test RE.Select([("cat", 1), ("dog", 2)], ("dog", 2)).default == w.params["options"][2]["value"]
+    end
+
+    # A widget whose option values the page can send back as their own text stays as before: the
+    # same params, default and coercion. A `ui_theme` Radio of theme names depends on it.
+    @testset "keyed options: plain option lists keep their params" begin
+        th = RE.Radio(["midnight" => "Midnight", "nord" => "Nord"], "midnight")
+        @test th.params == Dict{String,Any}("labeled" => true, "options" => [
+            Dict{String,Any}("value" => "midnight", "label" => "Midnight"),
+            Dict{String,Any}("value" => "nord", "label" => "Nord")])
+        @test th.default == "midnight" && RE.coerce_bind(th, "nord") == "nord"
+        @test RE.Select([1, 2]; label = "n").params == Dict{String,Any}("label" => "n", "options" => [
+            Dict{String,Any}("value" => 1, "label" => "1"), Dict{String,Any}("value" => 2, "label" => "2")])
+        @test RE.MultiSelect(["x", "y", "z"], ["z", "x"]).default == ["z", "x"]
+        for opts in (["a", "b"], [:x, :y], 1:3, [1.5, 2.5], [true, false], ['a', 'b'],
+                     [Dates.Date(2026, 1, 1), Dates.Date(2026, 1, 2)], String[])
+            @test !haskey(RE.Select(opts).params, "values")
+        end
+        # Two values with one text in the page, or a value with no such text, make a keyed widget.
+        for opts in (Any[1, "1"], Any[:a, "a"], Any[1, 1.0], Any["01", 1], Any[true, "true"], [NaN, 1.0],
+                     [("a", 1)], [nothing], [[1, 2]], [Float64], [1 => "one", 1 => "uno"])
+            @test haskey(RE.Select(opts).params, "values")
+        end
+    end
+
+    # The page sends back the same text for `1` and `"1"`, so a plain widget would bind the first of
+    # the two. A keyed widget binds the picked option, and reports the picked label.
+    @testset "keyed options: options with one text bind their own value" begin
+        @test browser_pick(RE.Select(Any[1, "1"]), 2) === "1"
+        @test browser_pick(RE.Select(Any[:a, "a"]), 2) === "a"
+        @test browser_pick(RE.Select(Any[1, 1.0]), 2) === 1.0
+        w1 = RE.Select(Any[1, 1.0], 1.0)
+        @test w1.default == w1.params["options"][2]["value"]           # the default finds its own option
+        c = browser_pick(RE.Select([1 => "one", 1 => "uno"]), 2)
+        @test c.value == 1 && c.label == "uno" && c.index == 2
+    end
+
+    # A cell, an agent or an extension gives an option VALUE, and `coerce` gives its key. JSON has
+    # no tuples, so an agent gives an array for a tuple option. A key of no option comes from a page
+    # that shows an old option list, and gives the default.
+    @testset "keyed options: coerce takes a key or an option value" begin
+        w = RE.Select([("cat", 1) => "Cat", ("dog", 2) => "Dog"])
+        k2 = w.params["options"][2]["value"]
+        @test RE.coerce_bind(w, k2) == k2
+        @test RE.coerce_bind(w, ("dog", 2)) == k2
+        @test RE.coerce_bind(w, Any["dog", 2]) == k2
+        @test RE.coerce_bind(w, "#opt:gone") == w.default
+        @test RE.coerce_bind(w, "upload.csv") == "upload.csv"   # not an option: kept, as on a plain widget
+        @test RE.wrap_value(w, "upload.csv").value == "upload.csv"
+        # A value set before the bind cell runs (the "?" placeholder) finds its option too.
+        lk = ReentrantLock()
+        reg = Dict{Symbol,Tuple{RE.Widget,Any}}(
+            :k => (RE.Widget("?", Dict{String,Any}(), Any["dog", 2]), Any["dog", 2]))
+        @test RE._do_bind(reg, lk, :k, w).value === ("dog", 2)
+    end
+
+    # A re-run of the bind cell keeps the selection by value: the same value has the same key in the
+    # new option list, wherever it moved.
+    @testset "keyed options: a re-run keeps the selection by value" begin
+        key(w, i) = w.params["options"][i]["value"]
+        old = RE.Select([("a", 1), ("b", 2), ("c", 3)])
+        new = RE.Select([("c", 3), ("a", 1)])
+        @test RE.wrap_value(new, RE.reconcile_bind(old, key(old, 3), new)) === ("c", 3)   # moved
+        @test RE.reconcile_bind(old, key(old, 2), new) == new.default                    # gone
+        # A change between plain and keyed keeps the value.
+        p0, p1 = RE.Select(["a", "b"]), RE.Select(["a", "b", (1, 2)])
+        @test RE.wrap_value(p1, RE.reconcile_bind(p0, "b", p1)) == "b"
+        @test RE.reconcile_bind(p1, key(p1, 2), p0) == "b"
+        # A value that a cell set before the options had it stays when a re-run adds it.
+        s0, s1 = RE.Select([("a", 1)]), RE.Select([("a", 1), ("n", 2)])
+        @test RE.wrap_value(s1, RE.reconcile_bind(s0, RE.coerce_bind(s0, ("n", 2)), s1)) === ("n", 2)
+    end
+
+    # The multiple-choice kinds hold a list of keys, in option order, and bind the option values.
+    @testset "keyed options: MultiSelect and MultiCheckBox" begin
+        m = RE.MultiSelect([(1, 2), (3, 4), (5, 6)])
+        key(i) = m.params["options"][i]["value"]
+        @test browser_pick(m, [3, 1]) == [(1, 2), (5, 6)]
+        @test browser_pick(RE.MultiCheckBox([(a = 1,), (a = 2,)]), [2]) == [(a = 2,)]
+        @test RE.wrap_value(m, RE.coerce_bind(m, Any[Any[3, 4]])) == [(3, 4)]          # the agent tool
+        @test RE.coerce_bind(m, [key(1), "#opt:gone", (9, 9)]) == [key(1)]              # no option: dropped
+        @test RE.MultiSelect([(1, 2), (3, 4)], [(3, 4)]).default == [m.params["options"][2]["value"]]
+        # A re-run keeps each value that the new list still has.
+        m2 = RE.MultiSelect([(5, 6) => "C", (1, 2) => "A"])
+        sel = RE.wrap_value(m2, RE.reconcile_bind(m, [key(1), key(2)], m2))
+        @test collect(keys(sel)) == [(1, 2)] && sel[(1, 2)] == "A" && RE.indices(sel) == [2]
+    end
+
+    # The bind record that leaves the worker has the keys and the labels, and no option values: the
+    # hub cannot read a type that the notebook defines, and a large value would go to every page.
+    @testset "keyed options: the option values stay in the worker" begin
+        r = parse_report("#%% code id=ctl\n@bind pick Select([(\"cat\", 1) => \"Cat\", (\"dog\", 2) => \"Dog\"])\n" *
+                         "#%% code id=use\nseen = pick")
+        build_dependencies!(r); eval_stale!(r)
+        spec = findcell(r, "ctl").binds[1]
+        @test !haskey(spec.params, "values") && all(o -> startswith(o["value"], "#opt:"), spec.params["options"])
+        @test spec.value == spec.params["options"][1]["value"]
+        set_bind_value!(r, findcell(r, "ctl"), spec.params["options"][2]["value"])   # the page's pick
+        findcell(r, "use").state = STALE; eval_stale!(r)
+        @test Base.invokelatest(getproperty, r.mod, :seen).value === ("dog", 2)
+        @test findcell(r, "ctl").binds[1].value == spec.params["options"][2]["value"]
+    end
+
+    # The memo key of a reader digests the bind value. A key is the hash of the option value, so a
+    # new option list that puts another value at the same position gives another memo key.
+    @testset "keyed options: the memo key follows the option value" begin
+        r = parse_report("#%% code id=ctl\n@bind pick Select(opts)\n#%% code id=use\nsum(length, pick)")
+        build_dependencies!(r)
+        memo(w) = (findcell(r, "ctl").binds = [RE.BindSpec(:pick, w.kind, RE._wire_params(w), w.default)];
+                   RE._memo_key(r, findcell(r, "use")))
+        k = memo(RE.Select([("a.csv", 1), ("b.csv", 2)]))
+        @test !isempty(k) && k != memo(RE.Select([("0.csv", 0), ("a.csv", 1), ("b.csv", 2)]))
+        @test k == memo(RE.Select([("a.csv", 1)]))          # the same value in another list
+    end
+
+    # `@replay` sweeps the domain of the control that the hub has: the keys. Each key wraps to the
+    # value that the cell sees.
+    @testset "keyed options: the replay domain is the keys" begin
+        w = RE.Select([("cat", 1), ("dog", 2)])
+        dom = RE.bind_domain(RE.Widget(w.kind, RE._wire_params(w), w.default))
+        @test dom == [o["value"] for o in w.params["options"]]
+        @test [RE.wrap_value(w, d) for d in dom] == [("cat", 1), ("dog", 2)]
+        @test length(RE.bind_domain(RE.MultiCheckBox([(1, 2), (3, 4)]))) == 4
+        r = parse_report("#%% code id=ctl\n@bind pick Select([(\"cat\", 1) => \"Cat\", (\"dog\", 2) => \"Dog\"])\n" *
+                         "#%% code id=use\nv = @replay(pick, [Float64(pick.value[2])])")
+        build_dependencies!(r); eval_stale!(r)
+        s = Base.invokelatest(getproperty, r.mod, :__slate_replay_sweeps)["use:pick"]
+        @test [Base.invokelatest(s.f, Base.invokelatest(s.wrap, d)) for d in s.domain] == [[1.0], [2.0]]
+    end
+
+    # A cell's `set_bind` on a keyed control that this worker holds sends the key, so that a value of
+    # a type that the notebook defines does not go to the hub. A plain control sends the value.
+    @testset "keyed options: a cell's set_bind sends the key" begin
+        r = parse_report("""
+        #%% code id=def
+        struct NPt; x::Int; y::Int; end
+        #%% code id=ctl
+        @bind pick Select([NPt(1, 2), NPt(3, 4)])
+        @bind plain Select(["a", "b"])
+        #%% code id=act
+        (pick, plain); set_bind(:pick, NPt(3, 4)); set_bind(:plain, "b")
+        """)
+        build_dependencies!(r)
+        sent = Pair{String,Any}[]
+        RE.register_setbind!(r.id, (n, v) -> push!(sent, n => v))
+        try
+            eval_stale!(r)
+        finally
+            RE.unregister_setbind!(r.id)
+        end
+        ctl = findcell(r, "ctl").binds[findfirst(b -> b.name == :pick, findcell(r, "ctl").binds)]
+        k2 = ctl.params["options"][2]["value"]
+        @test k2 isa String && startswith(k2, "#opt:") && sent == ["pick" => k2, "plain" => "b"]
+    end
+
+    # The value mirror and the controls palette show the label of a key (view.js).
+    @testset "keyed options: the page shows the label of a key (node, if available)" begin
+        node = Sys.which("node")
+        if node === nothing
+            @info "node not found: skipping the key label check of view.js"
+            @test true
+        else
+            io = IOBuffer()
+            ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", "option_key_text.mjs"))`; stdout = io, stderr = io))
+            ok || print(String(take!(io)))
+            @test ok
+        end
     end
 
     # A RangeSlider's thumb can only sit on a step, but another input device can hand over

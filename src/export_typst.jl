@@ -846,7 +846,7 @@ end
 function _emit_controls(c::Cell)::String
     isempty(c.binds) && return ""
     item(b) = "(" * "\"" * _typ_str(string(b.name)) * "\", \"" *
-              _typ_str(_bind_value_repr(b.value)) * "\")"
+              _typ_str(_bind_text(b)) * "\")"
     return "#paramblock((" * join((item(b) for b in c.binds), ", ") *
            (length(c.binds) == 1 ? ",))\n" : "))\n")
 end
@@ -856,6 +856,17 @@ function _bind_value_repr(v)::String
     v isa AbstractFloat && return string(round(v; sigdigits = 6))
     v isa AbstractString && return String(v)
     return string(v)
+end
+
+# The text of a control's value for the parameter strip. A keyed option widget (see `_norm_options`
+# in widgets.jl) holds `#opt:` keys: show the label of each key, as the live page does.
+function _bind_text(b)::String
+    v, opts = b.value, get(b.params, "options", nothing)
+    iskey(x) = x isa AbstractString && startswith(x, "#opt:")
+    (opts isa AbstractVector && (iskey(v) || v isa AbstractVector && any(iskey, v))) || return _bind_value_repr(v)
+    label(k) = (i = findfirst(o -> o isa AbstractDict && get(o, "value", nothing) == k, opts);
+                i === nothing ? _bind_value_repr(k) : string(opts[i]["label"]))
+    return v isa AbstractVector ? join(map(label, v), ", ") : label(v)
 end
 
 # Compile a .typ to PDF, preferring a system `typst`, else the bundled Typst_jll. `--root`

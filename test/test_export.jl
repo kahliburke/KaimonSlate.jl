@@ -1002,6 +1002,53 @@ end
     end
 end
 
+# A keyed option widget (see `_norm_options` in widgets.jl) exports its keys and its labels, and no
+# option values. The page finds each key in the replay domain, and the PDF parameter strip shows
+# the label of each selected key.
+@testset "@replay export contract: keyed option widgets" begin
+    RE = ReportEngine
+    widgets = Any[
+        ("pick",  RE.Select([("cat", 1) => "Cat", ("dog", 2) => "Dog"], ("dog", 2))),
+        ("mode",  RE.Radio([(a = 1,), (a = 2,)])),
+        ("picks", RE.MultiSelect([(1, 2), (3, 4)])),
+        ("flags", RE.MultiCheckBox([(1, 2) => "A", (3, 4) => "B"], [(3, 4)])),
+    ]
+    specs = Dict(name => RE.BindSpec(Symbol(name), w.kind, RE._wire_params(w), w.default) for (name, w) in widgets)
+    fixture = Any[]
+    for (name, w) in widgets
+        html = NS._export_control_html(specs[name])
+        # Each `value=` holds a key; an unlabeled option shows its value only as its label text.
+        @test all(m -> startswith(m[1], "#opt:"), eachmatch(r"value=\"([^\"]*)\"", html))
+        push!(fixture, Dict{String,Any}("name" => name, "kind" => w.kind, "html" => html,
+                                        "domain" => RE.bind_domain(w)))
+    end
+    pick = Dict(widgets)["pick"]
+    @test occursin("<option value=\"$(pick.params["options"][2]["value"])\" selected>Dog</option>",
+                   NS._export_control_html(specs["pick"]))
+    node = Sys.which("node")
+    if node === nothing
+        @info "node not found: skipping the keyed @replay export contract (fixture built, not driven)"
+        @test true
+    else
+        mktempdir() do dir
+            path = joinpath(dir, "controls.json")
+            open(io -> JSON.print(io, fixture), path, "w")
+            io = IOBuffer()
+            ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", "export_contract.mjs")) $path`;
+                                  stdout = io, stderr = io))
+            ok || print(String(take!(io)))
+            @test ok
+        end
+    end
+    # The PDF strip shows labels for keys; a plain widget shows its value, as before.
+    c = RE.parse_report("#%% code id=ctl\n1").cells[1]
+    plain = RE.Select([10, 20, 30] .=> ["ten", "twenty", "thirty"], 30)
+    c.binds = [specs["pick"], specs["flags"], RE.BindSpec(:lb, plain.kind, RE._wire_params(plain), plain.default)]
+    strip = NS._emit_controls(c)
+    @test occursin("(\"pick\", \"Dog\")", strip) && occursin("(\"flags\", \"B\")", strip)
+    @test occursin("(\"lb\", \"30\")", strip)
+end
+
 # ── A `@replay`-marked table ──────────────────────────────────────────────────────────────────────
 # A figure follows its control in a static export; a table did not. That is worse than no control at
 # all: the knob sits above the table, moves the charts beside it, and leaves the rows alone — which
