@@ -364,6 +364,21 @@ function _collect_asset_paths!(paths::Vector{String}, ex)
     return paths
 end
 
+# Statically collect the controls a cell names in `bind_observable(:name)`, anywhere in the AST. Only
+# a literal symbol counts: a computed name (`bind_observable(s)`) is unknown until the cell runs.
+function _collect_observed_binds!(names::Set{Symbol}, ex)
+    if ex isa Expr
+        if ex.head === :call && length(ex.args) == 2 && ex.args[1] === :bind_observable &&
+           ex.args[2] isa QuoteNode && ex.args[2].value isa Symbol
+            push!(names, ex.args[2].value)
+        end
+        for a in ex.args
+            _collect_observed_binds!(names, a)
+        end
+    end
+    return names
+end
+
 # Does the cell include a file by literal path? Such a cell gets the same expansion round-trip as an
 # unknown-macro cell: the statements of what it includes are spliced in worker-side and re-analyzed,
 # which is the only way the names the FILE defines can become this cell's writes (`_splice_includes`).
@@ -462,7 +477,7 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
-const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol},Int}}()
+const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol},Int,Set{Symbol}}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # Bounded LRU: entries carry a recency tick (`_BIND_TICKS`, bumped on every hit/store) and overflow
 # evicts the least-recently-used ~10% — the old clear-on-full wholesale `empty!` made a long-lived
@@ -499,12 +514,13 @@ function infer_bindings!(cell::Cell)
         empty!(cell.mutates); union!(cell.mutates, hit[7])   # in-place-mutated-only names (⊆ writes, ⊄ defines)
         hit[8] ? push!(cell.flags, :macrocall) : delete!(cell.flags, :macrocall)   # unknown-macro cell (expansion candidate)
         empty!(cell.reads_now); union!(cell.reads_now, hit[9])   # top-level reads (backref diagnostic)
+        empty!(cell.observes); union!(cell.observes, hit[11])   # `bind_observable(:name)` controls
         return cell
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && _bind_cache_evict!()
-        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now), gen)
+        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now), gen, copy(cell.observes))
         _BIND_TICKS[cell.id] = (_BIND_TICK[] += 1)
     end
     return cell
@@ -516,7 +532,7 @@ end
 _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_anon__"), names)
 
 function _infer_bindings_uncached!(cell::Cell)
-    empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides)
+    empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides); empty!(cell.observes)
     delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall)
     if cell.kind == MARKDOWN || cell.kind == WEB
         # A markdown or web cell "reads" the free variables of its `{{ expr }}` blocks, so it joins the
@@ -560,6 +576,7 @@ function _infer_bindings_uncached!(cell::Cell)
     let ap = _collect_asset_paths!(String[], top)
         isempty(ap) || append!(cell.inputs, sort!(unique!(ap)))
     end
+    _collect_observed_binds!(cell.observes, top)
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
 
     # `@bind name W(…)` statements: the bound name is a WRITE, the widget call's free

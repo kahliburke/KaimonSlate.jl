@@ -12,6 +12,11 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Fixed
+
+- A cell that uses `bind_observable(:name)` offers that control in its header control picker. The
+  cell still does not run again when the control changes.
+
 ## [1.11.1] - 2026-10-08
 
 ### Changed

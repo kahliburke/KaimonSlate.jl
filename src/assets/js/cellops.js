@@ -248,10 +248,11 @@ function _upstreamCone(id) {
   return up;
 }
 // Transitive @bind controls a cell is affected by: not just the ones it reads directly
-// (server-computed `binduses` = reads ∩ bound vars), but any whose value flows into it
-// through the dependency graph — e.g. a plot of `data` where `data = f(N)` and `N` is an
-// @bind. Union each upstream cell's direct binduses over the cell's dependency cone, so a
-// control can be surfaced on a downstream plot even though the plot never names it.
+// (server-computed `binduses` = (reads ∪ `bind_observable(:name)` names) ∩ bound vars), but any
+// whose value flows into it through the dependency graph — e.g. a plot of `data` where
+// `data = f(N)` and `N` is an @bind. Union each upstream cell's direct binduses over the cell's
+// dependency cone, so a control can be surfaced on a downstream plot even though the plot never
+// names it.
 function transBinduses(c) {
   if (!c) return [];
   const own = new Set((c.binds || []).map(b => b.name));

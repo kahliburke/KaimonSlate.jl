@@ -6,6 +6,7 @@ using ReTest
 using KaimonSlate
 using Observables
 const RE = KaimonSlate.ReportEngine
+const NS = KaimonSlate.NotebookServer
 
 # A notebook namespace without a server: `standalone!` installs the same `_populate_notebook_ns!`
 # contract the worker does, so these exercise the real bind machinery rather than a stand-in.
@@ -309,5 +310,29 @@ end
         @test RE.is_hidden_bind(Dict{String,Any}("display" => "none"))
         @test !RE.is_hidden_bind(Dict{String,Any}())
         @test !RE.is_hidden_bind(Dict{String,Any}("display" => "inline"))
+    end
+end
+
+@testset "a bind_observable reader is offered the control, with no edge" begin
+    src = "#%% code id=ctl\n@bind x Slider(1:10)\n" *
+          "#%% code id=obs\nlet o = bind_observable(:x)\n    o\nend\n" *
+          "#%% code id=dyn\ns = :x\nbind_observable(s)\n" *
+          "#%% code id=self\n@bind y Slider(1:3)\nbind_observable(:y)\n"
+    # The second parse hits the inference cache, which has to restore the names too.
+    for pass in 1:2
+        r = RE.parse_report(src)
+        RE.build_dependencies!(r)
+        byid = Dict(c.id => c for c in r.cells)
+        @test byid["obs"].observes == Set([:x])
+        @test isempty(byid["dyn"].observes)              # a computed name is unknown before a run
+        @test !(:x in byid["obs"].reads)
+        @test !("obs" in RE.dependents_of(r, Set(["ctl"])))   # moving x does not re-run it
+        # `binds` comes from a run; stand in for one.
+        byid["ctl"].binds = [RE.BindSpec(:x, "slider", Dict{String,Any}(), 1)]
+        byid["self"].binds = [RE.BindSpec(:y, "slider", Dict{String,Any}(), 1)]
+        bindref, hosted = NS._bind_index(r)
+        @test NS.cell_json(byid["obs"], bindref, hosted)["binduses"] == ["x"]
+        @test !haskey(NS.cell_json(byid["dyn"], bindref, hosted), "binduses")
+        @test !haskey(NS.cell_json(byid["self"], bindref, hosted), "binduses")   # its own control
     end
 end

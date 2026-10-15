@@ -1103,10 +1103,12 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # `@bind` variables this cell READS (so the header can one-click surface their controls) —
     # excluding any it defines itself. Not code-only: a markdown or web cell reads the free
     # variables of its `{{ }}` interpolations (see `_infer_bindings_uncached!`), so prose driven by
-    # a control can offer that control too.
-    if !isempty(c.reads)
+    # a control can offer that control too. A cell that names a control in `bind_observable(:name)`
+    # does not read it (`c.observes`, no edge), but the control drives the cell, so it is offered too.
+    if !isempty(c.reads) || !isempty(c.observes)
         own = Set(String(b.name) for b in c.binds)
-        uses = sort!(unique!(String[String(s) for s in c.reads if haskey(bindref, String(s)) && !(String(s) in own)]))
+        uses = sort!(unique!(String[String(s) for s in Iterators.flatten((c.reads, c.observes))
+                                    if haskey(bindref, String(s)) && !(String(s) in own)]))
         isempty(uses) || (d["binduses"] = uses)
     end
     # Names this cell defines that are ALSO defined by another cell — a silent footgun in a shared

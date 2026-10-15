@@ -127,6 +127,10 @@ mutable struct Cell
     reads_now::Set{Symbol}        # the subset of `reads` made at TOP LEVEL (not deferred into a
                                   # function/macro body) — feeds the `backref` ordering diagnostic;
                                   # never used for edges, so under-approximation is harmless
+    observes::Set{Symbol}         # the controls this cell names in a literal `bind_observable(:name)`.
+                                  # The cell consumes such a control as an Observable and does not read
+                                  # the variable, so these names are not in `reads` and make no edge.
+                                  # They only let the cell header offer the control (`binduses`).
     writes::Set{Symbol}           # rebindings/definitions ∪ in-place mutations — the full write-set used for
                                   # ordering (most-recent-writer), parallel write-conflicts, and reactive self-trigger
     mutates::Set{Symbol}          # the subset of `writes` reached ONLY via in-place mutation here (x[]=…, x.f=…,
@@ -153,7 +157,7 @@ end
 function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
-                Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
+                Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
                 STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0)
 end
 
