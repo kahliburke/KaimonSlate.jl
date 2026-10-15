@@ -31,21 +31,37 @@ A pause marker reveals everything after it in one step.
 @md"""
 ## Step effects
 
+::::: columns
+:::: column
 ::: {.step .fade-left}
-**fade-left** slides in from the side
+**fade-left** slides in from the left
 :::
-
+::: {.step .fade-right}
+**fade-right** slides in from the right
+:::
 ::: {.step .zoom}
 **zoom** grows into place
 :::
-
-::: {.step .highlight}
-**highlight** is there all along and lights up on its step
+::: {.step .blur}
+**blur** comes into focus
 :::
-
+::::
+:::: column
+::: {.step .highlight}
+**highlight** lights up on its step
+:::
+::: {.step .strike}
+**strike** is crossed out on its step
+:::
 ::: {.step .fade-out}
 **fade-out** leaves on its step
 :::
+::: {.incremental .dim}
+- **dim** keeps the current item bright
+- and quiets the ones before it
+:::
+::::
+:::::
 """
 
 #%% md id=columns
