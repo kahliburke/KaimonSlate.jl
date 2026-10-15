@@ -1981,10 +1981,17 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # notebook global for the duration. The domain is read from the control, so there is nothing to keep
     # in sync (see `_do_replay`).
     # Registered sweeps, keyed `<cell>:<control>`. Lives for the notebook's lifetime because the EXPORT
-    # reads it long after the cells ran; a re-run replaces its own entries in place.
+    # reads it long after the cells ran. `run_capture` calls `__slate_replay_forget` before each eval,
+    # so a cell's entries are always the marks of its last run.
     replay_sweeps = Dict{String,Any}()
     Core.eval(m, :(const __slate_replay_sweeps = $replay_sweeps))
     Core.eval(m, :(const __slate_replay = $((name, f) -> _do_replay(reg, reglock, replay_sweeps, name, f))))
+    # Remove the `@replay` marks of cell `cid`. Without this, a mark that the new source of the cell does
+    # not have stays in the registry, and the export sweeps and ships data that no output reads. The
+    # composed chain sweeps stay: `_register_chain_replays!` removes them on each pass.
+    Core.eval(m, :(const __slate_replay_forget = $(cid -> lock(reglock) do
+        filter!(p -> !(last(p).cell == cid && !get(last(p), :chain, false)), replay_sweeps)
+    end)))
     # The export's way in for a sweep NO cell declared: a table two hops from its control, whose closure
     # is composed from the graph rather than written by hand (see `_register_chain_replay`). Registering
     # rather than running keeps the one expensive step in one place — the sweep below.

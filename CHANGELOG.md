@@ -12,6 +12,11 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Fixed
+
+- A cell that runs again with fewer `@replay` marks no longer leaves the old marks registered. The
+  export swept them and shipped their data, although no output on the page read it.
+
 ## [1.11.1] - 2026-10-08
 
 ### Changed
