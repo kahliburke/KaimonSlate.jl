@@ -51,6 +51,8 @@
         animation: deck-rec-pulse 1.6s ease-in-out infinite; }
       .deck-rec-pill .lvl { width: 28px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.2); overflow: hidden; }
       .deck-rec-pill .lvl > i { display: block; height: 100%; width: 0; background: #46a758; }
+      .deck-rec-pill { transition: opacity .6s ease; }
+      body:not(.is-presenter) .deck-rec-pill.gone { opacity: 0; }
       @keyframes deck-rec-pulse { 50% { opacity: .35; } }
       .deck-rec-count { position: fixed; inset: 0; z-index: 10060; display: grid; place-items: center;
         background: rgba(0,0,0,.45); color: #fff; font: 700 22vh/1 var(--ui-font, system-ui); }
@@ -256,6 +258,10 @@
       pill.innerHTML = '<span class="dot"></span><span class="t">0:00</span><span class="lvl"><i></i></span>';
     }
     _host().appendChild(pill);
+    // The tab capture records the pill too, so it confirms the start and then gets out of the video;
+    // the presenter window keeps the full indicator.
+    pill.classList.remove('gone');
+    setTimeout(() => pill.classList.add('gone'), 3000);
     const buf = new Uint8Array(256);
     R.tick = setInterval(() => {
       const t = pill.querySelector('.t'); if (t) t.textContent = _fmt(performance.now() - R.t0);

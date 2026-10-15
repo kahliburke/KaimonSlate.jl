@@ -178,7 +178,7 @@ end
     @testset "fenced divs: columns, steps, incremental" begin
         h = R.markdown_html(":::: columns\n::: {.column width=\"40%\"}\nL\n:::\n::: column\nR\n:::\n::::\n\n" *
                             "::: {.step .zoom step=3}\nS\n:::\n\n::: incremental\n- a\n- b\n:::\n\nkeep {braces}")
-        @test occursin("<div class=\"columns\">", h) && occursin("width=\"40%\"", h)
+        @test occursin("<div class=\"columns\">", h) && occursin("max-width:40%", h)
         @test occursin("class=\"step zoom\"", h) && occursin("step=\"3\"", h)
         @test occursin("<div class=\"incremental\">", h)
         @test occursin("keep {braces}", h)                  # prose braces are not attributes

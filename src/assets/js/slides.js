@@ -549,10 +549,14 @@
     if (i === D.idx && D.restore.length) return;
     dir = dir != null ? dir : (i > D.idx ? 1 : -1);
     const kind = _transKind(dir > 0 ? i : D.idx);
+    // Announced from inside the swap: with a view transition the swap runs after this function
+    // returns, and listeners must hear the slide that is actually up.
     const swap = () => {
       D.idx = i; D.step = 0;
       _mountSlide(i);
       if (atEnd) _applyStep(D.total, true);
+      _emit('slide');
+      if (!fromRemote) _broadcast();
     };
     const stage = document.getElementById('deckstage');
     const oldSlide = stage && stage.querySelector('.deck-slide');
@@ -576,8 +580,6 @@
         newKeys.forEach(el => el.style.removeProperty('view-transition-name'));
       });
     }
-    _emit('slide');
-    if (!fromRemote) _broadcast();
   }
   function _fallbackEnter(kind, dir) {
     const slide = document.querySelector('#deckstage .deck-slide');
