@@ -72,10 +72,10 @@ function _cfgControl(it, eff) {
     return `<input type="checkbox" ${(eff === true || eff === 'true') ? 'checked' : ''} onchange="cfgSet('${it.key}', this.checked)"/>`;
   if (it.type === 'enum')
     return `<select onchange="cfgSet('${it.key}', this.value)">` +
-      it.choices.map(c => `<option value="${_cfgEsc(c)}" ${String(eff) === c ? 'selected' : ''}>${_cfgEsc(c)}</option>`).join('') +
+      it.choices.map(c => `<option value="${_cfgEsc(c)}" ${String(eff) === c ? 'selected' : ''}>${c === '' ? 'default' : _cfgEsc(c)}</option>`).join('') +
       `</select>`;
   if (it.type === 'int')
-    return `<input class="cfgnum" type="number" min="1" max="6" value="${_cfgEsc(eff)}" onchange="cfgSet('${it.key}', this.value)"/>`;
+    return `<input class="cfgnum" type="number" min="1" ${it.key === 'slidelevel' ? 'max="6"' : ''} value="${_cfgEsc(eff)}" onchange="cfgSet('${it.key}', this.value)"/>`;
   // string — show the override text (blank when inherited) with the inherited value as placeholder.
   const ph = it.key === 'agentmodel' ? (agentModel() || 'Sonnet (default)') : (it.key === 'threads' ? 'global (adaptive)' : String(it.default || ''));
   return `<input class="cfgtext" type="text" value="${it.overridden ? _cfgEsc(it.value) : ''}" placeholder="${_cfgEsc(ph)}" ` +
