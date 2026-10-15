@@ -91,12 +91,10 @@ _worker_location(nb::LiveNotebook) =
 _file_mtime(path::AbstractString) = try; round(Int, mtime(abspath(path))); catch; 0; end
 
 
-# `frame-ancestors 'self'` / X-Frame-Options: SAMEORIGIN — the notebook UI must never be framed by another
-# site (clickjacking: the origin guard allows same-origin clicks, so a redressed frame could drive it).
-# The hub's own pages may frame it: the presenter window shows live previews of the deck that way, and a
-# same-origin page can already do anything a frame could. A stricter CSP is deliberately NOT set: cell
-# output is allowed to render arbitrary HTML/JS by design.
-const _FRAME_GUARD = ["X-Frame-Options" => "SAMEORIGIN", "Content-Security-Policy" => "frame-ancestors 'self'"]
+# `frame-ancestors 'none'` / X-Frame-Options: DENY — the notebook UI must never be framed by another
+# page (clickjacking: the origin guard allows same-origin clicks, so a redressed frame could drive it).
+# A stricter CSP is deliberately NOT set: cell output is allowed to render arbitrary HTML/JS by design.
+const _FRAME_GUARD = ["X-Frame-Options" => "DENY", "Content-Security-Policy" => "frame-ancestors 'none'"]
 _html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store", _FRAME_GUARD...],
                             _vendor_versioned(body))
 _asset(body, ctype) = HTTP.Response(200, ["Content-Type" => ctype, "Cache-Control" => "no-store", _FRAME_GUARD...], body)

@@ -3105,7 +3105,9 @@ body.presenting > .srcbanner, body.presenting > #selcount, body.presenting > #do
 body.presenting { overflow: hidden; }
 
 .deck { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center;
-  background: #000;
+  background: #000; }
+/* The deck palette, shared by the deck and the presenter's previews of it. */
+.deck, .pp-frame {
   --deck-fg: var(--text); --deck-strong: var(--strong, var(--text)); --deck-dim: var(--dim);
   --deck-accent: var(--accent); --deck-accent2: #b392f0; --deck-surface: var(--bg);
   --deck-ink: #ff4d6d;
@@ -3321,21 +3323,25 @@ body.deck-recording .deck-hud, body.deck-recording .deck-edge { display: none; }
 .deck-ov-card.has-bg:not(.bgp-paper) { color: #e9ebf3; } .deck-ov-card.has-bg:not(.bgp-paper) b { color: #fff; }
 .deck-ov-card.bgp-paper { color: #2a2724; } .deck-ov-card.bgp-paper b { color: #111; }
 
-/* A presenter preview frame: only the slide. */
-body.deck-mirror .deck-hud, body.deck-mirror .deck-edge, body.deck-mirror .slide-autobar,
-body.deck-mirror #deckrec, body.deck-mirror .deck-cam { display: none !important; }
-body.deck-mirror .deck { background: #000; }
-body.deck-mirror.deck-mirror-end .deck-stage { visibility: hidden; }
 
 /* ── Presenter window (?present=1) ──────────────────────────────────────────── */
 body.is-presenter { overflow: hidden; }
-body.is-presenter > .topbar, body.is-presenter > .page, body.is-presenter > #doclauncher,
+body.is-presenter > .topbar, body.is-presenter > #doclauncher,
 body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !important; }
+/* The presenter's notebook is laid out off screen rather than hidden: its charts need a real size to
+   draw, and the previews are snapshots of them. */
+body.is-presenter > .page { position: absolute !important; left: -20000px; top: 0; width: 1100px; visibility: hidden; }
 #presenter { position: fixed; inset: 0; z-index: 90; background: var(--bg); color: var(--text); padding: 16px; }
 .pp-main { display: grid; grid-template-columns: 1.7fr 1fr; gap: 16px; height: 100%; }
 .pp-left { display: flex; flex-direction: column; gap: 10px; min-height: 0; justify-content: center; }
-.pp-frame { position: relative; border-radius: 10px; overflow: hidden; background: #000; border: 1px solid var(--border); }
-.pp-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.pp-frame { position: relative; border-radius: 10px; overflow: hidden; background: #000; border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center; }
+.pp-frame .pv-end { color: var(--dim); font-style: italic; }
+/* A preview draws the slide as the deck does, without motion; charts are snapshots sized to their column. */
+.deck-preview, .deck-preview * { transition: none !important; animation: none !important; }
+.deck-preview { view-transition-name: none; }
+.deck-preview .snap { width: 100% !important; height: auto !important; }
+.deck-preview .snap img { display: block; width: 100%; height: auto; max-height: calc(var(--u) * 700); object-fit: contain; }
 .pp-left .pp-cur { width: 100%; aspect-ratio: 16 / 9; }
 .pp-side .pp-next { width: 100%; aspect-ratio: 16 / 9; flex: none; opacity: .9; }
 .pp-pace { font-size: .9rem; color: var(--dim); min-height: 1.2em; font-variant-numeric: tabular-nums; }

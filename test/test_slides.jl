@@ -234,9 +234,3 @@ end
     @test occursin("style=\"flex:0 1 40%;max-width:40%\"", h)
     @test occursin("style=\"flex:0 1 60%;max-width:60%\"", h)
 end
-
-@testset "only the hub itself may frame a notebook page" begin
-    g = Dict(NS._FRAME_GUARD)
-    @test g["X-Frame-Options"] == "SAMEORIGIN"
-    @test g["Content-Security-Policy"] == "frame-ancestors 'self'"
-end

@@ -20,17 +20,14 @@
 // `@bind k SlideSteps(n)` on the slide follows the same counter, so a figure can build from
 // computed state. Moving forward walks the steps, then the slides.
 //
-// A presenter window (`?present=1`) follows the position over a BroadcastChannel and shows live
-// previews of the current and next position, notes, a timer and rehearsal pacing; it drives the deck
-// by sending it `nav` requests.
+// A presenter window (`?present=1`) follows the position over a BroadcastChannel and shows previews
+// of the current position and the next click, notes, a timer and rehearsal pacing; it drives the deck
+// by sending it `nav` requests. It is a notebook page of its own, so its previews are built from its
+// own up-to-date cells (charts as snapshots), with no second connection to the hub per preview.
 
 (function () {
   const NBID = decodeURIComponent((location.pathname.match(/^\/n\/([^\/]+)/) || ['', ''])[1]);
   const IS_PRESENTER = new URLSearchParams(location.search).get('present') === '1';
-  // A presenter preview: the same notebook in an iframe, showing the deck at the current (`cur`) or the
-  // following (`next`) position. It follows the deck and never drives anything — no broadcasts, no
-  // bound values, no timers — so the previews are live without competing with the real deck.
-  const IS_MIRROR = new URLSearchParams(location.search).get('deckmirror');
 
   // ── Segmentation (mirrors export_typst.jl `_first_heading_depth` / `_slide_segments`) ──
   function _firstHeadingDepth(src) {
@@ -94,7 +91,6 @@
   const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('slate-deck-' + NBID) : null;
 
   function _emit(type) {
-    if (IS_MIRROR) return;
     const detail = { type, idx: D.idx, step: D.step, steps: D.total, title: _slideTitle(D.slides[D.idx]) };
     try { window.dispatchEvent(new CustomEvent('slate-deck', { detail })); } catch (e) {}
   }
@@ -177,9 +173,9 @@
   }
 
   // ── Mount / unmount ─────────────────────────────────────────────────────────
-  function _mountSlide(i) {
-    _unmount();
-    const stage = document.getElementById('deckstage');
+  // A slide element for slide `i`: canvas, background, body holding `nodes` (cell elements, live or
+  // cloned) in their column rows, and the slide number. Cells tagged `step` are marked as build items.
+  function _buildSlide(i, nodes) {
     const sld = D.slides[i] || { ids: [], cfg: {} };
     const cfg = _effCfg(sld.cfg || {}, i);
     const slide = document.createElement('div');
@@ -191,26 +187,37 @@
     const num = document.createElement('div'); num.className = 'slide-num'; num.textContent = String(i + 1);
     slide.append(bg, body, num);
     // `column=N` cells live inside a `.cell-row` flex wrapper in the notebook (see notebook.js). Moving
-    // the bare cell nodes would drop that wrapper and stack them, so the rows are rebuilt here. The live
-    // cells still move (never clone); each one's real home is remembered for restore.
+    // the bare cell nodes would drop that wrapper and stack them, so the rows are rebuilt here.
     const cells = (nbState && nbState.cells) || [];
     let row = null;
-    sld.ids.forEach((id, j) => {
-      const el = document.getElementById('cell-' + id);
-      if (!el) return;
+    nodes.forEach(({ id, el }, j) => {
       const c = cells.find(x => x.id === id);
       const tm = _tagMap(c);
-      D.restore.push({ el, slot: el.parentNode });
       if (tm.step) { el.classList.add('step', 'deck-cellstep'); if (tm.step !== true) el.dataset.step = tm.step; }
       const col = c ? _slideCellColumn(c) : 1;
       if (col >= 2 && row) { row.appendChild(el); return; }
-      const nextC = cells.find(x => x.id === sld.ids[j + 1]);
+      const nextC = nodes[j + 1] && cells.find(x => x.id === nodes[j + 1].id);
       if (nextC && _slideCellColumn(nextC) >= 2) {
         row = document.createElement('div'); row.className = 'cell-row';
         row.appendChild(el); body.appendChild(row);
       } else { row = null; body.appendChild(el); }
     });
     _applySplit(slide);
+    return slide;
+  }
+  // Mount slide `i` on the deck. The live cells move (never clone); each one's home is remembered.
+  function _mountSlide(i) {
+    _unmount();
+    const stage = document.getElementById('deckstage');
+    const sld = D.slides[i] || { ids: [], cfg: {} };
+    const nodes = [];
+    for (const id of sld.ids) {
+      const el = document.getElementById('cell-' + id);
+      if (!el) continue;
+      D.restore.push({ el, slot: el.parentNode });
+      nodes.push({ id, el });
+    }
+    const slide = _buildSlide(i, nodes);
     stage.appendChild(slide);
     _typesetSlide(slide);
     _collectSteps(slide, sld);
@@ -284,8 +291,7 @@
   // ── Builds ──────────────────────────────────────────────────────────────────
   // Every build item on the slide, in document order, each with the step it appears on. Items without
   // an explicit `step=N` take the next number; a pause's group shares one.
-  function _collectSteps(slide, sld, keepStep) {
-    const body = slide.querySelector('.slide-body');
+  function _scanSteps(body, sld, sentOf) {
     // `. . .` → everything after the marker, among its siblings, is one group.
     body.querySelectorAll('.pause').forEach((m, k) => {
       const g = 'p' + k + '-' + Math.random().toString(36).slice(2, 7);
@@ -320,7 +326,7 @@
       for (const b of (cell && cell.binds) || []) {
         const p = b.params || {};
         if (!p.slidesteps) continue;
-        reactive.push({ name: b.name, n: parseInt(p.max, 10) || 0, sent: keepStep ? _reactiveSent(b.name) : null });
+        reactive.push({ name: b.name, n: parseInt(p.max, 10) || 0, sent: sentOf ? sentOf(b.name) : null });
       }
     }
     for (const ctl of body.querySelectorAll('[data-name]')) {
@@ -334,8 +340,11 @@
         ![...binds.querySelectorAll('[data-name]')].some(x => !x.closest('.deck-ctl-hidden'));
       cel.classList.toggle('deck-bindonly', !!onlyHidden && !_hasVisibleOutput(cel));
     });
-    D.items = items; D.reactive = reactive;
-    D.total = Math.max(0, ...items.map(x => x.idx), ...reactive.map(r => r.n));
+    return { items, reactive, total: Math.max(0, ...items.map(x => x.idx), ...reactive.map(r => r.n)) };
+  }
+  function _collectSteps(slide, sld, keepStep) {
+    const r = _scanSteps(slide.querySelector('.slide-body'), sld, keepStep ? _reactiveSent : null);
+    D.items = r.items; D.reactive = r.reactive; D.total = r.total;
     _applyStep(keepStep ? Math.min(D.step, D.total) : D.step, true);
   }
   function _reactiveSent(name) { const r = D.reactive.find(x => x.name === name); return r ? r.sent : null; }
@@ -344,7 +353,7 @@
   // overlapping requests can be applied out of order.
   const _inflight = new Map();   // name → { busy, want }
   function _sendReactive(r, v) {
-    if (IS_MIRROR || r.sent === v || !window.slateSetBind) return;
+    if (r.sent === v || !window.slateSetBind) return;
     r.sent = v;
     let q = _inflight.get(r.name);
     if (!q) { q = { busy: false, want: null }; _inflight.set(r.name, q); }
@@ -429,11 +438,7 @@
     const stage = document.getElementById('deckstage');
     const slide = stage && stage.querySelector('.deck-slide');
     if (!slide) return;
-    const [W, H] = _canvasSize();
-    const s = Math.min(stage.clientWidth / W, stage.clientHeight / H);
-    slide.style.width = Math.round(W * s) + 'px';
-    slide.style.height = Math.round(H * s) + 'px';
-    slide.style.setProperty('--u', s + 'px');
+    _sizeCanvas(slide, stage.clientWidth, stage.clientHeight);
     const body = slide.querySelector('.slide-body');
     body.style.setProperty('--shrink', 1);
     body.classList.remove('scroll');
@@ -452,14 +457,25 @@
       for (const c of charts) _sizeChart(c, c.dom.clientWidth * k, c.dom.clientHeight * k);
       over = body.scrollHeight - body.clientHeight;
     }
-    let shrink = 1;
+    if (over > 1 && _shrinkText(body)) body.classList.add('scroll');
+  }
+  function _sizeCanvas(slide, vw, vh) {
+    const [W, H] = _canvasSize();
+    const s = Math.min(vw / W, vh / H);
+    slide.style.width = Math.round(W * s) + 'px';
+    slide.style.height = Math.round(H * s) + 'px';
+    slide.style.setProperty('--u', s + 'px');
+  }
+  // Scale the body text down until it fits, to a legible floor. True when it still overflows.
+  function _shrinkText(body) {
+    let shrink = 1, over = body.scrollHeight - body.clientHeight;
     for (let pass = 0; pass < 3 && over > 1; pass++) {
       shrink = Math.max(0.62, shrink * body.clientHeight / body.scrollHeight);
       body.style.setProperty('--shrink', shrink);
       over = body.scrollHeight - body.clientHeight;
       if (shrink <= 0.62) break;
     }
-    if (over > 1) body.classList.add('scroll');
+    return over > 1;
   }
   function _relayout(slide) {
     slide = slide || document.querySelector('#deckstage .deck-slide');
@@ -501,7 +517,7 @@
   function _transKind(i) {
     const cfg = (D.slides[i] && D.slides[i].cfg) || {};
     const t = (cfg.transition && cfg.transition !== true) ? cfg.transition : ((nbState && nbState.slideTransition) || 'fade');
-    if (IS_MIRROR || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'none';
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'none';
     return t;
   }
   function _hash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
@@ -586,7 +602,7 @@
   function _clearAuto() { if (D.auto) { clearTimeout(D.auto); D.auto = null; } _autoBar(0); }
   function _scheduleAuto() {
     _clearAuto();
-    if (!D.open || D.paused || IS_MIRROR || D.rehearse) return;
+    if (!D.open || D.paused || D.rehearse) return;
     const cfg = (D.slides[D.idx] && D.slides[D.idx].cfg) || {};
     let secs = parseFloat(cfg.auto);
     if (D.autoplay) {
@@ -647,7 +663,9 @@
       _clearAuto();
       _flash('rehearsing: timing every step');
     } else {
-      D.posKey = null; _trackPos();          // closes the position on screen
+      const now = performance.now();         // close the position on screen
+      if (D.posKey) D.rehearse[D.posKey] = Math.round((now - D.posT) / 100) / 10;
+      D.posT = now;
       const t = Object.assign(_timings(), D.rehearse);
       D.rehearse = null;
       const str = Object.entries(t).map(([k, v]) => k + '=' + v).join(',');
@@ -808,13 +826,12 @@
 
   // ── BroadcastChannel sync (audience ⇄ presenter) ────────────────────────────
   function _broadcast() {
-    if (!bc || IS_PRESENTER || IS_MIRROR || !D.open) return;
+    if (!bc || IS_PRESENTER || !D.open) return;
     bc.postMessage({ type: 'goto', idx: D.idx, step: D.step, steps: D.total, total: D.slides.length,
                      rehearse: !!D.rehearse, autoplay: D.autoplay, from: 'deck' });
   }
   if (bc) bc.addEventListener('message', ev => {
     const m = ev.data || {};
-    if (IS_MIRROR) { if (m.type === 'goto') _mirrorFollow(m); return; }
     if (IS_PRESENTER) {
       if (m.type === 'goto') {
         Object.assign(P, { idx: m.idx, step: m.step, steps: m.steps, total: m.total, rehearse: m.rehearse, autoplay: m.autoplay });
@@ -840,7 +857,6 @@
   // where it owns the whole window. What ENTERS the deck is the `view.present` command, so that chord
   // is configurable like every other.
   document.addEventListener('keydown', e => {
-    if (IS_MIRROR) return;
     if (IS_PRESENTER) { _presenterKey(e); return; }
     if (!D.open) return;
     const tag = (e.target && e.target.tagName) || '';
@@ -930,10 +946,64 @@
     const t = P.step < P.steps ? 'step ' + (P.step + 1) + ' of ' + P.steps
             : slides[P.idx + 1] ? (_slideTitle(slides[P.idx + 1]) || 'next slide') : 'end';
     root.querySelector('.pp-nexttitle').textContent = '→ ' + t;
+    _renderPreviews();
     root.querySelector('.pp-rehearse').classList.toggle('on', !!P.rehearse);
     root.querySelector('.pp-autoplay').classList.toggle('on', !!P.autoplay);
     _renderPace();
     if (window.typeset) try { window.typeset(root.querySelector('.pp-notes')); } catch (e) {}
+  }
+  // A cell as it looks now, for a preview: a deep copy with each chart replaced by a snapshot of its
+  // canvas, since a copied chart is an empty box. Media are kept from loading or playing.
+  function _snapshotCell(el) {
+    const insts = _cellCharts(el);
+    insts.forEach((inst, k) => { const d = inst.getDom && inst.getDom(); if (d) d.dataset.snap = k; });
+    const c = el.cloneNode(true);
+    c.removeAttribute('id');
+    insts.forEach((inst, k) => {
+      const d = inst.getDom && inst.getDom(); if (!d) return;
+      delete d.dataset.snap;
+      const t = c.querySelector('[data-snap="' + k + '"]'); if (!t) return;
+      t.removeAttribute('data-snap'); t.classList.add('snap');
+      let url = ''; try { url = inst.getDataURL({ pixelRatio: 1.5 }); } catch (e) {}
+      t.innerHTML = url ? '<img alt="" src="' + url + '">' : '';
+    });
+    c.querySelectorAll('video, audio').forEach(m => { m.removeAttribute('data-autoplay'); m.autoplay = false; m.preload = 'metadata'; });
+    return c;
+  }
+  // Slide `i` at step `step`, drawn into `host` the way the deck draws it.
+  function _previewInto(host, i, step) {
+    host.innerHTML = '';
+    if (i >= D.slides.length) { host.innerHTML = '<div class="pv-end">end of deck</div>'; return; }
+    const sld = D.slides[i];
+    const nodes = sld.ids.map(id => document.getElementById('cell-' + id)).filter(Boolean)
+      .map(el => ({ id: el.id.replace(/^cell-/, ''), el: _snapshotCell(el) }));
+    const slide = _buildSlide(i, nodes);
+    slide.classList.add('deck-preview');
+    host.appendChild(slide);
+    _sizeCanvas(slide, host.clientWidth, host.clientHeight);
+    const { items } = _scanSteps(slide.querySelector('.slide-body'), sld, null);
+    for (const it of items) { it.el.classList.toggle('on', it.idx <= step); it.el.classList.toggle('current', it.idx === step); }
+    _shrinkText(slide.querySelector('.slide-body'));
+  }
+  function _renderPreviews() {
+    const root = document.getElementById('presenter'); if (!root) return;
+    D.slides = buildSlides();
+    _previewInto(root.querySelector('.pp-cur'), P.idx, P.step);
+    const nx = P.step < P.steps ? [P.idx, P.step + 1] : [P.idx + 1, 0];
+    _previewInto(root.querySelector('.pp-next'), nx[0], nx[1]);
+  }
+  // Redraw the previews when the notebook changes under them (a cell re-ran, an output arrived). A
+  // chart animates into its new state, so draw again once it has settled.
+  function _watchNotebook() {
+    const nb = document.getElementById('nb'); if (!nb) return;
+    let t1 = null, t2 = null;
+    new MutationObserver(muts => {
+      if (muts.every(m => m.target.closest && m.target.closest('#presenter'))) return;
+      clearTimeout(t1); clearTimeout(t2);
+      t1 = setTimeout(_renderPreviews, 250);
+      t2 = setTimeout(_renderPreviews, 1400);
+    }).observe(nb, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+    addEventListener('resize', () => _renderPreviews());
   }
   function _renderPace() {
     const root = document.getElementById('presenter'); if (!root) return;
@@ -948,18 +1018,17 @@
     document.body.classList.add('is-presenter');
     const root = document.createElement('div');
     root.id = 'presenter';
-    const src = which => location.pathname + '?deckmirror=' + which;
     root.innerHTML =
       '<div class="pp-main">' +
         '<div class="pp-left">' +
-          '<div class="pp-frame pp-cur"><iframe src="' + src('cur') + '" title="current slide"></iframe></div>' +
+          '<div class="pp-frame pp-cur"></div>' +
           '<div class="pp-steps"></div>' +
         '</div>' +
         '<div class="pp-side">' +
           '<div class="pp-clock"><span class="pp-elapsed">00:00</span><button class="pp-reset" title="restart the timer">↺</button><span class="pp-wall"></span></div>' +
           '<div class="pp-pace"></div>' +
           '<div class="pp-nexthd"><span class="pp-nexttitle">→ next</span><span class="pp-pos"></span></div>' +
-          '<div class="pp-frame pp-next"><iframe src="' + src('next') + '" title="next"></iframe></div>' +
+          '<div class="pp-frame pp-next"></div>' +
           '<div class="pp-noteshd">Speaker notes</div>' +
           '<div class="pp-notes"></div>' +
           '<div class="pp-tools"><button class="pp-rehearse" title="time every step as you rehearse">⏱ rehearse</button>' +
@@ -982,21 +1051,6 @@
     }, 1000);
   }
 
-  // ── Mirror (a presenter preview) ────────────────────────────────────────────
-  function _mirrorFollow(m) {
-    if (!D.open) return;
-    let idx = m.idx, step = m.step;
-    if (IS_MIRROR === 'next') {
-      if (m.step < m.steps) step = m.step + 1;
-      else { idx = m.idx + 1; step = 0; }
-    }
-    const end = idx >= D.slides.length;
-    document.body.classList.toggle('deck-mirror-end', end);
-    if (end) return;
-    if (idx !== D.idx || !D.restore.length) { D.idx = idx; D.step = 0; _mountSlide(idx); }
-    _applyStep(step, true);
-  }
-
   // ── Bootstrap ────────────────────────────────────────────────────────────────
   function _waitForCells(cb, tries) {
     tries = tries || 0;
@@ -1007,18 +1061,10 @@
     document.addEventListener('DOMContentLoaded', () => _waitForCells(() => {
       _buildPresenterDom();
       _renderPresenter();
+      _watchNotebook();
       if (bc) bc.postMessage({ type: 'hello' });   // ask the audience tab for its current position
     }));
   }
-  if (IS_MIRROR) {
-    document.body.classList.add('deck-mirror');
-    document.addEventListener('DOMContentLoaded', () => _waitForCells(() => {
-      document.body.classList.add('deck-mirror');
-      enterPresent(0);
-      if (bc) bc.postMessage({ type: 'hello' });
-    }));
-  }
-
   // Zen / reading mode — toggle `body.zen` (CSS hides code + chrome, leaving markdown + rendered
   // output). Unlike Present (a slide deck), zen is the same scrollable page, just distraction-free.
   // Esc or the floating ✕ exits.
