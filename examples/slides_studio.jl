@@ -145,14 +145,15 @@ $$\term{x}{x(t)} = \term{envelope}{e^{-\gamma t}}\,\cos(\term{freq}{\omega_d}\, 
 #%% code id=motion_plot
 let t = collect(range(0, 12; length = 600)), γ = 0.25, ωd = 2.0
     env = exp.(-γ .* t)
-    s = Any[series(:line, t, env .* cos.(ωd .* t); name = "x", showSymbol = false, lineStyle = (width = 3,))]
+    s = Any[series(:line, t, env .* cos.(ωd .* t); name = "x", showSymbol = false)]
     if show_env >= 1
         for sgn in (1, -1)
             push!(s, series(:line, t, sgn .* env; name = "envelope", showSymbol = false,
                             lineStyle = (width = 2, type = :dashed)))
         end
     end
-    echart(s...; legend = false, height = 420)
+    echart(s...; legend = false, height = 420,
+           steps = [(x = (0, 12),), (x = (7.5, 12), y = (-0.16, 0.16)), (x = (0, 3), band = true)])
 end
 
 #%% md id=draws

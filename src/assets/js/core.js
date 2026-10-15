@@ -978,6 +978,8 @@ function _geoSafeSetOption(inst, s) {
       Array.isArray(_opt && _opt.series) ? inst.setOption(_opt, { replaceMerge: ['series'] })
                                          : inst.setOption(_opt);
       _colorSeriesByTerms(inst);
+      // A presented chart redrawn by a re-run needs the deck's view and styling back (slides.js).
+      if (window._onChartRendered) try { window._onChartRendered(inst); } catch (e) {}
     }
     // Canvas-size self-heal: if layout/CSS changed the div since init (fonts settling, panel
     // toggles), the internal canvas keeps the stale size and every component lays out against it.
@@ -1617,6 +1619,7 @@ window.SLATE_TEX_MACROS = SLATE_TEX_MACROS;
 window.slateKatexOpts = slateKatexOpts;
 window.slateTermColor = slateTermColor;
 window.slateTermName = _termName;
+window.slateColorSeries = inst => _colorSeriesByTerms(inst);
 
 // Typeset any LaTeX ($…$ / $$…$$ / \(…\) / \[…\]) inside `el` with KaTeX. Safe to
 // call before KaTeX has loaded (no-op) and re-call (auto-render skips done spans).

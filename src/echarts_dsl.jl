@@ -407,6 +407,7 @@ function _slate_normalize!(opt::Dict{String,Any})
     end
     haskey(opt, "valuefmt") && (opt["__valuefmt"] = _valuefmt_wire(pop!(opt, "valuefmt")))
     haskey(opt, "zoom") && _apply_zoom!(opt, pop!(opt, "zoom"))
+    haskey(opt, "steps") && (opt["__steps"] = _steps_wire(pop!(opt, "steps")))
     haskey(opt, "select") && _apply_select!(opt, pop!(opt, "select"))
     sz = Dict{String,Any}()
     for k in ("height", "width")
@@ -497,6 +498,29 @@ end
 #
 # An explicit `dataZoom`/`toolbox` always wins: this only fills in what the caller didn't say, so
 # reaching for the raw ECharts components stays a clean escape hatch.
+# `steps = [(x = (0, 4),), (x = (8, 12), y = (-0.2, 0.2)), (x = (2, 3), band = true)]`: on a slide, each
+# build step moves the figure to the next window — the axes animate to the new range — or, with
+# `band = true`, keeps the view and shades that stretch of x. Step 0 is the figure as drawn. Each entry
+# becomes `{x?: [lo, hi], y?: [lo, hi], band?: true}`.
+function _steps_wire(steps)
+    out = Dict{String,Any}[]
+    for st in (steps isa AbstractVector || steps isa Tuple ? steps : [steps])
+        d = Dict{String,Any}()
+        for k in ("x", "y")
+            r = st isa AbstractDict ? get(st, k, nothing) : (hasproperty(st, Symbol(k)) ? getproperty(st, Symbol(k)) : nothing)
+            r === nothing && continue
+            (length(r) == 2 && all(v -> v isa Real, r)) ||
+                throw(ArgumentError("steps: `$k` must be a (lo, hi) pair of numbers, got $(repr(r))"))
+            d[k] = Float64[r[1], r[2]]
+        end
+        band = st isa AbstractDict ? get(st, "band", false) : (hasproperty(st, :band) && st.band)
+        band === true && (d["band"] = true)
+        isempty(d) && throw(ArgumentError("steps: each step needs an `x` and/or `y` window"))
+        push!(out, d)
+    end
+    return out
+end
+
 function _apply_zoom!(opt::Dict{String,Any}, mode)
     mode === false && return opt
     m = mode === true ? "buttons" : String(mode isa Symbol ? String(mode) : mode)
@@ -675,7 +699,8 @@ const _EC_TOPLEVEL = Set{String}(["xAxis", "yAxis", "grid", "dataZoom", "visualM
     # `zoom` likewise expands to the `dataZoom` (+ `toolbox`) components — see `_apply_zoom!`;
     # `select = :binding` makes the chart's x-range an INPUT for a `@bind` — see `_apply_select!`.
     # `renderer = :canvas | :svg` picks the rasteriser — see `_renderer_wire`; rides as `__renderer`.
-    "registerMap", "height", "width", "valuefmt", "zoom", "select", "renderer"])
+    # `steps` = the windows a presented figure moves through, one per build step — see `_steps_wire`.
+    "registerMap", "height", "width", "valuefmt", "zoom", "select", "renderer", "steps"])
 
 # Express: a single series + simple layout. Kwargs naming a top-level component (xAxis/yAxis/grid/…)
 # go on the OPTION (so `yAxis=(type=:log,)` makes a log axis); everything else styles the series.

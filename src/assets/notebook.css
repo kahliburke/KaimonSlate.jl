@@ -3172,6 +3172,13 @@ body.presenting { overflow: hidden; }
 .deck-slide .md h1, .deck-slide .md h2, .deck-slide .md h3 { width: fit-content; max-width: 100%; }
 .deck-slide[data-layout="center"] .md :is(h1, h2, h3), .deck-slide[data-layout="title"] .md :is(h1, h2, h3) {
   margin-left: auto; margin-right: auto; }
+/* Even line lengths: a heading never strands one word, a paragraph avoids a lone last word. */
+.deck-slide .md :is(h1, h2, h3) { text-wrap: balance; }
+.deck-slide .md :is(p, li) { text-wrap: pretty; hanging-punctuation: first; }
+.deck-slide :is(table, .tables) { font-variant-numeric: tabular-nums; }
+/* `class=serif`: a book face for the slide's headings, for a title or a quieter section. */
+.deck-slide.serif .md :is(h1, h2, h3) { font-family: "Iowan Old Style", "Charter", "Source Serif 4", Georgia, serif;
+  font-weight: 600; letter-spacing: -.01em; }
 .deck-slide .md h1 { font-size: 2.6em; font-weight: 800; }
 .deck-slide .md h2 { font-size: 1.85em; font-weight: 750; }
 .deck-slide .md h3 { font-size: 1.2em; font-weight: 650; color: var(--deck-accent); }

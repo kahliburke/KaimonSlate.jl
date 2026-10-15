@@ -227,6 +227,8 @@
   }
   function _unmount() {
     if (D.mo) { D.mo.disconnect(); D.mo = null; }
+    for (const c of (D.chartSteps || [])) _applyChartStep(c, 0, false);
+    D.chartSteps = [];
     _clearAuto();
     _inkClear();
     const stage = document.getElementById('deckstage');
@@ -351,6 +353,18 @@
   function _collectSteps(slide, sld, keepStep) {
     const r = _scanSteps(slide.querySelector('.slide-body'), sld, keepStep ? _reactiveSent : null);
     D.items = r.items; D.reactive = r.reactive; D.total = r.total;
+    // Charts with `steps` windows: each step moves the figure to the next one (see `_applyChartStep`).
+    const prev = new Map((D.chartSteps || []).map(c => [c.inst, c]));
+    D.chartSteps = [];
+    for (const rr of D.restore) for (const inst of _cellCharts(rr.el)) {
+      const spec = _specOf(inst), steps = spec && spec.__steps;
+      if (!steps || !steps.length) continue;
+      const old = prev.get(inst);
+      // A re-rendered chart is drawn at its base view again, so its window must be re-applied.
+      const fresh = !old || old.sig !== inst.__slateOptSig;
+      D.chartSteps.push({ inst, spec, steps, sig: inst.__slateOptSig, cur: fresh ? 0 : old.cur });
+      D.total = Math.max(D.total, steps.length);
+    }
     _applyStep(keepStep ? Math.min(D.step, D.total) : D.step, true);
   }
   function _reactiveSent(name) { const r = D.reactive.find(x => x.name === name); return r ? r.sent : null; }
@@ -444,6 +458,7 @@
         pairs.forEach(([, , el]) => el.style.removeProperty('view-transition-name'));
       });
     } else _stepClasses(s);
+    for (const c of (D.chartSteps || [])) _applyChartStep(c, Math.min(s, c.steps.length), !quiet);
     for (const r of D.reactive) _sendReactive(r, Math.min(s, r.n));
     _playVisibleMedia();
     _syncHud();
@@ -498,6 +513,36 @@
     }
     return out;
   }
+  // A chart on a slide is read from across a room or through a compressed screen share. Its text is
+  // set in slide units, lines and points are heavier unless the cell chose a size, and the plot keeps
+  // room for its labels. Applied on top of the cell's option, and undone when the cell goes home.
+  function _presentChart(inst, u) {
+    const spec = _specOf(inst); if (!spec) return;
+    const px = n => Math.round(n * u);
+    const font = getComputedStyle(document.querySelector('.deck') || document.body).getPropertyValue('--deck-font').trim();
+    const axes = a => (Array.isArray(a) ? a : [a || {}]).map(() => ({
+      axisLabel: { fontSize: px(20), margin: px(12) }, nameTextStyle: { fontSize: px(22) },
+      axisTick: { length: px(6) },
+    }));
+    const series = (spec.series || []).map(x => {
+      const o = {};
+      if ((x.type === 'line' || !x.type) && !(x.lineStyle && x.lineStyle.width)) o.lineStyle = { width: Math.max(2, px(4)) };
+      if (x.type === 'scatter' && x.symbolSize == null) o.symbolSize = Math.max(6, px(13));
+      return o;
+    });
+    const opt = {
+      textStyle: font ? { fontFamily: font } : {},
+      xAxis: axes(spec.xAxis), yAxis: axes(spec.yAxis), series,
+      tooltip: { textStyle: { fontSize: px(18) } },
+    };
+    // Only a legend the chart has: setting one where the cell turned it off would add it.
+    if (spec.legend && spec.legend !== false && spec.legend.show !== false)
+      opt.legend = { textStyle: { fontSize: px(20) }, itemWidth: px(28), itemHeight: px(14) };
+    if (!spec.grid && spec.xAxis) opt.grid = { containLabel: true, left: px(16), right: px(28), top: px(36), bottom: px(16) };
+    if (!spec.xAxis) delete opt.xAxis;
+    if (!spec.yAxis) delete opt.yAxis;
+    try { inst.setOption(opt); inst.__deckStyled = true; } catch (e) {}
+  }
   function _sizeChart(c, w, h) {
     w = Math.max(80, Math.round(w)); h = Math.max(60, Math.round(h));
     if (!_origStyle.has(c.dom)) _origStyle.set(c.dom, [c.dom.style.width, c.dom.style.height]);
@@ -517,6 +562,8 @@
     body.style.setProperty('--shrink', 1);
     body.classList.remove('scroll');
     const charts = _slideCharts();
+    const u = parseFloat(slide.style.getPropertyValue('--u')) || 1;
+    for (const c of charts) _presentChart(c.inst, u);
     const availH = body.clientHeight;
     for (const c of charts) {
       const host = c.dom.parentElement;
@@ -571,6 +618,11 @@
   // again only once the notebook is back on screen (`exitPresent`).
   function _restoreCellCharts(el) {
     for (const inst of _cellCharts(el)) {
+      if (inst.__deckStyled) {
+        const sp = _specOf(inst);
+        if (sp) try { inst.setOption(sp, { notMerge: true }); window.slateColorSeries && slateColorSeries(inst); } catch (e) {}
+        inst.__deckStyled = false;
+      }
       const dom = inst.getDom && inst.getDom(), orig = dom && _origStyle.get(dom); if (!orig) continue;
       dom.style.width = orig[0]; dom.style.height = orig[1];
       _origStyle.delete(dom);
@@ -679,6 +731,46 @@
       });
     }
   }
+  // Move a chart to its window for step `k` (0 = the figure as drawn): the axes animate to the new range,
+  // or with `band` the view stays and that stretch of x is shaded.
+  function _axis0(a) { return Array.isArray(a) ? (a[0] || {}) : (a || {}); }
+  function _applyChartStep(c, k, animate) {
+    if (c.cur === k) return;
+    c.cur = k;
+    const bx = _axis0(c.spec.xAxis), by = _axis0(c.spec.yAxis);
+    const st = k > 0 ? c.steps[k - 1] : null;
+    const view = st && !st.band ? st : {};
+    const band = st && st.band && st.x;
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#58a6ff';
+    try {
+      c.inst.setOption({
+        animation: true, animationDurationUpdate: animate ? 950 : 0, animationEasingUpdate: 'cubicInOut',
+        xAxis: { min: view.x ? view.x[0] : (bx.min != null ? bx.min : null), max: view.x ? view.x[1] : (bx.max != null ? bx.max : null) },
+        yAxis: { min: view.y ? view.y[0] : (by.min != null ? by.min : null), max: view.y ? view.y[1] : (by.max != null ? by.max : null) },
+        series: [{ markArea: band
+          ? { silent: true, itemStyle: { color: accent, opacity: 0.16 }, data: [[{ xAxis: band[0] }, { xAxis: band[1] }]] }
+          : { data: [] } }],
+      });
+    } catch (e) {}
+  }
+
+  window._onChartRendered = inst => {
+    if (!D.open) return;
+    const c = (D.chartSteps || []).find(x => x.inst === inst);
+    if (!c) return;
+    const k = c.cur;
+    c.spec = _specOf(inst) || c.spec; c.sig = inst.__slateOptSig; c.cur = 0;
+    _applyChartStep(c, k, false);
+  };
+  const _restyle = window._onChartRendered;
+  window._onChartRendered = inst => {
+    if (D.open && D.restore.some(r => _cellCharts(r.el).includes(inst))) {
+      const slide = document.querySelector('#deckstage .deck-slide');
+      _presentChart(inst, parseFloat(slide && slide.style.getPropertyValue('--u')) || 1);
+    }
+    _restyle(inst);
+  };
+
   // Data morph. Chart cells on consecutive slides tagged with the same `morph=name` are one figure
   // changing form: the incoming chart is first drawn with the outgoing chart's option, then given its own
   // with ECharts' universal transition, so marks travel to their new places (points gathering into bars,

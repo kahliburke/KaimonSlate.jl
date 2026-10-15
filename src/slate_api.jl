@@ -1249,7 +1249,11 @@ See also `save_asset`, `FileUpload`."""),
         or image that appears on two consecutive slides glides between them. DATA MORPH: two chart cells
         on consecutive slides tagged with the same `morph=name` are one figure changing form; data items
         sharing a `groupId` travel to the item with that `groupId` on the next slide (points gathering
-        into histogram bars, a line becoming columns). REACTIVE builds:
+        into histogram bars, a line becoming columns). FIGURE STEPS: `echart(…; steps = [(x = (a, b),),
+        (x = (c, d), y = (e, f)), (x = (g, h), band = true)])` moves the chart through those axis windows
+        (or shades an x band) on the slide's build steps, animated. Charts on slides are restyled for
+        presentation (slide-sized text, heavier lines) and restored on exit. `class=serif` on a slide sets
+        its headings in a book face. REACTIVE builds:
         `@bind k SlideSteps(n)` follows the slide's step counter (0…n) so a figure can build from
         computed state. See also `SlideSteps`, `cell tags`, `front matter`."""),
     SlateApiEntry("math slides", "Document",

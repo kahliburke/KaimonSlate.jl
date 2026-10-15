@@ -78,7 +78,7 @@ Put these on any cell of a slide (the first cell that sets a key wins):
 | `bgdim=0.5` | darken the background so text reads over it |
 | `transition=zoom` | how this slide enters: `fade`, `slide`, `zoom`, `rise`, `none` |
 | `auto=5` | advance by itself after 5 seconds per step |
-| `class=name` | add a CSS class to the slide |
+| `class=name` | add a CSS class to the slide; `class=serif` sets its headings in a book face |
 
 **Deck style** in Settings gives every slide without its own `bg` a background, dimmed behind
 content slides and full strength on title and section slides.
@@ -167,6 +167,23 @@ $$r = -\term{damping}{\gamma} \pm i\,\term{freq}{\omega_d}$$
 
 Named pieces carry between consecutive slides the same way, so the result of one slide can move into
 place on the next.
+
+### Figures on slides
+
+A chart on a slide is restyled for the room: tick labels, axis names, legend and tooltip are set in
+slide units, lines and points are heavier unless the cell chose their size, and the plot keeps room for
+its labels. The cell's chart is untouched; leaving the slide puts it back as drawn.
+
+`steps` walks a figure through views as the slide builds, with the axes animating from one to the next:
+
+```julia
+echart(:line, t, x; steps = [(x = (0, 12),),                       # step 1: the whole run
+                             (x = (7.5, 12), y = (-0.16, 0.16)),   # step 2: zoom into the tail
+                             (x = (0, 3), band = true)])           # step 3: back out, shade 0–3
+```
+
+A step with `band = true` keeps the view and shades that stretch of `x`. The figure's steps share the
+slide's step counter with its other builds.
 
 ### Media and morphing
 

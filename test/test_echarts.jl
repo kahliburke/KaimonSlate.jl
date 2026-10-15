@@ -21,6 +21,14 @@ const RE = ReportEngine
         @test o2["series"][1]["data"] == [[1.0, 3.0], [2.0, 4.0]]
     end
 
+    @testset "steps: the windows a presented figure moves through" begin
+        o = RE.echart(:line, [1, 2], [3, 4]; steps = [(x = (0, 4),), (x = (1, 2), y = (0.5, 1), band = true)]).option
+        @test o["__steps"] == [Dict("x" => [0.0, 4.0]), Dict("x" => [1.0, 2.0], "y" => [0.5, 1.0], "band" => true)]
+        @test !haskey(o["series"][1], "steps")                 # an option key, not a series field
+        @test_throws ArgumentError RE.echart(:line, [1], [2]; steps = [(x = (0, 1, 2),)])
+        @test_throws ArgumentError RE.echart(:line, [1], [2]; steps = [(band = true,)])
+    end
+
     @testset "an axis given as a bare type is that axis type" begin
         @test RE.echart(:line, [1, 2], [3, 4]; yAxis = :log).option["yAxis"] == Dict("type" => "log")
         # `(type = :value)` without its comma is an assignment, so the axis arrives as a bare symbol
