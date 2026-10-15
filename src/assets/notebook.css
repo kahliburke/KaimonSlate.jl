@@ -3096,71 +3096,196 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   .mentionbox li.on, .mentionbox li:hover { background: var(--accent); color: var(--bg); }
 
 /* ── Presentation / slideshow mode ─────────────────────────────────────────────
-   The deck is a fullscreen overlay; `body.presenting` hides the editing chrome so the
-   moved-in live cells own the screen. Slides auto-fit via a JS scale() transform. */
+   The deck is a fullscreen overlay; `body.presenting` hides the editing chrome so the moved-in live
+   cells own the screen. The slide is a fixed-aspect canvas sized by slides.js, which sets `--u` to one
+   1920th of its width (16:9): every length on the slide is a multiple of it, so a slide lays out the
+   same at any window size. `--shrink` (set by the fit pass) scales the body text down to fit. */
 body.presenting > .topbar, body.presenting > .page, body.presenting > .hydbanner,
 body.presenting > .srcbanner, body.presenting > #selcount, body.presenting > #doclauncher { display: none !important; }
 body.presenting { overflow: hidden; }
 
-.deck { position: fixed; inset: 0; z-index: 80; background: var(--bg); display: flex;
-  align-items: center; justify-content: center; }
+.deck { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center;
+  background: #000;
+  --deck-fg: var(--text); --deck-strong: var(--strong, var(--text)); --deck-dim: var(--dim);
+  --deck-accent: var(--accent); --deck-accent2: #b392f0; --deck-surface: var(--bg);
+  --deck-ink: #ff4d6d;
+  --deck-font: "Inter", "SF Pro Display", -apple-system, "Segoe UI", system-ui, sans-serif; }
 .deck-stage { position: relative; width: 100%; height: 100%; display: flex;
   align-items: center; justify-content: center; overflow: hidden; }
-/* Scroll mode: tall slides fit width and scroll vertically. Scroll lives on the STAGE (a scaled
-   slide can't scroll its own overflow), and alignment flips to top so the head isn't clipped. */
-.deck-stage.scrolling { overflow-y: auto; align-items: flex-start; padding: 2vh 0 6vh; }
-.deck-slide { width: min(1080px, 92vw); transform-origin: center center;
-  max-height: 100vh; }
-.deck-slide.overflow { max-height: none; }
-/* The moved-in cells lose their notebook chrome — present clean output, no editor/handles. */
-.deck-slide .cell { border: none !important; background: none !important; margin: 0 0 18px 0 !important; padding: 0 !important; }
-.deck-slide .cellhead { display: none !important; }
-/* The deck moves the LIVE cell nodes in, so command-mode selection / multi-select / dep-focus outlines
-   would ride along — a presentation shouldn't show editing chrome, so strip them. */
+
+.deck-slide { --u: 1px; --shrink: 1; position: relative; overflow: hidden; flex: none;
+  background: var(--deck-surface); color: var(--deck-fg); font-family: var(--deck-font);
+  view-transition-name: deck-slide; transition: opacity .3s ease, transform .3s ease; }
+.slide-bg { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.slide-bg-media { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.slide-bg-dim { position: absolute; inset: 0; background: #000; }
+.slide-body { position: absolute; inset: 0; z-index: 1; box-sizing: border-box;
+  padding: calc(var(--u) * 84) calc(var(--u) * 120) calc(var(--u) * 72);
+  display: flex; flex-direction: column; justify-content: flex-start; gap: calc(var(--u) * 18);
+  font-size: calc(var(--u) * 34 * var(--shrink)); line-height: 1.45; overflow: hidden; }
+.slide-body.scroll { overflow-y: auto; }
+.slide-num { position: absolute; z-index: 2; right: calc(var(--u) * 44); bottom: calc(var(--u) * 30);
+  font-size: calc(var(--u) * 20); color: var(--deck-dim); font-variant-numeric: tabular-nums; opacity: .7; }
+.deck-slide[data-layout="title"] .slide-num, .deck-slide[data-layout="section"] .slide-num,
+.deck-slide[data-layout="cover"] .slide-num { display: none; }
+
+/* The moved-in cells lose their notebook chrome. */
+.deck-slide .cell { border: none !important; background: none !important; margin: 0 !important; padding: 0 !important;
+  box-shadow: none !important; max-width: none !important; width: auto !important; }
+.deck-slide .cellhead, .deck-slide .cellmove, .deck-slide .addcell, .deck-slide .cellfoot { display: none !important; }
 .deck-slide .cell.selected, .deck-slide .cell.multisel, .deck-slide .cell.dep-focus { outline: none !important; }
+.deck-slide .cell-row { display: flex; gap: calc(var(--u) * 48); align-items: flex-start; }
+.deck-slide .cell-row > .cell { flex: 1 1 0; min-width: 0; }
 .deck-slide .srcedit, .deck-slide .cm-editor { display: none; }
 .deck-slide.show-code .srcedit, .deck-slide.show-code .cm-editor { display: block; }
-/* The "⊞ … surfaced in ‘cell’" chip is authoring chrome, as in zen: the live control renders in its
-   host cell. A cell with nothing to show (`.cell-blank`, set by `markBlank` in view.js; e.g. a bind
-   cell whose controls are all surfaced elsewhere) collapses, so it leaves no gap on the slide. It
-   stays while the code is shown, because its code is then its content. */
-.deck-slide .hostedph,
+.deck-slide .hostedph, .deck-slide .cell.deck-bindonly, .deck-slide .deck-ctl-hidden,
 .deck-slide:not(.show-code) .cell.cell-blank, .deck-slide .cell.cell-blank.codehidden { display: none !important; }
-/* A drag on a slider must not start a text selection over the slide. */
-.deck-slide .controls, .deck-slide .binds { user-select: none; }
-/* Presented code is read from a distance — bump it above the editor's default size (the slide-level
-   scale still shrinks it to fit, so this sets the on-screen size, not the layout size). */
+.deck-slide .controls, .deck-slide .binds { user-select: none; font-size: .6em; }
 .deck-slide.show-code .cm-editor, .deck-slide.show-code .cm-editor .cm-content,
-.deck-slide.show-code .srcedit { font-size: 1.02rem; line-height: 1.5; }
-/* Code-left / output-right: reclaim horizontal space when code is shown. Only cells tagged
-   `slide-split` (plain non-column cells that have output — see slides.js) split; the editor takes the
-   left column, every output host stacks in the right. */
-/* A code-split slide uses the wide screen — otherwise the narrow default width wraps the code into a
-   tall column and the whole slide scales down, wasting the horizontal space the split was meant to use. */
-.deck-slide.show-code.has-split { width: min(1600px, 94vw); }
-/* The editor spans ALL rows (grid-row 1/-1 over an ample explicit row track) so the two columns are
-   decoupled: without this, each output host lands in its own row, row 1 is shared with the tall code,
-   and the figure gets pushed DOWN by the code's height instead of sitting at the top of column 2. */
+.deck-slide.show-code .srcedit { font-size: .62em; line-height: 1.5; }
 .deck-slide.show-code .cell.slide-split { display: grid; align-items: start;
-  grid-template-columns: minmax(0, 44%) minmax(0, 1fr);
-  grid-template-rows: repeat(20, auto); column-gap: 22px; }
+  grid-template-columns: minmax(0, 44%) minmax(0, 1fr); grid-template-rows: repeat(20, auto); column-gap: calc(var(--u) * 32); }
 .deck-slide.show-code .cell.slide-split > .srchost,
 .deck-slide.show-code .cell.slide-split > .srcedit { grid-column: 1; grid-row: 1 / -1; min-width: 0; }
-.deck-slide.show-code .cell.slide-split > .binds,
-.deck-slide.show-code .cell.slide-split > .controls,
-.deck-slide.show-code .cell.slide-split > .output,
-.deck-slide.show-code .cell.slide-split > .tables,
-.deck-slide.show-code .cell.slide-split > .echarts,
-.deck-slide.show-code .cell.slide-split > .anim { grid-column: 2; min-width: 0; }
-.deck-slide .output { max-height: none !important; }
-.deck-slide .md { font-size: 1.15rem; }
-.deck-slide .md h1 { font-size: 2.6rem; } .deck-slide .md h2 { font-size: 2rem; }
+.deck-slide.show-code .cell.slide-split > .binds, .deck-slide.show-code .cell.slide-split > .controls,
+.deck-slide.show-code .cell.slide-split > .output, .deck-slide.show-code .cell.slide-split > .tables,
+.deck-slide.show-code .cell.slide-split > .echarts, .deck-slide.show-code .cell.slide-split > .anim { grid-column: 2; min-width: 0; }
+.deck-slide .output { max-height: none !important; font-size: .7em; }
+.deck-slide .output img, .deck-slide .md img, .deck-slide .md video {
+  max-width: 100%; max-height: calc(var(--u) * 760); height: auto; border-radius: calc(var(--u) * 10); }
 
-/* Slide transitions (honor prefers-reduced-motion via JS, which omits the class). */
+/* Typography: one scale, in `em` of the body size, so `--shrink` scales all of it together. */
+.deck-slide .md { font-size: 1em; color: var(--deck-fg); max-width: none; }
+.deck-slide .md p, .deck-slide .md li { font-size: 1em; }
+.deck-slide .md p { margin: 0 0 .55em; }
+.deck-slide .md ul, .deck-slide .md ol { margin: .2em 0 .6em; padding-left: 1.2em; }
+.deck-slide .md li { margin: .28em 0; }
+.deck-slide .md li::marker { color: var(--deck-accent); }
+.deck-slide .md h1, .deck-slide .md h2, .deck-slide .md h3 { font-family: var(--deck-font); color: var(--deck-strong);
+  letter-spacing: -.02em; line-height: 1.1; border: none; margin: 0 0 .45em; }
+.deck-slide .md h1 { font-size: 2.6em; font-weight: 800; }
+.deck-slide .md h2 { font-size: 1.85em; font-weight: 750; }
+.deck-slide .md h3 { font-size: 1.2em; font-weight: 650; color: var(--deck-accent); }
+.deck-slide .md h2::after { content: ""; display: block; width: 2.2em; height: calc(var(--u) * 6); margin-top: .32em;
+  border-radius: 99px; background: linear-gradient(90deg, var(--deck-accent), var(--deck-accent2)); }
+.deck-slide .md strong { color: var(--deck-strong); }
+.deck-slide .md code { font-size: .85em; }
+.deck-slide .md pre { font-size: .62em; }
+.deck-slide .md .columns { display: flex; gap: calc(var(--u) * 56); align-items: flex-start; }
+.deck-slide .md .columns > .column { flex: 1 1 0; min-width: 0; }
+.deck-slide .md .columns > .column[width] { flex: 0 0 auto; }
+#nb .md .columns { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+#nb .md .columns > .column { flex: 1 1 240px; min-width: 0; }
+#nb .md .pause { border-top: 1px dashed var(--border); margin: 6px 0; opacity: .6; }
+.deck-slide .md .pause { display: none; }
+
+/* Layouts. */
+.deck-slide[data-layout="center"] .slide-body { justify-content: center; text-align: center; align-items: center; }
+.deck-slide[data-layout="center"] .md h2::after { margin-left: auto; margin-right: auto; }
+.deck-slide[data-layout="title"] .slide-body { justify-content: center; align-items: center; text-align: center; }
+.deck-slide[data-layout="title"] .md h1 { font-size: 3.4em; margin-bottom: .25em;
+  background: linear-gradient(100deg, var(--deck-strong) 20%, var(--deck-accent) 60%, var(--deck-accent2));
+  -webkit-background-clip: text; background-clip: text; color: transparent; }
+.deck-slide[data-layout="title"] .md h2, .deck-slide[data-layout="title"] .md h3 { color: var(--deck-dim); font-weight: 500; }
+.deck-slide[data-layout="title"] .md h2::after { display: none; }
+.deck-slide[data-layout="section"] .slide-body { justify-content: center; padding-left: calc(var(--u) * 180); }
+.deck-slide[data-layout="section"] .md h2 { font-size: 3em; }
+.deck-slide[data-layout="section"] .md h3 { color: var(--deck-dim); font-weight: 500; }
+.deck-slide[data-layout="cover"] .slide-body { justify-content: flex-end; }
+.deck-slide[data-layout="cover"] .md img:first-of-type, .deck-slide[data-layout="cover"] .md video:first-of-type {
+  position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; object-fit: cover; border-radius: 0; z-index: -1; }
+.deck-slide[data-layout="cover"] .cell, .deck-slide[data-layout="cover"] .md p { position: static; }
+
+/* Backgrounds. A slide with an image/video or a dark preset gets light text. */
+.bg-aurora { background:
+  radial-gradient(60% 80% at 15% 20%, #3b2a8a 0%, transparent 60%),
+  radial-gradient(50% 70% at 85% 30%, #0f6c7a 0%, transparent 60%),
+  radial-gradient(70% 60% at 60% 100%, #6b1f5c 0%, transparent 65%), #0b0d1a; }
+.bg-nebula { background:
+  radial-gradient(40% 50% at 75% 40%, #7a2bd1aa 0%, transparent 70%),
+  radial-gradient(45% 60% at 20% 80%, #1c64f2aa 0%, transparent 70%), #07081a; }
+.bg-midnight { background: linear-gradient(160deg, #0d1424 0%, #111a33 55%, #1b1440 100%); }
+.bg-ember { background: radial-gradient(80% 90% at 80% 100%, #8a2a12 0%, transparent 60%), linear-gradient(160deg, #160d0a, #24110b); }
+.bg-ocean { background: linear-gradient(170deg, #031b2e 0%, #053a52 60%, #0a5c66 100%); }
+.bg-slate { background: linear-gradient(170deg, #15181e, #1d222b); }
+.bg-paper { background: #f6f3ec; }
+.deck-slide.bg-media, .deck-slide.bg-preset:not(.bgp-paper) {
+  --deck-fg: #e9ebf3; --deck-strong: #fff; --deck-dim: #aab0c6; --deck-accent: #8ab4ff; --deck-accent2: #d0a2ff; }
+.deck-slide.bgp-paper { --deck-fg: #2a2724; --deck-strong: #111; --deck-dim: #6d665c; --deck-accent: #b4532a; --deck-accent2: #d08a3a; }
+.deck-slide.bg-media .md { text-shadow: 0 1px calc(var(--u) * 14) #0009; }
+
+/* Builds. A step keeps its space while hidden, so the slide does not reflow as it builds. */
+.deck-slide .step { transition: opacity .45s ease, transform .5s cubic-bezier(.2,.7,.2,1), filter .45s ease,
+  color .35s ease, background-color .35s ease; }
+.deck-slide .step:not(.on):not(.highlight):not(.fade-out) { opacity: 0; transform: translateY(calc(var(--u) * 24)); visibility: hidden; }
+.deck-slide .step.fade:not(.on) { transform: none; }
+.deck-slide .step.fade-left:not(.on) { transform: translateX(calc(var(--u) * -48)); }
+.deck-slide .step.fade-right:not(.on) { transform: translateX(calc(var(--u) * 48)); }
+.deck-slide .step.zoom:not(.on) { transform: scale(.82); }
+.deck-slide .step.blur:not(.on) { transform: none; filter: blur(calc(var(--u) * 12)); }
+.deck-slide .step.highlight { border-radius: calc(var(--u) * 8); }
+.deck-slide .step.highlight.on { background-color: color-mix(in srgb, var(--deck-accent) 22%, transparent);
+  box-shadow: 0 0 0 calc(var(--u) * 8) color-mix(in srgb, var(--deck-accent) 22%, transparent); }
+.deck-slide .step.fade-out.on { opacity: 0; transform: translateY(calc(var(--u) * -16)); visibility: hidden; }
+.deck-slide .step.dim.on:not(.current) { opacity: .35; }
+.deck-slide .step.dim.on:not(.current) .step.dim { opacity: 1; }
+.deck-slide .step.strike.on { text-decoration: line-through; text-decoration-color: var(--deck-accent); opacity: .6; }
+.deck-slide .step:not(.on) { transition-delay: 0s; }
+
+/* Transitions without the View Transitions API. */
 .deck-slide.enter-fade { opacity: 0; }
-.deck-slide.enter-next { opacity: 0; transform: translateX(40px); }
-.deck-slide.enter-prev { opacity: 0; transform: translateX(-40px); }
-.deck-slide { transition: opacity .28s ease, transform .28s ease; }
+.deck-slide.enter-next { opacity: 0; transform: translateX(calc(var(--u) * 80)); }
+.deck-slide.enter-prev { opacity: 0; transform: translateX(calc(var(--u) * -80)); }
+.deck-slide.enter-zoom { opacity: 0; transform: scale(.94); }
+
+/* View Transitions: the slide as a whole animates by kind; shared (morphing) elements glide on their own. */
+html[data-deck-trans]::view-transition-old(root), html[data-deck-trans]::view-transition-new(root) { animation: none; }
+html[data-deck-trans]::view-transition-group(*) { animation-duration: .6s; animation-timing-function: cubic-bezier(.65,0,.35,1); }
+html[data-deck-trans="fade"]::view-transition-old(deck-slide) { animation: deck-out-fade .45s ease both; }
+html[data-deck-trans="fade"]::view-transition-new(deck-slide) { animation: deck-in-fade .45s ease both; }
+html[data-deck-trans="slide"][data-deck-dir="next"]::view-transition-old(deck-slide) { animation: deck-out-left .6s cubic-bezier(.65,0,.35,1) both; }
+html[data-deck-trans="slide"][data-deck-dir="next"]::view-transition-new(deck-slide) { animation: deck-in-right .6s cubic-bezier(.65,0,.35,1) both; }
+html[data-deck-trans="slide"][data-deck-dir="prev"]::view-transition-old(deck-slide) { animation: deck-out-right .6s cubic-bezier(.65,0,.35,1) both; }
+html[data-deck-trans="slide"][data-deck-dir="prev"]::view-transition-new(deck-slide) { animation: deck-in-left .6s cubic-bezier(.65,0,.35,1) both; }
+html[data-deck-trans="zoom"]::view-transition-old(deck-slide) { animation: deck-out-zoom .5s cubic-bezier(.4,0,.2,1) both; }
+html[data-deck-trans="zoom"]::view-transition-new(deck-slide) { animation: deck-in-zoom .5s cubic-bezier(.4,0,.2,1) both; }
+html[data-deck-trans="rise"]::view-transition-old(deck-slide) { animation: deck-out-fade .5s ease both; }
+html[data-deck-trans="rise"]::view-transition-new(deck-slide) { animation: deck-in-rise .6s cubic-bezier(.2,.7,.2,1) both; }
+@keyframes deck-out-fade { to { opacity: 0; } }
+@keyframes deck-in-fade { from { opacity: 0; } }
+@keyframes deck-out-left { to { transform: translateX(-100%); } }
+@keyframes deck-in-right { from { transform: translateX(100%); } }
+@keyframes deck-out-right { to { transform: translateX(100%); } }
+@keyframes deck-in-left { from { transform: translateX(-100%); } }
+@keyframes deck-out-zoom { to { opacity: 0; transform: scale(1.12); filter: blur(6px); } }
+@keyframes deck-in-zoom { from { opacity: 0; transform: scale(.9); } }
+@keyframes deck-in-rise { from { opacity: 0; transform: translateY(8%); } }
+
+/* Auto-advance countdown along the bottom edge. */
+.slide-autobar { position: absolute; left: 0; bottom: 0; height: calc(var(--u) * 5); width: 100%; z-index: 3;
+  background: linear-gradient(90deg, var(--deck-accent), var(--deck-accent2)); opacity: .55;
+  transform-origin: left; animation: deck-autobar linear both; }
+@keyframes deck-autobar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+/* Presenting aids: laser pointer, ink, blackout, go-to readout, key help. */
+.deck-laser { position: fixed; left: -9px; top: -9px; width: 18px; height: 18px; border-radius: 50%; z-index: 86;
+  pointer-events: none; display: none; background: radial-gradient(circle, #fff 0 18%, #ff2a4d 30%, #ff2a4d88 55%, transparent 72%);
+  box-shadow: 0 0 18px 6px #ff2a4d66; }
+.deck.laser-on .deck-laser { display: block; }
+.deck.laser-on, .deck.laser-on * { cursor: none !important; }
+.deck-ink { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 85; pointer-events: none; }
+.deck.draw-on .deck-ink { pointer-events: auto; cursor: crosshair; }
+.deck-black { position: fixed; inset: 0; background: #000; z-index: 87; opacity: 0; pointer-events: none; transition: opacity .35s; }
+.deck.black-on .deck-black { opacity: 1; pointer-events: auto; }
+.deck-goto { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); z-index: 88; padding: 6px 14px;
+  border-radius: 99px; background: #000a; color: #fff; font: 600 14px/1.4 system-ui; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.deck-goto.on { opacity: 1; }
+.deck-help { position: fixed; inset: 0; z-index: 89; display: none; align-items: center; justify-content: center; background: #0008; }
+.deck-help.on { display: flex; }
+.deck-help-card { display: grid; grid-template-columns: repeat(2, minmax(220px, auto)); gap: 8px 28px; padding: 22px 26px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; color: var(--text); font: 14px/1.5 system-ui; }
+.deck-help-card > div { display: flex; gap: 14px; align-items: baseline; }
+.deck-help-card kbd { min-width: 64px; color: var(--accent); font: 600 13px/1.4 ui-monospace, monospace; }
 
 .deck-edge { position: fixed; top: 0; height: 100vh; width: 9vw; border: none; cursor: pointer;
   background: transparent; color: var(--dim); font-size: 2.4rem; opacity: 0; transition: opacity .15s; z-index: 82; }
@@ -3168,13 +3293,14 @@ body.presenting { overflow: hidden; }
 .deck-prev { left: 0; } .deck-next { right: 0; background: linear-gradient(270deg, transparent, var(--ovl)); }
 
 .deck-hud { position: fixed; bottom: 14px; right: 16px; z-index: 83; display: flex; align-items: center;
-  gap: 6px; padding: 5px 8px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
-  opacity: .25; transition: opacity .15s; }
+  gap: 4px; padding: 5px 8px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  opacity: 0; transition: opacity .2s; }
 .deck-hud:hover { opacity: 1; }
 .deck-hud button { background: none; border: none; color: var(--text); cursor: pointer; font-size: .95rem;
   padding: 3px 6px; border-radius: 6px; }
 .deck-hud button:hover { background: var(--bg3); color: var(--accent); }
-.deck-progress { color: var(--dim); font-size: .82rem; padding: 0 6px; font-variant-numeric: tabular-nums; }
+.deck-progress { color: var(--dim); font-size: .82rem; padding: 0 6px; font-variant-numeric: tabular-nums; white-space: pre; }
+body.deck-recording .deck-hud, body.deck-recording .deck-edge { display: none; }
 
 /* ── Presenter window (?present=1) ──────────────────────────────────────────── */
 body.is-presenter { overflow: hidden; }
@@ -3182,6 +3308,12 @@ body.is-presenter > .topbar, body.is-presenter > .page, body.is-presenter > #doc
 body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !important; }
 #presenter { position: fixed; inset: 0; z-index: 90; background: var(--bg); color: var(--text); padding: 16px; }
 .pp-main { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; height: 100%; }
+.pp-left { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.pp-left .pp-cur { flex: 1 1 auto; }
+.pp-steps { display: flex; gap: 6px; min-height: 8px; }
+.pp-steps i { flex: 1; height: 6px; border-radius: 99px; background: var(--bg3); }
+.pp-steps i.on { background: var(--accent); }
+.pp-reset { background: none; border: 1px solid var(--border); color: var(--dim); border-radius: 6px; cursor: pointer; }
 .pp-stage { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: auto; padding: 18px; }
 .pp-cur { font-size: 1.05rem; }
 .pp-side { display: flex; flex-direction: column; gap: 10px; min-height: 0; }

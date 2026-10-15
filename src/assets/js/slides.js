@@ -1,16 +1,27 @@
-// Presentation / slideshow mode — turn the notebook into an interactive slide deck.
+// Presentation mode — the notebook as a slide deck.
 //
 // Slides are segmented from the live `nbState.cells` with the SAME rules as the Julia
-// `_slide_segments` (export_typst.jl): a markdown heading at depth ≤ `slideLevel` starts a
-// slide, a `slide`-tagged cell starts one explicitly, a `notes`-tagged cell becomes speaker
-// notes for its slide, and `collapsed` cells are skipped. (The PDF deck additionally splits a
-// markdown cell on a `---` rule; the live deck keeps whole cells together so their real
-// ECharts/@bind/editor nodes can be re-parented intact — split a cell if you want the break.)
+// `_slide_segments` (export_typst.jl): a markdown heading at depth ≤ `slideLevel` starts a slide, a
+// `slide`-tagged cell starts one explicitly, a `notes`-tagged cell becomes speaker notes for its
+// slide, and `collapsed` cells are skipped.
 //
-// The deck is a fullscreen overlay. To keep everything LIVE (charts animate, @bind widgets
-// work, cells stay reactive) the current slide's actual `#cell-<id>` DOM nodes are MOVED into
-// the slide stage and moved back on exit — never cloned. A separate presenter window
-// (`?present=1`) mirrors the position over a BroadcastChannel and shows notes + a timer.
+// To keep everything LIVE (charts animate, @bind widgets work, cells stay reactive) the current
+// slide's actual `#cell-<id>` DOM nodes are MOVED onto a fixed-aspect canvas and moved back on exit —
+// never cloned. The canvas is sized to the window and every length on it is a multiple of `--u`
+// (one 1920th of its width for 16:9), so a slide lays out the same at any size and stays crisp.
+//
+// Slide configuration rides on cell tags (the first cell that sets a key wins):
+//   layout=title|section|center|cover   bg=<preset|colour|gradient|image|video>   bgdim=0.5
+//   transition=fade|slide|zoom|rise|none   auto=<seconds>   class=<css class>
+// A cell tagged `step` (or `step=N`) is itself a build step.
+//
+// Builds: a slide has a step counter 0…S. Inside markdown, `::: step` blocks, `::: incremental`
+// lists and `. . .` pauses each take a step; `step=N` on a block or cell orders it explicitly. A
+// `@bind k SlideSteps(n)` on the slide follows the same counter, so a figure can build from
+// computed state. Moving forward walks the steps, then the slides.
+//
+// A presenter window (`?present=1`) mirrors the position over a BroadcastChannel and shows notes,
+// the next slide and a timer; it drives the deck by sending it `nav` requests.
 
 (function () {
   const NBID = decodeURIComponent((location.pathname.match(/^\/n\/([^\/]+)/) || ['', ''])[1]);
@@ -28,12 +39,22 @@
     }
     return null;
   }
+  // A cell's `key=value` tags as an object; a bare tag maps to `true`.
+  function _tagMap(c) {
+    const m = {};
+    for (const t of (c && c.tags) || []) {
+      const i = t.indexOf('=');
+      if (i > 0) m[t.slice(0, i)] = t.slice(i + 1); else m[t] = true;
+    }
+    return m;
+  }
+  const _SLIDE_KEYS = ['layout', 'bg', 'bgdim', 'transition', 'auto', 'class'];
   function buildSlides() {
     const cells = (typeof nbState !== 'undefined' && nbState && nbState.cells) || [];
     const level = (nbState && nbState.slideLevel) || 2;
     const slides = [];
-    let cur = { ids: [], notes: [] };
-    const flush = () => { if (cur.ids.length || cur.notes.length) { slides.push(cur); cur = { ids: [], notes: [] }; } };
+    let cur = { ids: [], notes: [], cfg: {} };
+    const flush = () => { if (cur.ids.length || cur.notes.length) { slides.push(cur); cur = { ids: [], notes: [], cfg: {} }; } };
     for (const c of cells) {
       if (c.collapsed) continue;
       if (c.notes) { cur.notes.push(c.id); continue; }
@@ -41,23 +62,36 @@
       const starts = c.slide || (d != null && d <= level);
       if (starts) flush();
       cur.ids.push(c.id);
+      const tm = _tagMap(c);
+      for (const k of _SLIDE_KEYS) if (tm[k] != null && cur.cfg[k] == null) cur.cfg[k] = tm[k];
     }
     flush();
     return slides;
   }
   function _slideTitle(slide) {
     const cells = (nbState && nbState.cells) || [];
-    for (const id of slide.ids) {
+    for (const id of (slide ? slide.ids : [])) {
       const c = cells.find(x => x.id === id);
       if (c && c.kind === 'md') { const m = (c.source || '').match(/^\s*#{1,6}\s+(.+?)\s*#*$/m); if (m) return m[1].trim(); }
     }
     return null;
   }
+  function _canvasSize() {
+    return ((nbState && nbState.slideRatio) || '16:9') === '4:3' ? [1440, 1080] : [1920, 1080];
+  }
 
   // ── Shared deck state ───────────────────────────────────────────────────────
-  const D = { open: false, idx: 0, slides: [], restore: [], showCode: false, fs: false };
+  const D = {
+    open: false, idx: 0, step: 0, total: 0, slides: [], restore: [], showCode: false, fs: false,
+    items: [], reactive: [], auto: null, autoplay: false, paused: false, laser: false, draw: false,
+    goto: '', mo: null,
+  };
   const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('slate-deck-' + NBID) : null;
-  let _muteBroadcast = false;
+
+  function _emit(type) {
+    const detail = { type, idx: D.idx, step: D.step, steps: D.total, title: _slideTitle(D.slides[D.idx]) };
+    try { window.dispatchEvent(new CustomEvent('slate-deck', { detail })); } catch (e) {}
+  }
 
   // ════════════════════════════════════════════════════════════════════════════
   //  Audience deck (the presenting tab)
@@ -68,16 +102,29 @@
     deck.id = 'deck'; deck.className = 'deck'; deck.style.display = 'none';
     deck.innerHTML =
       '<div class="deck-stage" id="deckstage"></div>' +
+      '<canvas class="deck-ink" id="deckink"></canvas>' +
+      '<div class="deck-laser" id="decklaser"></div>' +
+      '<div class="deck-black" id="deckblack"></div>' +
+      '<div class="deck-goto" id="deckgoto"></div>' +
+      '<div class="deck-help" id="deckhelp"></div>' +
       '<button class="deck-edge deck-prev" title="previous (←)" onclick="slidePrev()">‹</button>' +
       '<button class="deck-edge deck-next" title="next (→)" onclick="slideNext()">›</button>' +
       '<div class="deck-hud">' +
         '<span class="deck-progress" id="deckpos"></span>' +
         '<button title="toggle code (c)" onclick="slideToggleCode()">&lt;/&gt;</button>' +
+        '<button title="laser pointer (l)" onclick="deckLaser()">◉</button>' +
+        '<button title="draw on the slide (d · x clears)" onclick="deckDraw()">✎</button>' +
+        '<button title="autoplay (a)" onclick="deckAutoplay()">⏵</button>' +
+        '<button title="record (r)" onclick="window.deckRecordToggle && deckRecordToggle()">⏺</button>' +
+        '<button title="camera bubble (v)" onclick="window.deckCameraToggle && deckCameraToggle()">◎</button>' +
         '<button title="presenter view (s)" onclick="openPresenter()">🪞</button>' +
         '<button title="fullscreen (f)" onclick="slideFullscreen()">⛶</button>' +
+        '<button title="keys (?)" onclick="deckHelp()">?</button>' +
         '<button title="exit (Esc)" onclick="exitPresent()">✕</button>' +
       '</div>';
     document.body.appendChild(deck);
+    _wireLaser(deck);
+    _wireInk(deck);
   }
 
   // Mirror of notebook.js `_cellColumn`: a `column=N` tag (N≥2) rows a cell beside its predecessor.
@@ -85,98 +132,116 @@
     for (const t of (c && c.tags) || []) { const m = /^column=(\d+)$/.exec(t); if (m) return Math.max(1, parseInt(m[1], 10) || 1); }
     return 1;
   }
-  function _mountSlide(i, dir) {
+
+  // ── Backgrounds ─────────────────────────────────────────────────────────────
+  const _BG_PRESETS = ['aurora', 'nebula', 'midnight', 'ember', 'ocean', 'paper', 'slate'];
+  function _mediaUrl(v) {
+    if (/^(https?:|data:|blob:|\/)/.test(v)) return v;
+    return (window.Slate && Slate.assetUrl) ? Slate.assetUrl(v) : v;
+  }
+  function _paintBg(bgEl, slide, cfg) {
+    const v = cfg.bg;
+    bgEl.innerHTML = ''; bgEl.className = 'slide-bg'; bgEl.style.background = '';
+    slide.classList.remove('bg-media', 'bg-preset', 'has-bg');
+    if (!v || v === true) return;
+    slide.classList.add('has-bg');
+    if (_BG_PRESETS.includes(v)) { bgEl.classList.add('bg-' + v); slide.classList.add('bg-preset', 'bgp-' + v); }
+    else if (/\.(mp4|m4v|webm|mov|ogv)(\?.*)?$/i.test(v)) {
+      const vid = document.createElement('video');
+      vid.src = _mediaUrl(v); vid.muted = true; vid.loop = true; vid.playsInline = true; vid.autoplay = true;
+      vid.className = 'slide-bg-media'; bgEl.appendChild(vid); slide.classList.add('bg-media');
+    } else if (/\.(png|jpe?g|gif|webp|avif|svg)(\?.*)?$/i.test(v)) {
+      const img = document.createElement('img');
+      img.src = _mediaUrl(v); img.alt = ''; img.className = 'slide-bg-media';
+      bgEl.appendChild(img); slide.classList.add('bg-media');
+    } else bgEl.style.background = v;      // a colour or a (space-free) gradient
+    const dim = parseFloat(cfg.bgdim);
+    if (dim > 0) { const s = document.createElement('div'); s.className = 'slide-bg-dim'; s.style.opacity = Math.min(dim, 1); bgEl.appendChild(s); }
+  }
+
+  // ── Mount / unmount ─────────────────────────────────────────────────────────
+  function _mountSlide(i) {
     _unmount();
     const stage = document.getElementById('deckstage');
+    const sld = D.slides[i] || { ids: [], cfg: {} };
+    const cfg = sld.cfg || {};
     const slide = document.createElement('div');
-    slide.className = 'deck-slide' + (D.showCode ? ' show-code' : '');
-    const sld = D.slides[i] || { ids: [] };
+    slide.className = 'deck-slide' + (D.showCode ? ' show-code' : '') + (cfg.class && cfg.class !== true ? ' ' + cfg.class : '');
+    slide.dataset.layout = (cfg.layout && cfg.layout !== true) ? cfg.layout : 'default';
+    const bg = document.createElement('div');
+    _paintBg(bg, slide, cfg);
+    const body = document.createElement('div'); body.className = 'slide-body';
+    const num = document.createElement('div'); num.className = 'slide-num'; num.textContent = String(i + 1);
+    slide.append(bg, body, num);
     // `column=N` cells live inside a `.cell-row` flex wrapper in the notebook (see notebook.js). Moving
-    // the bare cell nodes would drop that wrapper and stack them — so rebuild the row grouping here,
-    // recreating `.cell-row` wrappers in the slide. The live cells still move (never clone); each one's
-    // real home (its `.cellslot` in #nb, see notebook.js `MemoCell`) is remembered for restore.
+    // the bare cell nodes would drop that wrapper and stack them, so the rows are rebuilt here. The live
+    // cells still move (never clone); each one's real home is remembered for restore.
     const cells = (nbState && nbState.cells) || [];
-    let row = null;   // the current open `.cell-row`, or null when at top level
-    for (const id of sld.ids) {
+    let row = null;
+    sld.ids.forEach((id, j) => {
       const el = document.getElementById('cell-' + id);
-      if (!el) continue;
+      if (!el) return;
       const c = cells.find(x => x.id === id);
+      const tm = _tagMap(c);
+      D.restore.push({ el, slot: el.parentNode });
+      if (tm.step) { el.classList.add('step', 'deck-cellstep'); if (tm.step !== true) el.dataset.step = tm.step; }
       const col = c ? _slideCellColumn(c) : 1;
-      D.restore.push({ el, slot: el.parentNode });   // remember home for exit
-      if (col >= 2 && row) { row.appendChild(el); continue; }                // extra column → into open row
-      // A default-column cell may still anchor a row if the NEXT slide cell is column≥2.
-      const j = sld.ids.indexOf(id);
+      if (col >= 2 && row) { row.appendChild(el); return; }
       const nextC = cells.find(x => x.id === sld.ids[j + 1]);
       if (nextC && _slideCellColumn(nextC) >= 2) {
         row = document.createElement('div'); row.className = 'cell-row';
-        row.appendChild(el); slide.appendChild(row);
-      } else { row = null; slide.appendChild(el); }
-    }
+        row.appendChild(el); body.appendChild(row);
+      } else { row = null; body.appendChild(el); }
+    });
     _applySplit(slide);
     stage.appendChild(slide);
-    // Transition: start offset/transparent, then release on the next frame.
-    const cls = D.slides.length <= 1 ? '' : _transClass(dir);
-    if (cls) { slide.classList.add(cls); requestAnimationFrame(() => requestAnimationFrame(() => slide.classList.remove(cls))); }
     _typesetSlide(slide);
+    _collectSteps(slide, sld);
     _fit();
-    _syncHud();
-    // Second pass once laid out: decide which splits actually FIT side-by-side (a cell whose code is
-    // taller than the slide reads better stacked), box-fit charts, and re-fit the slide to real heights.
+    _watch(slide);
     requestAnimationFrame(() => _relayout(slide));
   }
-  function _relayout(slide) {
-    slide = slide || document.querySelector('#deckstage .deck-slide');
-    if (!slide) return;
-    _reviewSplitFit(slide);
-    _fitCharts();
-    _fit();
-  }
-  // Code-left / output-right for present mode: given the limited vertical space, a plain (non-column)
-  // code cell that HAS output lays its editor beside its output instead of stacking. Tag those cells
-  // `slide-split`; the CSS only splits them when code is actually shown (`.show-code`). Column-declared
-  // cells (inside a `.cell-row`) already own their horizontal layout, so they're left alone. This is the
-  // FIRST pass (pre-layout) so the widened width is right on first paint; `_reviewSplitFit` then measures.
-  function _applySplit(slide) {
-    let any = false;
-    for (const el of slide.querySelectorAll(':scope > .cell.code, :scope > .cell.bind')) {
-      let hasOut = false;
-      el.querySelectorAll(':scope > .output, :scope > .tables, :scope > .echarts, :scope > .anim')
-        .forEach(n => { if (n.childNodes.length) hasOut = true; });
-      el.classList.toggle('slide-split', hasOut);
-      any = any || hasOut;
-    }
-    // A split slide wants the wide screen: the default narrow slide would just wrap the code into a tall
-    // column and then scale the whole slide down, defeating the point. Flag it so the CSS widens it.
-    slide.classList.toggle('has-split', any);
-  }
-  // Second pass (post-layout): only KEEP a split where the code fits side-by-side. Re-tag from output
-  // first (so a cell can re-split if the window grew), then unsplit any whose code column — measured at
-  // the split width + present font — is taller than the slide can show; those read better stacked.
-  function _reviewSplitFit(slide) {
-    _applySplit(slide);
-    const stage = document.getElementById('deckstage');
-    const maxH = stage ? Math.max(200, stage.clientHeight - 48) : 900;
-    for (const el of slide.querySelectorAll(':scope > .cell.slide-split')) {
-      const src = el.querySelector(':scope > .srchost, :scope > .srcedit');
-      if (D.showCode && src && src.scrollHeight > maxH) el.classList.remove('slide-split');
-    }
-    slide.classList.toggle('has-split', !!slide.querySelector(':scope > .cell.slide-split'));
-  }
   function _unmount() {
+    if (D.mo) { D.mo.disconnect(); D.mo = null; }
+    _clearAuto();
+    _inkClear();
+    const stage = document.getElementById('deckstage');
+    const old = stage && stage.querySelector('.deck-slide');
+    if (old) old.querySelectorAll('video, audio').forEach(m => { try { m.pause(); } catch (e) {} });
     for (const r of D.restore) {
-      r.el.classList.remove('slide-split');   // shed present-only layout tag before it goes home
-      _restoreCellCharts(r.el);                // undo present-only chart box-fit → notebook sizing
+      r.el.classList.remove('slide-split', 'step', 'deck-cellstep', 'on', 'current');
+      delete r.el.dataset.step;
+      r.el.style.removeProperty('view-transition-name');
+      r.el.querySelectorAll('[style*="view-transition-name"]').forEach(n => n.style.removeProperty('view-transition-name'));
+      r.el.querySelectorAll('.deck-ctl-hidden').forEach(n => n.classList.remove('deck-ctl-hidden'));
+      _restoreCellCharts(r.el);
       if (r.slot.isConnected) r.slot.appendChild(r.el);
       else r.el.remove();                      // its cell is gone (see `_deckSettle`)
     }
     D.restore = [];
-    const stage = document.getElementById('deckstage');
+    D.items = []; D.reactive = [];
     if (stage) stage.innerHTML = '';
   }
+  // A cell re-rendered while on the slide (a reactive step redraws its markdown, a chart replaces its
+  // output) comes back without the step classes; re-collect so the build state holds.
+  function _watch(slide) {
+    const body = slide.querySelector('.slide-body');
+    let pending = false;
+    D.mo = new MutationObserver(() => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        if (!D.open || !slide.isConnected) return;
+        _collectSteps(slide, D.slides[D.idx], true);
+        _relayout(slide);
+      });
+    });
+    D.mo.observe(body, { childList: true, subtree: true });
+  }
   // notebook.js calls this when a `MemoCell` unmounts. A slide cell whose `.cellslot` left #nb was
-  // deleted, or preact mounted it again in a new slot (for example when a `column=N` tag moves it into
-  // or out of a row). After the render, put the new node in the old one's place on the slide, or take
-  // the deleted cell off the slide.
+  // deleted, or preact mounted it again in a new slot. After the render, put the new node in the old
+  // one's place on the slide, or take the deleted cell off the slide.
   let _settling = false;
   function _deckSettle() {
     if (!D.open || _settling) return;
@@ -188,7 +253,7 @@
       D.restore = D.restore.filter(r => {
         if (r.slot.isConnected) return true;
         changed = true;
-        const el = nb && nb.querySelector('#' + CSS.escape(r.el.id));   // the new node, if any
+        const el = nb && nb.querySelector('#' + CSS.escape(r.el.id));
         if (!el) { r.el.remove(); return false; }
         r.slot = el.parentNode;
         r.el.replaceWith(el);
@@ -198,48 +263,203 @@
       if (changed) requestAnimationFrame(() => _relayout());
     });
   }
-  function _transClass(dir) {
-    const t = (nbState && nbState.slideTransition) || 'fade';
-    if (t === 'none' || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return '';
-    if (t === 'slide') return dir < 0 ? 'enter-prev' : 'enter-next';
-    return 'enter-fade';
+
+  // ── Builds ──────────────────────────────────────────────────────────────────
+  // Every build item on the slide, in document order, each with the step it appears on. Items without
+  // an explicit `step=N` take the next number; a pause's group shares one.
+  function _collectSteps(slide, sld, keepStep) {
+    const body = slide.querySelector('.slide-body');
+    // `. . .` → everything after the marker, among its siblings, is one group.
+    body.querySelectorAll('.pause').forEach((m, k) => {
+      const g = 'p' + k + '-' + Math.random().toString(36).slice(2, 7);
+      for (let n = m.nextElementSibling; n; n = n.nextElementSibling) {
+        if (n.classList.contains('pause')) break;
+        n.classList.add('step'); n.dataset.stepGroup = g;
+      }
+    });
+    body.querySelectorAll('.incremental').forEach(inc => {
+      const fx = [...inc.classList].filter(x => x !== 'incremental');
+      const lists = inc.querySelectorAll(':scope > ul > li, :scope > ol > li');
+      const kids = lists.length ? lists : inc.children;
+      for (const li of kids) { li.classList.add('step', ...fx); }
+    });
+    const items = [];
+    let c = 0;
+    const groups = {};
+    for (const el of body.querySelectorAll('.step')) {
+      const explicit = parseInt(el.dataset.step || el.getAttribute('step') || '', 10);
+      let idx;
+      if (el.dataset.stepGroup && groups[el.dataset.stepGroup] != null) idx = groups[el.dataset.stepGroup];
+      else if (explicit > 0) idx = explicit;
+      else idx = ++c;
+      if (el.dataset.stepGroup) groups[el.dataset.stepGroup] = idx;
+      items.push({ el, idx });
+    }
+    // `SlideSteps` controls on this slide: hidden here, driven by the counter.
+    const reactive = [];
+    const cells = (nbState && nbState.cells) || [];
+    for (const id of (sld ? sld.ids : [])) {
+      const cell = cells.find(x => x.id === id);
+      for (const b of (cell && cell.binds) || []) {
+        const p = b.params || {};
+        if (!p.slidesteps) continue;
+        reactive.push({ name: b.name, n: parseInt(p.max, 10) || 0, sent: keepStep ? _reactiveSent(b.name) : null });
+      }
+    }
+    for (const ctl of body.querySelectorAll('[data-name]')) {
+      if (!reactive.some(r => r.name === ctl.dataset.name)) continue;
+      const box = ctl.closest('.control, .widget, .bindrow') || ctl;
+      box.classList.add('deck-ctl-hidden');
+    }
+    body.querySelectorAll('.cell').forEach(cel => {
+      const binds = cel.querySelector(':scope > .binds');
+      const onlyHidden = binds && binds.querySelector('.deck-ctl-hidden') &&
+        ![...binds.querySelectorAll('[data-name]')].some(x => !x.closest('.deck-ctl-hidden'));
+      cel.classList.toggle('deck-bindonly', !!onlyHidden && !_hasVisibleOutput(cel));
+    });
+    D.items = items; D.reactive = reactive;
+    D.total = Math.max(0, ...items.map(x => x.idx), ...reactive.map(r => r.n));
+    _applyStep(keepStep ? Math.min(D.step, D.total) : D.step, true);
   }
+  function _reactiveSent(name) { const r = D.reactive.find(x => x.name === name); return r ? r.sent : null; }
+  // One request in flight per bound value, and the latest value always goes last: clicking through a
+  // build faster than the figure recomputes must land on the step the presenter stopped at, and
+  // overlapping requests can be applied out of order.
+  const _inflight = new Map();   // name → { busy, want }
+  function _sendReactive(r, v) {
+    if (r.sent === v || !window.slateSetBind) return;
+    r.sent = v;
+    let q = _inflight.get(r.name);
+    if (!q) { q = { busy: false, want: null }; _inflight.set(r.name, q); }
+    if (q.busy) { q.want = v; return; }
+    const send = val => {
+      q.busy = true;
+      Promise.resolve(slateSetBind(r.name, val)).catch(() => {}).finally(() => {
+        q.busy = false;
+        if (q.want !== null && q.want !== val) { const nv = q.want; q.want = null; send(nv); }
+        else q.want = null;
+      });
+    };
+    send(v);
+  }
+  function _hasVisibleOutput(cel) {
+    for (const sel of [':scope > .output', ':scope > .echarts', ':scope > .tables', ':scope > .md', ':scope > .anim'])
+      for (const n of cel.querySelectorAll(sel)) if (n.childNodes.length && n.textContent.trim() + n.querySelectorAll('canvas,img,svg,video').length) return true;
+    return false;
+  }
+  function _applyStep(s, quiet) {
+    D.step = Math.max(0, Math.min(s, D.total));
+    for (const it of D.items) {
+      it.el.classList.toggle('on', it.idx <= D.step);
+      it.el.classList.toggle('current', it.idx === D.step);
+    }
+    for (const r of D.reactive) _sendReactive(r, Math.min(D.step, r.n));
+    _playVisibleMedia();
+    _syncHud();
+    _scheduleAuto();
+    if (!quiet) { _emit('step'); _broadcast(); }
+  }
+  function _playVisibleMedia() {
+    const slide = document.querySelector('#deckstage .deck-slide');
+    if (!slide) return;
+    for (const m of slide.querySelectorAll('.slide-body [data-autoplay]')) {
+      const hidden = m.closest('.step:not(.on)');
+      if (hidden) { if (!m.paused) m.pause(); continue; }
+      if (m.paused && !m._deckPlayed) { m._deckPlayed = true; m.currentTime = 0; m.play().catch(() => {}); }
+    }
+  }
+
+  // ── Code split (code left, output right, while code is shown) ───────────────
+  function _applySplit(slide) {
+    let any = false;
+    for (const el of slide.querySelectorAll('.slide-body > .cell.code, .slide-body > .cell.bind')) {
+      let hasOut = false;
+      el.querySelectorAll(':scope > .output, :scope > .tables, :scope > .echarts, :scope > .anim')
+        .forEach(n => { if (n.childNodes.length) hasOut = true; });
+      el.classList.toggle('slide-split', hasOut);
+      any = any || hasOut;
+    }
+    slide.classList.toggle('has-split', any);
+  }
+
+  // ── Fit ─────────────────────────────────────────────────────────────────────
   function _cellCharts(el) {
     return (window.charts && window.charts[el.id.replace(/^cell-/, '')]) || [];
   }
-  // ECharts carry an explicit pixel size (core.js `_applySize`), so a bare `.resize()` keeps their fixed
-  // height. For NON-split cells that's fine — the slide-level scale in `_fit` handles overflow. For a
-  // slide-split cell the chart sits in a narrow output column, where a fixed square would overflow, so we
-  // box-fit it: shrink to the column width AND the available slide height, preserving aspect (never
-  // upscaling past its natural size). The natural + original inline sizes are captured ONCE per chart so
-  // toggling code off restores the notebook sizing exactly.
-  function _fitCharts() {
-    const stage = document.getElementById('deckstage');
-    const maxH = stage ? Math.max(160, stage.clientHeight - 48) : 600;
-    for (const r of D.restore) {
-      const split = r.el.classList.contains('slide-split');
-      const host = split ? r.el.querySelector(':scope > .echarts') : null;
-      for (const inst of _cellCharts(r.el)) {
-        const dom = inst.getDom && inst.getDom(); if (!dom) continue;
-        if (dom.dataset.natW == null) {                 // capture natural size before we ever constrain it
-          const w = inst.getWidth(), h = inst.getHeight();
-          if (w && h) { dom.dataset.natW = w; dom.dataset.natH = h; dom.dataset.origW = dom.style.width; dom.dataset.origH = dom.style.height; }
-        }
-        if (split && D.showCode && host && dom.dataset.natW != null) {
-          const natW = +dom.dataset.natW, natH = +dom.dataset.natH;
-          const availW = host.clientWidth || natW;
-          const k = Math.min(availW / natW, maxH / natH, 1);
-          const w = Math.round(natW * k), h = Math.round(natH * k);
-          dom.style.width = w + 'px'; dom.style.height = h + 'px';
-          try { inst.resize({ width: w, height: h }); } catch (e) {}
-        } else if (dom.dataset.natW != null) {          // full-width slide (or code hidden) → notebook sizing
-          dom.style.width = dom.dataset.origW || ''; dom.style.height = dom.dataset.origH || '';
-          try { inst.resize(); } catch (e) {}
-        } else { try { inst.resize(); } catch (e) {} }
+  function _slideCharts() {
+    const out = [];
+    for (const r of D.restore) for (const inst of _cellCharts(r.el)) {
+      const dom = inst.getDom && inst.getDom(); if (!dom || !dom.isConnected) continue;
+      if (dom.dataset.natW == null) {
+        const w = inst.getWidth(), h = inst.getHeight();
+        if (!(w && h)) continue;
+        dom.dataset.natW = w; dom.dataset.natH = h; dom.dataset.origW = dom.style.width; dom.dataset.origH = dom.style.height;
       }
+      out.push({ inst, dom, natW: +dom.dataset.natW, natH: +dom.dataset.natH });
     }
+    return out;
   }
-  // Drop the present-only chart sizing so a cell returns to its notebook layout on exit.
+  function _sizeChart(c, w, h) {
+    w = Math.max(80, Math.round(w)); h = Math.max(60, Math.round(h));
+    if (c.dom.style.width === w + 'px' && c.dom.style.height === h + 'px') return;
+    c.dom.style.width = w + 'px'; c.dom.style.height = h + 'px';
+    try { c.inst.resize({ width: w, height: h }); } catch (e) {}
+  }
+  // Size the canvas to the stage, then fit the content to the canvas: charts take the width they are
+  // given (keeping their aspect), and give up height first when the slide overflows; text shrinks
+  // only after that, and below a legible floor the body scrolls instead.
+  function _fit() {
+    const stage = document.getElementById('deckstage');
+    const slide = stage && stage.querySelector('.deck-slide');
+    if (!slide) return;
+    const [W, H] = _canvasSize();
+    const s = Math.min(stage.clientWidth / W, stage.clientHeight / H);
+    slide.style.width = Math.round(W * s) + 'px';
+    slide.style.height = Math.round(H * s) + 'px';
+    slide.style.setProperty('--u', s + 'px');
+    const body = slide.querySelector('.slide-body');
+    body.style.setProperty('--shrink', 1);
+    body.classList.remove('scroll');
+    const charts = _slideCharts();
+    const availH = body.clientHeight;
+    for (const c of charts) {
+      const host = c.dom.parentElement;
+      const hw = (host && host.clientWidth) || c.natW;
+      const k = Math.min(hw / c.natW, (availH * 0.82) / c.natH);
+      _sizeChart(c, c.natW * k, c.natH * k);
+    }
+    let over = body.scrollHeight - body.clientHeight;
+    if (over > 1 && charts.length) {
+      const tot = charts.reduce((a, c) => a + c.dom.clientHeight, 0);
+      const k = Math.max(0.5, 1 - over / Math.max(1, tot));
+      for (const c of charts) _sizeChart(c, c.dom.clientWidth * k, c.dom.clientHeight * k);
+      over = body.scrollHeight - body.clientHeight;
+    }
+    let shrink = 1;
+    for (let pass = 0; pass < 3 && over > 1; pass++) {
+      shrink = Math.max(0.62, shrink * body.clientHeight / body.scrollHeight);
+      body.style.setProperty('--shrink', shrink);
+      over = body.scrollHeight - body.clientHeight;
+      if (shrink <= 0.62) break;
+    }
+    if (over > 1) body.classList.add('scroll');
+  }
+  function _relayout(slide) {
+    slide = slide || document.querySelector('#deckstage .deck-slide');
+    if (!slide) return;
+    _reviewSplitFit(slide);
+    _fit();
+  }
+  function _reviewSplitFit(slide) {
+    _applySplit(slide);
+    const body = slide.querySelector('.slide-body');
+    const maxH = body ? body.clientHeight : 900;
+    for (const el of slide.querySelectorAll('.slide-body > .cell.slide-split')) {
+      const src = el.querySelector(':scope > .srchost, :scope > .srcedit');
+      if (D.showCode && src && src.scrollHeight > maxH) el.classList.remove('slide-split');
+    }
+    slide.classList.toggle('has-split', !!slide.querySelector('.slide-body > .cell.slide-split'));
+  }
   function _restoreCellCharts(el) {
     for (const inst of _cellCharts(el)) {
       const dom = inst.getDom && inst.getDom(); if (!dom || dom.dataset.natW == null) continue;
@@ -251,70 +471,227 @@
   function _typesetSlide(slide) {
     if (window.typeset) try { window.typeset(slide); } catch (e) {}
   }
-  // Auto-fit: scale a slide to fit the stage when it reasonably can; otherwise keep the text at a
-  // readable size (fit width only) and let the stage scroll vertically. `transform: scale()` shrinks
-  // the slide visually but NOT its layout box, so in scroll mode we pull the following extent up with a
-  // negative margin (= the height the scale reclaimed) — the stage's scroll area then matches what's
-  // visible, and centring-vs-top alignment is handed to the stage via the `.scrolling` class.
-  // A slide that fits with only a gentle shrink just scales; once it would need to shrink past this,
-  // shrinking makes the content too small to read from a distance — so keep it at a readable size and
-  // scroll vertically instead. (Raised from a low floor: users would rather scroll than squint.)
-  const _FIT_FLOOR = 0.85;
-  function _fit() {
-    const stage = document.getElementById('deckstage');
-    const slide = stage && stage.firstElementChild;
-    if (!slide) return;
-    slide.classList.remove('overflow');
-    slide.style.transform = 'none';
-    slide.style.marginBottom = '';
-    const vw = stage.clientWidth, vh = stage.clientHeight;
-    const sw = slide.scrollWidth, sh = slide.scrollHeight;
-    const fit = Math.min(vw / sw, vh / sh, 1);
-    const scroll = fit < _FIT_FLOOR;                 // can't fit legibly → scroll
-    const k = scroll ? Math.min(vw / sw, 1) : fit;   // scroll mode fits width only, keeps text readable
-    slide.style.transformOrigin = scroll ? 'top center' : 'center center';
-    slide.style.transform = 'scale(' + k + ')';
-    if (scroll) slide.style.marginBottom = (-sh * (1 - k)) + 'px';  // collapse layout box to visual height
-    slide.classList.toggle('overflow', scroll);
-    stage.classList.toggle('scrolling', scroll);
-  }
   function _syncHud() {
     const pos = document.getElementById('deckpos');
-    if (pos) pos.textContent = (D.idx + 1) + ' / ' + D.slides.length;
+    if (pos) pos.textContent = (D.idx + 1) + ' / ' + D.slides.length + (D.total ? '  ·  ' + D.step + '/' + D.total : '');
   }
 
-  function _go(i, dir, fromBC) {
+  // ── Transitions ─────────────────────────────────────────────────────────────
+  // The View Transitions API animates between the outgoing and incoming slide. An element present on
+  // both (a heading with the same text, an image with the same source, or anything marked
+  // `::: {.morph name=x}` / tagged `morph=x`) is given one shared name, so it moves and resizes into
+  // its new place while the rest of the slide transitions around it.
+  function _transKind(i) {
+    const cfg = (D.slides[i] && D.slides[i].cfg) || {};
+    const t = (cfg.transition && cfg.transition !== true) ? cfg.transition : ((nbState && nbState.slideTransition) || 'fade');
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'none';
+    return t;
+  }
+  function _hash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
+  function _morphKeys(root) {
+    const out = new Map(), dup = new Set();
+    const put = (k, el) => { if (out.has(k)) dup.add(k); else out.set(k, el); };
+    root.querySelectorAll('h1, h2, h3').forEach(h => { const t = h.textContent.trim(); if (t) put('h:' + t, h); });
+    root.querySelectorAll('img').forEach(im => { if (im.getAttribute('src')) put('i:' + im.getAttribute('src'), im); });
+    root.querySelectorAll('.morph[name], [data-morph]').forEach(el => put('m:' + (el.getAttribute('name') || el.dataset.morph), el));
+    for (const k of dup) out.delete(k);
+    return out;
+  }
+  function _cellMorphKeys(ids) {
+    const all = new Map(), dup = new Set();
+    const cells = (nbState && nbState.cells) || [];
+    for (const id of ids) {
+      const el = document.getElementById('cell-' + id); if (!el) continue;
+      const c = cells.find(x => x.id === id), tm = _tagMap(c);
+      if (tm.morph && tm.morph !== true) { const k = 'm:' + tm.morph; all.has(k) ? dup.add(k) : all.set(k, el); }
+      for (const [k, v] of _morphKeys(el)) all.has(k) ? dup.add(k) : all.set(k, v);
+    }
+    for (const k of dup) all.delete(k);
+    return all;
+  }
+  function _go(i, dir, atEnd, fromRemote) {
     if (!D.open) return;
     i = Math.max(0, Math.min(i, D.slides.length - 1));
     if (i === D.idx && D.restore.length) return;
     dir = dir != null ? dir : (i > D.idx ? 1 : -1);
-    D.idx = i;
-    _mountSlide(i, dir);
-    if (!fromBC) _broadcast();
+    const kind = _transKind(dir > 0 ? i : D.idx);
+    const swap = () => {
+      D.idx = i; D.step = 0;
+      _mountSlide(i);
+      if (atEnd) _applyStep(D.total, true);
+    };
+    const stage = document.getElementById('deckstage');
+    const oldSlide = stage && stage.querySelector('.deck-slide');
+    if (!oldSlide || kind === 'none' || !document.startViewTransition) {
+      swap();
+      _fallbackEnter(kind, dir);
+    } else {
+      const oldKeys = new Map([..._cellMorphKeys(D.slides[D.idx].ids)].filter(([, el]) => oldSlide.contains(el)));
+      const newKeys = _cellMorphKeys(D.slides[i].ids);
+      const shared = [...oldKeys.keys()].filter(k => newKeys.has(k));
+      shared.forEach(k => { oldKeys.get(k).style.viewTransitionName = 'dm-' + _hash(k); });
+      const root = document.documentElement;
+      root.dataset.deckTrans = kind; root.dataset.deckDir = dir > 0 ? 'next' : 'prev';
+      const vt = document.startViewTransition(() => {
+        oldKeys.forEach(el => el.style.removeProperty('view-transition-name'));
+        swap();
+        shared.forEach(k => { const el = newKeys.get(k); if (el) el.style.viewTransitionName = 'dm-' + _hash(k); });
+      });
+      vt.finished.finally(() => {
+        delete root.dataset.deckTrans; delete root.dataset.deckDir;
+        newKeys.forEach(el => el.style.removeProperty('view-transition-name'));
+      });
+    }
+    _emit('slide');
+    if (!fromRemote) _broadcast();
   }
-  function slideNext() { _go(D.idx + 1, 1); }
-  function slidePrev() { _go(D.idx - 1, -1); }
+  function _fallbackEnter(kind, dir) {
+    const slide = document.querySelector('#deckstage .deck-slide');
+    if (!slide || kind === 'none' || D.slides.length <= 1) return;
+    const cls = kind === 'slide' ? (dir < 0 ? 'enter-prev' : 'enter-next') : kind === 'zoom' ? 'enter-zoom' : 'enter-fade';
+    slide.classList.add(cls);
+    requestAnimationFrame(() => requestAnimationFrame(() => slide.classList.remove(cls)));
+  }
+  function slideNext() {
+    if (D.step < D.total) _applyStep(D.step + 1);
+    else if (D.idx < D.slides.length - 1) _go(D.idx + 1, 1);
+  }
+  function slidePrev() {
+    if (D.step > 0) _applyStep(D.step - 1);
+    else if (D.idx > 0) _go(D.idx - 1, -1, true);
+  }
 
+  // ── Timing ──────────────────────────────────────────────────────────────────
+  // `auto=N` advances that slide (each step, then on to the next slide) every N seconds. Autoplay (a)
+  // does the same for every slide, at the slide's own `auto` or the deck default.
+  const _AUTO_DEFAULT = 8;
+  function _clearAuto() { if (D.auto) { clearTimeout(D.auto); D.auto = null; } _autoBar(0); }
+  function _scheduleAuto() {
+    _clearAuto();
+    if (!D.open || D.paused) return;
+    const cfg = (D.slides[D.idx] && D.slides[D.idx].cfg) || {};
+    let secs = parseFloat(cfg.auto);
+    if (!(secs > 0) && D.autoplay) secs = parseFloat(nbState && nbState.slideAuto) || _AUTO_DEFAULT;
+    if (!(secs > 0)) return;
+    if (D.step >= D.total && D.idx >= D.slides.length - 1) return;
+    _autoBar(secs);
+    D.auto = setTimeout(() => { D.auto = null; slideNext(); }, secs * 1000);
+  }
+  function _autoBar(secs) {
+    const slide = document.querySelector('#deckstage .deck-slide');
+    let bar = slide && slide.querySelector('.slide-autobar');
+    if (!secs) { if (bar) bar.remove(); return; }
+    if (!slide) return;
+    if (bar) bar.remove();
+    bar = document.createElement('div'); bar.className = 'slide-autobar';
+    bar.style.animationDuration = secs + 's';
+    slide.appendChild(bar);
+  }
+  function deckAutoplay() {
+    D.autoplay = !D.autoplay; D.paused = false;
+    _flash(D.autoplay ? 'autoplay on' : 'autoplay off');
+    _scheduleAuto();
+  }
+  function _togglePause() {
+    D.paused = !D.paused;
+    _flash(D.paused ? 'paused' : 'resumed');
+    _scheduleAuto();
+  }
+
+  // ── Pointer, ink, blackout, go-to, help ─────────────────────────────────────
+  function _wireLaser(deck) {
+    const dot = deck.querySelector('#decklaser');
+    deck.addEventListener('pointermove', e => {
+      if (!D.laser) return;
+      dot.style.transform = 'translate(' + e.clientX + 'px,' + e.clientY + 'px)';
+    });
+  }
+  function deckLaser() {
+    D.laser = !D.laser;
+    if (D.laser && D.draw) deckDraw();
+    document.getElementById('deck').classList.toggle('laser-on', D.laser);
+  }
+  let _ink = null;
+  function _wireInk(deck) {
+    const cv = deck.querySelector('#deckink');
+    const ctx = cv.getContext('2d');
+    let drawing = false, last = null;
+    const size = () => {
+      const r = window.devicePixelRatio || 1;
+      cv.width = innerWidth * r; cv.height = innerHeight * r;
+      ctx.setTransform(r, 0, 0, r, 0, 0);
+    };
+    size(); addEventListener('resize', size);
+    cv.addEventListener('pointerdown', e => { drawing = true; last = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); });
+    cv.addEventListener('pointermove', e => {
+      if (!drawing) return;
+      ctx.strokeStyle = getComputedStyle(deck).getPropertyValue('--deck-ink').trim() || '#ff4d6d';
+      ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.moveTo(last[0], last[1]); ctx.lineTo(e.clientX, e.clientY); ctx.stroke();
+      last = [e.clientX, e.clientY];
+    });
+    cv.addEventListener('pointerup', () => { drawing = false; });
+    _ink = { cv, ctx };
+  }
+  function _inkClear() { if (_ink) _ink.ctx.clearRect(0, 0, _ink.cv.width, _ink.cv.height); }
+  function deckDraw() {
+    D.draw = !D.draw;
+    if (D.draw && D.laser) deckLaser();
+    document.getElementById('deck').classList.toggle('draw-on', D.draw);
+  }
+  function _blackout() { document.getElementById('deck').classList.toggle('black-on'); }
+  let _flashT = null;
+  function _flash(msg) {
+    const g = document.getElementById('deckgoto'); if (!g) return;
+    g.textContent = msg; g.classList.add('on');
+    clearTimeout(_flashT); _flashT = setTimeout(() => g.classList.remove('on'), 1100);
+  }
+  const _HELP = [
+    ['→  space', 'next step / slide'], ['←', 'previous'], ['⇧→  ⇧←', 'next / previous slide'],
+    ['Home  End', 'first / last slide'], ['3 ⏎', 'go to slide 3'], ['a', 'autoplay'], ['p', 'pause timing'],
+    ['b', 'black screen'], ['l', 'laser pointer'], ['d', 'draw · x clears'], ['c', 'show code'],
+    ['r', 'record'], ['v', 'camera bubble'], ['s', 'presenter window'], ['f', 'fullscreen'], ['Esc', 'exit'],
+  ];
+  function deckHelp() {
+    const h = document.getElementById('deckhelp');
+    if (!h.innerHTML) h.innerHTML = '<div class="deck-help-card">' +
+      _HELP.map(([k, v]) => '<div><kbd>' + k + '</kbd><span>' + v + '</span></div>').join('') + '</div>';
+    h.classList.toggle('on');
+  }
+
+  // ── Enter / exit ────────────────────────────────────────────────────────────
   function enterPresent(at) {
     if (D.open) return;
     if (typeof nbState === 'undefined' || !nbState || !nbState.cells) return;
     _buildDeckDom();
     D.slides = buildSlides();
     if (!D.slides.length) { window.alertDark ? alertDark('No slides yet — add markdown headings (## …) or tag a cell `slide`.') : alert('No slides.'); return; }
-    D.open = true; D.idx = Math.max(0, Math.min(at || 0, D.slides.length - 1));
+    D.open = true; D.idx = Math.max(0, Math.min(at || 0, D.slides.length - 1)); D.step = 0;
     document.body.classList.add('presenting');
     document.getElementById('deck').style.display = '';
-    _mountSlide(D.idx, 1);
+    _mountSlide(D.idx);
+    _emit('enter');
     _broadcast();
+  }
+  // Present from the slide that holds the selected cell.
+  function enterPresentHere() {
+    const slides = buildSlides();
+    const sel = document.querySelector('#nb .cell.selected');
+    const id = sel ? sel.id.replace(/^cell-/, '') : null;
+    const at = id ? Math.max(0, slides.findIndex(s => s.ids.includes(id) || s.notes.includes(id))) : 0;
+    enterPresent(at);
   }
   function exitPresent() {
     if (!D.open) return;
+    _emit('exit');
     _unmount();
-    D.open = false;
+    D.open = false; D.autoplay = false; D.paused = false;
+    if (D.laser) deckLaser();
+    if (D.draw) deckDraw();
     document.body.classList.remove('presenting');
-    const deck = document.getElementById('deck'); if (deck) deck.style.display = 'none';
+    const deck = document.getElementById('deck');
+    if (deck) { deck.style.display = 'none'; deck.classList.remove('black-on'); }
     if (D.fs && document.exitFullscreen) { try { document.exitFullscreen(); } catch (e) {} D.fs = false; }
-    // Repaint the notebook cleanly (the moved nodes are home; re-typeset math/charts).
     if (window.typesetSoon) try { typesetSoon(document.getElementById('nb'), '__all__'); } catch (e) {}
   }
   function slideToggleCode() {
@@ -330,47 +707,68 @@
 
   // ── BroadcastChannel sync (audience ⇄ presenter) ────────────────────────────
   function _broadcast() {
-    if (!bc || _muteBroadcast) return;
-    // Each window sends its OWN position: the presenter never opens the deck, so `D` stays at 0 there.
-    const idx = IS_PRESENTER ? P.idx : D.idx, total = IS_PRESENTER ? P.total : D.slides.length;
-    bc.postMessage({ type: 'goto', idx, total, from: IS_PRESENTER ? 'presenter' : 'deck' });
+    if (!bc || IS_PRESENTER || !D.open) return;
+    bc.postMessage({ type: 'goto', idx: D.idx, step: D.step, steps: D.total, total: D.slides.length, from: 'deck' });
   }
-  if (bc) bc.onmessage = ev => {
+  if (bc) bc.addEventListener('message', ev => {
     const m = ev.data || {};
-    if (m.type === 'hello') { _broadcast(); return; }            // a new window asked for the current position
-    if (m.type === 'goto') {
-      if (IS_PRESENTER) { P.idx = m.idx; P.total = m.total; _renderPresenter(); }
-      else if (D.open && m.idx !== D.idx) { _muteBroadcast = true; _go(m.idx, null, true); _muteBroadcast = false; }
+    if (IS_PRESENTER) {
+      if (m.type === 'goto') { P.idx = m.idx; P.step = m.step; P.steps = m.steps; P.total = m.total; _renderPresenter(); }
+      return;
     }
-  };
+    if (m.type === 'hello') { _broadcast(); return; }
+    if (!D.open) return;
+    if (m.type === 'nav') {
+      if (m.dir > 0) slideNext(); else if (m.dir < 0) slidePrev();
+      else if (m.idx != null) _go(m.idx, null, false);
+    }
+  });
   function openPresenter() {
-    const w = window.open(location.pathname + '?present=1', 'slate-presenter-' + NBID, 'width=1100,height=720');
+    const w = window.open(location.pathname + '?present=1', 'slate-presenter-' + NBID, 'width=1180,height=760');
     if (w) w.focus();
   }
 
   // ── Keyboard (active only while the deck or presenter is up) ─────────────────
   // Deck navigation is not in the keymap: these keys mean something only while the deck is on screen,
-  // where it owns the whole window, and a reader watching a slideshow is not going to rebind →. What
-  // ENTERS the deck is the `view.present` command, so that chord is configurable like every other.
+  // where it owns the whole window. What ENTERS the deck is the `view.present` command, so that chord
+  // is configurable like every other.
   document.addEventListener('keydown', e => {
     if (IS_PRESENTER) { _presenterKey(e); return; }
     if (!D.open) return;
     const tag = (e.target && e.target.tagName) || '';
     if (/INPUT|TEXTAREA/.test(tag) || (e.target && e.target.isContentEditable)) {   // let editors type
-      // Escape gives the keys back to the deck: a focused input (a slider, a text field) lets go. The
-      // blur waits for the input's own handlers, because an input can cancel on Escape and commit on blur.
       if (e.key === 'Escape' && tag === 'INPUT') { const t = e.target; setTimeout(() => { if (document.activeElement === t) t.blur(); }); }
       return;
     }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (/^[0-9]$/.test(e.key)) { D.goto += e.key; _flash('go to ' + D.goto); e.preventDefault(); return; }
+    if (e.key === 'Enter' && D.goto) { const n = parseInt(D.goto, 10); D.goto = ''; if (n > 0) _go(n - 1, null, false); e.preventDefault(); return; }
+    D.goto = '';
+    const help = document.getElementById('deckhelp');
+    if (help && help.classList.contains('on') && e.key !== '?') { help.classList.remove('on'); if (e.key === 'Escape') { e.preventDefault(); return; } }
     switch (e.key) {
-      case 'ArrowRight': case 'PageDown': case ' ': e.preventDefault(); slideNext(); break;
-      case 'ArrowLeft': case 'PageUp': e.preventDefault(); slidePrev(); break;
+      case 'ArrowRight': case 'PageDown': case ' ': case 'ArrowDown':
+        e.preventDefault(); if (e.shiftKey) _go(D.idx + 1, 1); else slideNext(); break;
+      case 'ArrowLeft': case 'PageUp': case 'ArrowUp':
+        e.preventDefault(); if (e.shiftKey) _go(D.idx - 1, -1); else slidePrev(); break;
       case 'Home': e.preventDefault(); _go(0, -1); break;
       case 'End': e.preventDefault(); _go(D.slides.length - 1, 1); break;
-      case 'Escape': e.preventDefault(); exitPresent(); break;
+      case 'Escape':
+        e.preventDefault();
+        if (D.draw) deckDraw(); else if (D.laser) deckLaser(); else exitPresent();
+        break;
       case 'f': case 'F': slideFullscreen(); break;
       case 'c': case 'C': slideToggleCode(); break;
       case 's': case 'S': openPresenter(); break;
+      case 'a': case 'A': deckAutoplay(); break;
+      case 'p': case 'P': _togglePause(); break;
+      case 'b': case 'B': case '.': _blackout(); break;
+      case 'l': case 'L': deckLaser(); break;
+      case 'd': case 'D': deckDraw(); break;
+      case 'x': case 'X': _inkClear(); break;
+      case 'r': case 'R': if (window.deckRecordToggle) deckRecordToggle(); break;
+      case 'v': case 'V': if (window.deckCameraToggle) deckCameraToggle(); break;
+      case '?': deckHelp(); break;
     }
   }, true);
   addEventListener('resize', () => { if (D.open) _relayout(); });
@@ -378,12 +776,12 @@
   // ════════════════════════════════════════════════════════════════════════════
   //  Presenter window (?present=1) — mirrors position, shows notes + next + timer
   // ════════════════════════════════════════════════════════════════════════════
-  const P = { idx: 0, total: 0, started: Date.now() };
+  const P = { idx: 0, step: 0, steps: 0, total: 0, started: Date.now() };
   function _presenterKey(e) {
-    if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); _presenterGo(1); }
-    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); _presenterGo(-1); }
+    if (['ArrowRight', 'PageDown', ' ', 'ArrowDown'].includes(e.key)) { e.preventDefault(); _presenterNav(1); }
+    else if (['ArrowLeft', 'PageUp', 'ArrowUp'].includes(e.key)) { e.preventDefault(); _presenterNav(-1); }
   }
-  function _presenterGo(d) { P.idx = Math.max(0, Math.min(P.idx + d, P.total - 1)); _renderPresenter(); _broadcast(); }
+  function _presenterNav(dir) { if (bc) bc.postMessage({ type: 'nav', dir }); }
   function _slidePreviewHtml(slide) {
     if (!slide) return '<div class="pv-empty">—</div>';
     let h = '';
@@ -411,7 +809,10 @@
     root.querySelector('.pp-next').innerHTML = _slidePreviewHtml(nxt);
     root.querySelector('.pp-notes').innerHTML = _notesHtml(cur);
     root.querySelector('.pp-pos').textContent = (P.idx + 1) + ' / ' + P.total;
-    const t = slides[P.idx + 1] ? (_slideTitle(slides[P.idx + 1]) || 'next') : 'end';
+    const st = root.querySelector('.pp-steps');
+    st.innerHTML = P.steps ? Array.from({ length: P.steps }, (_, k) => '<i class="' + (k < P.step ? 'on' : '') + '"></i>').join('') : '';
+    const t = P.step < P.steps ? 'step ' + (P.step + 1) + ' of ' + P.steps
+            : slides[P.idx + 1] ? (_slideTitle(slides[P.idx + 1]) || 'next slide') : 'end';
     root.querySelector('.pp-nexttitle').textContent = '→ ' + t;
     if (window.typeset) try { window.typeset(root); } catch (e) {}
   }
@@ -421,9 +822,12 @@
     root.id = 'presenter';
     root.innerHTML =
       '<div class="pp-main">' +
-        '<div class="pp-stage pp-cur"></div>' +
+        '<div class="pp-left">' +
+          '<div class="pp-stage pp-cur"></div>' +
+          '<div class="pp-steps"></div>' +
+        '</div>' +
         '<div class="pp-side">' +
-          '<div class="pp-clock"><span class="pp-elapsed">00:00</span><span class="pp-wall"></span></div>' +
+          '<div class="pp-clock"><span class="pp-elapsed">00:00</span><button class="pp-reset" title="restart the timer">↺</button><span class="pp-wall"></span></div>' +
           '<div class="pp-nexthd"><span class="pp-nexttitle">→ next</span><span class="pp-pos"></span></div>' +
           '<div class="pp-stage pp-next"></div>' +
           '<div class="pp-noteshd">Speaker notes</div>' +
@@ -432,8 +836,9 @@
         '</div>' +
       '</div>';
     document.body.appendChild(root);
-    window.__presPrev = () => _presenterGo(-1);
-    window.__presNext = () => _presenterGo(1);
+    window.__presPrev = () => _presenterNav(-1);
+    window.__presNext = () => _presenterNav(1);
+    root.querySelector('.pp-reset').onclick = () => { P.started = Date.now(); };
     const two = n => (n < 10 ? '0' : '') + n;
     setInterval(() => {
       const s = Math.floor((Date.now() - P.started) / 1000);
@@ -490,12 +895,18 @@
 
   // Exports onto the shared global scope (classic scripts) for inline handlers + palette/keys.
   window.enterPresent = enterPresent;
+  window.enterPresentHere = enterPresentHere;
   window.exitPresent = exitPresent;
   window.slideNext = slideNext;
   window.slidePrev = slidePrev;
   window.slideToggleCode = slideToggleCode;
   window.slideFullscreen = slideFullscreen;
   window.openPresenter = openPresenter;
+  window.deckLaser = deckLaser;
+  window.deckDraw = deckDraw;
+  window.deckAutoplay = deckAutoplay;
+  window.deckHelp = deckHelp;
   window._deckSettle = _deckSettle;
   window._deckOpen = () => D.open;
+  window._deckPos = () => ({ idx: D.idx, step: D.step, title: _slideTitle(D.slides[D.idx]) });
 })();

@@ -490,6 +490,17 @@ DateField(default = ""; label = nothing) = Widget("date", _wparams(label), strin
 TimeField(default = ""; label = nothing) = Widget("time", _wparams(label), string(default))
 Button(label::AbstractString = "Click") = Widget("button", Dict{String,Any}("label" => String(label)), 0)
 
+# The build step of a presented slide, as a value: `@bind k SlideSteps(3)` is 0 when the slide comes
+# up and counts to 3 as the presenter clicks through it, in step with the slide's `::: step` blocks, so
+# a figure can build up from computed state rather than from copies of itself. Outside the deck it is
+# an ordinary slider, which is how the author scrubs through the build while writing.
+function SlideSteps(n::Integer; label = nothing)
+    n >= 1 || throw(ArgumentError("SlideSteps needs at least one step, got $n"))
+    p = _wparams(label)
+    p["min"] = 0; p["max"] = Int(n); p["step"] = 1; p["slidesteps"] = true
+    return Widget("slider", p, 0)
+end
+
 """
     RangeSlider(range; default=nothing, label=nothing) -> Widget
     RangeSlider(min, max; step=1, default=nothing, label=nothing) -> Widget
@@ -801,7 +812,7 @@ custom_widget(kind::AbstractString, default = ""; kwargs...) =
 
 const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :TextArea,
                        :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
-                       :TimeField, :Button, :FileUpload, :RangeSlider, :playhead, :TableSelect,
+                       :TimeField, :Button, :SlideSteps, :FileUpload, :RangeSlider, :playhead, :TableSelect,
                        :PickPoint, :PickRegion, :PickPath,
                        :custom_widget,
                        # Not a widget but a modifier over one — injected alongside so

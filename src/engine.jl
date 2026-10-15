@@ -804,7 +804,7 @@ const _CONFIG_KEYS = ("sharefindings", "parallel", "threads", "hotreload", "macr
                       # how much detail this document's controls need to carry — so it travels with the
                       # `.jl` rather than living in one person's browser.
                       "replaystrides",
-                      "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
+                      "slidelevel", "slidetransition", "slideauto", "slidetheme", "slideratio", "bibstyle",
                       "publishrepo", "publishslug", "series", "docid",
                       # `format` = the notebook file format this file is written in (see `FORMAT`).
                       "format")
@@ -822,7 +822,7 @@ const _CONFIG_TYPES = Dict("sharefindings" => :bool, "parallel" => :bool, "threa
                            # `region=<name>`-tagged cells run on that region's worker while the main kernel
                            # stays put, boundary values crossing as CAS blobs. Defs live in the global registry.
                            "regions" => :string,
-                           "slidelevel" => :int, "slidetransition" => :string,
+                           "slidelevel" => :int, "slidetransition" => :string, "slideauto" => :int,
                            "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string,
                            "publishrepo" => :string, "publishslug" => :string, "series" => :string,
                            # `docid` = the notebook's STABLE publish-ledger identity, generated once and

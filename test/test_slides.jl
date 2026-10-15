@@ -172,3 +172,51 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
         end
     end
 end
+
+@testset "deck markup" begin
+    R = KaimonSlate.ReportRender
+    @testset "fenced divs: columns, steps, incremental" begin
+        h = R.markdown_html(":::: columns\n::: {.column width=\"40%\"}\nL\n:::\n::: column\nR\n:::\n::::\n\n" *
+                            "::: {.step .zoom step=3}\nS\n:::\n\n::: incremental\n- a\n- b\n:::\n\nkeep {braces}")
+        @test occursin("<div class=\"columns\">", h) && occursin("width=\"40%\"", h)
+        @test occursin("class=\"step zoom\"", h) && occursin("step=\"3\"", h)
+        @test occursin("<div class=\"incremental\">", h)
+        @test occursin("keep {braces}", h)                  # prose braces are not attributes
+    end
+    @testset "pause marker" begin
+        h = R.markdown_html("one\n\n. . .\n\ntwo")
+        @test occursin("<div class=\"pause\"></div>", h)
+        @test !occursin(". . .", h)
+    end
+    @testset "media from image syntax" begin
+        v = R.markdown_html("![autoplay loop](clips/a.mp4){width=600}")
+        @test occursin("<video src=\"clips/a.mp4\"", v)
+        @test all(occursin(v), ("controls", "loop", "muted", "data-autoplay", "playsinline", "width:600px"))
+        a = R.markdown_html("![nocontrols](sound.m4a)")
+        @test occursin("<audio src=\"sound.m4a\"", a) && !occursin("controls", a)
+        @test occursin("<img", R.markdown_html("![plot](fig.png)"))
+    end
+    @testset "print drops deck markup, keeps content" begin
+        s = NS._strip_deck_markup("::: step\nA\n:::\n. . .\nB\n```\n:::\n```")
+        @test s == "A\nB\n```\n:::\n```"                     # fenced code untouched
+        @test NS._strip_deck_markup("plain") == "plain"
+    end
+    @testset "SlideSteps" begin
+        w = RE.SlideSteps(4)
+        @test w.kind == "slider" && w.params["slidesteps"] === true
+        @test w.params["min"] == 0 && w.params["max"] == 4 && w.default == 0
+        @test_throws ArgumentError RE.SlideSteps(0)
+    end
+    @testset "asset byte ranges" begin
+        p = tempname(); write(p, collect(UInt8, 0:9))
+        req(r) = NS.HTTP.Request("GET", "/n/x/asset/a.mp4", r === nothing ? [] : ["Range" => r])
+        full = NS._asset_response(req(nothing), p)
+        @test full.status == 200 && length(full.body) == 10
+        part = NS._asset_response(req("bytes=2-4"), p)
+        @test part.status == 206 && part.body == UInt8[2, 3, 4]
+        @test NS.HTTP.header(part, "Content-Range") == "bytes 2-4/10"
+        @test NS._asset_response(req("bytes=7-"), p).body == UInt8[7, 8, 9]
+        @test NS._asset_response(req("bytes=-3"), p).body == UInt8[7, 8, 9]
+        @test NS._asset_response(req("bytes=20-"), p).status == 416
+    end
+end

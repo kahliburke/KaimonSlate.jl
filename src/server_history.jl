@@ -310,8 +310,10 @@ const _CONFIG_UI = (
     (key = "slidelevel", group = "Slides", label = "Slide heading level", type = :int, default = 2,
      choices = String[], global_default = nothing, restart = false),
     (key = "slidetransition", group = "Slides", label = "Slide transition", type = :enum, default = "fade",
-     choices = ["none", "fade", "slide"], global_default = nothing, restart = false),
-    (key = "slideratio", group = "Slides", label = "PDF slide ratio", type = :enum, default = "16:9",
+     choices = ["none", "fade", "slide", "zoom", "rise"], global_default = nothing, restart = false),
+    (key = "slideauto", group = "Slides", label = "Autoplay seconds per step", type = :int, default = 8,
+     choices = String[], global_default = nothing, restart = false),
+    (key = "slideratio", group = "Slides", label = "Slide aspect ratio", type = :enum, default = "16:9",
      choices = ["16:9", "4:3"], global_default = nothing, restart = false),
     (key = "bibstyle", group = "Export", label = "Citation style", type = :enum, default = "ieee",
      choices = collect(_CITATION_STYLES), global_default = nothing, restart = false),
@@ -1732,7 +1734,8 @@ function state_json(nb::LiveNotebook)
         ReportEngine.effective_worker_threads(nb.kernel.threads) : ""
     # Slide-deck presentation prefs (per-notebook, persisted in the Slate.config footer).
     meta["slideLevel"] = get(nb.report.meta, "slidelevel", 2)               # heading depth that starts a slide
-    meta["slideTransition"] = get(nb.report.meta, "slidetransition", "fade") # none | fade | slide
+    meta["slideTransition"] = get(nb.report.meta, "slidetransition", "fade") # none | fade | slide | zoom | rise
+    meta["slideAuto"] = get(nb.report.meta, "slideauto", 8)                  # autoplay seconds per step
     meta["slideTheme"] = get(nb.report.meta, "slidetheme", "")               # "" = follow the editor theme
     meta["slideRatio"] = get(nb.report.meta, "slideratio", "16:9")           # PDF deck aspect ratio
     meta["bibStyle"] = get(nb.report.meta, "bibstyle", "ieee")               # CSL citation/reference style

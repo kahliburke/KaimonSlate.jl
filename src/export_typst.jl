@@ -655,7 +655,25 @@ function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{S
     end
     s = _normalize_math_delims(s)
     s = _admonitions_to_quotes(s)
+    s = _strip_deck_markup(s)
     return _rewrite_citations(s, citekeys; figrefs = figrefs)
+end
+
+# `:::` fenced-div lines and `. . .` pauses structure a presented slide (columns, builds); cmarker would
+# print them as text. Print shows a slide's finished state, so the markers go and their content stays.
+function _strip_deck_markup(src::AbstractString)
+    (occursin(":::", src) || occursin(". . .", src)) || return String(src)
+    out = String[]
+    infence = false
+    for ln in split(String(src), '\n'; keepempty = true)
+        if occursin(r"^\s*(```|~~~)", ln)
+            infence = !infence
+        elseif !infence && (occursin(r"^\s*:{3,}", ln) || strip(ln) == ". . .")
+            continue
+        end
+        push!(out, ln)
+    end
+    return join(out, "\n")
 end
 
 

@@ -453,6 +453,9 @@ function _md_html(src::AbstractString, interps = CellOutput[]; prose = identity)
     # coin its own (`!!! answer`) and style it. Emits `.admonition.<category>` + `.admonition-title`.
     enable!(p, CommonMark.TableRule())
     enable!(p, CommonMark.AdmonitionRule())
+    # Pandoc `:::` fenced divs → `<div class=…>`. Slides lay out and build with them (`::: columns`,
+    # `::: {.column width="40%"}`, `::: step`, `::: incremental`); outside a deck they are plain divs.
+    enable!(p, CommonMark.FencedDivRule())
     html = CommonMark.html(p(s))
     for (i, m) in enumerate(math)
         tex = m
@@ -477,8 +480,40 @@ function _md_html(src::AbstractString, interps = CellOutput[]; prose = identity)
         _is_block_frag(f) && (html = replace(html, "<p>" * tok * "</p>" => f))
         html = replace(html, tok => f)                              # remaining (text) interps → HTML fragment
     end
+    html = replace(html, "<p>. . .</p>" => "<div class=\"pause\"></div>")
+    html = _media_from_img(html)
     # Last, so an image produced by a `{{ }}` interpolation can be sized like a literal one.
     return _apply_md_attrs(html)
+end
+
+# `![flags](clip.mp4)` → a `<video>` (or `<audio>` for a sound file): image syntax is what an author
+# reaches for, and an `<img>` pointing at a clip renders as a broken image. The alt text carries the
+# playback flags — `autoplay`, `loop`, `muted`, `nocontrols` — which a presented slide also reads to
+# start the clip when it comes on screen.
+const _VIDEO_EXT = r"\.(mp4|m4v|webm|mov|ogv)(?:[?#][^\"]*)?$"i
+const _AUDIO_EXT = r"\.(mp3|m4a|wav|ogg|oga|flac|aac)(?:[?#][^\"]*)?$"i
+const _MEDIA_FLAGS = ("autoplay", "loop", "muted", "nocontrols")
+function _media_from_img(html::AbstractString)
+    occursin("<img", html) || return String(html)
+    return replace(html, r"<img\b([^<>]*?)\s*/?>" => function (tag)
+        src = match(r"\ssrc=\"([^\"]*)\"", tag)
+        src === nothing && return tag
+        url = String(src.captures[1])
+        kind = occursin(_VIDEO_EXT, url) ? "video" : occursin(_AUDIO_EXT, url) ? "audio" : ""
+        isempty(kind) && return tag
+        alt = match(r"\salt=\"([^\"]*)\"", tag)
+        flags = Set(lowercase.(split(alt === nothing ? "" : alt.captures[1])))
+        style = match(r"\sstyle=\"([^\"]*)\"", tag)
+        attrs = String[]
+        "nocontrols" in flags || push!(attrs, "controls")
+        "loop" in flags && push!(attrs, "loop")
+        # A clip that starts itself must be muted, or the browser refuses to play it without a click.
+        ("muted" in flags || ("autoplay" in flags && kind == "video")) && push!(attrs, "muted")
+        "autoplay" in flags && push!(attrs, "data-autoplay")
+        kind == "video" && push!(attrs, "playsinline", "preload=\"metadata\"")
+        style === nothing || push!(attrs, "style=\"" * style.captures[1] * "\"")
+        return string("<", kind, " src=\"", url, "\" ", join(attrs, " "), "></", kind, ">")
+    end)
 end
 
 # ── Pandoc-style attribute blocks on media ────────────────────────────────────────────────────────

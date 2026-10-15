@@ -71,6 +71,7 @@ module SlateApi;  include("test_slate_api.jl"); end
 module Agentops;  include("test_agentops.jl");  end
 module Repro;     include("test_repro.jl");     end
 module Slides;    include("test_slides.jl");    end
+module Recording; include("test_recording.jl"); end
 module Frontmatter; include("test_frontmatter.jl"); end
 module Export;    include("test_export.jl");    end
 module Bootfail;  include("test_bootfail.jl");  end

@@ -422,6 +422,12 @@ datafile === nothing ? md"Upload a file to begin." : CSV.read(datafile.path, Dat
         ["click", "trigger", "run", "action", "go"], "Button(label=\"Click\")",
         """An action button; value is the click count (Int, 0,1,2,…). Drive an action with `@onclick`.
         `@bind go Button(\"Run\")`."""),
+    SlateApiEntry("SlideSteps", "Widgets", "A slide's build step as a value (0…n), driven by clicking through the presented slide.",
+        ["slides", "presentation", "build", "fragment", "step", "animation", "reveal"], "SlideSteps(n; label)",
+        """`@bind k SlideSteps(3)` in a cell on a slide: `k` is 0 when the slide comes up and counts to 3
+        as the presenter clicks, in step with the slide's `::: step` blocks, so a figure computed from `k`
+        builds up (a series per step, a highlighted region) instead of being duplicated per slide. The
+        control is hidden while presenting; in the notebook it is a slider for scrubbing the build."""),
     SlateApiEntry("TableSelect", "Widgets",
         "A clickable table — binds the CLICKED ROW as a NamedTuple (`sel.price`).",
         ["row", "pick", "dataframe", "selection", "drill down"],
@@ -1229,8 +1235,19 @@ See also `save_asset`, `FileUpload`."""),
         level is configurable in Settings), so a well-structured document usually needs no extra
         markup. For explicit control, tag a cell `slide` (force a new slide here) or `notes` (speaker
         notes — presenter view only, never rendered in the deck or the article).
-        Present live in the browser (▶ Present) or Export PDF → slides for a 16:9 deck. See also
-        `cell tags`, `front matter`."""),
+        Present live in the browser (▶ Present) or Export PDF → slides for a 16:9 deck.
+        SLIDE TAGS (on any cell of the slide; the first one wins): `layout=title|section|center|cover`,
+        `bg=aurora|nebula|midnight|ember|ocean|slate|paper` or a colour, a space-free gradient, or an
+        image/video path (`bgdim=0.5` darkens it), `transition=fade|slide|zoom|rise|none`, `auto=<secs>`
+        (advance by itself), `class=<css>`. A cell tagged `step` (or `step=N`) appears on a click.
+        BUILDS in markdown: `::: step` … `:::` (effects as classes: `{.step .fade-left}`, `.zoom`,
+        `.blur`, `.highlight`, `.fade-out`, `.dim`, `.strike`; `step=3` orders it), `::: incremental`
+        around a list (one item per click), and a `. . .` line (the rest of the cell is one step).
+        COLUMNS: `:::: columns` / `::: {.column width="40%"}` … `:::` / `::::`. MEDIA:
+        `![autoplay loop](clip.mp4)` is a video that starts when it comes on screen. MORPH: a heading
+        or image that appears on two consecutive slides glides between them. REACTIVE builds:
+        `@bind k SlideSteps(n)` follows the slide's step counter (0…n) so a figure can build from
+        computed state. See also `SlideSteps`, `cell tags`, `front matter`."""),
     SlateApiEntry("markdown", "Document",
         "Prose cells (`#%% md`) with `{{ expr }}` interpolation of live values; `@md` is their skin.",
         ["md", "text", "prose", "interpolation", "narrative", "template", "standalone"],

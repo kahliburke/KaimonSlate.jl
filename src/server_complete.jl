@@ -1066,6 +1066,28 @@ function _register_diag_gauges!(h)
     return nothing
 end
 
+# A notebook asset, honouring a single `Range: bytes=a-b` request. A media element seeks by asking for
+# byte ranges, and Safari will not play a clip at all from a server that answers them with the whole
+# file. Reads only the requested slice, so seeking in a large clip does not read all of it each time.
+function _asset_response(req, p::AbstractString)
+    ctype = _site_ctype(p)
+    hdrs = ["Content-Type" => ctype, "Cache-Control" => "no-store", "Accept-Ranges" => "bytes"]
+    rng = HTTP.header(req, "Range", "")
+    m = match(r"^bytes=(\d*)-(\d*)$", strip(rng))
+    m === nothing && return HTTP.Response(200, hdrs, read(p))
+    n = filesize(p)
+    a, b = m.captures
+    lo, hi = if isempty(a)                      # `bytes=-k`: the last k bytes
+        isempty(b) && return HTTP.Response(200, hdrs, read(p))
+        (max(0, n - parse(Int, b)), n - 1)
+    else
+        (parse(Int, a), isempty(b) ? n - 1 : min(parse(Int, b), n - 1))
+    end
+    (lo > hi || lo >= n) && return HTTP.Response(416, ["Content-Range" => "bytes */$n"])
+    body = open(p) do io; seek(io, lo); read(io, hi - lo + 1); end
+    return HTTP.Response(206, vcat(hdrs, ["Content-Range" => "bytes $lo-$hi/$n"]), body)
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     # Front page + inlined last-known ledger (see `_index_html`). An APP hub has no front page: the
@@ -1094,6 +1116,7 @@ function _make_router(h::Hub)
     # Operator status — vitals for the hub process and its worker(s), plus the worker log. Served in
     # BOTH postures: it's just as useful when developing the app as when running it.
     HTTP.register!(router, "GET", "/status", _ -> _html(_status_html()))
+    _register_recording_routes!(router, h)
     HTTP.register!(router, "GET", "/api/status", _ -> _json(_status_json(h)))
     HTTP.register!(router, "GET", "/api/status/log", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
@@ -1223,7 +1246,7 @@ function _make_router(h::Hub)
         p = _confined_path(base, sub)            # stay inside the project dir
         p === nothing && return HTTP.Response(404)
         isfile(p) || return HTTP.Response(404, "no such asset")
-        HTTP.Response(200, ["Content-Type" => _site_ctype(p), "Cache-Control" => "no-store"], read(p))
+        _asset_response(req, p)
     end)
     # Serve an extension-registered byte asset (`SlateExtensionsBase.provide_served_asset!`) at a stable,
     # content-addressed, IMMUTABLE URL — fetched lazily from the notebook's worker by hash the first time a
