@@ -1321,8 +1321,13 @@ end
 # A value outside the domain is a WARNING, not an error. This runs during live editing — precisely when
 # a slider's range is being changed — and breaking the cell there would be hostile; the live result is
 # still correct, only the shipped coverage is stale.
+#
+# `val` is the expression's value, computed in the cell where the mark stands; the live run never
+# calls `f`. Each run of a cell makes a new closure type for each `@replay`, so calling it would
+# compile its body again on every run (about 5 ms per mark). For the same reason `f` and `val` are
+# `@nospecialize`: a specialized method would compile this whole function again on each run.
 function _do_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
-                    sweeps::Dict{String,Any}, name::Symbol, f)
+                    sweeps::Dict{String,Any}, name::Symbol, @nospecialize(f), @nospecialize(val))
     entry = lock(reglock) do; get(reg, name, nothing); end
     entry === nothing && error("@replay: `" * String(name) * "` is not a @bind control in this notebook " *
                                "(declare it with `@bind " * String(name) * " Slider(…)` first)")
@@ -1382,7 +1387,6 @@ function _do_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
               "value is correct, but an export would have no data for this position" domain = dom
     end
     pos = i === nothing ? 0 : i
-    val = f(wrap(cur))
     # A TABLE is replayable too, and it is not an array of numbers — so it carries its mark in its own
     # spec rather than in a `ReplayArray`, which could neither hold it nor be handed on to the things
     # that consume a `SlateTable`. What actually ships for it is decided in `_table_replay_pack`.
@@ -1984,7 +1988,8 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # reads it long after the cells ran; a re-run replaces its own entries in place.
     replay_sweeps = Dict{String,Any}()
     Core.eval(m, :(const __slate_replay_sweeps = $replay_sweeps))
-    Core.eval(m, :(const __slate_replay = $((name, f) -> _do_replay(reg, reglock, replay_sweeps, name, f))))
+    Core.eval(m, :(const __slate_replay = $((name, @nospecialize(f), @nospecialize(val)) ->
+        _do_replay(reg, reglock, replay_sweeps, name, f, val))))
     # The export's way in for a sweep NO cell declared: a table two hops from its control, whose closure
     # is composed from the graph rather than written by hand (see `_register_chain_replay`). Registering
     # rather than running keeps the one expensive step in one place — the sweep below.
@@ -2001,9 +2006,11 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # each would compute, and where they live — so a size/time estimate can be shown, and skipped or
     # strided, without running anything.
     Core.eval(m, :(const __slate_replay_plan = $(() -> _replay_plan(replay_sweeps, reglock))))
+    # The expression appears twice: as the closure the export sweeps, and in place for the live value.
+    # The closure is made but not called live, so its body does not compile on each run.
     Core.eval(m, :(macro replay(ctl, body)
         ctl isa Symbol || error("@replay expects a control name first: `@replay w expr`")
-        esc(Expr(:call, :__slate_replay, QuoteNode(ctl), Expr(:->, ctl, body)))
+        esc(Expr(:call, :__slate_replay, QuoteNode(ctl), Expr(:->, ctl, body), body))
     end))
     # `@trace begin … end` — rewrite the block to record each assignment into `__slate_trace_sink`
     # while the cell STILL RETURNS ITS REAL LAST VALUE (so the output is normal; the trace shows in

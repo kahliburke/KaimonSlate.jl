@@ -25,8 +25,14 @@ echart(:line, days, @replay(w, movavg(sales, w)); title = "Rolling mean")
 as a bare symbol. Inside the expression that name refers to the value being swept, so the code you
 write is the code you would have written without the macro.
 
-While you are authoring, `@replay` is a pass-through. It computes the one value the control is
-sitting on, so the cell costs exactly what the bare expression costs. The sweep happens at export.
+While you are authoring, `@replay` is a pass-through. It evaluates the expression in place, for the
+one value the control is sitting on, so the cell costs what the bare expression costs. The sweep
+happens at export.
+
+A moved control runs the whole cell again, and Julia compiles some of a cell's code again on each
+run: closures, comprehensions, `do` blocks, and top-level loops. For a fast control, put the work in
+functions in an earlier cell, and keep the expression in `@replay` a call to them. A loop written
+inside the `@replay` expression runs in Julia's interpreter, which is slow for heavy work.
 
 ## What can drive a replay
 
