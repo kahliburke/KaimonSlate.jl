@@ -3243,7 +3243,7 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 .deck-slide .step.zoom { --step-from: scale(.6); --step-ease: cubic-bezier(.34, 1.4, .64, 1); transform-origin: left center; }
 .deck-slide:is([data-layout="center"], [data-layout="title"]) .step.zoom { transform-origin: center; }
 .deck-slide .step.blur { --step-from: none; --step-filter: blur(calc(var(--u) * 14)); }
-.deck-slide .step:not(.on):not(.highlight):not(.strike):not(.fade-out),
+.deck-slide .step:not(.on):not(.highlight):not(.strike):not(.fade-out):not(.mcancel),
 .deck-slide .step.fade-out.on {
   opacity: 0; transform: var(--step-from); filter: var(--step-filter); visibility: hidden;
   transition: opacity .4s ease, transform .5s ease, filter .4s ease, visibility 0s linear .5s; }
@@ -3255,6 +3255,24 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 .deck-slide .step.strike { text-decoration: line-through; text-decoration-color: transparent;
   transition: text-decoration-color .35s ease, opacity .35s ease; }
 .deck-slide .step.strike.on { text-decoration-color: var(--deck-accent); opacity: .55; }
+
+/* Math. Display equations are the subject of a slide, so they are set large; a step inside an
+   equation is a box, so it can move as it arrives. A cancel line draws in on its step. */
+.deck-slide .katex { font-size: 1.1em; color: var(--deck-strong); }
+.deck-slide .katex-display { margin: .5em 0 .7em; }
+.deck-slide .katex-display > .katex { font-size: 1.4em; }
+.deck-slide[data-layout="center"] .katex-display > .katex, .deck-slide[data-layout="title"] .katex-display > .katex { font-size: 1.8em; }
+.deck-slide .slide-body .derive .katex-display > .katex { font-size: 2.2em; }
+.katex .step, .katex .term { display: inline-block; }
+.deck-slide .katex .highlight { border-radius: .15em; padding: 0 .08em; margin: 0 -.08em; }
+.deck-slide .mcancel svg { transition: opacity .35s ease, clip-path .5s ease; }
+.deck-slide .mcancel:not(.on) svg { opacity: 0; clip-path: inset(0 100% 0 0); }
+/* `::: derive`: equations stacked in one place, one shown; stepping turns it into the next. */
+.deck-slide .derive { display: grid; justify-items: center; }
+.deck-slide .derive > .derive-eq { grid-area: 1 / 1; transition: none !important; }
+.deck-slide .derive > .derive-eq:not(.derive-cur) { visibility: hidden; opacity: 0; }
+html[data-deck-trans="derive"]::view-transition-group(*) { animation-duration: .9s;
+  animation-timing-function: cubic-bezier(.65, 0, .35, 1); }
 
 /* Transitions without the View Transitions API. */
 .deck-slide.enter-fade { opacity: 0; }

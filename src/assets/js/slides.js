@@ -258,7 +258,7 @@
         pending = false;
         if (!D.open || !slide.isConnected) return;
         _collectSteps(slide, D.slides[D.idx], true);
-        _relayout(slide);
+            _relayout(slide);
       });
     });
     D.mo.observe(body, { childList: true, subtree: true });
@@ -300,6 +300,11 @@
         n.classList.add('step'); n.dataset.stepGroup = g;
       }
     });
+    // `::: derive` — a sequence of equations shown one at a time in one place; each after the first is
+    // a step, and stepping turns the current equation into the next (see `_applyStep`).
+    body.querySelectorAll('.derive').forEach(dv => {
+      [...dv.children].forEach((eq, k) => { eq.classList.add('derive-eq'); if (k > 0) eq.classList.add('step'); });
+    });
     body.querySelectorAll('.incremental').forEach(inc => {
       const fx = [...inc.classList].filter(x => x !== 'incremental');
       const lists = inc.querySelectorAll(':scope > ul > li, :scope > ol > li');
@@ -310,7 +315,8 @@
     let c = 0;
     const groups = {};
     for (const el of body.querySelectorAll('.step')) {
-      const explicit = parseInt(el.dataset.step || el.getAttribute('step') || '', 10);
+      let explicit = parseInt(el.dataset.step || el.getAttribute('step') || '', 10);
+      if (!(explicit > 0)) for (const c of el.classList) if (c.startsWith('stepat-')) explicit = parseInt(c.slice(7), 10);
       let idx;
       if (el.dataset.stepGroup && groups[el.dataset.stepGroup] != null) idx = groups[el.dataset.stepGroup];
       else if (explicit > 0) idx = explicit;
@@ -373,13 +379,72 @@
       for (const n of cel.querySelectorAll(sel)) if (n.childNodes.length && n.textContent.trim() + n.querySelectorAll('canvas,img,svg,video').length) return true;
     return false;
   }
-  function _applyStep(s, quiet) {
-    D.step = Math.max(0, Math.min(s, D.total));
+  function _stepClasses(s) {
     for (const it of D.items) {
-      it.el.classList.toggle('on', it.idx <= D.step);
-      it.el.classList.toggle('current', it.idx === D.step);
+      it.el.classList.toggle('on', it.idx <= s);
+      it.el.classList.toggle('current', it.idx === s);
     }
-    for (const r of D.reactive) _sendReactive(r, Math.min(D.step, r.n));
+    for (const dv of _derives()) { const eq = _deriveTarget(dv, s); for (const c of dv.children) c.classList.toggle('derive-cur', c === eq); }
+  }
+  function _derives() {
+    const slide = document.querySelector('#deckstage .deck-slide');
+    return slide ? [...slide.querySelectorAll('.slide-body .derive')] : [];
+  }
+  // The equation a derive block shows at step `s`: the last one whose step has come.
+  function _deriveTarget(dv, s) {
+    let cur = dv.children[0];
+    for (const c of dv.children) {
+      const it = D.items.find(x => x.el === c);
+      if (c === dv.children[0] || (it && it.idx <= s)) cur = c;
+    }
+    return cur;
+  }
+  // Terms of one equation, keyed by name and occurrence, so the second ω of one equation pairs with the
+  // second ω of the next.
+  function _termKeys(root) {
+    const out = new Map(), seen = {};
+    for (const t of root.querySelectorAll('.katex .term')) {
+      const n = window.slateTermName ? slateTermName(t) : null; if (!n) continue;
+      const k = (seen[n] = (seen[n] || 0) + 1);
+      out.set('t:' + n + '#' + k, t);
+    }
+    return out;
+  }
+  function _applyStep(s, quiet) {
+    s = Math.max(0, Math.min(s, D.total));
+    // A derive block that changes equation on this step transforms in place: terms both equations name
+    // glide to their new places, the rest crossfades.
+    const moving = [];
+    for (const dv of _derives()) {
+      const from = _deriveTarget(dv, D.step), to = _deriveTarget(dv, s);
+      if (from !== to) moving.push([from, to]);
+    }
+    D.step = s;
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!quiet && moving.length && document.startViewTransition && !reduce && !D.swapPending) {
+      const pairs = [];
+      for (const [from, to] of moving) {
+        const a = _termKeys(from), b = _termKeys(to);
+        for (const [k, el] of a) if (b.has(k)) pairs.push([k, el, b.get(k)]);
+      }
+      pairs.forEach(([k, el]) => { el.style.viewTransitionName = 'dt-' + _hash(k); });
+      const root = document.documentElement;
+      root.dataset.deckTrans = 'derive';
+      D.swapPending = true;
+      const vt = D.vt = document.startViewTransition(() => {
+        D.swapPending = false; D.vt = null;
+        pairs.forEach(([, el]) => el.style.removeProperty('view-transition-name'));
+        _stepClasses(s);
+        pairs.forEach(([k, , el]) => { el.style.viewTransitionName = 'dt-' + _hash(k); });
+        if (D.queue.length) setTimeout(_drain, 0);
+      });
+      vt.ready.catch(() => {}); vt.updateCallbackDone.catch(() => {});
+      vt.finished.catch(() => {}).finally(() => {
+        delete root.dataset.deckTrans;
+        pairs.forEach(([, , el]) => el.style.removeProperty('view-transition-name'));
+      });
+    } else _stepClasses(s);
+    for (const r of D.reactive) _sendReactive(r, Math.min(s, r.n));
     _playVisibleMedia();
     _syncHud();
     if (_trackPos()) _scheduleAuto();
@@ -538,6 +603,7 @@
     root.querySelectorAll('h1, h2, h3').forEach(h => { const t = h.textContent.trim(); if (t) put('h:' + t, h); });
     root.querySelectorAll('img').forEach(im => { if (im.getAttribute('src')) put('i:' + im.getAttribute('src'), im); });
     root.querySelectorAll('.morph[name], [data-morph]').forEach(el => put('m:' + (el.getAttribute('name') || el.dataset.morph), el));
+    for (const [k, el] of _termKeys(root)) put(k, el);
     for (const k of dup) out.delete(k);
     return out;
   }
@@ -1026,6 +1092,11 @@
     _sizeCanvas(slide, host.clientWidth, host.clientHeight);
     const { items } = _scanSteps(slide.querySelector('.slide-body'), sld, null);
     for (const it of items) { it.el.classList.toggle('on', it.idx <= step); it.el.classList.toggle('current', it.idx === step); }
+    for (const dv of slide.querySelectorAll('.derive')) {
+      let cur = dv.children[0];
+      for (const c of dv.children) { const it = items.find(x => x.el === c); if (it && it.idx <= step) cur = c; }
+      for (const c of dv.children) c.classList.toggle('derive-cur', c === cur);
+    }
     _shrinkText(slide.querySelector('.slide-body'));
   }
   function _renderPreviews() {

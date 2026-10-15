@@ -234,3 +234,12 @@ end
     @test occursin("style=\"flex:0 1 40%;max-width:40%\"", h)
     @test occursin("style=\"flex:0 1 60%;max-width:60%\"", h)
 end
+
+@testset "presentation math macros print as plain math" begin
+    f = NS._plain_math_macros
+    @test f(raw"$\term{x}{\ddot x} + \stepat{2}{\term{g}{\gamma}\dot x} = \hl{0}$") == raw"${\ddot x} + {{\gamma}\dot x} = {0}$"
+    @test f(raw"\cancelat{3}{\omega^2 x}") == raw"\cancel{\omega^2 x}"
+    @test f(raw"\termc{F}{red}{\step{F(t)}}") == raw"{{F(t)}}"
+    @test f(raw"\termination{a} \text{b}") == raw"\termination{a} \text{b}"      # other commands untouched
+    @test f(raw"\term{x}") == raw"\term{x}"                                       # missing argument: left alone
+end

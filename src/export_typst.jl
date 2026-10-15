@@ -656,7 +656,52 @@ function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{S
     s = _normalize_math_delims(s)
     s = _admonitions_to_quotes(s)
     s = _strip_deck_markup(s)
+    s = _plain_math_macros(s)
     return _rewrite_citations(s, citekeys; figrefs = figrefs)
+end
+
+# The presentation macros (`\term`, `\step`, … — see SLATE_TEX_MACROS in core.js) mark up an equation
+# for the deck. Print shows the finished equation, so each becomes the math it wraps: the argument kept
+# is the last one, and `\cancelat` keeps its cancel line.
+const _MATH_MACROS = Dict("term" => 2, "termc" => 3, "step" => 1, "stepat" => 2, "hl" => 1, "hlat" => 2,
+                          "cancelat" => 2, "fadeat" => 2)
+function _plain_math_macros(src::AbstractString)
+    occursin('\\', src) || return String(src)
+    s = String(src)
+    for _ in 1:8                                  # nested macros unwrap one level per pass
+        changed = false
+        io = IOBuffer(); i = firstindex(s)
+        while i <= lastindex(s)
+            m = s[i] == '\\' ? match(r"^\\([A-Za-z]+)", SubString(s, i)) : nothing
+            n = m === nothing ? 0 : get(_MATH_MACROS, m.captures[1], 0)
+            if n > 0
+                j = i + ncodeunits(m.match)
+                args = String[]
+                while length(args) < n
+                    while j <= lastindex(s) && isspace(s[j]); j = nextind(s, j); end
+                    (j <= lastindex(s) && s[j] == '{') || break
+                    depth = 0; k = j
+                    while k <= lastindex(s)
+                        s[k] == '{' ? (depth += 1) : s[k] == '}' ? (depth -= 1) : nothing
+                        depth == 0 && break
+                        k = nextind(s, k)
+                    end
+                    k > lastindex(s) && break
+                    push!(args, s[nextind(s, j):prevind(s, k)])
+                    j = nextind(s, k)
+                end
+                if length(args) == n
+                    print(io, m.captures[1] == "cancelat" ? string("\\cancel{", args[end], "}") : string("{", args[end], "}"))
+                    i = j; changed = true
+                    continue
+                end
+            end
+            print(io, s[i]); i = nextind(s, i)
+        end
+        s = String(take!(io))
+        changed || break
+    end
+    return s
 end
 
 # `:::` fenced-div lines and `. . .` pauses structure a presented slide (columns, builds); cmarker would

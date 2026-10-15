@@ -977,6 +977,7 @@ function _geoSafeSetOption(inst, s) {
       // (a theme-only or axis-only patch) would be read as "remove every series".
       Array.isArray(_opt && _opt.series) ? inst.setOption(_opt, { replaceMerge: ['series'] })
                                          : inst.setOption(_opt);
+      _colorSeriesByTerms(inst);
     }
     // Canvas-size self-heal: if layout/CSS changed the div since init (fonts settling, panel
     // toggles), the internal canvas keeps the stale size and every component lays out against it.
@@ -1530,6 +1531,93 @@ function _fillTable(wrap, spec, st, pageRows, total, baseCount, pageIdx) {
   }
 }
 
+// ── Math for explanation ─────────────────────────────────────────────────────────────────────
+// A few macros let an equation take part in a presentation: a term can be named (it then keeps one
+// colour wherever it appears, and glides into place when the next equation has it too), and a term can
+// arrive, light up, be cancelled or leave on a build step. They are `\htmlClass` wrappers, carrying
+// the term's name and step number as classes, so the deck finds them like any other build item; outside
+// a deck they render as plain, coloured math. Only `\htmlClass` is trusted, which adds a class and
+// nothing else, so cell output cannot use TeX to set styles or links.
+const SLATE_TEX_MACROS = {
+  '\\term':     '\\htmlClass{term term-#1}{#2}',
+  '\\termc':    '\\htmlClass{term term-#1 tc-#2}{#3}',
+  '\\step':     '\\htmlClass{step}{#1}',
+  '\\stepat':   '\\htmlClass{step stepat-#1}{#2}',
+  '\\hl':       '\\htmlClass{step highlight}{#1}',
+  '\\hlat':     '\\htmlClass{step highlight stepat-#1}{#2}',
+  '\\cancelat': '\\htmlClass{step mcancel stepat-#1}{\\cancel{#2}}',
+  '\\fadeat':   '\\htmlClass{step fade-out stepat-#1}{#2}',
+};
+function slateKatexOpts(extra) {
+  return Object.assign({
+    throwOnError: false, strict: 'ignore', macros: Object.assign({}, SLATE_TEX_MACROS),
+    trust: ctx => ctx.command === '\\htmlClass',
+  }, extra || {});
+}
+// The colour a named term wears, from a palette of well-separated hues tuned for a dark slide. Terms
+// take colours in the order they first appear in the notebook, so the first several are all distinct and
+// a term keeps its colour on every slide; `\termc{name}{color}{…}` pins one by palette name or hex.
+const SLATE_TERM_PALETTE = {
+  blue: '#58c4dd', yellow: '#f4d345', red: '#fc6255', green: '#83c167', purple: '#a98bd8',
+  orange: '#f39c4b', teal: '#4fd1c5', pink: '#e879b9', lime: '#c5e063', sky: '#8ab4ff',
+};
+const _TERM_HUES = Object.values(SLATE_TERM_PALETTE);
+let _termOrderKey = '', _termOrder = new Map(), _termPick = new Map();
+function _termIndex(name) {
+  const cells = (typeof nbState !== 'undefined' && nbState && nbState.cells) || null;
+  if (!cells) return -1;
+  const key = cells.map(c => c.hash || '').join(',');
+  if (key !== _termOrderKey) {
+    _termOrderKey = key; _termOrder = new Map(); _termPick = new Map();
+    for (const c of cells) for (const m of String(c.source || '').matchAll(/\\term(c?)\{([A-Za-z0-9_-]+)\}(?:\{([A-Za-z0-9#]+)\})?/g)) {
+      if (!_termOrder.has(m[2])) _termOrder.set(m[2], _termOrder.size);
+      if (m[1] && m[3] && !_termPick.has(m[2])) _termPick.set(m[2], m[3].replace(/^#/, ''));
+    }
+  }
+  return _termOrder.has(name) ? _termOrder.get(name) : -1;
+}
+function slateTermColor(name, pick) {
+  if (pick && SLATE_TERM_PALETTE[pick]) return SLATE_TERM_PALETTE[pick];
+  if (pick && /^[0-9a-f]{3,8}$/i.test(pick)) return '#' + pick;
+  let i = _termIndex(name);
+  if (i < 0) {                                  // no notebook to order by (an export): by name
+    let h = 2166136261;
+    for (let k = 0; k < name.length; k++) { h ^= name.charCodeAt(k); h = Math.imul(h, 16777619); }
+    i = h >>> 0;
+  }
+  return _TERM_HUES[i % _TERM_HUES.length];
+}
+// A chart series named like a term wears the term's colour, so the ω in an equation and the curve it
+// controls read as one thing — in the notebook, on a slide, in the presenter's preview.
+function _colorSeriesByTerms(inst) {
+  if (_termIndex('') === -1 && !_termOrder.size) return;
+  let opt; try { opt = inst.getOption(); } catch (e) { return; }
+  const series = (opt && opt.series) || [];
+  if (!series.some(x => x.name && _termOrder.has(x.name))) return;
+  const upd = series.map(x => {
+    if (!x.name || !_termOrder.has(x.name)) return {};
+    const col = slateTermColor(x.name, _termPick.get(x.name));
+    return { itemStyle: { color: col }, lineStyle: { color: col }, areaStyle: x.areaStyle ? { color: col } : undefined };
+  });
+  try { inst.setOption({ series: upd }); } catch (e) {}
+}
+function _termName(el) {
+  for (const c of el.classList) if (c.startsWith('term-')) return c.slice(5);
+  return null;
+}
+function _colorTerms(root) {
+  if (!root || !root.querySelectorAll) return;
+  for (const t of root.querySelectorAll('.katex .term')) {
+    const name = _termName(t); if (!name) continue;
+    let pick = null; for (const c of t.classList) if (c.startsWith('tc-')) pick = c.slice(3);
+    t.style.color = slateTermColor(name, pick || _termPick.get(name));
+  }
+}
+window.SLATE_TEX_MACROS = SLATE_TEX_MACROS;
+window.slateKatexOpts = slateKatexOpts;
+window.slateTermColor = slateTermColor;
+window.slateTermName = _termName;
+
 // Typeset any LaTeX ($…$ / $$…$$ / \(…\) / \[…\]) inside `el` with KaTeX. Safe to
 // call before KaTeX has loaded (no-op) and re-call (auto-render skips done spans).
 // A code cell's unmounted placeholder is a <pre> (in KaTeX's default ignore list); a mounted
@@ -1549,12 +1637,12 @@ function typeset(el) {
       else if (t.startsWith('$') && t.endsWith('$')) t = t.slice(1, -1);
       else if (t.startsWith('\\[') && t.endsWith('\\]')) t = t.slice(2, -2);
       else if (t.startsWith('\\(') && t.endsWith('\\)')) t = t.slice(2, -2);
-      try { katex.render(t, d, { displayMode: true, throwOnError: false }); } catch (e) {}
+      try { katex.render(t, d, slateKatexOpts({ displayMode: true })); } catch (e) {}
     });
   }
   if (typeof renderMathInElement !== 'function') return;
   try {
-    renderMathInElement(el, {
+    renderMathInElement(el, slateKatexOpts({
       delimiters: [
         { left: '$$', right: '$$', display: true },
         { left: '\\[', right: '\\]', display: true },
@@ -1566,9 +1654,9 @@ function typeset(el) {
       // the surrounding formula, not a formula of its own. A mounted CodeMirror editor is
       // contenteditable DOM: typesetting inside it is read by the editor as an edit to the source.
       ignoredClasses: ['katex', 'latex', 'cm-editor'],
-      throwOnError: false,
-    });
+    }));
   } catch (e) {}
+  _colorTerms(el);
 }
 // ── Background hydration scheduler ──────────────────────────────────────────────
 // A big notebook's per-cell setup (mounting CodeMirror editors, typesetting KaTeX) costs ~tens of
@@ -2061,7 +2149,7 @@ document.addEventListener('click', e => {
         const d = document.createElement('div');
         d.className = 'srec-mattex';
         stage.appendChild(d);
-        try { katex.render(r.tex.replace(/^\$\$|\$\$$/g, ''), d, { displayMode: true, throwOnError: false }); }
+        try { katex.render(r.tex.replace(/^\$\$|\$\$$/g, ''), d, slateKatexOpts({ displayMode: true })); }
         catch (_) {}
       }
     })

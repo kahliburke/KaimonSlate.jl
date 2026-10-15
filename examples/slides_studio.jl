@@ -98,6 +98,63 @@ let x = range(0, 4π; length = 600)
     echart(:line, collect(x), 4 / π .* y; showSymbol = false, lineStyle = (width = 3,))
 end
 
+#%% md id=forces
+@md raw"""
+## Three forces
+
+$$\term{inertia}{m\ddot x} \stepat{1}{{}+ \term{damping}{c\,\dot x}} \stepat{2}{{}+ \term{spring}{k\,x}} = 0$$
+
+$\term{inertia}{m\ddot x}$ is the inertia: mass times acceleration
+
+::: {.step step=1}
+$\term{damping}{c\,\dot x}$ resists motion, in proportion to speed
+:::
+
+::: {.step step=2}
+$\term{spring}{k\,x}$ pulls back, in proportion to displacement
+:::
+"""
+
+#%% md id=derivation layout=center
+@md raw"""
+## Looking for the motion
+
+::: derive
+$$\term{inertia}{m\ddot x} + \term{damping}{c\,\dot x} + \term{spring}{k\,x} = 0$$
+
+$$\term{inertia}{\ddot x} + \term{damping}{2\gamma\,\dot x} + \term{spring}{\omega_0^2\,x} = 0$$
+
+$$\term{inertia}{r^2} + \term{damping}{2\gamma\, r} + \term{spring}{\omega_0^2} = 0$$
+
+$$r = -\term{damping}{\gamma} \pm i\,\term{freq}{\omega_d}$$
+
+$$\term{x}{x(t)} = \term{envelope}{e^{-\gamma t}}\,\cos(\term{freq}{\omega_d}\, t)$$
+:::
+"""
+
+#%% md id=motion
+@md raw"""
+## The motion
+
+$$\term{x}{x(t)} = \term{envelope}{e^{-\gamma t}}\,\cos(\term{freq}{\omega_d}\, t)$$
+"""
+
+#%% code id=env_bind hidecode
+@bind show_env SlideSteps(1)
+
+#%% code id=motion_plot
+let t = collect(range(0, 12; length = 600)), γ = 0.25, ωd = 2.0
+    env = exp.(-γ .* t)
+    s = Any[series(:line, t, env .* cos.(ωd .* t); name = "x", showSymbol = false, lineStyle = (width = 3,))]
+    if show_env >= 1
+        for sgn in (1, -1)
+            push!(s, series(:line, t, sgn .* env; name = "envelope", showSymbol = false,
+                            lineStyle = (width = 2, type = :dashed)))
+        end
+    end
+    echart(s...; legend = false, height = 420)
+end
+
 #%% md id=section bg=nebula layout=section transition=slide
 @md"""
 ## Part two
