@@ -167,6 +167,7 @@ draws = randn(MersenneTwister(7), 240)
 jitter = rand(MersenneTwister(11), 240)
 edges = collect(range(-3, 3; length = 13))
 binof(v) = clamp(searchsortedlast(edges, v), 1, length(edges) - 1)
+nothing
 
 #%% code id=draws_strip morph=dist
 echart(; xAxis = (type = :value, min = -3, max = 3), yAxis = (type = :value, min = 0, max = 1, show = false),

@@ -618,6 +618,8 @@
   // again only once the notebook is back on screen (`exitPresent`).
   function _restoreCellCharts(el) {
     for (const inst of _cellCharts(el)) {
+      // Left mid-morph: the chart still holds the previous slide's figure.
+      if (inst.__morphing) { cancelAnimationFrame(inst.__morphing); inst.__morphing = 0; inst.__deckStyled = true; }
       if (inst.__deckStyled) {
         const sp = _specOf(inst);
         if (sp) try { inst.setOption(sp, { notMerge: true }); window.slateColorSeries && slateColorSeries(inst); } catch (e) {}
@@ -806,7 +808,10 @@
       const own = _specOf(inst); if (!own) continue;
       try {
         inst.setOption(_withMorph(opt, false), { notMerge: true });
-        requestAnimationFrame(() => { try { inst.setOption(_withMorph(own, true), { notMerge: true }); } catch (e) {} });
+        inst.__morphing = requestAnimationFrame(() => {
+          inst.__morphing = 0;
+          try { inst.setOption(_withMorph(own, true), { notMerge: true }); } catch (e) {}
+        });
       } catch (e) {}
     }
   }
