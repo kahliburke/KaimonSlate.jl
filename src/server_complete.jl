@@ -3419,12 +3419,19 @@ function _make_router(h::Hub)
     # presentation. Body keys: level (int), transition, theme, ratio (any subset).
     HTTP.register!(router, "POST", "/api/{id}/slideconfig", req -> _withnb(h, req, nb -> begin
         b = _body(req)
+        # Rehearsed timings from the deck: `<slide's first cell id>:<step>=<seconds>`, comma-separated.
+        haskey(b, "timings") && !occursin(r"^([A-Za-z0-9_]+:\d+=\d+(\.\d+)?,?)*$", String(b["timings"])) &&
+            return HTTP.Response(400, "malformed timings")
         with_report(nb) do report
             haskey(b, "level") && (report.meta["slidelevel"] = something(tryparse(Int, string(b["level"])), 2))
             haskey(b, "transition") && (report.meta["slidetransition"] = String(b["transition"]))
             haskey(b, "theme") && (report.meta["slidetheme"] = String(b["theme"]))
             haskey(b, "ratio") && (report.meta["slideratio"] = String(b["ratio"]))
             haskey(b, "bibstyle") && (report.meta["bibstyle"] = String(b["bibstyle"]))
+            if haskey(b, "timings")
+                t = String(b["timings"])
+                isempty(t) ? delete!(report.meta, "slidetimings") : (report.meta["slidetimings"] = t)
+            end
             _persist!(nb)
         end
         _json(state_json(nb))

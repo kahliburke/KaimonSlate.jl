@@ -12,14 +12,43 @@ into slides and shown one at a time.
 Because the deck *is* the notebook, your figures, tables, and `@bind` controls are all live on
 the slide — a slider still drives its chart mid-presentation.
 
-In the deck: `←` / `→` move, `Home` / `End` jump to the ends, `c` toggles code, `f` toggles
-fullscreen, and `Esc` exits back to the editor.
+In the deck:
+
+| Key | Action |
+|:----|:-------|
+| `→` `space` / `←` | next / previous step or slide |
+| `⇧→` / `⇧←` | next / previous slide, skipping steps |
+| `Home` / `End`, `3` `⏎` | first / last slide, go to slide 3 |
+| `o` | overview of every slide |
+| `a` / `p` | autoplay / pause timing |
+| `t` | rehearse: time every step |
+| `b` | black screen |
+| `l` / `d` / `x` | laser pointer / draw on the slide / clear the drawing |
+| `c` | show code |
+| `r` / `v` | record / camera bubble |
+| `s` / `f` / `?` | presenter window / fullscreen / key list |
+| `Esc` | exit |
 
 ### The presenter window
 
 Press `s` (or the 🪞 button, or *Open presenter window* in the palette) for a second window showing
-the current and next slide, a timer, and the **speaker notes** from your `notes` cells. The two stay
-in step as you advance.
+live previews of the current position and the next click, a timer, and the **speaker notes** from
+your `notes` cells. Arrow keys in either window drive the deck. On a video call, share only the
+deck window and keep the presenter window to yourself.
+
+### Rehearsal and autoplay
+
+Press `t` (or *rehearse* in the presenter window) and click through the talk: every step is timed,
+and pressing `t` again saves the timings to the notebook. The presenter window then shows the planned
+length and whether you are ahead or behind, and autoplay (`a`) advances on the rehearsed timings.
+
+### Recording
+
+Press `r` to record the deck with your microphone. The browser asks which tab or window to capture,
+a 3-2-1 countdown starts it, and `r` again stops it. The video is written beside the notebook in
+`recordings/`, with a chapters file (`.vtt`) marking each slide and a `.json` of the step timings.
+Press `v` for a camera bubble, which is part of the recording; drag it to move it, double-click to
+enlarge it. The presenter window shows the recording time and a stop button.
 
 A `notes` cell shows while you are **authoring** — marked with a dashed rule so you can tell at a
 glance which cells are yours alone — and nowhere else. It never reaches a slide, the reading view
@@ -28,6 +57,85 @@ it in CSS, so the text is not in the published page's source either. The PDF car
 you ask for the appendix (below). Style them yourself with the `.cell-notes` class.
 
 ![A notebook presented full-screen as a slide, with its heading, prose, and a live chart](./assets/present-slide.png)
+
+## Designing slides
+
+A slide is a fixed 16:9 (or 4:3) canvas that scales to the window, so it lays out the same on a
+laptop, a projector and a shared screen. Everything below is markup in the notebook itself: the deck
+never holds a second copy of your content.
+
+### Slide tags
+
+Put these on any cell of a slide (the first cell that sets a key wins):
+
+| Tag | Effect |
+|:----|:-------|
+| `layout=title` | centred, large gradient title |
+| `layout=section` | a section divider |
+| `layout=center` | content centred on the slide |
+| `layout=cover` | the slide's first image or video fills the canvas, text over it |
+| `bg=aurora` | a background: `aurora`, `nebula`, `midnight`, `ember`, `ocean`, `slate`, `paper`, a colour (`bg=#0b1020`), a gradient written without spaces, or an image or video path |
+| `bgdim=0.5` | darken the background so text reads over it |
+| `transition=zoom` | how this slide enters: `fade`, `slide`, `zoom`, `rise`, `none` |
+| `auto=5` | advance by itself after 5 seconds per step |
+| `class=name` | add a CSS class to the slide |
+
+**Deck style** in Settings gives every slide without its own `bg` a background, dimmed behind
+content slides and full strength on title and section slides.
+
+### Columns
+
+```markdown
+:::: columns
+::: {.column width="40%"}
+Left
+:::
+::: column
+Right takes the rest
+:::
+::::
+```
+
+Cells tagged `column=2` still sit beside the cell before them, on a slide as in the notebook.
+
+### Builds
+
+A slide can bring its content in a piece at a time. `→` walks the steps, then moves to the next
+slide; going back to a slide lands on its finished state.
+
+- `::: step` … `:::` appears on its own click. Add an effect as a class: `{.step .fade-left}`,
+  `.fade-right`, `.zoom`, `.blur`, `.highlight` (lights up), `.fade-out` (leaves), `.dim` (dims once
+  passed), `.strike`. `step=3` puts it on a specific step.
+- `::: incremental` around a list brings in one item per click.
+- A line with `. . .` reveals the rest of the cell in one step.
+- A cell tagged `step` (or `step=2`) appears as a whole.
+
+Hidden steps keep their space, so the slide never reflows as it builds.
+
+### Builds from computed state
+
+`SlideSteps(n)` makes the step counter a value the notebook can compute with:
+
+```julia
+#%% code id=k hidecode
+@bind k SlideSteps(5)
+
+#%% code id=fit
+echart(:line, x, partial_sum(x, k + 1))
+```
+
+`k` is 0 when the slide comes up and counts to 5 as you click, so the figure is recomputed at each
+step instead of being duplicated across slides. The control is hidden while presenting; in the
+notebook it is a slider for scrubbing through the build.
+
+### Media and morphing
+
+`![autoplay loop](clip.mp4)` is a video (and `![](talk.m4a)` audio). Flags in the alt text:
+`autoplay` (starts when it comes on screen), `loop`, `muted`, `nocontrols`. Relative paths resolve
+next to the notebook.
+
+A heading or image that appears on two consecutive slides moves and resizes into its new place.
+Name anything else to morph it the same way: `::: {.morph name=plot}`, or tag a cell `morph=plot`.
 
 ## How cells become slides
 

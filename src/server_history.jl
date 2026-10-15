@@ -311,6 +311,8 @@ const _CONFIG_UI = (
      choices = String[], global_default = nothing, restart = false),
     (key = "slidetransition", group = "Slides", label = "Slide transition", type = :enum, default = "fade",
      choices = ["none", "fade", "slide", "zoom", "rise"], global_default = nothing, restart = false),
+    (key = "deckstyle", group = "Slides", label = "Deck style", type = :enum, default = "",
+     choices = ["", "midnight", "aurora", "nebula", "ocean", "ember", "slate", "paper"], global_default = nothing, restart = false),
     (key = "slideauto", group = "Slides", label = "Autoplay seconds per step", type = :int, default = 8,
      choices = String[], global_default = nothing, restart = false),
     (key = "slideratio", group = "Slides", label = "Slide aspect ratio", type = :enum, default = "16:9",
@@ -618,6 +620,16 @@ const _PREVIEW_MAX_TOTAL = 50 * 1024 * 1024
 
 # Replace inlined base64 image <img>s in `html` with cached `/api/<nbid>/blob/<hash>` URLs, adding
 # width/height so the layout reserves space before the (async, cached) image loads.
+# A relative `src`/`poster` in rendered markdown (`![](figs/a.png)`, `![](clip.mp4)`) names a file beside
+# the notebook. The page lives at `/n/<id>`, where a relative URL would resolve against `/n/`, so point it
+# at the notebook's asset route, the same URL a dropped file gets.
+const _REL_SRC_RE = r"(\s(?:src|poster)=\")(?![a-zA-Z][a-zA-Z0-9+.-]*:|/|#)([^\"]+)\""
+function _asset_srcs(nbid::AbstractString, html::AbstractString)
+    (isempty(nbid) || !(occursin("src=\"", html) || occursin("poster=\"", html))) && return String(html)
+    base = "/n/" * HTTP.escapeuri(nbid) * "/asset/"
+    return replace(html, _REL_SRC_RE => m -> (c = match(_REL_SRC_RE, m); string(c[1], base, c[2], "\"")))
+end
+
 function _externalize_blobs(nbid::AbstractString, html::AbstractString)
     (isempty(nbid) || !occursin("data:image", html)) && return html
     replace(html, _IMG_RE => function (s)
@@ -1070,7 +1082,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "blocked" => c.blocked,
         "blockedHost" => c.blocked_host,
         "blockedAt" => c.blocked_at,
-        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp; prose = cites ? _cite_rw : identity) :
+        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? _asset_srcs(nbid, markdown_html(_mdsrc, c.interp; prose = cites ? _cite_rw : identity)) :
                         (live_placeholder && _is_live(c) ? _live_output_placeholder() : output_html(c))),
         # How the browser should treat this output's session-boundness (see `_live_output_placeholder`):
         # "render" = the real, live-for-THIS-session thing; "placeholder" = a stand-in awaiting the connect
@@ -1736,6 +1748,8 @@ function state_json(nb::LiveNotebook)
     meta["slideLevel"] = get(nb.report.meta, "slidelevel", 2)               # heading depth that starts a slide
     meta["slideTransition"] = get(nb.report.meta, "slidetransition", "fade") # none | fade | slide | zoom | rise
     meta["slideAuto"] = get(nb.report.meta, "slideauto", 8)                  # autoplay seconds per step
+    meta["deckStyle"] = get(nb.report.meta, "deckstyle", "")                 # "" = follow the editor theme
+    meta["slideTimings"] = get(nb.report.meta, "slidetimings", "")           # rehearsed seconds, `<slide>:<step>=<s>,…`
     meta["slideTheme"] = get(nb.report.meta, "slidetheme", "")               # "" = follow the editor theme
     meta["slideRatio"] = get(nb.report.meta, "slideratio", "16:9")           # PDF deck aspect ratio
     meta["bibStyle"] = get(nb.report.meta, "bibstyle", "ieee")               # CSL citation/reference style

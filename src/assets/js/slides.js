@@ -20,12 +20,17 @@
 // `@bind k SlideSteps(n)` on the slide follows the same counter, so a figure can build from
 // computed state. Moving forward walks the steps, then the slides.
 //
-// A presenter window (`?present=1`) mirrors the position over a BroadcastChannel and shows notes,
-// the next slide and a timer; it drives the deck by sending it `nav` requests.
+// A presenter window (`?present=1`) follows the position over a BroadcastChannel and shows live
+// previews of the current and next position, notes, a timer and rehearsal pacing; it drives the deck
+// by sending it `nav` requests.
 
 (function () {
   const NBID = decodeURIComponent((location.pathname.match(/^\/n\/([^\/]+)/) || ['', ''])[1]);
   const IS_PRESENTER = new URLSearchParams(location.search).get('present') === '1';
+  // A presenter preview: the same notebook in an iframe, showing the deck at the current (`cur`) or the
+  // following (`next`) position. It follows the deck and never drives anything — no broadcasts, no
+  // bound values, no timers — so the previews are live without competing with the real deck.
+  const IS_MIRROR = new URLSearchParams(location.search).get('deckmirror');
 
   // ── Segmentation (mirrors export_typst.jl `_first_heading_depth` / `_slide_segments`) ──
   function _firstHeadingDepth(src) {
@@ -89,6 +94,7 @@
   const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('slate-deck-' + NBID) : null;
 
   function _emit(type) {
+    if (IS_MIRROR) return;
     const detail = { type, idx: D.idx, step: D.step, steps: D.total, title: _slideTitle(D.slides[D.idx]) };
     try { window.dispatchEvent(new CustomEvent('slate-deck', { detail })); } catch (e) {}
   }
@@ -159,12 +165,23 @@
     if (dim > 0) { const s = document.createElement('div'); s.className = 'slide-bg-dim'; s.style.opacity = Math.min(dim, 1); bgEl.appendChild(s); }
   }
 
+  // The deck style gives every slide without its own `bg` a background; content slides get it dimmed
+  // so text and figures stay readable, while title and section slides show it at full strength.
+  function _deckStyle() { const s = nbState && nbState.deckStyle; return s && _BG_PRESETS.includes(s) ? s : ''; }
+  function _effCfg(cfg, i) {
+    const st = _deckStyle();
+    if (cfg.bg || !st) return cfg;
+    const lay = cfg.layout;
+    const strong = lay === 'title' || lay === 'section' || i === 0;
+    return Object.assign({}, cfg, { bg: st, bgdim: cfg.bgdim || (strong || st === 'paper' ? 0 : 0.45) });
+  }
+
   // ── Mount / unmount ─────────────────────────────────────────────────────────
   function _mountSlide(i) {
     _unmount();
     const stage = document.getElementById('deckstage');
     const sld = D.slides[i] || { ids: [], cfg: {} };
-    const cfg = sld.cfg || {};
+    const cfg = _effCfg(sld.cfg || {}, i);
     const slide = document.createElement('div');
     slide.className = 'deck-slide' + (D.showCode ? ' show-code' : '') + (cfg.class && cfg.class !== true ? ' ' + cfg.class : '');
     slide.dataset.layout = (cfg.layout && cfg.layout !== true) ? cfg.layout : 'default';
@@ -207,7 +224,7 @@
     _inkClear();
     const stage = document.getElementById('deckstage');
     const old = stage && stage.querySelector('.deck-slide');
-    if (old) old.querySelectorAll('video, audio').forEach(m => { try { m.pause(); } catch (e) {} });
+    if (old) old.querySelectorAll('video, audio').forEach(m => { m._deckPlayed = false; try { m.pause(); } catch (e) {} });
     for (const r of D.restore) {
       r.el.classList.remove('slide-split', 'step', 'deck-cellstep', 'on', 'current');
       delete r.el.dataset.step;
@@ -327,7 +344,7 @@
   // overlapping requests can be applied out of order.
   const _inflight = new Map();   // name → { busy, want }
   function _sendReactive(r, v) {
-    if (r.sent === v || !window.slateSetBind) return;
+    if (IS_MIRROR || r.sent === v || !window.slateSetBind) return;
     r.sent = v;
     let q = _inflight.get(r.name);
     if (!q) { q = { busy: false, want: null }; _inflight.set(r.name, q); }
@@ -356,7 +373,7 @@
     for (const r of D.reactive) _sendReactive(r, Math.min(D.step, r.n));
     _playVisibleMedia();
     _syncHud();
-    _scheduleAuto();
+    if (_trackPos()) _scheduleAuto();
     if (!quiet) { _emit('step'); _broadcast(); }
   }
   function _playVisibleMedia() {
@@ -484,7 +501,7 @@
   function _transKind(i) {
     const cfg = (D.slides[i] && D.slides[i].cfg) || {};
     const t = (cfg.transition && cfg.transition !== true) ? cfg.transition : ((nbState && nbState.slideTransition) || 'fade');
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'none';
+    if (IS_MIRROR || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'none';
     return t;
   }
   function _hash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
@@ -511,6 +528,7 @@
   }
   function _go(i, dir, atEnd, fromRemote) {
     if (!D.open) return;
+    const ov = document.getElementById('deckoverview'); if (ov) ov.remove();
     i = Math.max(0, Math.min(i, D.slides.length - 1));
     if (i === D.idx && D.restore.length) return;
     dir = dir != null ? dir : (i > D.idx ? 1 : -1);
@@ -568,10 +586,13 @@
   function _clearAuto() { if (D.auto) { clearTimeout(D.auto); D.auto = null; } _autoBar(0); }
   function _scheduleAuto() {
     _clearAuto();
-    if (!D.open || D.paused) return;
+    if (!D.open || D.paused || IS_MIRROR || D.rehearse) return;
     const cfg = (D.slides[D.idx] && D.slides[D.idx].cfg) || {};
     let secs = parseFloat(cfg.auto);
-    if (!(secs > 0) && D.autoplay) secs = parseFloat(nbState && nbState.slideAuto) || _AUTO_DEFAULT;
+    if (D.autoplay) {
+      const t = _timings()[_posKey()];
+      secs = t > 0 ? t : secs > 0 ? secs : (parseFloat(nbState && nbState.slideAuto) || _AUTO_DEFAULT);
+    }
     if (!(secs > 0)) return;
     if (D.step >= D.total && D.idx >= D.slides.length - 1) return;
     _autoBar(secs);
@@ -596,6 +617,49 @@
     D.paused = !D.paused;
     _flash(D.paused ? 'paused' : 'resumed');
     _scheduleAuto();
+  }
+
+  // ── Rehearsal ───────────────────────────────────────────────────────────────
+  // A position is keyed by its slide's first cell id and the step, so timings survive slides being
+  // added or reordered elsewhere in the notebook. Rehearsing (t) times every position as you click
+  // through; stopping saves them to the notebook, where autoplay and the presenter's pacing read them.
+  function _slideKey(i) { const sl = D.slides[i]; return sl && sl.ids.length ? sl.ids[0] : 's' + i; }
+  function _posKey() { return _slideKey(D.idx) + ':' + D.step; }
+  function _parseTimings(str) {
+    const out = {};
+    for (const part of String(str || '').split(',')) {
+      const m = /^([A-Za-z0-9_]+:\d+)=(\d+(?:\.\d+)?)$/.exec(part.trim());
+      if (m) out[m[1]] = parseFloat(m[2]);
+    }
+    return out;
+  }
+  function _timings() { return _parseTimings(nbState && nbState.slideTimings); }
+  function _trackPos() {
+    const k = _posKey(), now = performance.now();
+    if (k === D.posKey) return false;
+    if (D.rehearse && D.posKey) D.rehearse[D.posKey] = Math.round((now - D.posT) / 100) / 10;
+    D.posKey = k; D.posT = now;
+    return true;
+  }
+  function deckRehearse() {
+    if (!D.rehearse) {
+      D.rehearse = {}; D.posKey = null; _trackPos();
+      _clearAuto();
+      _flash('rehearsing: timing every step');
+    } else {
+      D.posKey = null; _trackPos();          // closes the position on screen
+      const t = Object.assign(_timings(), D.rehearse);
+      D.rehearse = null;
+      const str = Object.entries(t).map(([k, v]) => k + '=' + v).join(',');
+      fetch('/api/' + encodeURIComponent(NBID) + '/slideconfig', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ timings: str }) })
+        .then(r => r.ok ? r.json() : null)
+        .then(st => { if (st && st.meta) nbState.slideTimings = st.meta.slideTimings; else nbState.slideTimings = str;
+                      _flash('timings saved'); _broadcast(); })
+        .catch(() => _flash('could not save timings'));
+      _scheduleAuto();
+    }
+    _broadcast();
   }
 
   // ── Pointer, ink, blackout, go-to, help ─────────────────────────────────────
@@ -650,8 +714,42 @@
     ['→  space', 'next step / slide'], ['←', 'previous'], ['⇧→  ⇧←', 'next / previous slide'],
     ['Home  End', 'first / last slide'], ['3 ⏎', 'go to slide 3'], ['a', 'autoplay'], ['p', 'pause timing'],
     ['b', 'black screen'], ['l', 'laser pointer'], ['d', 'draw · x clears'], ['c', 'show code'],
-    ['r', 'record'], ['v', 'camera bubble'], ['s', 'presenter window'], ['f', 'fullscreen'], ['Esc', 'exit'],
+    ['o', 'overview'], ['t', 'rehearse timings'], ['r', 'record'], ['v', 'camera bubble'],
+    ['s', 'presenter window'], ['f', 'fullscreen'], ['Esc', 'exit'],
   ];
+  // Every slide as a card (number, title, first line), on its own background. Click or type a number
+  // to jump; o or Esc closes.
+  function deckOverview() {
+    const deck = document.getElementById('deck');
+    let ov = document.getElementById('deckoverview');
+    if (ov) { ov.remove(); return; }
+    ov = document.createElement('div'); ov.id = 'deckoverview'; ov.className = 'deck-overview';
+    const cells = (nbState && nbState.cells) || [];
+    const grid = document.createElement('div'); grid.className = 'deck-ov-grid';
+    D.slides.forEach((sl, i) => {
+      const card = document.createElement('button');
+      card.className = 'deck-ov-card' + (i === D.idx ? ' on' : '');
+      const bg = document.createElement('div');
+      const probe = document.createElement('div');
+      _paintBg(bg, probe, _effCfg(sl.cfg || {}, i));
+      card.className += ' ' + probe.className;
+      let sub = '';
+      for (const id of sl.ids) {
+        const c = cells.find(x => x.id === id); if (!c || c.kind !== 'md') continue;
+        const line = (c.source || '').split('\n').map(l => l.trim()).find(l => l && !/^(#|:::|\. \. \.|[-*+] |!\[)/.test(l));
+        if (line) { sub = line.replace(/[*_`]/g, ''); break; }
+      }
+      card.innerHTML = '<span class="n">' + (i + 1) + '</span><b></b><span class="s"></span>';
+      card.prepend(bg);
+      card.querySelector('b').textContent = _slideTitle(sl) || '';
+      card.querySelector('.s').textContent = sub.slice(0, 90);
+      card.onclick = () => { ov.remove(); _go(i, null, false); };
+      grid.appendChild(card);
+    });
+    ov.appendChild(grid);
+    deck.appendChild(ov);
+    const cur = grid.children[D.idx]; if (cur) cur.scrollIntoView({ block: 'center' });
+  }
   function deckHelp() {
     const h = document.getElementById('deckhelp');
     if (!h.innerHTML) h.innerHTML = '<div class="deck-help-card">' +
@@ -666,9 +764,11 @@
     _buildDeckDom();
     D.slides = buildSlides();
     if (!D.slides.length) { window.alertDark ? alertDark('No slides yet — add markdown headings (## …) or tag a cell `slide`.') : alert('No slides.'); return; }
-    D.open = true; D.idx = Math.max(0, Math.min(at || 0, D.slides.length - 1)); D.step = 0;
+    D.open = true; D.idx = Math.max(0, Math.min(at || 0, D.slides.length - 1)); D.step = 0; D.posKey = null;
     document.body.classList.add('presenting');
-    document.getElementById('deck').style.display = '';
+    const deck = document.getElementById('deck');
+    deck.style.display = '';
+    deck.dataset.style = _deckStyle();
     _mountSlide(D.idx);
     _emit('enter');
     _broadcast();
@@ -683,6 +783,7 @@
   }
   function exitPresent() {
     if (!D.open) return;
+    if (D.rehearse) deckRehearse();
     _emit('exit');
     _unmount();
     D.open = false; D.autoplay = false; D.paused = false;
@@ -707,13 +808,18 @@
 
   // ── BroadcastChannel sync (audience ⇄ presenter) ────────────────────────────
   function _broadcast() {
-    if (!bc || IS_PRESENTER || !D.open) return;
-    bc.postMessage({ type: 'goto', idx: D.idx, step: D.step, steps: D.total, total: D.slides.length, from: 'deck' });
+    if (!bc || IS_PRESENTER || IS_MIRROR || !D.open) return;
+    bc.postMessage({ type: 'goto', idx: D.idx, step: D.step, steps: D.total, total: D.slides.length,
+                     rehearse: !!D.rehearse, autoplay: D.autoplay, from: 'deck' });
   }
   if (bc) bc.addEventListener('message', ev => {
     const m = ev.data || {};
+    if (IS_MIRROR) { if (m.type === 'goto') _mirrorFollow(m); return; }
     if (IS_PRESENTER) {
-      if (m.type === 'goto') { P.idx = m.idx; P.step = m.step; P.steps = m.steps; P.total = m.total; _renderPresenter(); }
+      if (m.type === 'goto') {
+        Object.assign(P, { idx: m.idx, step: m.step, steps: m.steps, total: m.total, rehearse: m.rehearse, autoplay: m.autoplay });
+        _renderPresenter();
+      }
       return;
     }
     if (m.type === 'hello') { _broadcast(); return; }
@@ -721,7 +827,8 @@
     if (m.type === 'nav') {
       if (m.dir > 0) slideNext(); else if (m.dir < 0) slidePrev();
       else if (m.idx != null) _go(m.idx, null, false);
-    }
+    } else if (m.type === 'rehearse') deckRehearse();
+    else if (m.type === 'autoplay') deckAutoplay();
   });
   function openPresenter() {
     const w = window.open(location.pathname + '?present=1', 'slate-presenter-' + NBID, 'width=1180,height=760');
@@ -733,6 +840,7 @@
   // where it owns the whole window. What ENTERS the deck is the `view.present` command, so that chord
   // is configurable like every other.
   document.addEventListener('keydown', e => {
+    if (IS_MIRROR) return;
     if (IS_PRESENTER) { _presenterKey(e); return; }
     if (!D.open) return;
     const tag = (e.target && e.target.tagName) || '';
@@ -755,8 +863,11 @@
       case 'End': e.preventDefault(); _go(D.slides.length - 1, 1); break;
       case 'Escape':
         e.preventDefault();
-        if (D.draw) deckDraw(); else if (D.laser) deckLaser(); else exitPresent();
+        if (document.getElementById('deckoverview')) deckOverview();
+        else if (D.draw) deckDraw(); else if (D.laser) deckLaser(); else exitPresent();
         break;
+      case 'o': case 'O': deckOverview(); break;
+      case 't': case 'T': deckRehearse(); break;
       case 'f': case 'F': slideFullscreen(); break;
       case 'c': case 'C': slideToggleCode(); break;
       case 's': case 'S': openPresenter(); break;
@@ -774,23 +885,14 @@
   addEventListener('resize', () => { if (D.open) _relayout(); });
 
   // ════════════════════════════════════════════════════════════════════════════
-  //  Presenter window (?present=1) — mirrors position, shows notes + next + timer
+  //  Presenter window (?present=1) — live previews, notes, timer, pacing
   // ════════════════════════════════════════════════════════════════════════════
-  const P = { idx: 0, step: 0, steps: 0, total: 0, started: Date.now() };
+  const P = { idx: 0, step: 0, steps: 0, total: 0, started: Date.now(), rehearse: false, autoplay: false };
   function _presenterKey(e) {
     if (['ArrowRight', 'PageDown', ' ', 'ArrowDown'].includes(e.key)) { e.preventDefault(); _presenterNav(1); }
     else if (['ArrowLeft', 'PageUp', 'ArrowUp'].includes(e.key)) { e.preventDefault(); _presenterNav(-1); }
   }
   function _presenterNav(dir) { if (bc) bc.postMessage({ type: 'nav', dir }); }
-  function _slidePreviewHtml(slide) {
-    if (!slide) return '<div class="pv-empty">—</div>';
-    let h = '';
-    for (const id of slide.ids) {
-      const el = document.getElementById('cell-' + id);
-      if (el) { const c = el.cloneNode(true); c.removeAttribute('id'); h += c.outerHTML; }
-    }
-    return h || '<div class="pv-empty">—</div>';
-  }
   function _notesHtml(slide) {
     const cells = (nbState && nbState.cells) || [];
     let h = '';
@@ -800,13 +902,27 @@
     }
     return h || '<div class="pv-empty">No notes for this slide.</div>';
   }
+  const _mmss = secs => { const a = Math.abs(Math.round(secs)); return (secs < 0 ? '-' : '') + Math.floor(a / 60) + ':' + String(a % 60).padStart(2, '0'); };
+  // Where the rehearsal says the talk should be by now: the time of every position before this one.
+  function _pace(slides) {
+    const t = _parseTimings(nbState && nbState.slideTimings);
+    const keys = Object.keys(t);
+    if (!keys.length) return null;
+    const order = {}; slides.forEach((sl, i) => { if (sl.ids.length) order[sl.ids[0]] = i; });
+    let before = 0, total = 0;
+    for (const k of keys) {
+      const [sid, st] = k.split(':'); const i = order[sid];
+      if (i == null) continue;
+      total += t[k];
+      if (i < P.idx || (i === P.idx && +st < P.step)) before += t[k];
+    }
+    return { before, total };
+  }
   function _renderPresenter() {
     const root = document.getElementById('presenter'); if (!root) return;
     const slides = buildSlides();
     P.total = slides.length;
-    const cur = slides[P.idx], nxt = slides[P.idx + 1];
-    root.querySelector('.pp-cur').innerHTML = _slidePreviewHtml(cur);
-    root.querySelector('.pp-next').innerHTML = _slidePreviewHtml(nxt);
+    const cur = slides[P.idx];
     root.querySelector('.pp-notes').innerHTML = _notesHtml(cur);
     root.querySelector('.pp-pos').textContent = (P.idx + 1) + ' / ' + P.total;
     const st = root.querySelector('.pp-steps');
@@ -814,37 +930,71 @@
     const t = P.step < P.steps ? 'step ' + (P.step + 1) + ' of ' + P.steps
             : slides[P.idx + 1] ? (_slideTitle(slides[P.idx + 1]) || 'next slide') : 'end';
     root.querySelector('.pp-nexttitle').textContent = '→ ' + t;
-    if (window.typeset) try { window.typeset(root); } catch (e) {}
+    root.querySelector('.pp-rehearse').classList.toggle('on', !!P.rehearse);
+    root.querySelector('.pp-autoplay').classList.toggle('on', !!P.autoplay);
+    _renderPace();
+    if (window.typeset) try { window.typeset(root.querySelector('.pp-notes')); } catch (e) {}
+  }
+  function _renderPace() {
+    const root = document.getElementById('presenter'); if (!root) return;
+    const el = root.querySelector('.pp-pace');
+    const p = _pace(buildSlides());
+    if (!p || P.rehearse) { el.textContent = P.rehearse ? 'rehearsing' : ''; el.className = 'pp-pace'; return; }
+    const d = (Date.now() - P.started) / 1000 - p.before;
+    el.textContent = 'plan ' + _mmss(p.total) + ' · ' + (Math.abs(d) < 15 ? 'on pace' : _mmss(Math.abs(d)) + (d > 0 ? ' behind' : ' ahead'));
+    el.className = 'pp-pace ' + (d > 60 ? 'behind' : d < -60 ? 'ahead' : '');
   }
   function _buildPresenterDom() {
     document.body.classList.add('is-presenter');
     const root = document.createElement('div');
     root.id = 'presenter';
+    const src = which => location.pathname + '?deckmirror=' + which;
     root.innerHTML =
       '<div class="pp-main">' +
         '<div class="pp-left">' +
-          '<div class="pp-stage pp-cur"></div>' +
+          '<div class="pp-frame pp-cur"><iframe src="' + src('cur') + '" title="current slide"></iframe></div>' +
           '<div class="pp-steps"></div>' +
         '</div>' +
         '<div class="pp-side">' +
           '<div class="pp-clock"><span class="pp-elapsed">00:00</span><button class="pp-reset" title="restart the timer">↺</button><span class="pp-wall"></span></div>' +
+          '<div class="pp-pace"></div>' +
           '<div class="pp-nexthd"><span class="pp-nexttitle">→ next</span><span class="pp-pos"></span></div>' +
-          '<div class="pp-stage pp-next"></div>' +
+          '<div class="pp-frame pp-next"><iframe src="' + src('next') + '" title="next"></iframe></div>' +
           '<div class="pp-noteshd">Speaker notes</div>' +
           '<div class="pp-notes"></div>' +
+          '<div class="pp-tools"><button class="pp-rehearse" title="time every step as you rehearse">⏱ rehearse</button>' +
+            '<button class="pp-autoplay" title="advance on the rehearsed timings">⏵ autoplay</button></div>' +
           '<div class="pp-nav"><button onclick="__presPrev()">‹ prev</button><button onclick="__presNext()">next ›</button></div>' +
         '</div>' +
       '</div>';
     document.body.appendChild(root);
     window.__presPrev = () => _presenterNav(-1);
     window.__presNext = () => _presenterNav(1);
-    root.querySelector('.pp-reset').onclick = () => { P.started = Date.now(); };
+    root.querySelector('.pp-reset').onclick = () => { P.started = Date.now(); _renderPace(); };
+    root.querySelector('.pp-rehearse').onclick = () => { if (!P.rehearse) P.started = Date.now(); bc && bc.postMessage({ type: 'rehearse' }); };
+    root.querySelector('.pp-autoplay').onclick = () => bc && bc.postMessage({ type: 'autoplay' });
     const two = n => (n < 10 ? '0' : '') + n;
     setInterval(() => {
       const s = Math.floor((Date.now() - P.started) / 1000);
       const el = root.querySelector('.pp-elapsed'); if (el) el.textContent = two(Math.floor(s / 60)) + ':' + two(s % 60);
       const d = new Date(), w = root.querySelector('.pp-wall'); if (w) w.textContent = two(d.getHours()) + ':' + two(d.getMinutes());
+      _renderPace();
     }, 1000);
+  }
+
+  // ── Mirror (a presenter preview) ────────────────────────────────────────────
+  function _mirrorFollow(m) {
+    if (!D.open) return;
+    let idx = m.idx, step = m.step;
+    if (IS_MIRROR === 'next') {
+      if (m.step < m.steps) step = m.step + 1;
+      else { idx = m.idx + 1; step = 0; }
+    }
+    const end = idx >= D.slides.length;
+    document.body.classList.toggle('deck-mirror-end', end);
+    if (end) return;
+    if (idx !== D.idx || !D.restore.length) { D.idx = idx; D.step = 0; _mountSlide(idx); }
+    _applyStep(step, true);
   }
 
   // ── Bootstrap ────────────────────────────────────────────────────────────────
@@ -858,6 +1008,14 @@
       _buildPresenterDom();
       _renderPresenter();
       if (bc) bc.postMessage({ type: 'hello' });   // ask the audience tab for its current position
+    }));
+  }
+  if (IS_MIRROR) {
+    document.body.classList.add('deck-mirror');
+    document.addEventListener('DOMContentLoaded', () => _waitForCells(() => {
+      document.body.classList.add('deck-mirror');
+      enterPresent(0);
+      if (bc) bc.postMessage({ type: 'hello' });
     }));
   }
 
@@ -906,6 +1064,8 @@
   window.deckDraw = deckDraw;
   window.deckAutoplay = deckAutoplay;
   window.deckHelp = deckHelp;
+  window.deckOverview = deckOverview;
+  window.deckRehearse = deckRehearse;
   window._deckSettle = _deckSettle;
   window._deckOpen = () => D.open;
   window._deckPos = () => ({ idx: D.idx, step: D.step, title: _slideTitle(D.slides[D.idx]) });

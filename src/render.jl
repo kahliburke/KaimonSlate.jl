@@ -481,9 +481,21 @@ function _md_html(src::AbstractString, interps = CellOutput[]; prose = identity)
         html = replace(html, tok => f)                              # remaining (text) interps → HTML fragment
     end
     html = replace(html, "<p>. . .</p>" => "<div class=\"pause\"></div>")
+    html = _column_widths(html)
     html = _media_from_img(html)
     # Last, so an image produced by a `{{ }}` interpolation can be sized like a literal one.
     return _apply_md_attrs(html)
+end
+
+# `::: {.column width="40%"}` arrives as a bare `width` attribute, which a `<div>` ignores; make it the
+# column's flex basis so the column is that wide wherever it renders.
+function _column_widths(html::AbstractString)
+    occursin("width=\"", html) || return String(html)
+    return replace(html, r"<div class=\"([^\"]*\bcolumn\b[^\"]*)\"([^>]*?)\swidth=\"([0-9.]+(?:%|px|em|rem)?)\"" => function (tag)
+        m = match(r"<div class=\"([^\"]*)\"([^>]*?)\swidth=\"([^\"]*)\"", tag)
+        w = occursin(r"^[0-9.]+$", m[3]) ? m[3] * "%" : m[3]
+        string("<div class=\"", m[1], "\"", m[2], " style=\"flex:0 1 ", w, ";max-width:", w, "\"")
+    end)
 end
 
 # `![flags](clip.mp4)` → a `<video>` (or `<audio>` for a sound file): image syntax is what an author

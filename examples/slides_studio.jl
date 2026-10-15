@@ -79,13 +79,38 @@ Each click adds the next odd harmonic; the chart is recomputed, not swapped.
 #%% code id=fourier
 let x = range(0, 4π; length = 600)
     y = sum(sin.((2j - 1) .* x) ./ (2j - 1) for j in 1:(k + 1))
-    echart(:line, collect(x), 4 / π .* y)
+    echart(:line, collect(x), 4 / π .* y; showSymbol = false, lineStyle = (width = 3,))
 end
 
 #%% md id=section bg=nebula layout=section transition=slide
 @md"""
 ## Part two
 ### Media and timing
+"""
+
+#%% md id=video
+@md"""
+## Video on a slide
+
+:::: columns
+::: {.column width="58%"}
+![autoplay loop](slides_media/mandelbrot.mp4)
+:::
+::: column
+::: incremental
+- Image syntax, a clip path
+- `autoplay` starts it when the slide comes up
+- `loop`, `muted`, `nocontrols` as needed
+:::
+:::
+::::
+"""
+
+#%% md id=bgvideo bg=slides_media/mandelbrot.mp4 bgdim=0.45 layout=center transition=zoom
+@md"""
+## Full-bleed background
+
+### `bg=clip.mp4 bgdim=0.45` on the cell
 """
 
 #%% md id=morph_a

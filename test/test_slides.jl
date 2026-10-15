@@ -220,3 +220,23 @@ end
         @test NS._asset_response(req("bytes=20-"), p).status == 416
     end
 end
+
+@testset "relative media resolves to the asset route" begin
+    h = NS._asset_srcs("talk", "<img src=\"figs/a.png\"><video src=\"c.mp4\" poster=\"p.jpg\"></video>" *
+                               "<img src=\"/n/x/asset/b.png\"><img src=\"https://x/y.png\"><img src=\"data:image/png;base64,AA\">")
+    @test occursin("src=\"/n/talk/asset/figs/a.png\"", h) && occursin("poster=\"/n/talk/asset/p.jpg\"", h)
+    @test occursin("src=\"/n/x/asset/b.png\"", h) && occursin("src=\"https://x/y.png\"", h) && occursin("src=\"data:", h)
+    @test NS._asset_srcs("", "<img src=\"a.png\">") == "<img src=\"a.png\">"
+end
+
+@testset "column widths become flex widths" begin
+    h = KaimonSlate.ReportRender.markdown_html(":::: columns\n::: {.column width=\"40%\"}\nL\n:::\n::: {.column width=60}\nR\n:::\n::::")
+    @test occursin("style=\"flex:0 1 40%;max-width:40%\"", h)
+    @test occursin("style=\"flex:0 1 60%;max-width:60%\"", h)
+end
+
+@testset "only the hub itself may frame a notebook page" begin
+    g = Dict(NS._FRAME_GUARD)
+    @test g["X-Frame-Options"] == "SAMEORIGIN"
+    @test g["Content-Security-Policy"] == "frame-ancestors 'self'"
+end

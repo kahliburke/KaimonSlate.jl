@@ -3136,8 +3136,8 @@ body.presenting { overflow: hidden; }
 .deck-slide .cell.selected, .deck-slide .cell.multisel, .deck-slide .cell.dep-focus { outline: none !important; }
 .deck-slide .cell-row { display: flex; gap: calc(var(--u) * 48); align-items: flex-start; }
 .deck-slide .cell-row > .cell { flex: 1 1 0; min-width: 0; }
-.deck-slide .srcedit, .deck-slide .cm-editor { display: none; }
-.deck-slide.show-code .srcedit, .deck-slide.show-code .cm-editor { display: block; }
+.deck-slide .srcedit, .deck-slide .cm-editor, .deck-slide .srchost { display: none; }
+.deck-slide.show-code .srcedit, .deck-slide.show-code .cm-editor, .deck-slide.show-code .srchost { display: block; }
 .deck-slide .hostedph, .deck-slide .cell.deck-bindonly, .deck-slide .deck-ctl-hidden,
 .deck-slide:not(.show-code) .cell.cell-blank, .deck-slide .cell.cell-blank.codehidden { display: none !important; }
 .deck-slide .controls, .deck-slide .binds { user-select: none; font-size: .6em; }
@@ -3151,6 +3151,8 @@ body.presenting { overflow: hidden; }
 .deck-slide.show-code .cell.slide-split > .output, .deck-slide.show-code .cell.slide-split > .tables,
 .deck-slide.show-code .cell.slide-split > .echarts, .deck-slide.show-code .cell.slide-split > .anim { grid-column: 2; min-width: 0; }
 .deck-slide .output { max-height: none !important; font-size: .7em; }
+.deck-slide .cell > .output, .deck-slide .cell > .echarts, .deck-slide .cell > .tables,
+.deck-slide .cell > .controls, .deck-slide .cell > .anim { border: none !important; }
 .deck-slide .output img, .deck-slide .md img, .deck-slide .md video {
   max-width: 100%; max-height: calc(var(--u) * 760); height: auto; border-radius: calc(var(--u) * 10); }
 
@@ -3173,7 +3175,6 @@ body.presenting { overflow: hidden; }
 .deck-slide .md pre { font-size: .62em; }
 .deck-slide .md .columns { display: flex; gap: calc(var(--u) * 56); align-items: flex-start; }
 .deck-slide .md .columns > .column { flex: 1 1 0; min-width: 0; }
-.deck-slide .md .columns > .column[width] { flex: 0 0 auto; }
 #nb .md .columns { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
 #nb .md .columns > .column { flex: 1 1 240px; min-width: 0; }
 #nb .md .pause { border-top: 1px dashed var(--border); margin: 6px 0; opacity: .6; }
@@ -3223,7 +3224,7 @@ body.presenting { overflow: hidden; }
 .deck-slide .step.fade-right:not(.on) { transform: translateX(calc(var(--u) * 48)); }
 .deck-slide .step.zoom:not(.on) { transform: scale(.82); }
 .deck-slide .step.blur:not(.on) { transform: none; filter: blur(calc(var(--u) * 12)); }
-.deck-slide .step.highlight { border-radius: calc(var(--u) * 8); }
+.deck-slide .step.highlight { border-radius: calc(var(--u) * 8); width: fit-content; max-width: 100%; }
 .deck-slide .step.highlight.on { background-color: color-mix(in srgb, var(--deck-accent) 22%, transparent);
   box-shadow: 0 0 0 calc(var(--u) * 8) color-mix(in srgb, var(--deck-accent) 22%, transparent); }
 .deck-slide .step.fade-out.on { opacity: 0; transform: translateY(calc(var(--u) * -16)); visibility: hidden; }
@@ -3302,27 +3303,57 @@ html[data-deck-trans="rise"]::view-transition-new(deck-slide) { animation: deck-
 .deck-progress { color: var(--dim); font-size: .82rem; padding: 0 6px; font-variant-numeric: tabular-nums; white-space: pre; }
 body.deck-recording .deck-hud, body.deck-recording .deck-edge { display: none; }
 
+/* Overview: every slide as a card on its own background. */
+.deck-overview { position: fixed; inset: 0; z-index: 88; overflow-y: auto; padding: 4vh 4vw;
+  background: color-mix(in srgb, #05060c 88%, transparent); backdrop-filter: blur(8px); }
+.deck-ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; }
+.deck-ov-card { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 10px; cursor: pointer;
+  border: 1px solid #ffffff1a; background: var(--bg); color: var(--text); text-align: left; padding: 14px 16px;
+  display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; font: 14px/1.35 var(--deck-font, system-ui);
+  transition: transform .15s ease, border-color .15s ease; }
+.deck-ov-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+.deck-ov-card.on { outline: 2px solid var(--accent); outline-offset: 2px; }
+.deck-ov-card .slide-bg { position: absolute; inset: 0; z-index: 0; }
+.deck-ov-card > :not(.slide-bg) { position: relative; z-index: 1; }
+.deck-ov-card .n { position: absolute; top: 10px; left: 12px; font-size: 12px; opacity: .6; }
+.deck-ov-card b { font-size: 16px; font-weight: 700; color: var(--strong, var(--text)); }
+.deck-ov-card .s { opacity: .7; font-size: 12px; }
+.deck-ov-card.has-bg:not(.bgp-paper) { color: #e9ebf3; } .deck-ov-card.has-bg:not(.bgp-paper) b { color: #fff; }
+.deck-ov-card.bgp-paper { color: #2a2724; } .deck-ov-card.bgp-paper b { color: #111; }
+
+/* A presenter preview frame: only the slide. */
+body.deck-mirror .deck-hud, body.deck-mirror .deck-edge, body.deck-mirror .slide-autobar,
+body.deck-mirror #deckrec, body.deck-mirror .deck-cam { display: none !important; }
+body.deck-mirror .deck { background: #000; }
+body.deck-mirror.deck-mirror-end .deck-stage { visibility: hidden; }
+
 /* ── Presenter window (?present=1) ──────────────────────────────────────────── */
 body.is-presenter { overflow: hidden; }
 body.is-presenter > .topbar, body.is-presenter > .page, body.is-presenter > #doclauncher,
 body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !important; }
 #presenter { position: fixed; inset: 0; z-index: 90; background: var(--bg); color: var(--text); padding: 16px; }
-.pp-main { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; height: 100%; }
-.pp-left { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
-.pp-left .pp-cur { flex: 1 1 auto; }
+.pp-main { display: grid; grid-template-columns: 1.7fr 1fr; gap: 16px; height: 100%; }
+.pp-left { display: flex; flex-direction: column; gap: 10px; min-height: 0; justify-content: center; }
+.pp-frame { position: relative; border-radius: 10px; overflow: hidden; background: #000; border: 1px solid var(--border); }
+.pp-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.pp-left .pp-cur { width: 100%; aspect-ratio: 16 / 9; }
+.pp-side .pp-next { width: 100%; aspect-ratio: 16 / 9; flex: none; opacity: .9; }
+.pp-pace { font-size: .9rem; color: var(--dim); min-height: 1.2em; font-variant-numeric: tabular-nums; }
+.pp-pace.behind { color: #ff8a65; } .pp-pace.ahead { color: #81c784; }
+.pp-tools { display: flex; gap: 8px; }
+.pp-tools button { flex: 1; padding: 6px; background: var(--bg2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; cursor: pointer; }
+.pp-tools button.on { border-color: var(--accent); color: var(--accent); }
 .pp-steps { display: flex; gap: 6px; min-height: 8px; }
 .pp-steps i { flex: 1; height: 6px; border-radius: 99px; background: var(--bg3); }
 .pp-steps i.on { background: var(--accent); }
 .pp-reset { background: none; border: 1px solid var(--border); color: var(--dim); border-radius: 6px; cursor: pointer; }
-.pp-stage { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: auto; padding: 18px; }
-.pp-cur { font-size: 1.05rem; }
 .pp-side { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .pp-clock { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
 .pp-elapsed { font-size: 1.8rem; font-weight: 700; color: var(--strong); }
 .pp-wall { font-size: 1.1rem; color: var(--dim); align-self: center; }
 .pp-nexthd { display: flex; justify-content: space-between; align-items: baseline; color: var(--dim); font-size: .85rem; }
 .pp-nexttitle { color: var(--accent); }
-.pp-next { flex: 0 0 30%; opacity: .85; font-size: .8rem; }
 .pp-noteshd { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); }
 .pp-notes { flex: 1 1 auto; overflow: auto; background: var(--bg2); border: 1px solid var(--border);
   border-radius: 12px; padding: 14px; font-size: 1.15rem; line-height: 1.5; }
@@ -3332,11 +3363,6 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .pp-nav button { flex: 1; padding: 9px; background: var(--bg2); border: 1px solid var(--border);
   color: var(--text); border-radius: 9px; cursor: pointer; font-size: 1rem; }
 .pp-nav button:hover { background: var(--bg3); color: var(--accent); }
-.pp-cur .cell, .pp-next .cell { border: none !important; background: none !important; margin: 0 0 10px 0 !important; padding: 0 !important; }
-.pp-cur .cellhead, .pp-next .cellhead, .pp-cur .srcedit, .pp-next .srcedit,
-.pp-cur .cm-editor, .pp-next .cm-editor { display: none !important; }
-/* The presenter previews never show code, so the chip and every blank cell go (see `.deck-slide`). */
-.pp-cur .hostedph, .pp-next .hostedph, .pp-cur .cell.cell-blank, .pp-next .cell.cell-blank { display: none !important; }
 
 /* ── Document-metadata role cells (title / abstract / bibliography) ─────────────
    Authored as ordinary cells in natural flow; styled in place so what you see is what
