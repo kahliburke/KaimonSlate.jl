@@ -517,7 +517,11 @@
   // set in slide units, lines and points are heavier unless the cell chose a size, and the plot keeps
   // room for its labels. Applied on top of the cell's option, and undone when the cell goes home.
   function _presentChart(inst, u) {
+    if (_morphing(inst)) return;            // folded into the morph's own option (see `_applyCarry`)
     const spec = _specOf(inst); if (!spec) return;
+    try { inst.setOption(_presentOpts(spec, u)); inst.__deckStyled = true; } catch (e) {}
+  }
+  function _presentOpts(spec, u) {
     const px = n => Math.round(n * u);
     const font = getComputedStyle(document.querySelector('.deck') || document.body).getPropertyValue('--deck-font').trim();
     const axes = a => (Array.isArray(a) ? a : [a || {}]).map(() => ({
@@ -541,9 +545,25 @@
     if (!spec.grid && spec.xAxis) opt.grid = { containLabel: true, left: px(16), right: px(28), top: px(36), bottom: px(16) };
     if (!spec.xAxis) delete opt.xAxis;
     if (!spec.yAxis) delete opt.yAxis;
-    try { inst.setOption(opt); inst.__deckStyled = true; } catch (e) {}
+    return opt;
   }
+  // Plain-object deep merge (arrays merge by index), for laying slide styling over a chart's option.
+  function _merge(a, b) {
+    if (Array.isArray(b)) {
+      const base = Array.isArray(a) ? a : (a && typeof a === 'object' ? [a] : []);
+      return b.map((x, i) => _merge(base[i], x)).concat(base.slice(b.length));
+    }
+    if (b && typeof b === 'object') {
+      const out = Object.assign({}, a && typeof a === 'object' && !Array.isArray(a) ? a : {});
+      for (const k of Object.keys(b)) out[k] = _merge(out[k], b[k]);
+      return out;
+    }
+    return b === undefined ? a : b;
+  }
+  // A chart mid-morph is left alone: any other update to it ends the animation where it stands.
+  function _morphing(inst) { return inst.__morphUntil && performance.now() < inst.__morphUntil; }
   function _sizeChart(c, w, h) {
+    if (_morphing(c.inst)) return;
     w = Math.max(80, Math.round(w)); h = Math.max(60, Math.round(h));
     if (!_origStyle.has(c.dom)) _origStyle.set(c.dom, [c.dom.style.width, c.dom.style.height]);
     if (c.dom.style.width === w + 'px' && c.dom.style.height === h + 'px') return;
@@ -620,6 +640,7 @@
     for (const inst of _cellCharts(el)) {
       // Left mid-morph: the chart still holds the previous slide's figure.
       if (inst.__morphing) { cancelAnimationFrame(inst.__morphing); inst.__morphing = 0; inst.__deckStyled = true; }
+      inst.__morphUntil = 0;
       if (inst.__deckStyled) {
         const sp = _specOf(inst);
         if (sp) try { inst.setOption(sp, { notMerge: true }); window.slateColorSeries && slateColorSeries(inst); } catch (e) {}
@@ -806,11 +827,22 @@
       const inst = (window.charts && window.charts[dest] || [])[0];
       if (!inst) continue;
       const own = _specOf(inst); if (!own) continue;
+      const slide = document.querySelector('#deckstage .deck-slide');
+      const u = parseFloat(slide && slide.style.getPropertyValue('--u')) || 1;
       try {
-        inst.setOption(_withMorph(opt, false), { notMerge: true });
+        inst.setOption(_merge(_withMorph(opt, false), _presentOpts(opt, u)), { notMerge: true });
         inst.__morphing = requestAnimationFrame(() => {
           inst.__morphing = 0;
-          try { inst.setOption(_withMorph(own, true), { notMerge: true }); } catch (e) {}
+          inst.__morphUntil = performance.now() + 1250;
+          try {
+            inst.setOption(_merge(_withMorph(own, true), _presentOpts(own, u)), { notMerge: true });
+            inst.__deckStyled = true;
+          } catch (e) {}
+          setTimeout(() => {
+            inst.__morphUntil = 0;
+            if (window.slateColorSeries) slateColorSeries(inst);
+            if (D.open) _relayout();
+          }, 1300);
         });
       } catch (e) {}
     }
