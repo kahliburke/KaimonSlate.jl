@@ -177,6 +177,21 @@ next to the notebook.
 A heading or image that appears on two consecutive slides moves and resizes into its new place.
 Name anything else to morph it the same way: `::: {.morph name=plot}`, or tag a cell `morph=plot`.
 
+Two chart cells on consecutive slides tagged with the same `morph=` name are treated as one figure
+changing form: the marks of the first travel into the second. Give data items a shared `groupId` to say
+which go where; several items with one `groupId` gather into the single item that carries it on the
+next slide, so points can collect into the histogram bar they fall in:
+
+```julia
+#%% code id=strip morph=dist
+echart(; xAxis = (type = :value,), yAxis = (type = :value, show = false),
+       series = [(type = :scatter, data = [(value = [v, rand()], groupId = "b$(bin(v))") for v in draws])])
+
+#%% code id=hist morph=dist
+echart(; xAxis = (type = :value,), yAxis = (type = :value,),
+       series = [(type = :bar, data = [(value = [centre(b), count(b)], groupId = "b$b") for b in bins])])
+```
+
 ## How cells become slides
 
 Segmentation follows a small set of boundary rules:

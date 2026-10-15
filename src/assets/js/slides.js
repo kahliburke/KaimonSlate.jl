@@ -642,10 +642,12 @@
     const kind = _transKind(dir > 0 ? i : D.idx);
     // Announced from inside the swap: with a view transition the swap runs after this function
     // returns, and listeners must hear the slide that is actually up.
+    const carry = _chartCarry(D.idx, i);
     const swap = () => {
       D.swapPending = false; D.vt = null;
       D.idx = i; D.step = 0;
       _mountSlide(i);
+      _applyCarry(carry);
       if (atEnd) _applyStep(D.total, true);
       _emit('slide');
       if (!fromRemote) _broadcast();
@@ -675,6 +677,45 @@
         delete root.dataset.deckTrans; delete root.dataset.deckDir;
         newKeys.forEach(el => el.style.removeProperty('view-transition-name'));
       });
+    }
+  }
+  // Data morph. Chart cells on consecutive slides tagged with the same `morph=name` are one figure
+  // changing form: the incoming chart is first drawn with the outgoing chart's option, then given its own
+  // with ECharts' universal transition, so marks travel to their new places (points gathering into bars,
+  // a line becoming columns). Marks pair up by series `id`, or across series by `groupId` on data items.
+  function _chartCarry(from, to) {
+    const cells = (nbState && nbState.cells) || [];
+    const keyOf = id => { const t = _tagMap(cells.find(x => x.id === id)).morph; return t && t !== true ? t : null; };
+    const want = new Map();
+    for (const id of (D.slides[to] || { ids: [] }).ids) { const k = keyOf(id); if (k) want.set(k, id); }
+    const out = [];
+    for (const id of (D.slides[from] || { ids: [] }).ids) {
+      const k = keyOf(id), dest = k && want.get(k);
+      const opt = dest && _specOf((window.charts && window.charts[id] || [])[0]);
+      if (opt) out.push({ dest, opt });
+    }
+    return out;
+  }
+  // The option the page last applied to a chart (core.js `_geoSafeSetOption` keeps it as JSON). The
+  // instance's own `getOption()` is its internal model, which cannot be handed back to `setOption`.
+  function _specOf(inst) {
+    if (!inst || !inst.__slateOptSig) return null;
+    try { return JSON.parse(inst.__slateOptSig); } catch (e) { return null; }
+  }
+  function _withMorph(opt, anim) {
+    const o = Object.assign({}, opt, { animation: anim, animationDurationUpdate: 1100, animationEasingUpdate: 'cubicInOut' });
+    o.series = (opt.series || []).map(x => Object.assign({}, x, { universalTransition: { enabled: true, divideShape: 'split' } }));
+    return o;
+  }
+  function _applyCarry(carry) {
+    for (const { dest, opt } of carry) {
+      const inst = (window.charts && window.charts[dest] || [])[0];
+      if (!inst) continue;
+      const own = _specOf(inst); if (!own) continue;
+      try {
+        inst.setOption(_withMorph(opt, false), { notMerge: true });
+        requestAnimationFrame(() => { try { inst.setOption(_withMorph(own, true), { notMerge: true }); } catch (e) {} });
+      } catch (e) {}
     }
   }
   function _fallbackEnter(kind, dir) {

@@ -388,6 +388,13 @@ end
 function _slate_normalize!(opt::Dict{String,Any})
     t = get(opt, "title", nothing)
     (t isa AbstractString || t isa Symbol) && (opt["title"] = Dict{String,Any}("text" => String(t)))
+    # An axis given as a bare type (`yAxis = :log`, or `(type = :value)` written without its trailing
+    # comma, which Julia reads as an assignment) names the axis type. ECharts would otherwise get a
+    # string where it wants an object and silently draw no series.
+    for ax in ("xAxis", "yAxis")
+        a = get(opt, ax, nothing)
+        (a isa AbstractString || a isa Symbol) && (opt[ax] = Dict{String,Any}("type" => String(a)))
+    end
     s = get(opt, "series", nothing)
     if s isa AbstractVector
         for e in s

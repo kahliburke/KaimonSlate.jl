@@ -21,6 +21,13 @@ const RE = ReportEngine
         @test o2["series"][1]["data"] == [[1.0, 3.0], [2.0, 4.0]]
     end
 
+    @testset "an axis given as a bare type is that axis type" begin
+        @test RE.echart(:line, [1, 2], [3, 4]; yAxis = :log).option["yAxis"] == Dict("type" => "log")
+        # `(type = :value)` without its comma is an assignment, so the axis arrives as a bare symbol
+        o = RE.echart(; xAxis = (type = :value,), yAxis = (type = :value), series = [(type = :bar, data = [[1, 2]])]).option
+        @test o["yAxis"] == Dict("type" => "value")
+    end
+
     @testset "Express: top-level component kwargs go on the OPTION, not the series" begin
         # The documented log-axis pattern — regression for the trap where `yAxis` was spliced into the
         # series and silently did nothing.

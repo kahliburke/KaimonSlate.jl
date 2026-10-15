@@ -155,6 +155,39 @@ let t = collect(range(0, 12; length = 600)), γ = 0.25, ωd = 2.0
     echart(s...; legend = false, height = 420)
 end
 
+#%% md id=draws
+@md"""
+## Two hundred and forty draws
+"""
+
+#%% code id=draws_data hidecode
+using Random
+draws = randn(MersenneTwister(7), 240)
+jitter = rand(MersenneTwister(11), 240)
+edges = collect(range(-3, 3; length = 13))
+binof(v) = clamp(searchsortedlast(edges, v), 1, length(edges) - 1)
+
+#%% code id=draws_strip morph=dist
+echart(; xAxis = (type = :value, min = -3, max = 3), yAxis = (type = :value, min = 0, max = 1, show = false),
+       series = [(type = :scatter, symbolSize = 10, itemStyle = (opacity = 0.85,),
+                  data = [(value = [v, j], groupId = "b$(binof(v))") for (v, j) in zip(draws, jitter)])],
+       height = 420)
+
+#%% md id=histo
+@md"""
+## Gathered into a histogram
+"""
+
+#%% code id=histo_chart morph=dist
+let nb = length(edges) - 1
+    counts = [count(v -> binof(v) == b, draws) for b in 1:nb]
+    centers = [(edges[b] + edges[b+1]) / 2 for b in 1:nb]
+    echart(; xAxis = (type = :value, min = -3, max = 3), yAxis = (type = :value,),
+           series = [(type = :bar, barWidth = "80%",
+                      data = [(value = [centers[b], counts[b]], groupId = "b$b") for b in 1:nb])],
+           height = 420)
+end
+
 #%% md id=section bg=nebula layout=section transition=slide
 @md"""
 ## Part two

@@ -1246,7 +1246,10 @@ See also `save_asset`, `FileUpload`."""),
         around a list (one item per click), and a `. . .` line (the rest of the cell is one step).
         COLUMNS: `:::: columns` / `::: {.column width="40%"}` … `:::` / `::::`. MEDIA:
         `![autoplay loop](clip.mp4)` is a video that starts when it comes on screen. MORPH: a heading
-        or image that appears on two consecutive slides glides between them. REACTIVE builds:
+        or image that appears on two consecutive slides glides between them. DATA MORPH: two chart cells
+        on consecutive slides tagged with the same `morph=name` are one figure changing form; data items
+        sharing a `groupId` travel to the item with that `groupId` on the next slide (points gathering
+        into histogram bars, a line becoming columns). REACTIVE builds:
         `@bind k SlideSteps(n)` follows the slide's step counter (0…n) so a figure can build from
         computed state. See also `SlideSteps`, `cell tags`, `front matter`."""),
     SlateApiEntry("math slides", "Document",
