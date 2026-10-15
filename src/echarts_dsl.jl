@@ -514,8 +514,11 @@ function _steps_wire(steps)
             d[k] = Float64[r[1], r[2]]
         end
         band = st isa AbstractDict ? get(st, "band", false) : (hasproperty(st, :band) && st.band)
-        band === true && (d["band"] = true)
         isempty(d) && throw(ArgumentError("steps: each step needs an `x` and/or `y` window"))
+        if band === true
+            haskey(d, "x") || throw(ArgumentError("steps: a `band` step shades an `x` range, so it needs one"))
+            d["band"] = true
+        end
         push!(out, d)
     end
     return out
