@@ -545,8 +545,12 @@
   function _presentOpts(spec, u) {
     const px = n => Math.round(n * u);
     const font = getComputedStyle(document.querySelector('.deck') || document.body).getPropertyValue('--deck-font').trim();
-    const axes = a => (Array.isArray(a) ? a : [a || {}]).map(() => ({
-      axisLabel: { fontSize: px(20), margin: px(12) }, nameTextStyle: { fontSize: px(22) },
+    const axes = (a, vertical) => (Array.isArray(a) ? a : [a || {}]).map(ax => ({
+      axisLabel: { fontSize: px(20), margin: px(12) },
+      // A y-axis name sits above the axis, centred on it, and `containLabel` leaves no room for it:
+      // set from the axis line rightwards it stays on the canvas.
+      nameTextStyle: Object.assign({ fontSize: px(22) },
+        vertical && (!ax.nameLocation || ax.nameLocation === 'end') && !(ax.nameTextStyle && ax.nameTextStyle.align) ? { align: 'left' } : {}),
       axisTick: { length: px(6) },
     }));
     const series = (spec.series || []).map(x => {
@@ -557,7 +561,7 @@
     });
     const opt = {
       textStyle: font ? { fontFamily: font } : {},
-      xAxis: axes(spec.xAxis), yAxis: axes(spec.yAxis), series,
+      xAxis: axes(spec.xAxis, false), yAxis: axes(spec.yAxis, true), series,
       tooltip: { textStyle: { fontSize: px(18) } },
     };
     // Only a legend the chart has: setting one where the cell turned it off would add it.

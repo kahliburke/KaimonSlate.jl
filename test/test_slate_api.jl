@@ -118,6 +118,10 @@ include("stubgate.jl")
         many = NS.slate_api_reference("echart @bind slate_table")
         @test occursin("### echart", many) && occursin("### @bind", many) && occursin("### slate_table", many)
         @test NS.slate_api_reference("echart, @bind") == NS.slate_api_reference("echart @bind")
+        # Entry names of several words batch too, matched longest first.
+        multi = NS.slate_api_reference("cell tags front matter math slides")
+        @test all(n -> occursin("### $n", multi), ("cell tags", "front matter", "math slides"))
+        @test startswith(NS.slate_api_reference("front matter"), "### front matter")
         # PARTIAL batch: a named helper is still served, and the token that resolved to nothing says
         # so — never a bare "no match" that silently drops what the caller correctly named.
         part = NS.slate_api_reference("echart binding")

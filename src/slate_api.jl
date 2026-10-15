@@ -1235,7 +1235,9 @@ See also `save_asset`, `FileUpload`."""),
         level is configurable in Settings), so a well-structured document usually needs no extra
         markup. For explicit control, tag a cell `slide` (force a new slide here) or `notes` (speaker
         notes — presenter view only, never rendered in the deck or the article).
-        Present live in the browser (▶ Present) or Export PDF → slides for a 16:9 deck.
+        Present live in the browser (▶ Present) or Export PDF → slides for a 16:9 deck. TITLE SLIDE: the
+        first cell, `# Title` with an optional `### subtitle`, tagged `layout=title` (and `title` if the PDF
+        should also take it as the document title; keep math out of a `title` cell's subtitle).
         SLIDE TAGS (on any cell of the slide; the first one wins): `layout=title|section|center|cover`,
         `bg=aurora|nebula|midnight|ember|ocean|slate|paper` or a colour, a space-free gradient, or an
         image/video path (`bgdim=0.5` darkens it), `transition=fade|slide|zoom|rise|none`, `auto=<secs>`
@@ -1260,37 +1262,60 @@ See also `save_asset`, `FileUpload`."""),
     SlateApiEntry("math slides", "Document",
         "Explain mathematics on slides: named terms, equations that build, derivations that transform in place.",
         ["math", "equation", "derivation", "latex", "katex", "explain", "physics", "3blue1brown", "term", "build", "morph"],
-        "\\term{name}{tex} · \\step{tex} · \\stepat{n}{tex} · \\hl · \\cancelat{n}{tex} · ::: derive",
-        """Macros usable in any `\$…\$`/`\$\$…\$\$` math (notebook, deck, presenter; print unwraps them):
-        - `\\term{name}{tex}` names a piece. Its colour follows the order terms first appear in the notebook,
-          so give each physical quantity ONE name and use it everywhere (prose, every equation, chart series).
-          `\\termc{name}{blue}{tex}` pins a colour (blue yellow red green purple orange teal pink lime sky, or hex
-          without `#`). Names are identifiers: letters, digits, `_`, `-`.
-        - `\\step{tex}` arrives on the next click; `\\stepat{n}{tex}` on step n. Put a leading operator INSIDE
-          with an empty group so spacing stays binary: `m\\ddot x \\stepat{1}{{}+ \\term{damping}{c\\dot x}}`.
-        - `\\hl{tex}` / `\\hlat{n}{tex}` light a piece up; `\\cancelat{n}{tex}` strikes it through on step n;
-          `\\fadeat{n}{tex}` removes it on step n.
-        - `\\braceat{n}{tex}{label}` (`\\obraceat` above) draws a labelled brace under the piece on step n —
-          the way to say what a term IS. `\\focusat{n}{tex}` (or `::: {.step .focus}` for a block) dims the
-          rest of the slide on step n, keeping lit whatever arrives on that step.
-        - `\\note{text}` sets a small dim annotation beside an equation saying what the step did
-          (`… = 0 \\qquad \\note{divide by m}`); in a derive block each equation carries its own.
-        A derivation reads best as small moves, one per equation, each named by a `\\note`: divide through,
-        name a combination, substitute a guess, factor, cancel. Split a long derivation over several
-        slides; the last equation of one slide as the first of the next carries the terms across.
-        Derivation in place: a `::: derive` block holding display equations, one per paragraph (blank line
-        between `\$\$…\$\$` lines). One equation shows at a time; each click turns it into the next. Terms that
-        share a name in consecutive equations (matched by name and occurrence) glide to their new place; the
-        rest crossfades. The same matching runs between consecutive SLIDES, so an equation can carry over.
-        Figures: a chart series whose `name` equals a term name takes that term's colour
-        (`series(:line, t, x; name="x")` beside `\\term{x}{x(t)}`). Drive a figure's build with
-        `@bind k SlideSteps(n)` on the same slide, in step with the equation.
-        Composition that explains well: one idea per slide; introduce each term in prose with its name and
-        colour before it is manipulated; build an equation from its terms (`\\stepat`) before deriving with
-        it; keep each derive block to 3 to 6 equations; end on the result next to a figure that shows it.
-        Pair explanatory text with a step (`::: {.step step=2}`) when it describes the term arriving on that
-        step. Example: `examples/slides_studio.jl` (slides "Three forces", "Looking for the motion",
-        "The motion"). See also `slides`, `SlideSteps`."""),
+        "\\term{name}{tex} · \\stepat{n}{tex} · \\braceat{n}{tex}{label} · \\note{text} · ::: derive",
+        """Macros usable in any `\$…\$`/`\$\$…\$\$` math (notebook, deck, presenter). They nest freely
+        (`\\stepat{1}{\\term{damping}{c\\dot x}}`, a `\\term` inside a `\\term`).
+        - `\\term{name}{tex}` names a piece. Colours follow the order terms first appear in the notebook, so
+          give each quantity ONE name and use it everywhere: prose, every equation, and the `name` of the
+          chart series that plots it (the series takes the colour). `\\termc{name}{blue}{tex}` pins a colour
+          (blue yellow red green purple orange teal pink lime sky, or hex without `#`). Names: letters,
+          digits, `_`, `-`. Print (PDF) shows terms uncoloured.
+        - `\\step{tex}` arrives on the next step, `\\stepat{n}{tex}` on step n. Put an operator that joins
+          the piece INSIDE the step; before a binary `+`/`-` add an empty group so spacing stays binary:
+          `m\\ddot x \\stepat{1}{{}+ \\term{damping}{c\\dot x}}`. A relation needs none: `\\stepat{1}{= -mg}`.
+        - `\\hl{tex}`/`\\hlat{n}{tex}` light a piece up; `\\cancelat{n}{tex}` strikes it through on step n;
+          `\\fadeat{n}{tex}` removes it on step n; `\\focusat{n}{tex}` (or `::: {.step .focus}` for a block)
+          dims the rest of the slide on step n, keeping lit whatever arrives on that step.
+        - `\\braceat{n}{tex}{label}` (`\\obraceat` above) draws a labelled brace under the piece on step n.
+          The label is TEXT: put math in it as `\$…\$` (`{mass \$\\times\$ acceleration}`), and keep it about as
+          wide as its term, because a wider label pushes the rest of the equation apart.
+        - `\\note{text}` sets a small dim annotation beside an equation saying what a step did. It is TEXT
+          too: write the math after it, outside: `… = 0 \\qquad \\note{use} \; \\omega^2 = g/L`.
+        STEPS. A slide has ONE step counter. Every build item on it takes a step: in document order each
+        item without an explicit number takes the next one, `stepat-n`/`step=n` items take step n, and the
+        slide's step count is the largest. Items sharing a number arrive together. In a `::: derive` block
+        the first equation shows from step 0 and EACH LATER equation is one auto-numbered item, so a 4-equation
+        derive takes 3 steps; a following `::: {.step}` paragraph without a number takes the step after it,
+        and `::: {.step step=3}` arrives WITH the third transform. `@bind k SlideSteps(n)` follows the same
+        counter (`k = min(step, n)`) and adds no items; `echart(…; steps=[…])` likewise (window i shows on
+        step i). Prefer explicit numbers when a caption must land with a particular equation.
+        DERIVE. `::: derive` holds display equations, one per paragraph (blank line between). One shows at a
+        time; each step turns it into the next. Pieces sharing a `\\term` name in consecutive equations (by
+        name and occurrence) glide to their new place; the rest crossfades. The same matching runs between
+        consecutive SLIDES, so making the last equation of one slide the first of the next carries it over.
+        Small moves explain best: one per equation, each with a `\\note` (divide through, name a combination,
+        substitute a guess, factor, cancel). Split a long derivation over slides of 3 to 6 equations.
+        FIGURES. Put the chart in its own code cell; tag it `column=2` to sit beside the markdown cell before
+        it (a markdown `::: columns` block cannot hold a code cell). Put `@bind k SlideSteps(n)` in its own
+        cell tagged `hidecode` (it is hidden on slides; in the notebook it is a slider for scrubbing).
+        Use `SlideSteps` when the figure's CONTENT changes per step (a series appears: recomputed), and
+        `echart(…; steps=…)` when only the VIEW changes (zoom, shaded band: no recompute).
+        CHECK. Markdown cells render on the page, so a TeX error is not reported back; `slate.export_pdf`
+        with `layout="slides"` shows each slide as printed (final state, uncoloured terms).
+        EXAMPLE (one slide, then a figure beside it):
+        ```
+        #%% md id=forces layout=center
+        ## Three forces
+        \$\$\\braceat{1}{\\term{inertia}{m\\ddot x}}{inertia} \\stepat{2}{{}+ \\term{damping}{c\\,\\dot x}} = 0\$\$
+        ::: {.step step=2}
+        \$\\term{damping}{c\\,\\dot x}\$ resists motion
+        :::
+        #%% code id=k hidecode
+        @bind k SlideSteps(2)
+        #%% code id=plot column=2
+        echart(series(:line, t, x; name = "inertia"), (k >= 2 ? [series(:line, t, v; name = "damping")] : [])...)
+        ```
+        Worked deck: `examples/slides_studio.jl`. See also `slides`, `SlideSteps`, `echart`."""),
     SlateApiEntry("markdown", "Document",
         "Prose cells (`#%% md`) with `{{ expr }}` interpolation of live values; `@md` is their skin.",
         ["md", "text", "prose", "interpolation", "narrative", "template", "standalone"],
@@ -1462,6 +1487,24 @@ The `slate.api` tool's text.
 - anything else → entries whose name/category/keywords/doc contain every word of the topic; failing
   that, a "did you mean" list of the nearest entries rather than a dead end.
 """
+# The entries named by a run of words, each name being the longest run that matches one; `nothing` if
+# any word is left over.
+function _api_entries_in(tokens)
+    out = SlateApiEntry[]; i = 1
+    while i <= length(tokens)
+        hit = nothing
+        for j in min(length(tokens), i + 3):-1:i
+            e = slate_api_entry(join(tokens[i:j], " "))
+            if e !== nothing
+                hit = (e, j); break
+            end
+        end
+        hit === nothing && return nothing
+        push!(out, hit[1]); i = hit[2] + 1
+    end
+    return out
+end
+
 function slate_api_reference(topic::AbstractString = "")
     t = strip(lowercase(String(topic)))
     io = IOBuffer()
@@ -1483,20 +1526,19 @@ function slate_api_reference(topic::AbstractString = "")
     # An exact helper NAME wins over everything else — `slate.api("display")` means the helper, even
     # though "Display" is also a category.
     tokens = filter(!isempty, split(replace(t, ',' => ' ')))
-    if length(tokens) == 1
-        e = slate_api_entry(t)
-        if e !== nothing
-            _render_entries(io, [e])
-            return String(take!(io))
-        end
+    e = slate_api_entry(t)                         # the whole topic, which may be a multi-word name
+    if e !== nothing
+        _render_entries(io, [e])
+        return String(take!(io))
     end
     # BATCHED drill-down: every token naming an entry → return them all. Commas optional, so
-    # `slate_api("echart, @bind")` and `slate_api("echart @bind")` both work. Only when EVERY token
-    # resolves — otherwise the topic is prose ("warm region"), handled as a phrase query below.
+    # `slate_api("echart, @bind")` and `slate_api("echart @bind")` both work. Entry names can be several
+    # words ("math slides", "front matter"), so runs of words are matched longest first. Only when EVERY
+    # word is accounted for — otherwise the topic is prose ("warm region"), a phrase query below.
     if length(tokens) > 1
-        found = [slate_api_entry(tok) for tok in tokens]
-        if all(!isnothing, found)
-            _render_entries(io, SlateApiEntry[e for e in found])
+        found = _api_entries_in(tokens)
+        if found !== nothing
+            _render_entries(io, found)
             return String(take!(io))
         end
     end
