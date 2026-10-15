@@ -1240,8 +1240,9 @@ See also `save_asset`, `FileUpload`."""),
         `bg=aurora|nebula|midnight|ember|ocean|slate|paper` or a colour, a space-free gradient, or an
         image/video path (`bgdim=0.5` darkens it), `transition=fade|slide|zoom|rise|none`, `auto=<secs>`
         (advance by itself), `class=<css>`. A cell tagged `step` (or `step=N`) appears on a click.
-        BUILDS in markdown: `::: step` … `:::` (effects as classes: `{.step .fade-left}`, `.zoom`,
-        `.blur`, `.highlight`, `.fade-out`, `.dim`, `.strike`; `step=3` orders it), `::: incremental`
+        BUILDS in markdown: `::: step` … `:::` (effects as classes: `{.step .fade-left}`, `.fade-right`,
+        `.fade-down`, `.fade`, `.zoom`, `.blur`; on content already showing `.highlight`, `.strike`,
+        `.fade-out`; `.dim` once passed; `step=3` orders it), `::: incremental`
         around a list (one item per click), and a `. . .` line (the rest of the cell is one step).
         COLUMNS: `:::: columns` / `::: {.column width="40%"}` … `:::` / `::::`. MEDIA:
         `![autoplay loop](clip.mp4)` is a video that starts when it comes on screen. MORPH: a heading

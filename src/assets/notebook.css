@@ -3226,23 +3226,35 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 .deck-slide.bgp-paper { --deck-fg: #2a2724; --deck-strong: #111; --deck-dim: #6d665c; --deck-accent: #b4532a; --deck-accent2: #d08a3a; }
 .deck-slide.bg-media .md { text-shadow: 0 1px calc(var(--u) * 14) #0009; }
 
-/* Builds. A step keeps its space while hidden, so the slide does not reflow as it builds. */
-.deck-slide .step { transition: opacity .45s ease, transform .5s cubic-bezier(.2,.7,.2,1), filter .45s ease,
-  color .35s ease, background-color .35s ease; }
-.deck-slide .step:not(.on):not(.highlight):not(.fade-out) { opacity: 0; transform: translateY(calc(var(--u) * 24)); visibility: hidden; }
-.deck-slide .step.fade:not(.on) { transform: none; }
-.deck-slide .step.fade-left:not(.on) { transform: translateX(calc(var(--u) * -48)); }
-.deck-slide .step.fade-right:not(.on) { transform: translateX(calc(var(--u) * 48)); }
-.deck-slide .step.zoom:not(.on) { transform: scale(.82); }
-.deck-slide .step.blur:not(.on) { transform: none; filter: blur(calc(var(--u) * 12)); }
+/* Builds. A step keeps its space while hidden, so the slide does not reflow as it builds.
+   An entering step starts from `--step-from` (each effect sets only that) and settles to its place.
+   Visibility switches on at once when a step appears, and off only after the fade when it leaves,
+   so leaving animates too. `highlight`, `strike` and `fade-out` are on the slide from the start and
+   change on their step instead. */
+.deck-slide .step {
+  --step-from: translateY(calc(var(--u) * 28)); --step-filter: none; --step-ease: cubic-bezier(.2, .7, .2, 1);
+  transition: opacity .5s ease, transform .6s var(--step-ease), filter .5s ease,
+    color .35s ease, background-color .35s ease, box-shadow .35s ease, visibility 0s linear 0s; }
+.deck-slide .step.fade { --step-from: none; }
+.deck-slide .step.fade-up { --step-from: translateY(calc(var(--u) * 28)); }
+.deck-slide .step.fade-down { --step-from: translateY(calc(var(--u) * -28)); }
+.deck-slide .step.fade-left { --step-from: translateX(calc(var(--u) * -80)); }
+.deck-slide .step.fade-right { --step-from: translateX(calc(var(--u) * 80)); }
+.deck-slide .step.zoom { --step-from: scale(.6); --step-ease: cubic-bezier(.34, 1.4, .64, 1); transform-origin: left center; }
+.deck-slide:is([data-layout="center"], [data-layout="title"]) .step.zoom { transform-origin: center; }
+.deck-slide .step.blur { --step-from: none; --step-filter: blur(calc(var(--u) * 14)); }
+.deck-slide .step:not(.on):not(.highlight):not(.strike):not(.fade-out),
+.deck-slide .step.fade-out.on {
+  opacity: 0; transform: var(--step-from); filter: var(--step-filter); visibility: hidden;
+  transition: opacity .4s ease, transform .5s ease, filter .4s ease, visibility 0s linear .5s; }
+.deck-slide .step.fade-out { --step-from: translateY(calc(var(--u) * -20)); }
 .deck-slide .step.highlight { border-radius: calc(var(--u) * 8); width: fit-content; max-width: 100%; }
 .deck-slide .step.highlight.on { background-color: color-mix(in srgb, var(--deck-accent) 22%, transparent);
   box-shadow: 0 0 0 calc(var(--u) * 8) color-mix(in srgb, var(--deck-accent) 22%, transparent); }
-.deck-slide .step.fade-out.on { opacity: 0; transform: translateY(calc(var(--u) * -16)); visibility: hidden; }
 .deck-slide .step.dim.on:not(.current) { opacity: .35; }
-.deck-slide .step.dim.on:not(.current) .step.dim { opacity: 1; }
-.deck-slide .step.strike.on { text-decoration: line-through; text-decoration-color: var(--deck-accent); opacity: .6; }
-.deck-slide .step:not(.on) { transition-delay: 0s; }
+.deck-slide .step.strike { text-decoration: line-through; text-decoration-color: transparent;
+  transition: text-decoration-color .35s ease, opacity .35s ease; }
+.deck-slide .step.strike.on { text-decoration-color: var(--deck-accent); opacity: .55; }
 
 /* Transitions without the View Transitions API. */
 .deck-slide.enter-fade { opacity: 0; }

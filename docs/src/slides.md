@@ -103,9 +103,10 @@ Cells tagged `column=2` still sit beside the cell before them, on a slide as in 
 A slide can bring its content in a piece at a time. `→` walks the steps, then moves to the next
 slide; going back to a slide lands on its finished state.
 
-- `::: step` … `:::` appears on its own click. Add an effect as a class: `{.step .fade-left}`,
-  `.fade-right`, `.zoom`, `.blur`, `.highlight` (lights up), `.fade-out` (leaves), `.dim` (dims once
-  passed), `.strike`. `step=3` puts it on a specific step.
+- `::: step` … `:::` appears on its own click, rising into place. Choose how with a class:
+  `{.step .fade}`, `.fade-left`, `.fade-right`, `.fade-down`, `.zoom`, `.blur`. Three effects act on
+  content that is already showing: `.highlight` lights it up, `.strike` crosses it out, `.fade-out`
+  takes it away. `.dim` dims an item once the next one arrives. `step=3` puts it on a specific step.
 - `::: incremental` around a list brings in one item per click.
 - A line with `. . .` reveals the rest of the cell in one step.
 - A cell tagged `step` (or `step=2`) appears as a whole.
