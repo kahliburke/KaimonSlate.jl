@@ -1550,6 +1550,7 @@ const SLATE_TEX_MACROS = {
   '\\cancelat': '\\htmlClass{step mcancel stepat-#1}{\\cancel{#2}}',
   '\\fadeat':   '\\htmlClass{step fade-out stepat-#1}{#2}',
   '\\focusat':  '\\htmlClass{step focus stepat-#1}{#2}',
+  '\\note':     '\\htmlClass{eqnote}{\\text{#1}}',
   '\\brace':    '\\htmlClass{step brace}{\\underbrace{#1}_{\\htmlClass{brace-label}{\\text{#2}}}}',
   '\\braceat':  '\\htmlClass{step brace stepat-#1}{\\underbrace{#2}_{\\htmlClass{brace-label}{\\text{#3}}}}',
   '\\obraceat': '\\htmlClass{step brace stepat-#1}{\\overbrace{#2}^{\\htmlClass{brace-label}{\\text{#3}}}}',

@@ -665,13 +665,14 @@ end
 # `\cancelat` keeps its cancel line and the brace macros keep their brace and label.
 const _MATH_MACROS = Dict("term" => 2, "termc" => 3, "step" => 1, "stepat" => 2, "hl" => 1, "hlat" => 2,
                           "cancelat" => 2, "fadeat" => 2, "focusat" => 2, "brace" => 2, "braceat" => 3,
-                          "obraceat" => 3)
+                          "obraceat" => 3, "note" => 1)
 # The braces print as braces, with their label.
 function _print_math_macro(name, args)
     name == "cancelat" && return string("\\cancel{", args[end], "}")
     name == "brace"    && return string("\\underbrace{", args[1], "}_{\\text{", args[2], "}}")
     name == "braceat"  && return string("\\underbrace{", args[2], "}_{\\text{", args[3], "}}")
     name == "obraceat" && return string("\\overbrace{", args[2], "}^{\\text{", args[3], "}}")
+    name == "note"     && return string("\\text{", args[1], "}")
     return string("{", args[end], "}")
 end
 function _plain_math_macros(src::AbstractString)

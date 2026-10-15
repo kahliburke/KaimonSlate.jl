@@ -128,14 +128,44 @@ Nothing pushes from outside: the three forces balance
 
 #%% md id=derivation layout=center
 @md raw"""
-## Looking for the motion
+## Naming the rates
 
 ::: derive
 $$\term{inertia}{m\ddot x} + \term{damping}{c\,\dot x} + \term{spring}{k\,x} = 0$$
 
+$$\term{inertia}{\ddot x} + \term{damping}{\tfrac{c}{m}\,\dot x} + \term{spring}{\tfrac{k}{m}\,x} = 0 \qquad \note{divide by m}$$
+
+$$\term{inertia}{\ddot x} + \term{damping}{2\gamma\,\dot x} + \term{spring}{\omega_0^2\,x} = 0 \qquad \note{name the rates}\;\; \term{damping}{2\gamma = \tfrac{c}{m}},\; \term{spring}{\omega_0^2 = \tfrac{k}{m}}$$
+:::
+"""
+
+#%% md id=derive_guess layout=center
+@md raw"""
+## Guessing an exponential
+
+::: derive
 $$\term{inertia}{\ddot x} + \term{damping}{2\gamma\,\dot x} + \term{spring}{\omega_0^2\,x} = 0$$
 
+$$\term{inertia}{r^2}\,\term{ert}{e^{rt}} + \term{damping}{2\gamma\, r}\,\term{ert}{e^{rt}} + \term{spring}{\omega_0^2}\,\term{ert}{e^{rt}} = 0 \qquad \note{try}\;\; x = e^{rt}$$
+
+$$\term{ert}{e^{rt}}\left(\term{inertia}{r^2} + \term{damping}{2\gamma\, r} + \term{spring}{\omega_0^2}\right) = 0 \qquad \note{factor it out}$$
+
+$$\term{ert}{\cancel{e^{rt}}}\left(\term{inertia}{r^2} + \term{damping}{2\gamma\, r} + \term{spring}{\omega_0^2}\right) = 0 \qquad \note{never zero}$$
+
 $$\term{inertia}{r^2} + \term{damping}{2\gamma\, r} + \term{spring}{\omega_0^2} = 0$$
+:::
+"""
+
+#%% md id=derive_roots layout=center
+@md raw"""
+## The roots
+
+::: derive
+$$\term{inertia}{r^2} + \term{damping}{2\gamma\, r} + \term{spring}{\omega_0^2} = 0$$
+
+$$r = -\term{damping}{\gamma} \pm \sqrt{\term{damping}{\gamma}^2 - \term{spring}{\omega_0^2}}$$
+
+$$r = -\term{damping}{\gamma} \pm i\,\term{freq}{\sqrt{\term{spring}{\omega_0^2} - \term{damping}{\gamma}^2}} \qquad \note{when}\;\; \term{damping}{\gamma} < \term{spring}{\omega_0}$$
 
 $$r = -\term{damping}{\gamma} \pm i\,\term{freq}{\omega_d}$$
 

@@ -1272,6 +1272,11 @@ See also `save_asset`, `FileUpload`."""),
         - `\\braceat{n}{tex}{label}` (`\\obraceat` above) draws a labelled brace under the piece on step n —
           the way to say what a term IS. `\\focusat{n}{tex}` (or `::: {.step .focus}` for a block) dims the
           rest of the slide on step n, keeping lit whatever arrives on that step.
+        - `\\note{text}` sets a small dim annotation beside an equation saying what the step did
+          (`… = 0 \\qquad \\note{divide by m}`); in a derive block each equation carries its own.
+        A derivation reads best as small moves, one per equation, each named by a `\\note`: divide through,
+        name a combination, substitute a guess, factor, cancel. Split a long derivation over several
+        slides; the last equation of one slide as the first of the next carries the terms across.
         Derivation in place: a `::: derive` block holding display equations, one per paragraph (blank line
         between `\$\$…\$\$` lines). One equation shows at a time; each click turns it into the next. Terms that
         share a name in consecutive equations (matched by name and occurrence) glide to their new place; the

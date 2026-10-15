@@ -144,6 +144,7 @@ ordinary coloured math in the notebook, and print unwraps them to the plain equa
 | `\fadeat{2}{…}` | removes it on step 2 |
 | `\braceat{2}{…}{label}`, `\obraceat` | draws a brace under (over) the piece with a label on step 2 |
 | `\focusat{2}{…}` | on step 2 everything else on the slide recedes |
+| `\note{…}` | a quiet word beside an equation on what the step did ("divide by m") |
 
 Outside math, `::: {.step .focus}` spotlights a block the same way; whatever arrives on that step (a
 caption, say) stays lit with it.

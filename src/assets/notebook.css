@@ -3280,6 +3280,9 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 .deck-slide .brace:not(.on) .brace-label { opacity: 0; transform: translateY(.3em); }
 .deck-slide .brace-label { color: var(--deck-dim); }
 .katex .brace-label { display: inline-block; }
+/* `\note{…}`: a quiet word on what a step of a derivation does, set beside the equation. */
+.katex .eqnote { color: var(--dim); font-size: .62em; font-family: var(--deck-font, inherit); letter-spacing: .01em; }
+.deck-slide .katex .eqnote { color: var(--deck-dim); }
 /* Spotlight: on a `focus` step everything but that item recedes. */
 .deck-slide .slide-body .spot-dim { opacity: .22; filter: saturate(.4); transition: opacity .45s ease, filter .45s ease; }
 .deck-slide .slide-body.spotlit .slide-num { opacity: .2; }
