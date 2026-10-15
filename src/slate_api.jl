@@ -1249,6 +1249,32 @@ See also `save_asset`, `FileUpload`."""),
         or image that appears on two consecutive slides glides between them. REACTIVE builds:
         `@bind k SlideSteps(n)` follows the slide's step counter (0…n) so a figure can build from
         computed state. See also `SlideSteps`, `cell tags`, `front matter`."""),
+    SlateApiEntry("math slides", "Document",
+        "Explain mathematics on slides: named terms, equations that build, derivations that transform in place.",
+        ["math", "equation", "derivation", "latex", "katex", "explain", "physics", "3blue1brown", "term", "build", "morph"],
+        "\\term{name}{tex} · \\step{tex} · \\stepat{n}{tex} · \\hl · \\cancelat{n}{tex} · ::: derive",
+        """Macros usable in any `\$…\$`/`\$\$…\$\$` math (notebook, deck, presenter; print unwraps them):
+        - `\\term{name}{tex}` names a piece. Its colour follows the order terms first appear in the notebook,
+          so give each physical quantity ONE name and use it everywhere (prose, every equation, chart series).
+          `\\termc{name}{blue}{tex}` pins a colour (blue yellow red green purple orange teal pink lime sky, or hex
+          without `#`). Names are identifiers: letters, digits, `_`, `-`.
+        - `\\step{tex}` arrives on the next click; `\\stepat{n}{tex}` on step n. Put a leading operator INSIDE
+          with an empty group so spacing stays binary: `m\\ddot x \\stepat{1}{{}+ \\term{damping}{c\\dot x}}`.
+        - `\\hl{tex}` / `\\hlat{n}{tex}` light a piece up; `\\cancelat{n}{tex}` strikes it through on step n;
+          `\\fadeat{n}{tex}` removes it on step n.
+        Derivation in place: a `::: derive` block holding display equations, one per paragraph (blank line
+        between `\$\$…\$\$` lines). One equation shows at a time; each click turns it into the next. Terms that
+        share a name in consecutive equations (matched by name and occurrence) glide to their new place; the
+        rest crossfades. The same matching runs between consecutive SLIDES, so an equation can carry over.
+        Figures: a chart series whose `name` equals a term name takes that term's colour
+        (`series(:line, t, x; name="x")` beside `\\term{x}{x(t)}`). Drive a figure's build with
+        `@bind k SlideSteps(n)` on the same slide, in step with the equation.
+        Composition that explains well: one idea per slide; introduce each term in prose with its name and
+        colour before it is manipulated; build an equation from its terms (`\\stepat`) before deriving with
+        it; keep each derive block to 3 to 6 equations; end on the result next to a figure that shows it.
+        Pair explanatory text with a step (`::: {.step step=2}`) when it describes the term arriving on that
+        step. Example: `examples/slides_studio.jl` (slides "Three forces", "Looking for the motion",
+        "The motion"). See also `slides`, `SlideSteps`."""),
     SlateApiEntry("markdown", "Document",
         "Prose cells (`#%% md`) with `{{ expr }}` interpolation of live values; `@md` is their skin.",
         ["md", "text", "prose", "interpolation", "narrative", "template", "standalone"],

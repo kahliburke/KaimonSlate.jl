@@ -129,6 +129,45 @@ echart(:line, x, partial_sum(x, k + 1))
 step instead of being duplicated across slides. The control is hidden while presenting; in the
 notebook it is a slider for scrubbing through the build.
 
+### Explaining mathematics
+
+A few macros, usable in any math, let an equation be explained one piece at a time. They render as
+ordinary coloured math in the notebook, and print unwraps them to the plain equation.
+
+| Macro | Effect |
+|:------|:-------|
+| `\term{name}{…}` | names a piece; it keeps one colour everywhere it appears |
+| `\termc{name}{blue}{…}` | the same, with the colour chosen |
+| `\step{…}`, `\stepat{2}{…}` | the piece arrives on the next click, or on step 2 |
+| `\hl{…}`, `\hlat{2}{…}` | lights the piece up |
+| `\cancelat{2}{…}` | strikes it through on step 2 |
+| `\fadeat{2}{…}` | removes it on step 2 |
+
+Terms take colours in the order they first appear in the notebook, so give each quantity one name and
+use it in prose, in every equation, and as the name of the chart series that plots it: the series wears
+the term's colour.
+
+```markdown
+$$\term{inertia}{m\ddot x} \stepat{1}{{}+ \term{damping}{c\,\dot x}} \stepat{2}{{}+ \term{spring}{k\,x}} = 0$$
+```
+
+A `::: derive` block shows a sequence of equations in one place, one at a time. Each click turns the
+equation into the next: pieces with the same name glide to where they belong in the new equation, and
+the rest fades across. Put a blank line between the equations.
+
+```markdown
+::: derive
+$$\term{inertia}{m\ddot x} + \term{damping}{c\,\dot x} + \term{spring}{k\,x} = 0$$
+
+$$\term{inertia}{\ddot x} + \term{damping}{2\gamma\,\dot x} + \term{spring}{\omega_0^2\,x} = 0$$
+
+$$r = -\term{damping}{\gamma} \pm i\,\term{freq}{\omega_d}$$
+:::
+```
+
+Named pieces carry between consecutive slides the same way, so the result of one slide can move into
+place on the next.
+
 ### Media and morphing
 
 `![autoplay loop](clip.mp4)` is a video (and `![](talk.m4a)` audio). Flags in the alt text:
