@@ -3167,6 +3167,11 @@ body.presenting { overflow: hidden; }
 .deck-slide .md li::marker { color: var(--deck-accent); }
 .deck-slide .md h1, .deck-slide .md h2, .deck-slide .md h3 { font-family: var(--deck-font); color: var(--deck-strong);
   letter-spacing: -.02em; line-height: 1.1; border: none; margin: 0 0 .45em; }
+/* Headings are as wide as their text: a heading that morphs between slides is animated as a box, and
+   a full-width box on one slide against a text-width one on the next stretches the text. */
+.deck-slide .md h1, .deck-slide .md h2, .deck-slide .md h3 { width: fit-content; max-width: 100%; }
+.deck-slide[data-layout="center"] .md :is(h1, h2, h3), .deck-slide[data-layout="title"] .md :is(h1, h2, h3) {
+  margin-left: auto; margin-right: auto; }
 .deck-slide .md h1 { font-size: 2.6em; font-weight: 800; }
 .deck-slide .md h2 { font-size: 1.85em; font-weight: 750; }
 .deck-slide .md h3 { font-size: 1.2em; font-weight: 650; color: var(--deck-accent); }
