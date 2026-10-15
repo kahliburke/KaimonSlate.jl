@@ -86,7 +86,7 @@
   const D = {
     open: false, idx: 0, step: 0, total: 0, slides: [], restore: [], showCode: false, fs: false,
     items: [], reactive: [], auto: null, autoplay: false, paused: false, laser: false, draw: false,
-    goto: '', mo: null,
+    goto: '', mo: null, swapPending: false, vt: null, queue: [],
   };
   const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('slate-deck-' + NBID) : null;
 
@@ -412,21 +412,30 @@
   function _cellCharts(el) {
     return (window.charts && window.charts[el.id.replace(/^cell-/, '')]) || [];
   }
+  // A chart's natural size is its size in the notebook, recorded while the notebook is on screen: once
+  // presenting, the notebook is hidden and a chart measured there has no real width. A chart first
+  // seen on a slide (a cell re-ran while it was up) takes its size there, unless that is degenerate.
+  const _natural = new WeakMap();   // chart instance → [w, h]
+  // The notebook's own inline sizing of a chart element, saved before the deck first changes it. Keyed
+  // by element: a cell that re-runs may draw a new chart into the same element.
+  const _origStyle = new WeakMap(); // chart element → [inline width, inline height]
+  function _recordNatural(inst) {
+    const w = inst.getWidth(), h = inst.getHeight();
+    _natural.set(inst, (w >= 240 && h >= 120) ? [w, h] : [900, 450]);
+  }
   function _slideCharts() {
     const out = [];
     for (const r of D.restore) for (const inst of _cellCharts(r.el)) {
       const dom = inst.getDom && inst.getDom(); if (!dom || !dom.isConnected) continue;
-      if (dom.dataset.natW == null) {
-        const w = inst.getWidth(), h = inst.getHeight();
-        if (!(w && h)) continue;
-        dom.dataset.natW = w; dom.dataset.natH = h; dom.dataset.origW = dom.style.width; dom.dataset.origH = dom.style.height;
-      }
-      out.push({ inst, dom, natW: +dom.dataset.natW, natH: +dom.dataset.natH });
+      if (!_natural.has(inst)) _recordNatural(inst);
+      const [natW, natH] = _natural.get(inst);
+      out.push({ inst, dom, natW, natH });
     }
     return out;
   }
   function _sizeChart(c, w, h) {
     w = Math.max(80, Math.round(w)); h = Math.max(60, Math.round(h));
+    if (!_origStyle.has(c.dom)) _origStyle.set(c.dom, [c.dom.style.width, c.dom.style.height]);
     if (c.dom.style.width === w + 'px' && c.dom.style.height === h + 'px') return;
     c.dom.style.width = w + 'px'; c.dom.style.height = h + 'px';
     try { c.inst.resize({ width: w, height: h }); } catch (e) {}
@@ -493,12 +502,14 @@
     }
     slide.classList.toggle('has-split', !!slide.querySelector('.slide-body > .cell.slide-split'));
   }
+  // Put a chart back to its notebook sizing. Its home is hidden while presenting, so it is measured
+  // again only once the notebook is back on screen (`exitPresent`).
   function _restoreCellCharts(el) {
     for (const inst of _cellCharts(el)) {
-      const dom = inst.getDom && inst.getDom(); if (!dom || dom.dataset.natW == null) continue;
-      dom.style.width = dom.dataset.origW || ''; dom.style.height = dom.dataset.origH || '';
-      delete dom.dataset.natW; delete dom.dataset.natH; delete dom.dataset.origW; delete dom.dataset.origH;
-      try { inst.resize(); } catch (e) {}
+      const dom = inst.getDom && inst.getDom(), orig = dom && _origStyle.get(dom); if (!orig) continue;
+      dom.style.width = orig[0]; dom.style.height = orig[1];
+      _origStyle.delete(dom);
+      if (!D.open) try { inst.resize({ width: 'auto', height: 'auto' }); } catch (e) {}
     }
   }
   function _typesetSlide(slide) {
@@ -542,8 +553,22 @@
     for (const k of dup) all.delete(k);
     return all;
   }
+  // A view transition swaps the slide a frame or two after it starts, so until then the deck's position
+  // is still the outgoing slide's. Navigation that arrives in that window is held, the transition is
+  // cut short, and the held moves replay against the slide that is actually up.
+  function _held(fn) {
+    if (!D.swapPending) return false;
+    D.queue.push(fn);
+    try { D.vt && D.vt.skipTransition(); } catch (e) {}
+    return true;
+  }
+  function _drain() {
+    const q = D.queue.splice(0);
+    for (const f of q) f();
+  }
   function _go(i, dir, atEnd, fromRemote) {
     if (!D.open) return;
+    if (_held(() => _go(i, dir, atEnd, fromRemote))) return;
     const ov = document.getElementById('deckoverview'); if (ov) ov.remove();
     i = Math.max(0, Math.min(i, D.slides.length - 1));
     if (i === D.idx && D.restore.length) return;
@@ -552,11 +577,13 @@
     // Announced from inside the swap: with a view transition the swap runs after this function
     // returns, and listeners must hear the slide that is actually up.
     const swap = () => {
+      D.swapPending = false; D.vt = null;
       D.idx = i; D.step = 0;
       _mountSlide(i);
       if (atEnd) _applyStep(D.total, true);
       _emit('slide');
       if (!fromRemote) _broadcast();
+      if (D.queue.length) setTimeout(_drain, 0);
     };
     const stage = document.getElementById('deckstage');
     const oldSlide = stage && stage.querySelector('.deck-slide');
@@ -570,12 +597,15 @@
       shared.forEach(k => { oldKeys.get(k).style.viewTransitionName = 'dm-' + _hash(k); });
       const root = document.documentElement;
       root.dataset.deckTrans = kind; root.dataset.deckDir = dir > 0 ? 'next' : 'prev';
-      const vt = document.startViewTransition(() => {
+      D.swapPending = true;
+      const vt = D.vt = document.startViewTransition(() => {
         oldKeys.forEach(el => el.style.removeProperty('view-transition-name'));
         swap();
         shared.forEach(k => { const el = newKeys.get(k); if (el) el.style.viewTransitionName = 'dm-' + _hash(k); });
       });
-      vt.finished.finally(() => {
+      // Skipping (above, or by a newer transition) rejects these; that is expected, not an error.
+      vt.ready.catch(() => {}); vt.updateCallbackDone.catch(() => {});
+      vt.finished.catch(() => {}).finally(() => {
         delete root.dataset.deckTrans; delete root.dataset.deckDir;
         newKeys.forEach(el => el.style.removeProperty('view-transition-name'));
       });
@@ -589,13 +619,17 @@
     requestAnimationFrame(() => requestAnimationFrame(() => slide.classList.remove(cls)));
   }
   function slideNext() {
+    if (_held(slideNext)) return;
     if (D.step < D.total) _applyStep(D.step + 1);
     else if (D.idx < D.slides.length - 1) _go(D.idx + 1, 1);
   }
   function slidePrev() {
+    if (_held(slidePrev)) return;
     if (D.step > 0) _applyStep(D.step - 1);
     else if (D.idx > 0) _go(D.idx - 1, -1, true);
   }
+
+  function _slideJump(d) { if (!_held(() => _slideJump(d))) _go(D.idx + d, d); }
 
   // ── Timing ──────────────────────────────────────────────────────────────────
   // `auto=N` advances that slide (each step, then on to the next slide) every N seconds. Autoplay (a)
@@ -785,6 +819,7 @@
     D.slides = buildSlides();
     if (!D.slides.length) { window.alertDark ? alertDark('No slides yet — add markdown headings (## …) or tag a cell `slide`.') : alert('No slides.'); return; }
     D.open = true; D.idx = Math.max(0, Math.min(at || 0, D.slides.length - 1)); D.step = 0; D.posKey = null;
+    Object.values(window.charts || {}).flat().forEach(inst => { if (inst.getDom && inst.getDom().offsetWidth) _recordNatural(inst); });
     document.body.classList.add('presenting');
     const deck = document.getElementById('deck');
     deck.style.display = '';
@@ -804,6 +839,7 @@
   function exitPresent() {
     if (!D.open) return;
     if (D.rehearse) deckRehearse();
+    D.queue = []; D.swapPending = false; D.vt = null;
     _emit('exit');
     _unmount();
     D.open = false; D.autoplay = false; D.paused = false;
@@ -814,6 +850,11 @@
     if (deck) { deck.style.display = 'none'; deck.classList.remove('black-on'); }
     if (D.fs && document.exitFullscreen) { try { document.exitFullscreen(); } catch (e) {} D.fs = false; }
     if (window.typesetSoon) try { typesetSoon(document.getElementById('nb'), '__all__'); } catch (e) {}
+    // `auto`, not a bare resize(): a chart the deck sized explicitly keeps that size until told to
+    // measure its container again.
+    requestAnimationFrame(() => Object.values(window.charts || {}).flat().forEach(inst => {
+      try { inst.resize({ width: 'auto', height: 'auto' }); } catch (e) {}
+    }));
   }
   function slideToggleCode() {
     D.showCode = !D.showCode;
@@ -874,9 +915,9 @@
     if (help && help.classList.contains('on') && e.key !== '?') { help.classList.remove('on'); if (e.key === 'Escape') { e.preventDefault(); return; } }
     switch (e.key) {
       case 'ArrowRight': case 'PageDown': case ' ': case 'ArrowDown':
-        e.preventDefault(); if (e.shiftKey) _go(D.idx + 1, 1); else slideNext(); break;
+        e.preventDefault(); if (e.shiftKey) _slideJump(1); else slideNext(); break;
       case 'ArrowLeft': case 'PageUp': case 'ArrowUp':
-        e.preventDefault(); if (e.shiftKey) _go(D.idx - 1, -1); else slidePrev(); break;
+        e.preventDefault(); if (e.shiftKey) _slideJump(-1); else slidePrev(); break;
       case 'Home': e.preventDefault(); _go(0, -1); break;
       case 'End': e.preventDefault(); _go(D.slides.length - 1, 1); break;
       case 'Escape':

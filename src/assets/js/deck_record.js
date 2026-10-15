@@ -60,7 +60,7 @@
         border-radius: 50%; object-fit: cover; transform: scaleX(-1); cursor: grab; touch-action: none;
         box-shadow: 0 6px 24px rgba(0,0,0,.45); border: 3px solid rgba(255,255,255,.85); }
       .deck-cam.big { width: 320px; height: 320px; }
-      .deck-cam.dragging { cursor: grabbing; }
+      .deck-cam.cam-dragging { cursor: grabbing; }
       body.is-presenter .deck-rec-pill { opacity: 1; pointer-events: auto; top: auto; bottom: 12px; left: 12px;
         background: #2a1215; border: 1px solid #e5484d; font-size: 13px; padding: 6px 10px; }
       body.is-presenter .deck-rec-pill button { margin-left: 6px; font: inherit; color: #fff; background: #e5484d;
@@ -255,7 +255,7 @@
     let pill = document.getElementById('deckrec');
     if (!pill) {
       pill = document.createElement('div'); pill.id = 'deckrec'; pill.className = 'deck-rec-pill';
-      pill.innerHTML = '<span class="dot"></span><span class="t">0:00</span><span class="lvl"><i></i></span>';
+      pill.innerHTML = '<span class="dot"></span><span class="rec-t">0:00</span><span class="lvl"><i></i></span>';
     }
     _host().appendChild(pill);
     // The tab capture records the pill too, so it confirms the start and then gets out of the video;
@@ -264,7 +264,7 @@
     setTimeout(() => pill.classList.add('gone'), 3000);
     const buf = new Uint8Array(256);
     R.tick = setInterval(() => {
-      const t = pill.querySelector('.t'); if (t) t.textContent = _fmt(performance.now() - R.t0);
+      const t = pill.querySelector('.rec-t'); if (t) t.textContent = _fmt(performance.now() - R.t0);
       if (R.analyser) {
         R.analyser.getByteTimeDomainData(buf);
         let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
@@ -287,12 +287,12 @@
     if (!m.on) { if (pill) pill.remove(); return; }
     if (!pill) {
       pill = document.createElement('div'); pill.id = 'deckrec'; pill.className = 'deck-rec-pill';
-      pill.innerHTML = '<span class="dot"></span><span>REC</span><span class="t"></span><span class="lvl"><i></i></span>' +
+      pill.innerHTML = '<span class="dot"></span><span>REC</span><span class="rec-t"></span><span class="lvl"><i></i></span>' +
                        '<button title="stop recording">■ Stop</button>';
       pill.querySelector('button').onclick = () => bc && bc.postMessage({ type: 'rec-stop' });
       document.body.appendChild(pill);
     }
-    pill.querySelector('.t').textContent = _fmt(m.elapsed || 0);
+    pill.querySelector('.rec-t').textContent = _fmt(m.elapsed || 0);
     pill.querySelector('.lvl > i').style.width = Math.round((m.level || 0) * 100) + '%';
   }
 
@@ -316,14 +316,14 @@
     v.addEventListener('pointerdown', e => {
       const r = v.getBoundingClientRect();
       sx = e.clientX; sy = e.clientY; ox = r.left; oy = r.top;
-      v.setPointerCapture(e.pointerId); v.classList.add('dragging');
+      v.setPointerCapture(e.pointerId); v.classList.add('cam-dragging');
     });
     v.addEventListener('pointermove', e => {
-      if (!v.classList.contains('dragging')) return;
+      if (!v.classList.contains('cam-dragging')) return;
       v.style.left = (ox + e.clientX - sx) + 'px'; v.style.top = (oy + e.clientY - sy) + 'px';
       v.style.right = 'auto'; v.style.bottom = 'auto';
     });
-    v.addEventListener('pointerup', e => { v.classList.remove('dragging'); v.releasePointerCapture(e.pointerId); });
+    v.addEventListener('pointerup', e => { v.classList.remove('cam-dragging'); v.releasePointerCapture(e.pointerId); });
     v.addEventListener('dblclick', () => v.classList.toggle('big'));
   }
   async function cameraToggle() {

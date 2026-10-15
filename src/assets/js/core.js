@@ -1210,7 +1210,11 @@ function _wireEchartReplay(inst, spec) {
   });
 }
 
-window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => c.resize()));
+// Only charts on screen: one in a hidden container (a notebook behind the deck, a closed panel) would
+// measure as zero width and collapse. Whoever shows it again resizes it then.
+window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => {
+  const d = c.getDom && c.getDom(); if (d && d.offsetWidth > 0) c.resize();
+}));
 // Late size heal: a chart initialized before its div finished layout has a 0×0 canvas, and
 // the synchronous heal inside _geoSafeSetOption can't see the final size yet (clientWidth
 // is still 0 in the same frame). Check again next frame and once more after layout settles.
