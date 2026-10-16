@@ -1027,6 +1027,10 @@
       secs = t > 0 ? t : secs > 0 ? secs : (parseFloat(nbState && nbState.slideAuto) || _AUTO_DEFAULT);
     }
     if (!(secs > 0)) return;
+    // A step that plays a clip (a slide figure's move) is held until the clip has run, and a beat more.
+    const slide = document.querySelector('#deckstage .deck-slide');
+    for (const v of slide ? slide.querySelectorAll('.slidefig > video.sf-anim.current') : [])
+      if (isFinite(v.duration) && v.duration > 0) secs = Math.max(secs, v.duration - v.currentTime + 0.8);
     if (D.step >= D.total && D.idx >= D.slides.length - 1) {
       if (D.autoplay) { D.autoplay = false; _syncAutoButton(); _broadcast(); }   // played to the end
       return;

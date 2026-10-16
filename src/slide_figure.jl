@@ -319,14 +319,15 @@ end
     trace!(ax, xs, ys[, zs]; color = :white, linewidth = 3, markers = false, head = true) -> trace
 
 An orbit that draws itself along its points when a `slide_figure` step names it (`trace = tr`): the
-line grows point by point with a bright head at its tip, at an even pace per point, so a sampled flow
-runs smoothly and a map's orbit hops from iterate to iterate (`markers = true` leaves a dot at each
-one). Give `zs` on an `Axis3`. Close a periodic orbit by repeating its first point at the end. Before
+line grows point by point with a bright head at its tip and a soft glow on the stretch just behind it
+(`tail`, a fraction of the orbit; `0` for none), at an even pace per point, so a sampled flow runs
+smoothly and a map's orbit hops from iterate to iterate (`markers = true` leaves a dot at each one).
+The glow is gone once the orbit has closed. Give `zs` on an `Axis3`. Close a periodic orbit by repeating its first point at the end. Before
 its step it is hidden; `tr.t[]` (0 to 1) sets how far along it is for any other use, and a step can
 `show`, `hide` or `focus` it like a plot.
 """
 function trace!(ax, xs, ys, zs = nothing; color = :white, linewidth = 3, markers = false, markersize = 10,
-                head = true, headsize = 18)
+                head = true, headsize = 18, tail = 0.08)
     Mk = _mk()
     P = zs === nothing ? [Mk.Point2f(x, y) for (x, y) in zip(xs, ys)] :
                          [Mk.Point3f(x, y, z) for (x, y, z) in zip(xs, ys, zs)]
@@ -341,7 +342,14 @@ function trace!(ax, xs, ys, zs = nothing; color = :white, linewidth = 3, markers
         pts
     end
     path = Base.invokelatest(Mk.lift, upto, t)
-    plots = Any[_mkcall(Mk.lines!, ax, path; color, linewidth)]
+    plots = Any[]
+    if tail > 0
+        k = max(2, ceil(Int, tail * N))
+        recent = Base.invokelatest(Mk.lift, p -> (0 < t[] < 1 ? p[max(1, end - k):end] : p[end:end]), path)
+        push!(plots, _mkcall(Mk.lines!, ax, recent; color = (color, 0.28), linewidth = 3.2 * linewidth,
+                             linecap = :round, joinstyle = :round))
+    end
+    push!(plots, _mkcall(Mk.lines!, ax, path; color, linewidth))
     if markers
         dots = Base.invokelatest(Mk.lift, t -> P[1:reached(t)], t)
         push!(plots, _mkcall(Mk.scatter!, ax, dots; color, markersize))

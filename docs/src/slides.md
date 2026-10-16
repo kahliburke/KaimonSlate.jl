@@ -246,8 +246,8 @@ turn while an orbit draws.
 
 `callout!(ax, (x, y), "label")` pins a label with a fine leader line to a point of the data; on an
 `Axis3`, `callout!(ax, (x, y, z), "label")` keeps the label upright beside the point as the camera
-turns. `trace!(ax, xs, ys[, zs])` is an orbit that draws itself with a bright head, at an even pace
-per point: a sampled flow runs smoothly, and a map's orbit hops from iterate to iterate (`markers =
+turns, and its label can be math (`L"W^u"`). `trace!(ax, xs, ys[, zs])` is an orbit that draws
+itself with a bright head and a soft glow just behind it, at an even pace per point: a sampled flow runs smoothly, and a map's orbit hops from iterate to iterate (`markers =
 true` leaves a dot at each). Repeat the first point to close a periodic orbit.
 
 `slate_color(:red)` is the red that `\termc{name}{red}{…}` gives a term, so the figure and the equation

@@ -1368,9 +1368,9 @@ See also `save_asset`, `FileUpload`."""),
         - `frames = n` renders the step as an n-frame CLIP instead of one image, played when the presenter steps
           onto it. The moves of one step (`limits`, `view`, `trace`, `animate`) run together.
         `callout!(ax, (x, y), "X-point"; offset = (40, 40))` pins a label with a leader line to a data point and
-        returns its plots (show it on a step); on an `Axis3` give `(x, y, z)` and the label follows the point as
-        the camera turns. `trace!(ax, xs, ys[, zs]; color, markers = false)` is an orbit that draws itself with
-        a bright head at an even pace per point: a sampled flow runs smoothly, a map's orbit hops between
+        returns its plots (show it on a step); the label can be math, `L"W^u"`; on an `Axis3` give `(x, y, z)` and the label follows the point as
+        the camera turns. `trace!(ax, xs, ys[, zs]; color, markers = false, tail = 0.08)` is an orbit that draws itself
+        with a bright head and a glow just behind it, at an even pace per point: a sampled flow runs smoothly, a map's orbit hops between
         iterates (`markers = true` leaves a dot at each); repeat the first point to close a periodic orbit.
         `slate_color(:red)` is the colour `\\termc{name}{red}{…}` gives a
         math term, so a figure and its equation share colours (blue yellow red green purple orange teal pink
