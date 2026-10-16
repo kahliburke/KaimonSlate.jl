@@ -57,7 +57,7 @@ _setalpha!(p, a) = try; p.alpha[] = a; catch; end
 function _all_plots(fig)
     Mk = _mk()
     out = Any[]
-    for c in _mkcall(Mk.contents, fig.layout; recursive = true)
+    for c in fig.content
         (c isa Mk.Axis || (isdefined(Mk, :Axis3) && c isa Mk.Axis3)) || continue
         append!(out, c.scene.plots)
     end
