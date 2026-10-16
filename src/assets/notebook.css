@@ -3360,6 +3360,7 @@ html[data-deck-trans="rise"]::view-transition-new(deck-slide) { animation: deck-
 .deck-hud button { background: none; border: none; color: var(--text); cursor: pointer; font-size: .95rem;
   padding: 3px 6px; border-radius: 6px; }
 .deck-hud button:hover { background: var(--bg3); color: var(--accent); }
+.deck-hud button.on { color: var(--accent); }
 .deck-progress { color: var(--dim); font-size: .82rem; padding: 0 6px; font-variant-numeric: tabular-nums; white-space: pre; }
 body.deck-recording .deck-hud, body.deck-recording .deck-edge { display: none; }
 

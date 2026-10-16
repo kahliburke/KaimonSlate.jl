@@ -116,7 +116,7 @@
         '<button title="toggle code (c)" onclick="slideToggleCode()">&lt;/&gt;</button>' +
         '<button title="laser pointer (l)" onclick="deckLaser()">◉</button>' +
         '<button title="draw on the slide (d · x clears)" onclick="deckDraw()">✎</button>' +
-        '<button title="autoplay (a)" onclick="deckAutoplay()">⏵</button>' +
+        '<button class="hud-auto" title="autoplay (a)" onclick="deckAutoplay()">⏵</button>' +
         '<button title="record (r · ⇧R chooses audio)" onclick="window.deckRecordOptions && deckRecordOptions()">⏺</button>' +
         '<button title="camera bubble (v)" onclick="window.deckCameraToggle && deckCameraToggle()">◎</button>' +
         '<button title="presenter view (s)" onclick="openPresenter()">🪞</button>' +
@@ -963,7 +963,10 @@
       secs = t > 0 ? t : secs > 0 ? secs : (parseFloat(nbState && nbState.slideAuto) || _AUTO_DEFAULT);
     }
     if (!(secs > 0)) return;
-    if (D.step >= D.total && D.idx >= D.slides.length - 1) return;
+    if (D.step >= D.total && D.idx >= D.slides.length - 1) {
+      if (D.autoplay) { D.autoplay = false; _syncAutoButton(); _broadcast(); }   // played to the end
+      return;
+    }
     _autoBar(secs);
     D.auto = setTimeout(() => { D.auto = null; slideNext(); }, secs * 1000);
   }
@@ -980,7 +983,16 @@
   function deckAutoplay() {
     D.autoplay = !D.autoplay; D.paused = false;
     _flash(D.autoplay ? 'autoplay on' : 'autoplay off');
+    _syncAutoButton();
     _scheduleAuto();
+    _broadcast();
+  }
+  // The autoplay button is a stop button while autoplay runs.
+  function _syncAutoButton() {
+    const b = document.querySelector('#deck .hud-auto'); if (!b) return;
+    b.textContent = D.autoplay ? '⏹' : '⏵';
+    b.title = D.autoplay ? 'stop autoplay (a)' : 'autoplay (a)';
+    b.classList.toggle('on', D.autoplay);
   }
   function _togglePause() {
     D.paused = !D.paused;
@@ -1163,6 +1175,7 @@
     _emit('exit');
     _unmount();
     D.open = false; D.autoplay = false; D.paused = false;
+    _syncAutoButton();
     if (D.laser) deckLaser();
     if (D.draw) deckDraw();
     document.body.classList.remove('presenting');
@@ -1317,7 +1330,9 @@
     root.querySelector('.pp-nexttitle').textContent = '→ ' + t;
     _renderPreviews();
     root.querySelector('.pp-rehearse').classList.toggle('on', !!P.rehearse);
-    root.querySelector('.pp-autoplay').classList.toggle('on', !!P.autoplay);
+    const ap = root.querySelector('.pp-autoplay');
+    ap.classList.toggle('on', !!P.autoplay);
+    ap.textContent = P.autoplay ? '⏹ stop autoplay' : '⏵ autoplay';
     _renderPace();
     if (window.typeset) try { window.typeset(root.querySelector('.pp-notes')); } catch (e) {}
   }
