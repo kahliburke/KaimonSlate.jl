@@ -1356,7 +1356,8 @@ See also `save_asset`, `FileUpload`."""),
         - `limits = (ax, (x1, x2, y1, y2))` moves the axis; `animate = t -> …` is called with t from 0 to 1,
           usually to set observables (`n[] = round(Int, t * N)` draws a set point by point);
         - `update = () -> …` any other change; `frames = n` renders the step as an n-frame CLIP (smooth camera
-          moves and sweeps) instead of one image, played when the presenter steps onto it.
+          moves and sweeps) instead of one image, played when the presenter steps onto it. A 3-D view turns
+          the same way: `(animate = t -> ax3.azimuth[] = a0 + t * π / 2, frames = 60)` on an `Axis3`.
         `callout!(ax, (x, y), "X-point"; offset = (40, 40))` pins a label with a leader line to a data point and
         returns its plots (show it on a step). `slate_color(:red)` is the colour `\\termc{name}{red}{…}` gives a
         math term, so a figure and its equation share colours (blue yellow red green purple orange teal pink
