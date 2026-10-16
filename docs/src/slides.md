@@ -45,7 +45,8 @@ deck window and keep the presenter window to yourself.
 
 Press `t` (or *rehearse* in the presenter window) and click through the talk: every step is timed,
 and pressing `t` again saves the timings to the notebook. The presenter window then shows the planned
-length and whether you are ahead or behind, and autoplay (`a`) advances on the rehearsed timings.
+length and whether you are ahead or behind, and autoplay (`a`) advances on the rehearsed timings. A
+step that plays a figure's clip is held until the clip has run, whatever its timing says.
 
 ### Recording
 

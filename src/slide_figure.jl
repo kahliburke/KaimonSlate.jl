@@ -346,7 +346,7 @@ function trace!(ax, xs, ys, zs = nothing; color = :white, linewidth = 3, markers
     if tail > 0
         k = max(2, ceil(Int, tail * N))
         recent = Base.invokelatest(Mk.lift, p -> (0 < t[] < 1 ? p[max(1, end - k):end] : p[end:end]), path)
-        push!(plots, _mkcall(Mk.lines!, ax, recent; color = (color, 0.28), linewidth = 3.2 * linewidth,
+        push!(plots, _mkcall(Mk.lines!, ax, recent; color = (color, 0.5), linewidth = 2.8 * linewidth,
                              linecap = :round, joinstyle = :round))
     end
     push!(plots, _mkcall(Mk.lines!, ax, path; color, linewidth))
