@@ -198,6 +198,45 @@ Tag a chart cell `ghost` and, while it is presented, changing a control leaves a
 figure as it was before the change. A drag compares against where it started, so a question answered
 live ("what if the damping doubles?") shows both curves at once.
 
+### Makie figures that build
+
+A CairoMakie figure can build on a slide too. Draw it as usual, keep the plots you want to bring in,
+and return `slide_figure(fig; steps)`:
+
+```julia
+let fig = Figure(size = (1100, 1000)), ax = Axis(fig[1, 1]; aspect = DataAspect())
+    scatter!(ax, R, Z; markersize = 1, color = (:gray70, 0.4))           # always there
+    wu = lines!(ax, Ru, Zu; color = slate_color(:red))
+    ws = lines!(ax, Rs, Zs; color = slate_color(:yellow))
+    xp = callout!(ax, (RX, ZX), "X-point")
+    slide_figure(fig; steps = [
+        (show = wu, animate = t -> n[] = round(Int, t * N), frames = 60),   # the branch grows
+        (show = ws,),                                                      # the other one appears
+        (show = xp, focus = [wu, ws, xp]),                                 # the rest dims
+        (limits = (ax, (RX - w, RX + w, ZX - w, ZX + w)), frames = 45),    # the camera moves in
+    ])
+end
+```
+
+Each step is rendered with the notebook's Makie backend, so the slide is as crisp as the figure. A step
+fades in over the one before; a step with `frames` is rendered as a short clip that plays when you step
+onto it, which is how growth, sweeps and camera moves stay smooth. The figure's steps are the slide's
+build steps, so they line up with equations built on the same slide. In the notebook the finished figure
+shows.
+
+| Step key | Effect |
+|:---------|:-------|
+| `show = plots`, `hide = plots` | plots appear (hidden until then) or go |
+| `focus = plots` | every other plot dims until the next `focus` |
+| `limits = (ax, (x1, x2, y1, y2))` | the axis moves to that window |
+| `animate = t -> …` | called with `t` from 0 to 1, usually setting observables |
+| `update = () -> …` | any other change |
+| `frames = n` | render the step as an `n`-frame clip |
+
+`callout!(ax, (x, y), "label")` pins a label with a fine leader line to a point of the data, and
+`slate_color(:red)` is the red that `\termc{name}{red}{…}` gives a term, so the figure and the equation
+beside it agree.
+
 ### Media and morphing
 
 `![autoplay loop](clip.mp4)` is a video (and `![](talk.m4a)` audio). Flags in the alt text:
