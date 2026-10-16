@@ -3286,6 +3286,13 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 /* Spotlight: on a `focus` step everything but that item recedes. */
 .deck-slide .slide-body .spot-dim { opacity: .22; filter: saturate(.4); transition: opacity .45s ease, filter .45s ease; }
 .deck-slide .slide-body.spotlit .slide-num { opacity: .2; }
+/* `slide_figure`: a Makie figure's states stacked in one box; on a slide each fades in on its step, in
+   the notebook the last one shows. */
+.slidefig { position: relative; width: 100%; margin: 0 auto; }
+.slidefig > img, .slidefig > video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.slidefig > .sf-layer { position: absolute; inset: 0; }
+.deck-slide .slidefig { max-width: min(100%, calc(var(--u) * 760 * var(--sf-ar))) !important; }
+.deck-slide .slidefig > .sf-layer.step { transition-duration: .55s; }
 /* `::: derive`: equations stacked in one place, one shown; stepping turns it into the next. */
 .deck-slide .derive { display: grid; justify-items: center; }
 .deck-slide .derive > .derive-eq { grid-area: 1 / 1; transition: none !important; }

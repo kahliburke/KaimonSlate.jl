@@ -443,6 +443,7 @@
   }
   function _applyStep(s, quiet) {
     s = Math.max(0, Math.min(s, D.total));
+    const prevStep = D.step;
     // A derive block that changes equation on this step transforms in place: terms both equations name
     // glide to their new places, the rest crossfades.
     const moving = [];
@@ -476,11 +477,24 @@
       });
     } else _stepClasses(s);
     for (const c of (D.chartSteps || [])) _applyChartStep(c, Math.min(s, c.steps.length), !quiet);
+    _slideFigureClips(prevStep, s, quiet);
     for (const r of D.reactive) _sendReactive(r, Math.min(s, r.n));
     _playVisibleMedia();
     _syncHud();
     if (_trackPos()) _scheduleAuto();
     if (!quiet) { _emit('step'); _broadcast(); }
+  }
+  // A `slide_figure` step rendered as a clip plays when the deck steps forward onto it; reached any other
+  // way (stepping back, entering the slide at its end) it shows its last frame, the state it leads to.
+  function _slideFigureClips(prev, s, quiet) {
+    const slide = document.querySelector('#deckstage .deck-slide'); if (!slide) return;
+    for (const v of slide.querySelectorAll('.slidefig > video.sf-anim')) {
+      const it = D.items.find(x => x.el === v); if (!it) continue;
+      const end = () => { try { v.pause(); v.currentTime = Math.max(0, (v.duration || 0) - 0.04); } catch (e) {} };
+      if (it.idx > s) { try { v.pause(); v.currentTime = 0; } catch (e) {} }
+      else if (it.idx === s && s === prev + 1 && !quiet) { try { v.currentTime = 0; v.play().catch(end); } catch (e) {} }
+      else if (v.paused) { if (v.readyState >= 1) end(); else v.addEventListener('loadedmetadata', end, { once: true }); }
+    }
   }
   function _playVisibleMedia() {
     const slide = document.querySelector('#deckstage .deck-slide');

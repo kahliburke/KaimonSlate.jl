@@ -266,3 +266,19 @@ end
     @test occursin("deckstyle", r("settings"))
     @test all(k -> occursin(k, r("math slides")), ("\\term", "\\braceat", "\\note", "::: derive", "STEPS."))
 end
+
+@testset "slide_figure: stacked states and the shared palette" begin
+    RE = KaimonSlate.ReportEngine
+    sf = RE.SlideFigure(800, 400, UInt8[1], [(1, :png, UInt8[2], UInt8[]), (2, :mp4, UInt8[3], UInt8[4])])
+    h = sprint(show, MIME("text/html"), sf)
+    @test occursin("class=\"slidefig\"", h) && occursin("aspect-ratio:800/400", h)
+    @test occursin("<img class=\"step fade sf-layer\" step=\"1\"", h)
+    @test occursin("<video class=\"step fade sf-layer sf-anim\" step=\"2\"", h) && occursin("poster=\"data:image/png", h)
+    # The figure palette is the one the slide math colours terms with (core.js SLATE_TERM_PALETTE).
+    js = read(joinpath(@__DIR__, "..", "src", "assets", "js", "core.js"), String)
+    for (k, v) in pairs(RE.SLATE_COLORS)
+        @test occursin("$k: '$v'", js)
+    end
+    @test RE.slate_color(:red) == "#fc6255"
+    @test RE._limits_at((0.0, 1.0, 0.0, 1.0), (2.0, 3.0, 2.0, 3.0), 1.0) == (2.0, 3.0, 2.0, 3.0)
+end

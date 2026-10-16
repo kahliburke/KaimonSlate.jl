@@ -1067,6 +1067,7 @@ source_text(cell::Cell) = cell.source
 include(joinpath(@__DIR__, "echarts.jl"))   # EChart (used by capture.jl)
 include(joinpath(@__DIR__, "echarts_dsl.jl")) # echart(:line,…)/series DSL (shared with the worker)
 include(joinpath(@__DIR__, "slate_look.jl")) # slate_theme()/use_slate_theme! — shared ECharts/Makie palette
+include(joinpath(@__DIR__, "slide_figure.jl")) # slide_figure/callout!/slate_color — Makie figures that build on slides
 include(joinpath(@__DIR__, "animation.jl")) # animate(frames;…) → Animation (used by capture.jl; shared)
 include(joinpath(@__DIR__, "reactive.jl"))  # reactive/@onclick/pause async primitives (shared)
 include(joinpath(@__DIR__, "worker_debug.jl")) # cell stepper (shared with the worker)
