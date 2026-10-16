@@ -262,11 +262,15 @@ function Base.show(io::IO, ::MIME"text/html", sf::SlideFigure)
     print(io, "</div>")
 end
 
+# A label as Makie takes it: a LaTeX string (`L"W^u"`) keeps its math.
+_label(x) = x isa Symbol ? String(x) : x
+
 """
     callout!(ax, (x, y), label; offset = (40, 40), color = :white, fontsize = 26) -> plots
     callout!(ax3, (x, y, z), label; …)
 
 A label pinned to a point of the data: a dot, a fine leader line, and the label `offset` pixels away.
+The label may be math: `callout!(ax, pt, L"W^u")`.
 The leader keeps its length on screen as the axis zooms, and on an `Axis3` follows the point as the
 camera turns. Returns its plots, so a step can `show` it.
 """
@@ -283,7 +287,7 @@ function callout!(ax, pt, label; offset = (40, 40), color = :white, fontsize = 2
     end
     ends = Base.invokelatest(Mk.lift, lead, ax.finallimits, ax.scene.viewport)
     seg = _mkcall(Mk.lines!, ax, ends; color = (color, 0.85), linewidth)
-    lbl = _mkcall(Mk.text!, ax, x, y; text = String(label), color, fontsize, offset = (Float32(ox), Float32(oy)),
+    lbl = _mkcall(Mk.text!, ax, x, y; text = _label(label), color, fontsize, offset = (Float32(ox), Float32(oy)),
                   align = (ox >= 0 ? :left : :right, oy >= 0 ? :bottom : :top))
     return Any[dot, seg, lbl]
 end
@@ -306,7 +310,7 @@ function _callout3!(ax, pt, label; offset, color, fontsize, linewidth)
     noclip = Mk.Plane3f[]
     seg = _mkcall(Mk.lines!, ax.scene, ends; space = :pixel, clip_planes = noclip, color = (color, 0.85), linewidth)
     pos = Base.invokelatest(Mk.lift, a -> a + o, at)
-    lbl = _mkcall(Mk.text!, ax.scene, pos; space = :pixel, clip_planes = noclip, text = String(label), color, fontsize,
+    lbl = _mkcall(Mk.text!, ax.scene, pos; space = :pixel, clip_planes = noclip, text = _label(label), color, fontsize,
                   align = (o[1] >= 0 ? :left : :right, o[2] >= 0 ? :bottom : :top))
     return Any[dot, seg, lbl]
 end
