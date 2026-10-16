@@ -3288,7 +3288,13 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 .deck-slide[data-layout="center"] .katex-display > .katex, .deck-slide[data-layout="title"] .katex-display > .katex { font-size: 1.8em; }
 .deck-slide .slide-body .derive .katex-display > .katex { font-size: 2.2em; }
 .katex .step, .katex .term { display: inline-block; }
-.deck-slide .katex .highlight { border-radius: .15em; padding: 0 .08em; margin: 0 -.08em; }
+/* In math a highlight is a glow around the glyphs in the accent colour: a background box takes KaTeX's
+   strut height and runs past superscripts and into the symbols beside it. */
+.deck-slide .katex .step.highlight.on { background-color: transparent; box-shadow: none;
+  text-shadow: 0 0 .1em color-mix(in srgb, var(--deck-accent) 90%, transparent),
+    0 0 .5em color-mix(in srgb, var(--deck-accent) 80%, transparent),
+    0 0 1.1em color-mix(in srgb, var(--deck-accent) 45%, transparent); }
+.deck-slide .katex .step.highlight { transition: text-shadow .35s ease; }
 .deck-slide .mcancel svg { transition: opacity .35s ease, clip-path .5s ease; }
 .deck-slide .mcancel:not(.on) svg { opacity: 0; clip-path: inset(0 100% 0 0); }
 /* A brace under (or over) a term draws in on its step; the term is there all along. */
