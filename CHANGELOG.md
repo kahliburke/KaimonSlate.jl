@@ -78,6 +78,29 @@ were written when they went out. They are marked.
 
 - **Profile** and **Debug** the selected cell from the command palette.
 
+- Presentation mode is a designed deck. A slide is a fixed-aspect canvas that scales to the window;
+  cell tags set its layout (`title`, `section`, `center`, `cover`), background (presets, colour,
+  gradient, image or video), transition (`fade`, `slide`, `zoom`, `rise`) and timing (`auto=`).
+- Builds: `::: step` blocks with entrance and emphasis effects, `::: incremental` lists, `. . .`
+  pauses and `step`-tagged cells, all on one step counter per slide. `SlideSteps(n)` binds that counter
+  to a value, so a figure is recomputed at each step.
+- `::: columns`, video and audio from image syntax (`![autoplay loop](clip.mp4)`), relative media paths
+  resolved beside the notebook, and byte-range requests on notebook assets.
+- Morphs: a heading, image or named math term present on consecutive slides moves into its new place;
+  chart cells sharing a `morph=` tag animate one figure into the other.
+- Presentation math: `\term`, `\stepat`, `\hlat`, `\braceat`, `\cancelat`, `\focusat` and `\note`, with
+  term colours shared by chart series of the same name, and `::: derive` blocks that transform one
+  equation into the next.
+- `echart(…; steps = …)` moves a chart through axis windows on build steps. `slide_figure` builds a
+  Makie figure on a slide (plots appear, others dim, the camera moves, clips for smooth sweeps), with
+  `callout!` and `slate_color`.
+- The presenter window shows the current and next step, a timer, rehearsal pacing and notes. Rehearsal
+  (`t`) saves per-step timings that autoplay (`a`) follows. Overview (`o`), laser (`l`), drawing (`d`),
+  black screen (`b`), go-to and a key list (`?`).
+- Recording (`r`) captures the deck with the microphone and slide sound (chosen with ⇧R) into
+  `recordings/` beside the notebook, with chapters and step timings.
+- A `settings` tool reads and changes a notebook's own settings, including the deck style.
+
 - A notebook's worker runs its own machinery on dedicated threads, so a notebook that saturates
   `:default` with CPU-bound work no longer stalls it. A `:slate` pool serves status, cancel, the hub
   heartbeat, telemetry and blob transfers, and never runs notebook code. A `:slate_ui` pool serves
@@ -121,6 +144,9 @@ were written when they went out. They are marked.
 
 ### Fixed
 
+- A chart hidden while presenting is no longer resized to nothing, and a chart sized for a slide returns
+  to its notebook size.
+- The slides PDF no longer fails to compile on a chart that was not captured.
 - A notebook's packages are rebuilt the way each was added: a local checkout is developed again
   from its path and a git package added from its URL, instead of being looked up by name. A
   checkout missing on this machine is skipped and named, and the rest still install.
