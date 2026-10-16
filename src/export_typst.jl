@@ -1015,6 +1015,22 @@ end
 _has_html_output(c::Cell) = c.output !== nothing &&
     any(ch -> ch.mime in ("text/html", "application/vnd.kaimonslate.html+html"), c.output.display)
 
+# The finished state of a `slide_figure` output (slide_figure.jl): the last PNG in its block, which is the
+# last state's image, or the poster frame of a final clip. `nothing` for any other output.
+function _slidefig_final_png(o)
+    for ch in o.display
+        ch.mime in ("text/html", "application/vnd.kaimonslate.html+html") || continue
+        h = String(copy(ch.data))
+        occursin("class=\"slidefig\"", h) || continue
+        last = nothing
+        for m in eachmatch(r"(?:src|poster)=\"data:image/png;base64,([^\"]+)\"", h)
+            last = m.captures[1]
+        end
+        last === nothing || return Base64.base64decode(last)
+    end
+    return nothing
+end
+
 # Emit a code cell's outputs (value / stdout / error / figure / tables) into the doc.
 # Export output-verbosity: `"all"` (everything), `"figures"` (only figures / charts / tables / rendered
 # math — drop scalar text reprs, stdout, and errors, the "working output" noise), `"none"` (nothing).
@@ -1067,6 +1083,8 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
     # rendered by Typst and isn't an embeddable figure — so rasterize the rendered card via the open
     # tab (html2canvas, same round-trip slate.inspect uses) and embed that image. Needs a live tab;
     # falls back to nothing (just the code) if none is open or the capture times out.
+    # A `slide_figure` carries its states as PNGs; print shows the finished one, no tab needed.
+    fig === nothing && (sf = _slidefig_final_png(o); sf === nothing || (fig = (sf, "png")))
     if fig === nothing && _has_html_output(c)
         # `cell_image`, not `cell_image_fresh`: `_warm_html_rasters!` already asked the tab for
         # every one of these in a single round-trip, so this is a store read. Asking again here

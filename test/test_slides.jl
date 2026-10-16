@@ -282,3 +282,11 @@ end
     @test RE.slate_color(:red) == "#fc6255"
     @test RE._limits_at((0.0, 1.0, 0.0, 1.0), (2.0, 3.0, 2.0, 3.0), 1.0) == (2.0, 3.0, 2.0, 3.0)
 end
+
+@testset "print takes a slide_figure's finished state" begin
+    RE = KaimonSlate.ReportEngine
+    sf = RE.SlideFigure(10, 10, UInt8[1], [(1, :png, UInt8[2], UInt8[]), (2, :mp4, UInt8[3], UInt8[9])])
+    out = (; display = [(; mime = "text/html", data = Vector{UInt8}(codeunits(sprint(show, MIME("text/html"), sf))))])
+    @test NS._slidefig_final_png(out) == UInt8[9]          # the final clip's poster frame
+    @test NS._slidefig_final_png((; display = [(; mime = "text/html", data = UInt8[0x3c])])) === nothing
+end
