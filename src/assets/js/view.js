@@ -1510,16 +1510,20 @@ function toggleSource(id, mode) {
 // keep their source in a hidden `.srcedit` overlay → toggle it. code / web cells show their editor
 // inline (no overlay) → just focus it, un-hiding the code first if it was hidden via 🙈.
 async function editCellSource(id, kind) {
-  const cell = document.getElementById('cell-' + id); if (!cell) return;
+  const cell = document.getElementById('cell-' + id); if (!cell || _onSlide(cell)) return;
   if (cell.querySelector('.srcedit')) { toggleSource(id, kind === 'md' ? 'markdown' : 'julia'); return; }
   if (cell.classList.contains('codehidden')) await toggleHideCode(id);   // reveal hidden code before focusing
   if (window.ensureEditor) window.ensureEditor(id);                // mount if it hasn't lazily yet
   if (window.edFocus) window.edFocus(id);
 }
 
+// A cell on a slide is being presented, not edited: a double-click there would swap its rendered
+// output for an editor the deck does not show.
+function _onSlide(cell) { return !!cell.closest('#deck'); }
+
 function editSource(id, mode) {
   const cell = document.getElementById('cell-' + id);
-  if (!cell) return;
+  if (!cell || _onSlide(cell)) return;
   const d = _disp(cell); if (d) d.style.display = 'none';
   const sed = cell.querySelector('.srcedit'); sed.style.display = '';
   // A prior cell re-render (a live widget/output refresh — e.g. a Mol* viewer streaming frames) can swap

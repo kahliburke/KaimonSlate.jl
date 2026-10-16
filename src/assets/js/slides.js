@@ -218,6 +218,8 @@
       nodes.push({ id, el });
     }
     const slide = _buildSlide(i, nodes);
+    // The notebook's "double-click to edit" hint means nothing on a slide.
+    slide.querySelectorAll('.md[title]').forEach(m => { m.dataset.deckTitle = m.title; m.removeAttribute('title'); });
     stage.appendChild(slide);
     _typesetSlide(slide);
     _collectSteps(slide, sld);
@@ -241,6 +243,7 @@
       r.el.querySelectorAll('[style*="view-transition-name"]').forEach(n => n.style.removeProperty('view-transition-name'));
       r.el.querySelectorAll('.deck-ctl-hidden').forEach(n => n.classList.remove('deck-ctl-hidden'));
       r.el.querySelectorAll('.slidefig').forEach(n => n.style.removeProperty('max-width'));
+      r.el.querySelectorAll('[data-deck-title]').forEach(m => { m.title = m.dataset.deckTitle; delete m.dataset.deckTitle; });
       _restoreCellCharts(r.el);
       if (r.slot.isConnected) r.slot.appendChild(r.el);
       else r.el.remove();                      // its cell is gone (see `_deckSettle`)
