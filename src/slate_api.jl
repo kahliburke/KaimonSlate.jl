@@ -1323,7 +1323,7 @@ See also `save_asset`, `FileUpload`."""),
         consecutive SLIDES, so making the last equation of one slide the first of the next carries it over.
         Small moves explain best: one per equation, each with a `\\note` (divide through, name a combination,
         substitute a guess, factor, cancel). Split a long derivation over slides of 3 to 6 equations.
-        FIGURES. Put the chart in its own code cell; tag it `column=2` to sit beside the markdown cell before
+        FIGURES. A Makie figure builds with `slide_figure` (see that entry). Put the chart in its own code cell; tag it `column=2` to sit beside the markdown cell before
         it (a markdown `::: columns` block cannot hold a code cell). Put `@bind k SlideSteps(n)` in its own
         cell tagged `hidecode` (it is hidden on slides; in the notebook it is a slider for scrubbing).
         Use `SlideSteps` when the figure's CONTENT changes per step (a series appears: recomputed), and
@@ -1344,6 +1344,35 @@ See also `save_asset`, `FileUpload`."""),
         echart(series(:line, t, x; name = "inertia"), (k >= 2 ? [series(:line, t, v; name = "damping")] : [])...)
         ```
         Worked deck: `examples/slides_studio.jl`. See also `slides`, `SlideSteps`, `echart`."""),
+    SlateApiEntry("slide_figure", "Document",
+        "A Makie (CairoMakie) figure that BUILDS on a slide: plots appear, the rest dims, the camera moves, a sweep animates.",
+        ["makie", "cairomakie", "figure", "build", "animation", "zoom", "camera", "callout", "annotate", "slides", "3blue1brown"],
+        "slide_figure(fig; steps, fps = 30, px_per_unit = 1.5) · callout!(ax, (x, y), label) · slate_color(:red)",
+        """Draw the figure as usual, keep the plot objects, and return `slide_figure(fig; steps)`. Each step is a
+        NamedTuple of changes; the figure is rendered after each, and on the slide the states fade in on the
+        slide's build steps (step i of the figure is build step i). In the notebook the final state shows.
+        - `show = plots` (hidden until this step), `hide = plots`;
+        - `focus = plots` dims every other plot until the next `focus` (`focus = nothing` undims);
+        - `limits = (ax, (x1, x2, y1, y2))` moves the axis; `animate = t -> …` is called with t from 0 to 1,
+          usually to set observables (`n[] = round(Int, t * N)` draws a set point by point);
+        - `update = () -> …` any other change; `frames = n` renders the step as an n-frame CLIP (smooth camera
+          moves and sweeps) instead of one image, played when the presenter steps onto it.
+        `callout!(ax, (x, y), "X-point"; offset = (40, 40))` pins a label with a leader line to a data point and
+        returns its plots (show it on a step). `slate_color(:red)` is the colour `\\termc{name}{red}{…}` gives a
+        math term, so a figure and its equation share colours (blue yellow red green purple orange teal pink
+        lime sky). Keep the heavy computation in its own cell and draw from its result, so re-rendering the
+        figure is cheap. Clips cost a render per frame: 30 to 60 frames is plenty.
+        ```julia
+        let fig = Figure(size = (1100, 1000)), ax = Axis(fig[1, 1]; aspect = DataAspect())
+            scatter!(ax, R, Z; markersize = 1, color = (:gray70, 0.4))
+            wu = lines!(ax, Ru, Zu; color = slate_color(:red))
+            xp = callout!(ax, (RX, ZX), "X-point")
+            slide_figure(fig; steps = [(show = wu,), (show = xp, focus = [wu, xp]),
+                                       (limits = (ax, (RX - w, RX + w, ZX - w, ZX + w)), frames = 45)])
+        end
+        ```
+        Example deck: `examples/` decks and the stellarator `notebooks/pot_slides.jl`. See also `slides`,
+        `math slides`."""),
     SlateApiEntry("markdown", "Document",
         "Prose cells (`#%% md`) with `{{ expr }}` interpolation of live values; `@md` is their skin.",
         ["md", "text", "prose", "interpolation", "narrative", "template", "standalone"],
