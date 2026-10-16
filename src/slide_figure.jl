@@ -86,7 +86,8 @@ NamedTuple saying what changes on that step:
 
 - `show = plots` — those plots appear (they are hidden until their step);
 - `hide = plots` — those plots go;
-- `focus = plots` — every other plot dims until the next step that sets `focus`; `focus = nothing` undims;
+- `focus = plots` — every other plot dims until the next step that sets `focus`; `focus = nothing` undims.
+  A plot shown later while the rest is dimmed joins the focus;
 - `limits = (ax, (x1, x2, y1, y2))` — the axis moves to that window (smoothly, with `frames`);
 - `animate = t -> …` — called with `t` from 0 to 1 to change the figure, typically setting observables
   (`n[] = round(Int, t * N)` to draw a section point by point);
@@ -119,7 +120,13 @@ function slide_figure(fig; steps = NamedTuple[], fps::Integer = 30, px_per_unit:
     alphas = IdDict{Any,Any}()             # plots dimmed by the current focus → their own alpha
     layers = Tuple{Int,Symbol,String,String}[]
     for (i, st) in enumerate(steps)
-        haskey(st, :show) && foreach(p -> _setvis!(p, true), _plots_of(st.show))
+        if haskey(st, :show)
+            for p in _plots_of(st.show)
+                _setvis!(p, true)
+                # A plot that arrives while others are dimmed is the new subject: it joins the focus.
+                haskey(alphas, p) && (_setalpha!(p, alphas[p]); delete!(alphas, p))
+            end
+        end
         haskey(st, :hide) && foreach(p -> _setvis!(p, false), _plots_of(st.hide))
         if haskey(st, :focus)
             for (p, a) in alphas; _setalpha!(p, a); end
@@ -180,12 +187,12 @@ function Base.show(io::IO, ::MIME"text/html", sf::SlideFigure)
 end
 
 """
-    callout!(ax, (x, y), label; offset = (40, 40), color = :white, fontsize = 18) -> plots
+    callout!(ax, (x, y), label; offset = (40, 40), color = :white, fontsize = 26) -> plots
 
 A label pinned to a point of the data: a dot, a fine leader line, and the label `offset` pixels away.
 The leader keeps its length on screen as the axis zooms. Returns its plots, so a step can `show` it.
 """
-function callout!(ax, pt, label; offset = (40, 40), color = :white, fontsize = 18, linewidth = 1.2)
+function callout!(ax, pt, label; offset = (40, 40), color = :white, fontsize = 26, linewidth = 1.5)
     Mk = _mk()
     x, y = Float64(pt[1]), Float64(pt[2])
     ox, oy = Float64(offset[1]), Float64(offset[2])
