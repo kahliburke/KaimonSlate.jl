@@ -240,6 +240,7 @@
       r.el.style.removeProperty('view-transition-name');
       r.el.querySelectorAll('[style*="view-transition-name"]').forEach(n => n.style.removeProperty('view-transition-name'));
       r.el.querySelectorAll('.deck-ctl-hidden').forEach(n => n.classList.remove('deck-ctl-hidden'));
+      r.el.querySelectorAll('.slidefig').forEach(n => n.style.removeProperty('max-width'));
       _restoreCellCharts(r.el);
       if (r.slot.isConnected) r.slot.appendChild(r.el);
       else r.el.remove();                      // its cell is gone (see `_deckSettle`)
@@ -635,6 +636,17 @@
       const tot = charts.reduce((a, c) => a + c.dom.clientHeight, 0);
       const k = Math.max(0.5, 1 - over / Math.max(1, tot));
       for (const c of charts) _sizeChart(c, c.dom.clientWidth * k, c.dom.clientHeight * k);
+      over = body.scrollHeight - body.clientHeight;
+    }
+    // Slide figures (`slide_figure`) give up height the same way; they keep their aspect, so a
+    // narrower box is a shorter one.
+    const figs = [...body.querySelectorAll('.slidefig')];
+    figs.forEach(f => f.style.removeProperty('max-width'));
+    if (figs.length) over = body.scrollHeight - body.clientHeight;
+    for (let pass = 0; pass < 3 && over > 1 && figs.length; pass++) {
+      const tot = figs.reduce((a, f) => a + f.clientHeight, 0);
+      const k = Math.max(0.6, 1 - over / Math.max(1, tot));
+      for (const f of figs) f.style.setProperty('max-width', (f.clientWidth * k) + 'px', 'important');
       over = body.scrollHeight - body.clientHeight;
     }
     _fitMath(body);

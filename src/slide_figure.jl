@@ -30,7 +30,7 @@ struct SlideFigure
     w::Int
     h::Int
     base::String                           # asset path of the figure before any step (PNG)
-    layers::Vector{Tuple{Int,Symbol,String,String}}   # (step, :png | :mp4, asset path, poster PNG path or "")
+    layers::Vector{Tuple{Int,Symbol,String,String}}   # (step, :png | :video, asset path, poster PNG path or "")
 end
 
 _mk() = _need_makie()
@@ -54,6 +54,42 @@ function _setvis!(p, v::Bool)
 end
 _getalpha(p) = try; p.alpha[]; catch; nothing; end
 _setalpha!(p, a) = try; p.alpha[] = a; catch; end
+
+# A figure whose background lets the slide show through. Its clips are VP9 WebM with an alpha channel,
+# which an MP4 cannot carry.
+_transparent(fig) = try
+    _mkcall(_mk().to_color, fig.scene.backgroundcolor[]).alpha < 1
+catch
+    false
+end
+
+function _mp4_clip(fig, frame, n, fps)
+    path = tempname() * ".mp4"
+    try
+        Base.invokelatest(_mk().record, frame, fig, path, 1:n; framerate = fps)
+        return read(path)
+    finally
+        rm(path; force = true)
+    end
+end
+
+function _webm_clip(fig, frame, n, fps, ppu)
+    Mk = _mk()
+    dir = mktempdir()
+    try
+        for k in 1:n
+            frame(k)
+            _mkcall(Mk.save, joinpath(dir, "f" * lpad(k, 4, '0') * ".png"), fig; px_per_unit = ppu)
+        end
+        out = joinpath(dir, "clip.webm")
+        ff = Base.invokelatest(() -> Mk.FFMPEG_jll.ffmpeg())
+        run(pipeline(`$ff -y -loglevel error -framerate $fps -i $(joinpath(dir, "f%04d.png")) -c:v libvpx-vp9
+                      -pix_fmt yuva420p -b:v 0 -crf 30 -deadline good -cpu-used 4 -row-mt 1 $out`))
+        return read(out)
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
 
 # Every plot drawn in the figure's axes, for `focus` to dim the rest.
 function _all_plots(fig)
@@ -96,7 +132,10 @@ NamedTuple saying what changes on that step:
 
 A plot is anything Makie returns from `lines!`, `scatter!`, `callout!`, …; pass several as a vector.
 The steps share the slide's step counter with its other builds (step `i` here is build step `i`).
-Rendering mutates `fig`, which ends in its final state.
+Rendering mutates `fig`, which ends in its final state. A figure with a transparent background
+(`backgroundcolor = :transparent` on the figure and its axes, e.g. through `update_theme!`) is drawn
+on the slide's own background; its clips are WebM with an alpha channel (VP9), which Chrome and Firefox
+play.
 
 ```julia
 fig = Figure(); ax = Axis(fig[1, 1])
@@ -115,6 +154,7 @@ function slide_figure(fig; steps = NamedTuple[], fps::Integer = 30, px_per_unit:
     end
     foreach(p -> _setvis!(p, false), shown)
     w, h = Int.(round.(_mkcall(size, fig.scene)))
+    clear = _transparent(fig)
     save(name, bytes, mime) = _save_asset(name, bytes; mime).path
     base = save("slidefig-0.png", _png_bytes(fig, px_per_unit), "image/png")
     alphas = IdDict{Any,Any}()             # plots dimmed by the current focus → their own alpha
@@ -147,19 +187,15 @@ function slide_figure(fig; steps = NamedTuple[], fps::Integer = 30, px_per_unit:
         anim = get(st, :animate, nothing)
         if n > 1 && (lim !== nothing || anim !== nothing)
             from = lim === nothing ? nothing : _current_limits(lim[1])
-            path = tempname() * ".mp4"
-            try
-                frame = k -> begin
-                    t = (k - 1) / (n - 1)
-                    lim === nothing || _mkcall(Mk.limits!, lim[1], _limits_at(from, lim[2], t)...)
-                    anim === nothing || Base.invokelatest(anim, t)
-                end
-                Base.invokelatest(Mk.record, frame, fig, path, 1:n; framerate = fps)
-                push!(layers, (i, :mp4, save("slidefig-$i.mp4", read(path), "video/mp4"),
-                               save("slidefig-$i-end.png", _png_bytes(fig, px_per_unit), "image/png")))
-            finally
-                rm(path; force = true)
+            frame = k -> begin
+                t = (k - 1) / (n - 1)
+                lim === nothing || _mkcall(Mk.limits!, lim[1], _limits_at(from, lim[2], t)...)
+                anim === nothing || Base.invokelatest(anim, t)
             end
+            name, bytes, mime = clear ? ("slidefig-$i.webm", _webm_clip(fig, frame, n, fps, px_per_unit), "video/webm") :
+                                        ("slidefig-$i.mp4", _mp4_clip(fig, frame, n, fps), "video/mp4")
+            push!(layers, (i, :video, save(name, bytes, mime),
+                           save("slidefig-$i-end.png", _png_bytes(fig, px_per_unit), "image/png")))
         else
             lim === nothing || _mkcall(Mk.limits!, lim[1], lim[2]...)
             anim === nothing || Base.invokelatest(anim, 1.0)

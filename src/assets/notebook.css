@@ -3138,6 +3138,8 @@ body.presenting { overflow: hidden; }
 .deck-slide .cell.selected, .deck-slide .cell.multisel, .deck-slide .cell.dep-focus { outline: none !important; }
 .deck-slide .cell-row { display: flex; gap: calc(var(--u) * 48); align-items: flex-start; }
 .deck-slide .cell-row > .cell { flex: 1 1 0; min-width: 0; }
+/* Text beside a figure sits level with the figure's middle. */
+.deck-slide .cell-row:has(> .cell.md) { align-items: center; }
 .deck-slide .srcedit, .deck-slide .cm-editor, .deck-slide .srchost { display: none; }
 .deck-slide.show-code .srcedit, .deck-slide.show-code .cm-editor, .deck-slide.show-code .srchost { display: block; }
 .deck-slide .hostedph, .deck-slide .cell.deck-bindonly, .deck-slide .deck-ctl-hidden,
@@ -3153,6 +3155,7 @@ body.presenting { overflow: hidden; }
 .deck-slide.show-code .cell.slide-split > .output, .deck-slide.show-code .cell.slide-split > .tables,
 .deck-slide.show-code .cell.slide-split > .echarts, .deck-slide.show-code .cell.slide-split > .anim { grid-column: 2; min-width: 0; }
 .deck-slide .output { max-height: none !important; font-size: .7em; }
+.deck-slide .output > .out, .deck-slide .output > .val, .deck-slide .output > .dispwrap { border-top: none; }
 .deck-slide .cell > .output, .deck-slide .cell > .echarts, .deck-slide .cell > .tables,
 .deck-slide .cell > .controls, .deck-slide .cell > .anim { border: none !important; }
 .deck-slide .output img, .deck-slide .md img, .deck-slide .md video {
@@ -3291,6 +3294,15 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 .slidefig { position: relative; width: 100%; margin: 0 auto; }
 .slidefig > img, .slidefig > video { display: block; width: 100%; height: 100%; object-fit: contain; }
 .slidefig > .sf-layer { position: absolute; inset: 0; }
+/* Only one state shows at a time, so a figure with a transparent background doesn't show the states
+   under it: in the notebook the last, on a slide the latest one reached. On a slide the state being
+   left goes only once the next has faded in over it, a crossfade with no dip. */
+.slidefig:has(> .sf-layer) > .sf-base, .slidefig > .sf-layer:not(:last-child) { visibility: hidden; }
+.deck-slide .slidefig > .sf-base, .deck-slide .slidefig > .sf-layer { visibility: visible; }
+.deck-slide .slidefig:has(> .sf-layer.on) > .sf-base,
+.deck-slide .slidefig > .sf-layer.step.on:has(~ .sf-layer.on) {
+  opacity: 0; visibility: hidden; transition: opacity .2s ease .5s, visibility 0s linear .7s; }
+.deck-slide .slidefig > .sf-base { transition: opacity .2s ease; }
 .deck-slide .slidefig { max-width: min(100%, calc(var(--u) * 760 * var(--sf-ar))) !important; }
 .deck-slide .slidefig > .sf-layer.step { transition-duration: .55s; }
 /* `::: derive`: equations stacked in one place, one shown; stepping turns it into the next. */

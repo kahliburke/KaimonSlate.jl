@@ -1362,7 +1362,11 @@ See also `save_asset`, `FileUpload`."""),
         returns its plots (show it on a step). `slate_color(:red)` is the colour `\\termc{name}{red}{…}` gives a
         math term, so a figure and its equation share colours (blue yellow red green purple orange teal pink
         lime sky). Keep the heavy computation in its own cell and draw from its result, so re-rendering the
-        figure is cheap. Clips cost a render per frame: 30 to 60 frames is plenty.
+        figure is cheap. Clips cost a render per frame: 30 to 60 frames is plenty. Size the figure about as
+        the slide shows it (800 px tall, `px_per_unit = 2`) with a slide-sized theme font (`update_theme!(fontsize
+        = 26)`); give it `backgroundcolor = :transparent` (figure and axes) to sit on the slide background. A
+        figure beside text: tag the figure cell `column=2` after a markdown cell, and pair an `::: incremental`
+        list with the figure's steps (both follow the slide's step counter).
         ```julia
         let fig = Figure(size = (1100, 1000)), ax = Axis(fig[1, 1]; aspect = DataAspect())
             scatter!(ax, R, Z; markersize = 1, color = (:gray70, 0.4))
@@ -1372,8 +1376,7 @@ See also `save_asset`, `FileUpload`."""),
                                        (limits = (ax, (RX - w, RX + w, ZX - w, ZX + w)), frames = 45)])
         end
         ```
-        Example deck: `examples/` decks and the stellarator `notebooks/pot_slides.jl`. See also `slides`,
-        `math slides`."""),
+        See also `slides`, `math slides`."""),
     SlateApiEntry("markdown", "Document",
         "Prose cells (`#%% md`) with `{{ expr }}` interpolation of live values; `@md` is their skin.",
         ["md", "text", "prose", "interpolation", "narrative", "template", "standalone"],

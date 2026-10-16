@@ -269,7 +269,7 @@ end
 
 @testset "slide_figure: stacked states and the shared palette" begin
     RE = KaimonSlate.ReportEngine
-    sf = RE.SlideFigure(800, 400, "data/s0.png", [(1, :png, "data/s1.png", ""), (2, :mp4, "data/s2.mp4", "data/s2-end.png")])
+    sf = RE.SlideFigure(800, 400, "data/s0.png", [(1, :png, "data/s1.png", ""), (2, :video, "data/s2.mp4", "data/s2-end.png")])
     h = sprint(show, MIME("text/html"), sf)
     @test occursin("class=\"slidefig\"", h) && occursin("aspect-ratio:800/400", h)
     @test occursin("<img class=\"step fade sf-layer\" step=\"1\" alt=\"\" data-slate-src=\"data/s1.png\"", h)
@@ -286,7 +286,7 @@ end
 
 @testset "print takes a slide_figure's finished state" begin
     RE = KaimonSlate.ReportEngine
-    sf = RE.SlideFigure(10, 10, "data/a.png", [(1, :png, "data/b.png", ""), (2, :mp4, "data/c.mp4", "data/c-end.png")])
+    sf = RE.SlideFigure(10, 10, "data/a.png", [(1, :png, "data/b.png", ""), (2, :video, "data/c.mp4", "data/c-end.png")])
     html = Vector{UInt8}(codeunits(sprint(show, MIME("text/html"), sf)))
     assets = [(; path = p, bytes = UInt8[k]) for (k, p) in enumerate(("data/a.png", "data/b.png", "data/c.mp4", "data/c-end.png"))]
     out = (; display = [(; mime = "text/html", data = html)], assets)
