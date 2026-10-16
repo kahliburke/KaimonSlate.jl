@@ -1015,18 +1015,22 @@ end
 _has_html_output(c::Cell) = c.output !== nothing &&
     any(ch -> ch.mime in ("text/html", "application/vnd.kaimonslate.html+html"), c.output.display)
 
-# The finished state of a `slide_figure` output (slide_figure.jl): the last PNG in its block, which is the
-# last state's image, or the poster frame of a final clip. `nothing` for any other output.
+# The finished state of a `slide_figure` output (slide_figure.jl): the last PNG its block names (the last
+# state's image, or the poster frame of a final clip), read from the cell's saved assets. `nothing` for
+# any other output.
 function _slidefig_final_png(o)
     for ch in o.display
         ch.mime in ("text/html", "application/vnd.kaimonslate.html+html") || continue
         h = String(copy(ch.data))
         occursin("class=\"slidefig\"", h) || continue
         last = nothing
-        for m in eachmatch(r"(?:src|poster)=\"data:image/png;base64,([^\"]+)\"", h)
+        for m in eachmatch(r"data-slate-(?:src|poster)=\"([^\"]+\.png)\"", h)
             last = m.captures[1]
         end
-        last === nothing || return Base64.base64decode(last)
+        last === nothing && continue
+        for a in o.assets
+            String(getfield(a, :path)) == last && return _asset_bytes(a)
+        end
     end
     return nothing
 end

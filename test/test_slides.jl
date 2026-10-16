@@ -269,11 +269,12 @@ end
 
 @testset "slide_figure: stacked states and the shared palette" begin
     RE = KaimonSlate.ReportEngine
-    sf = RE.SlideFigure(800, 400, UInt8[1], [(1, :png, UInt8[2], UInt8[]), (2, :mp4, UInt8[3], UInt8[4])])
+    sf = RE.SlideFigure(800, 400, "data/s0.png", [(1, :png, "data/s1.png", ""), (2, :mp4, "data/s2.mp4", "data/s2-end.png")])
     h = sprint(show, MIME("text/html"), sf)
     @test occursin("class=\"slidefig\"", h) && occursin("aspect-ratio:800/400", h)
-    @test occursin("<img class=\"step fade sf-layer\" step=\"1\"", h)
-    @test occursin("<video class=\"step fade sf-layer sf-anim\" step=\"2\"", h) && occursin("poster=\"data:image/png", h)
+    @test occursin("<img class=\"step fade sf-layer\" step=\"1\" alt=\"\" data-slate-src=\"data/s1.png\"", h)
+    @test occursin("<video class=\"step fade sf-layer sf-anim\" step=\"2\"", h)
+    @test occursin("data-slate-poster=\"data/s2-end.png\"", h) && !occursin("base64", h)   # paths, not bytes
     # The figure palette is the one the slide math colours terms with (core.js SLATE_TERM_PALETTE).
     js = read(joinpath(@__DIR__, "..", "src", "assets", "js", "core.js"), String)
     for (k, v) in pairs(RE.SLATE_COLORS)
@@ -285,8 +286,10 @@ end
 
 @testset "print takes a slide_figure's finished state" begin
     RE = KaimonSlate.ReportEngine
-    sf = RE.SlideFigure(10, 10, UInt8[1], [(1, :png, UInt8[2], UInt8[]), (2, :mp4, UInt8[3], UInt8[9])])
-    out = (; display = [(; mime = "text/html", data = Vector{UInt8}(codeunits(sprint(show, MIME("text/html"), sf))))])
-    @test NS._slidefig_final_png(out) == UInt8[9]          # the final clip's poster frame
-    @test NS._slidefig_final_png((; display = [(; mime = "text/html", data = UInt8[0x3c])])) === nothing
+    sf = RE.SlideFigure(10, 10, "data/a.png", [(1, :png, "data/b.png", ""), (2, :mp4, "data/c.mp4", "data/c-end.png")])
+    html = Vector{UInt8}(codeunits(sprint(show, MIME("text/html"), sf)))
+    assets = [(; path = p, bytes = UInt8[k]) for (k, p) in enumerate(("data/a.png", "data/b.png", "data/c.mp4", "data/c-end.png"))]
+    out = (; display = [(; mime = "text/html", data = html)], assets)
+    @test NS._slidefig_final_png(out) == UInt8[4]          # the final clip's poster frame
+    @test NS._slidefig_final_png((; display = [(; mime = "text/html", data = UInt8[0x3c])], assets)) === nothing
 end

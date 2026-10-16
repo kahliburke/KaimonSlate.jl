@@ -4,7 +4,9 @@
 # notebook's own Makie backend. A step without `frames` is one image the deck crossfades to; a step
 # with `frames` is a short clip rendered frame by frame, so camera moves and fills are smooth. The
 # states are stacked in one HTML block, each tagged with its build step, so the deck's step counter
-# reveals them in turn; in the notebook the last state is what shows.
+# reveals them in turn; in the notebook the last state is what shows. The images and clips are saved as
+# cell assets (`save_asset`): they ride with the cell's cached result and an export, and the HTML holds
+# only their paths, which the page resolves (core.js `_hydrateAssetMedia`).
 #
 # Makie is reached at runtime through whatever backend the notebook loaded (as `slate_look.jl` does),
 # so neither the engine nor the worker depends on it.
@@ -27,8 +29,8 @@ slate_color(name) = getproperty(SLATE_COLORS, Symbol(name))
 struct SlideFigure
     w::Int
     h::Int
-    base::Vector{UInt8}                    # PNG of the figure before any step
-    layers::Vector{Tuple{Int,Symbol,Vector{UInt8},Vector{UInt8}}}   # (step, :png | :mp4, bytes, poster png)
+    base::String                           # asset path of the figure before any step (PNG)
+    layers::Vector{Tuple{Int,Symbol,String,String}}   # (step, :png | :mp4, asset path, poster PNG path or "")
 end
 
 _mk() = _need_makie()
@@ -112,9 +114,10 @@ function slide_figure(fig; steps = NamedTuple[], fps::Integer = 30, px_per_unit:
     end
     foreach(p -> _setvis!(p, false), shown)
     w, h = Int.(round.(_mkcall(size, fig.scene)))
-    base = _png_bytes(fig, px_per_unit)
+    save(name, bytes, mime) = _save_asset(name, bytes; mime).path
+    base = save("slidefig-0.png", _png_bytes(fig, px_per_unit), "image/png")
     alphas = IdDict{Any,Any}()             # plots dimmed by the current focus → their own alpha
-    layers = Tuple{Int,Symbol,Vector{UInt8},Vector{UInt8}}[]
+    layers = Tuple{Int,Symbol,String,String}[]
     for (i, st) in enumerate(steps)
         haskey(st, :show) && foreach(p -> _setvis!(p, true), _plots_of(st.show))
         haskey(st, :hide) && foreach(p -> _setvis!(p, false), _plots_of(st.hide))
@@ -145,32 +148,32 @@ function slide_figure(fig; steps = NamedTuple[], fps::Integer = 30, px_per_unit:
                     anim === nothing || Base.invokelatest(anim, t)
                 end
                 Base.invokelatest(Mk.record, frame, fig, path, 1:n; framerate = fps)
-                push!(layers, (i, :mp4, read(path), _png_bytes(fig, px_per_unit)))
+                push!(layers, (i, :mp4, save("slidefig-$i.mp4", read(path), "video/mp4"),
+                               save("slidefig-$i-end.png", _png_bytes(fig, px_per_unit), "image/png")))
             finally
                 rm(path; force = true)
             end
         else
             lim === nothing || _mkcall(Mk.limits!, lim[1], lim[2]...)
             anim === nothing || Base.invokelatest(anim, 1.0)
-            push!(layers, (i, :png, _png_bytes(fig, px_per_unit), UInt8[]))
+            push!(layers, (i, :png, save("slidefig-$i.png", _png_bytes(fig, px_per_unit), "image/png"), ""))
         end
     end
     return SlideFigure(w, h, base, layers)
 end
 
-_b64(bytes) = Base64.base64encode(bytes)
+_attr(x) = replace(String(x), '&' => "&amp;", '"' => "&quot;", '<' => "&lt;")
 
 function Base.show(io::IO, ::MIME"text/html", sf::SlideFigure)
     print(io, "<div class=\"slidefig\" style=\"--sf-ar:", round(sf.w / sf.h; digits = 4), ";max-width:", sf.w,
               "px;aspect-ratio:", sf.w, "/", sf.h, "\">")
-    print(io, "<img class=\"sf-base\" alt=\"\" src=\"data:image/png;base64,",
-              _b64(sf.base), "\">")
-    for (i, kind, bytes, poster) in sf.layers
+    print(io, "<img class=\"sf-base\" alt=\"\" data-slate-src=\"", _attr(sf.base), "\">")
+    for (i, kind, path, poster) in sf.layers
         if kind === :png
-            print(io, "<img class=\"step fade sf-layer\" step=\"", i, "\" alt=\"\" src=\"data:image/png;base64,", _b64(bytes), "\">")
+            print(io, "<img class=\"step fade sf-layer\" step=\"", i, "\" alt=\"\" data-slate-src=\"", _attr(path), "\">")
         else
             print(io, "<video class=\"step fade sf-layer sf-anim\" step=\"", i, "\" muted playsinline preload=\"auto\" ",
-                      "poster=\"data:image/png;base64,", _b64(poster), "\" src=\"data:video/mp4;base64,", _b64(bytes), "\"></video>")
+                      "data-slate-poster=\"", _attr(poster), "\" data-slate-src=\"", _attr(path), "\"></video>")
         end
     end
     print(io, "</div>")

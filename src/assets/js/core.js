@@ -259,6 +259,26 @@ function _lookupAsset(path) {
   if (!window.__slateAssets[path]) ((window.__slateState || {}).cells || []).forEach(_registerAssets);
   return window.__slateAssets[path];
 }
+// An <img>/<video> naming a cell asset by path (`data-slate-src`, `data-slate-poster`) gets the asset's
+// URL: the served blob live, a data: URL in a static export where the bytes are inlined. Run with each
+// typeset pass, so an output picks its media up whenever it renders.
+function _assetMediaUrl(path) {
+  const a = _lookupAsset(path);
+  if (!a) return null;
+  if (a.url) return a.url;
+  return a.data !== undefined ? 'data:' + (a.mime || 'application/octet-stream') + ';base64,' + a.data : null;
+}
+function _hydrateAssetMedia(root) {
+  if (!root || !root.querySelectorAll) return;
+  for (const el of root.querySelectorAll('[data-slate-src], [data-slate-poster]')) {
+    for (const [attr, prop] of [['data-slate-poster', 'poster'], ['data-slate-src', 'src']]) {
+      const p = el.getAttribute(attr); if (!p) continue;
+      const u = _assetMediaUrl(p);
+      if (u && el.getAttribute(prop) !== u) el.setAttribute(prop, u);
+    }
+  }
+}
+window.slateHydrateAssetMedia = _hydrateAssetMedia;
 window.Slate.asset = function (path) {
   const a = _lookupAsset(path);
   if (!a) return Promise.reject(new Error('Slate.asset: unknown asset ' + path));
@@ -1632,6 +1652,7 @@ window.slateColorSeries = inst => _colorSeriesByTerms(inst);
 // CodeMirror editor is skipped by class below, so editor `$` is never touched.
 function typeset(el) {
   if (!el) return;
+  _hydrateAssetMedia(el);
   // Output `text/latex` blocks render in DISPLAY mode so they match markdown
   // `$$…$$` sizing (a LaTeXString arrives as inline `$…$`, which KaTeX would
   // otherwise typeset cramped). Render them explicitly first; cache the raw TeX
