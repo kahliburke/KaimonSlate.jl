@@ -1171,31 +1171,32 @@
     let ov = document.getElementById('deckoverview');
     if (ov) { ov.remove(); return; }
     ov = document.createElement('div'); ov.id = 'deckoverview'; ov.className = 'deck-overview';
-    const cells = (nbState && nbState.cells) || [];
+    // Each card is the slide itself at its last step, drawn the way the presenter draws its previews.
+    const [W, H] = _canvasSize();
     const grid = document.createElement('div'); grid.className = 'deck-ov-grid';
+    const thumbs = [];
     D.slides.forEach((sl, i) => {
       const card = document.createElement('button');
       card.className = 'deck-ov-card' + (i === D.idx ? ' on' : '');
-      const bg = document.createElement('div');
-      const probe = document.createElement('div');
-      _paintBg(bg, probe, _effCfg(sl.cfg || {}, i));
-      card.className += ' ' + probe.className;
-      let sub = '';
-      for (const id of sl.ids) {
-        const c = cells.find(x => x.id === id); if (!c || c.kind !== 'md') continue;
-        const line = (c.source || '').split('\n').map(l => l.trim()).find(l => l && !/^(#|:::|\. \. \.|[-*+] |!\[)/.test(l));
-        if (line) { sub = line.replace(/[*_`]/g, ''); break; }
-      }
-      card.innerHTML = '<span class="n">' + (i + 1) + '</span><b></b><span class="s"></span>';
-      card.prepend(bg);
-      card.querySelector('b').textContent = _slideTitle(sl) || '';
-      card.querySelector('.s').textContent = sub.slice(0, 90);
+      card.style.aspectRatio = W + ' / ' + H;
+      card.setAttribute('aria-label', (i + 1) + '. ' + (_slideTitle(sl) || 'slide'));
+      const thumb = document.createElement('div'); thumb.className = 'deck-ov-thumb';
+      const n = document.createElement('span'); n.className = 'n'; n.textContent = String(i + 1);
+      card.append(thumb, n);
       card.onclick = () => { ov.remove(); _go(i, null, false); };
       grid.appendChild(card);
+      thumbs.push([thumb, i]);
     });
     ov.appendChild(grid);
     deck.appendChild(ov);
     const cur = grid.children[D.idx]; if (cur) cur.scrollIntoView({ block: 'center' });
+    // A few per frame, so the overview opens at once and fills in.
+    const draw = () => {
+      if (!ov.isConnected) return;
+      for (const [thumb, i] of thumbs.splice(0, 4)) _previewInto(thumb, i, Infinity);
+      if (thumbs.length) requestAnimationFrame(draw);
+    };
+    requestAnimationFrame(draw);
   }
   function deckHelp() {
     const h = document.getElementById('deckhelp');

@@ -3405,7 +3405,7 @@ body.deck-recording .deck-hud, body.deck-recording .deck-edge { display: none; }
 /* Overview: every slide as a card on its own background. */
 .deck-overview { position: fixed; inset: 0; z-index: 88; overflow-y: auto; padding: 4vh 4vw;
   background: color-mix(in srgb, #05060c 88%, transparent); backdrop-filter: blur(8px); }
-.deck-ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; }
+.deck-ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
 .deck-ov-card { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 10px; cursor: pointer;
   border: 1px solid #ffffff1a; background: var(--bg); color: var(--text); text-align: left; padding: 14px 16px;
   display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; font: 14px/1.35 var(--deck-font, system-ui);
@@ -3413,6 +3413,8 @@ body.deck-recording .deck-hud, body.deck-recording .deck-edge { display: none; }
 .deck-ov-card:hover { transform: translateY(-2px); border-color: var(--accent); }
 .deck-ov-card.on { outline: 2px solid var(--accent); outline-offset: 2px; }
 .deck-ov-card .slide-bg { position: absolute; inset: 0; z-index: 0; }
+.deck-overview .deck-ov-card > .deck-ov-thumb { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.deck-overview .deck-ov-card > .n { position: absolute; top: 8px; left: 10px; z-index: 2; background: rgba(0, 0, 0, .5); color: #fff; padding: 2px 7px; border-radius: 4px; opacity: .85; }
 .deck-ov-card > :not(.slide-bg) { position: relative; z-index: 1; }
 .deck-ov-card .n { position: absolute; top: 10px; left: 12px; font-size: 12px; opacity: .6; }
 .deck-ov-card b { font-size: 16px; font-weight: 700; color: var(--strong, var(--text)); }
