@@ -228,14 +228,35 @@ shows.
 |:---------|:-------|
 | `show = plots`, `hide = plots` | plots appear (hidden until then) or go |
 | `focus = plots` | every other plot dims until the next `focus` |
-| `limits = (ax, (x1, x2, y1, y2))` | the axis moves to that window |
+| `limits = (ax, (x1, x2, y1, y2))` | the axis moves to that window (six values for an `Axis3`) |
+| `view = (ax3, (azimuth, elevation))` | an `Axis3` camera turns to those angles |
+| `trace = tr` | a `trace!` orbit draws itself along its points |
+| `terms = "name"` | the math terms `\term{name}{…}` on the slide light up while this step is current |
 | `animate = t -> …` | called with `t` from 0 to 1, usually setting observables |
 | `update = () -> …` | any other change |
 | `frames = n` | render the step as an `n`-frame clip |
 
-`callout!(ax, (x, y), "label")` pins a label with a fine leader line to a point of the data, and
+The moves of one step (`limits`, `view`, `trace`, `animate`) run together in its clip, so a camera can
+turn while an orbit draws.
+
+`callout!(ax, (x, y), "label")` pins a label with a fine leader line to a point of the data; on an
+`Axis3`, `callout!(ax, (x, y, z), "label")` keeps the label upright beside the point as the camera
+turns. `trace!(ax, xs, ys[, zs])` is an orbit that draws itself with a bright head, at an even pace
+per point: a sampled flow runs smoothly, and a map's orbit hops from iterate to iterate (`markers =
+true` leaves a dot at each). Repeat the first point to close a periodic orbit.
+
 `slate_color(:red)` is the red that `\termc{name}{red}{…}` gives a term, so the figure and the equation
-beside it agree.
+beside it agree. With `terms`, a step also points at the symbol: a figure that brings in the orbit 01
+with `terms = "t01"` rings `\termc{t01}{teal}{t_{01}}` in the cycle expansion beside it at the same
+moment. A markdown step can do the same with `::: {.step terms="t01"}`.
+
+Tag two figure cells on consecutive slides `morph=name` and the figure glides from its place on the
+first to its place on the second, say from full width to a column beside text. Draw the second one
+starting from the state the first ends in, so the glide reads as one figure moving.
+
+A figure with a transparent background (`backgroundcolor = :transparent` on the figure and its axes)
+sits on the slide's own background. Its clips are then WebM with an alpha channel, which Chrome and
+Firefox play.
 
 ### Media and morphing
 

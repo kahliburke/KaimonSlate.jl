@@ -1979,6 +1979,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const use_slate_theme! = $use_slate_theme!))   # apply it globally (needs Makie loaded)
     Core.eval(m, :(const slide_figure = $slide_figure))           # a Makie figure that builds on a slide (slide_figure.jl)
     Core.eval(m, :(const callout! = $callout!))
+    Core.eval(m, :(const trace! = $trace!))
     Core.eval(m, :(const slate_color = $slate_color))
     Core.eval(m, :(const animate = $animate))     # animate(frames;…) → Animation (animation.jl)
     Core.eval(m, :(const slate_table = $slate_table))

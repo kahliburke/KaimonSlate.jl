@@ -182,6 +182,9 @@ end
         @test occursin("class=\"step zoom\"", h) && occursin("step=\"3\"", h)
         @test occursin("<div class=\"incremental\">", h)
         @test occursin("keep {braces}", h)                  # prose braces are not attributes
+        # A step that names terms, and a derive equation placed on an explicit step
+        h2 = R.markdown_html("::: {.step terms=\"t01\"}\nS\n:::\n\n:::: derive\n\$\$a\$\$\n\n::: {step=4}\n\$\$b\$\$\n:::\n::::")
+        @test occursin("terms=\"t01\"", h2) && occursin("step=\"4\"", h2) && occursin("<div class=\"derive\">", h2)
     end
     @testset "pause marker" begin
         h = R.markdown_html("one\n\n. . .\n\ntwo")
@@ -269,11 +272,13 @@ end
 
 @testset "slide_figure: stacked states and the shared palette" begin
     RE = KaimonSlate.ReportEngine
-    sf = RE.SlideFigure(800, 400, "data/s0.png", [(1, :png, "data/s1.png", ""), (2, :video, "data/s2.mp4", "data/s2-end.png")])
+    sf = RE.SlideFigure(800, 400, "data/s0.png",
+                        [(; step = 1, kind = :png, path = "data/s1.png", poster = "", terms = String[]),
+                         (; step = 2, kind = :video, path = "data/s2.mp4", poster = "data/s2-end.png", terms = ["t01", "t0"])])
     h = sprint(show, MIME("text/html"), sf)
     @test occursin("class=\"slidefig\"", h) && occursin("aspect-ratio:800/400", h)
     @test occursin("<img class=\"step fade sf-layer\" step=\"1\" alt=\"\" data-slate-src=\"data/s1.png\"", h)
-    @test occursin("<video class=\"step fade sf-layer sf-anim\" step=\"2\"", h)
+    @test occursin("<video class=\"step fade sf-layer sf-anim\" step=\"2\" data-terms=\"t01 t0\"", h)
     @test occursin("data-slate-poster=\"data/s2-end.png\"", h) && !occursin("base64", h)   # paths, not bytes
     # The figure palette is the one the slide math colours terms with (core.js SLATE_TERM_PALETTE).
     js = read(joinpath(@__DIR__, "..", "src", "assets", "js", "core.js"), String)
@@ -281,12 +286,18 @@ end
         @test occursin("$k: '$v'", js)
     end
     @test RE.slate_color(:red) == "#fc6255"
-    @test RE._limits_at((0.0, 1.0, 0.0, 1.0), (2.0, 3.0, 2.0, 3.0), 1.0) == (2.0, 3.0, 2.0, 3.0)
+    # Moves interpolate any number of values: an Axis window, an Axis3 box, a camera's two angles.
+    @test RE._lerp((0.0, 1.0, 0.0, 1.0), (2.0, 3.0, 2.0, 3.0), 1.0) == (2.0, 3.0, 2.0, 3.0)
+    @test RE._lerp(Tuple(zeros(6)), Tuple(ones(6)), 0.5) == Tuple(fill(0.5, 6))
+    @test RE._view_target((; elevation = Ref(0.3)), (1.0, 0.5)) == (1.0, 0.5)
+    @test RE._view_target((; elevation = Ref(0.3)), 2.0) == (2.0, 0.3)      # azimuth only keeps the elevation
+    @test RE._terms_of("t01") == ["t01"] && RE._terms_of([:a, "b"]) == ["a", "b"] && isempty(RE._terms_of(nothing))
 end
 
 @testset "print takes a slide_figure's finished state" begin
     RE = KaimonSlate.ReportEngine
-    sf = RE.SlideFigure(10, 10, "data/a.png", [(1, :png, "data/b.png", ""), (2, :video, "data/c.mp4", "data/c-end.png")])
+    sf = RE.SlideFigure(10, 10, "data/a.png", [(; step = 1, kind = :png, path = "data/b.png", poster = "", terms = String[]),
+                                               (; step = 2, kind = :video, path = "data/c.mp4", poster = "data/c-end.png", terms = String[])])
     html = Vector{UInt8}(codeunits(sprint(show, MIME("text/html"), sf)))
     assets = [(; path = p, bytes = UInt8[k]) for (k, p) in enumerate(("data/a.png", "data/b.png", "data/c.mp4", "data/c-end.png"))]
     out = (; display = [(; mime = "text/html", data = html)], assets)

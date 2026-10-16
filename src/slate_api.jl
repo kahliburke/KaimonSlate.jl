@@ -1346,27 +1346,38 @@ See also `save_asset`, `FileUpload`."""),
         Worked deck: `examples/slides_studio.jl`. See also `slides`, `SlideSteps`, `echart`."""),
     SlateApiEntry("slide_figure", "Document",
         "A Makie (CairoMakie) figure that BUILDS on a slide: plots appear, the rest dims, the camera moves, a sweep animates.",
-        ["makie", "cairomakie", "figure", "build", "animation", "zoom", "camera", "callout", "annotate", "slides", "3blue1brown"],
-        "slide_figure(fig; steps, fps = 30, px_per_unit = 1.5) · callout!(ax, (x, y), label) · slate_color(:red)",
+        ["makie", "cairomakie", "figure", "build", "animation", "zoom", "camera", "callout", "annotate", "slides", "3blue1brown",
+         "trace", "orbit", "axis3", "3d", "rotate", "term"],
+        "slide_figure(fig; steps, fps = 30, px_per_unit = 1.5) · callout!(ax, pt, label) · trace!(ax, xs, ys[, zs]) · slate_color(:red)",
         """Draw the figure as usual, keep the plot objects, and return `slide_figure(fig; steps)`. Each step is a
         NamedTuple of changes; the figure is rendered after each, and on the slide the states fade in on the
         slide's build steps (step i of the figure is build step i). In the notebook the final state shows.
         - `show = plots` (hidden until this step), `hide = plots`;
         - `focus = plots` dims every other plot until the next `focus` (`focus = nothing` undims);
-        - `limits = (ax, (x1, x2, y1, y2))` moves the axis; `animate = t -> …` is called with t from 0 to 1,
-          usually to set observables (`n[] = round(Int, t * N)` draws a set point by point);
-        - `update = () -> …` any other change; `frames = n` renders the step as an n-frame CLIP (smooth camera
-          moves and sweeps) instead of one image, played when the presenter steps onto it. A 3-D view turns
-          the same way: `(animate = t -> ax3.azimuth[] = a0 + t * π / 2, frames = 60)` on an `Axis3`.
+        - `limits = (ax, (x1, x2, y1, y2))` moves the axis (six values with z for an `Axis3`);
+          `view = (ax3, (azimuth, elevation))` turns an `Axis3` camera (`(ax3, az)` about the vertical only);
+        - `trace = tr` draws a `trace!` orbit along its points (a clip, 60 frames by default);
+        - `terms = "name"` lights the math terms `\\term{name}{…}` on the slide while this step is current, so a
+          cycle in the figure and its symbol in the equation beside it are picked out together;
+        - `animate = t -> …` is called with t from 0 to 1, usually to set observables (`n[] = round(Int, t * N)`
+          draws a set point by point); `update = () -> …` any other change;
+        - `frames = n` renders the step as an n-frame CLIP instead of one image, played when the presenter steps
+          onto it. The moves of one step (`limits`, `view`, `trace`, `animate`) run together.
         `callout!(ax, (x, y), "X-point"; offset = (40, 40))` pins a label with a leader line to a data point and
-        returns its plots (show it on a step). `slate_color(:red)` is the colour `\\termc{name}{red}{…}` gives a
+        returns its plots (show it on a step); on an `Axis3` give `(x, y, z)` and the label follows the point as
+        the camera turns. `trace!(ax, xs, ys[, zs]; color, markers = false)` is an orbit that draws itself with
+        a bright head at an even pace per point: a sampled flow runs smoothly, a map's orbit hops between
+        iterates (`markers = true` leaves a dot at each); repeat the first point to close a periodic orbit.
+        `slate_color(:red)` is the colour `\\termc{name}{red}{…}` gives a
         math term, so a figure and its equation share colours (blue yellow red green purple orange teal pink
         lime sky). Keep the heavy computation in its own cell and draw from its result, so re-rendering the
         figure is cheap. Clips cost a render per frame: 30 to 60 frames is plenty. Size the figure about as
         the slide shows it (800 px tall, `px_per_unit = 2`) with a slide-sized theme font (`update_theme!(fontsize
         = 26)`); give it `backgroundcolor = :transparent` (figure and axes) to sit on the slide background. A
         figure beside text: tag the figure cell `column=2` after a markdown cell, and pair an `::: incremental`
-        list with the figure's steps (both follow the slide's step counter).
+        list with the figure's steps (both follow the slide's step counter). To carry a figure onto the next
+        slide (full width here, beside text there), tag both figure cells `morph=name`: the figure glides to
+        its new place, so draw the second one starting from the state the first ends in.
         ```julia
         let fig = Figure(size = (1100, 1000)), ax = Axis(fig[1, 1]; aspect = DataAspect())
             scatter!(ax, R, Z; markersize = 1, color = (:gray70, 0.4))

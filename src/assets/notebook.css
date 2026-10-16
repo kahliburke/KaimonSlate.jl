@@ -3286,6 +3286,11 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 /* `\note{…}`: a quiet word on what a step of a derivation does, set beside the equation. */
 .katex .eqnote { color: var(--dim); font-size: .62em; font-family: var(--deck-font, inherit); letter-spacing: .01em; }
 .deck-slide .katex .eqnote { color: var(--deck-dim); }
+/* A term a figure step names (`terms`): ringed in its own colour while that step is current. */
+.deck-slide .katex .term { border-radius: .18em; transition: background-color .35s ease, box-shadow .35s ease; }
+.deck-slide .katex .term.lit-term { background-color: color-mix(in srgb, currentColor 16%, transparent);
+  box-shadow: 0 0 0 .12em color-mix(in srgb, currentColor 75%, transparent),
+    0 0 .7em color-mix(in srgb, currentColor 40%, transparent); }
 /* Spotlight: on a `focus` step everything but that item recedes. */
 .deck-slide .slide-body .spot-dim { opacity: .22; filter: saturate(.4); transition: opacity .45s ease, filter .45s ease; }
 .deck-slide .slide-body.spotlit .slide-num { opacity: .2; }

@@ -92,8 +92,8 @@ were written when they went out. They are marked.
   term colours shared by chart series of the same name, and `::: derive` blocks that transform one
   equation into the next.
 - `echart(…; steps = …)` moves a chart through axis windows on build steps. `slide_figure` builds a
-  Makie figure on a slide (plots appear, others dim, the camera moves, clips for smooth sweeps), with
-  `callout!` and `slate_color`.
+  Makie figure on a slide (plots appear, others dim, the camera moves or turns in 3-D, orbits draw
+  themselves with `trace!`, steps light the math terms they show), with `callout!` and `slate_color`.
 - The presenter window shows the current and next step, a timer, rehearsal pacing and notes. Rehearsal
   (`t`) saves per-step timings that autoplay (`a`) follows. Overview (`o`), laser (`l`), drawing (`d`),
   black screen (`b`), go-to and a key list (`?`).

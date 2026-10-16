@@ -401,6 +401,19 @@
     }
     _spotlight();
     for (const dv of _derives()) { const eq = _deriveTarget(dv, s); for (const c of dv.children) c.classList.toggle('derive-cur', c === eq); }
+    _lightTerms();
+  }
+  // A current step that names math terms (`data-terms` from a `slide_figure` step's `terms`, or a
+  // `terms="…"` attribute on a markdown step) lights those terms wherever they are on the slide, so a
+  // cycle in a figure and its symbol in an equation are picked out together.
+  function _lightTerms() {
+    const body = document.querySelector('#deckstage .deck-slide .slide-body');
+    if (!body) return;
+    const names = new Set();
+    for (const el of body.querySelectorAll('.current[data-terms], .current[terms]'))
+      for (const n of (el.dataset.terms || el.getAttribute('terms') || '').split(/[\s,]+/)) if (n) names.add(n);
+    for (const t of body.querySelectorAll('.katex .term'))
+      t.classList.toggle('lit-term', names.has(window.slateTermName ? slateTermName(t) : ''));
   }
   // A `focus` item on its step dims everything else on the slide, except what arrives on that same step
   // (its caption, say). At each level from a lit item up to the slide body its siblings dim, so the item
