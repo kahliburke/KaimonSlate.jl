@@ -58,11 +58,11 @@ For small angles (in radians) $\sin\theta \approx \theta$: at 10° the two diffe
 ::: derive
 $$\term{inertia}{\ddot\theta} = -\term{omega}{\omega^2}\,\theta \qquad \note{what we found}$$
 
-$$\term{theta}{\theta(t)} = \theta_0 \cos(\term{omega}{\omega}\, t) \qquad \note{guess a cosine: two derivatives give back −ω² times itself}$$
+$$\term{theta}{\theta(t)} = \theta_0 \cos(\term{omega}{\omega}\, t) \qquad \note{guess a cosine}$$
 
-$$\term{omega}{\omega}\,\term{period}{T} = 2\pi \qquad \note{one full swing: the cosine comes round}$$
+$$\term{omega}{\omega}\,\term{period}{T} = 2\pi \qquad \note{one full swing}$$
 
-$$\term{period}{T} = 2\pi\sqrt{\frac{\term{length}{L}}{g}} \qquad \note{use ω² = g/L}$$
+$$\term{period}{T} = 2\pi\sqrt{\frac{\term{length}{L}}{g}} \qquad \note{use} \; \term{omega}{\omega^2} = g/L$$
 :::
 
 ::: {.step step=3}

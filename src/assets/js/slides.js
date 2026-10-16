@@ -623,7 +623,32 @@
       for (const c of charts) _sizeChart(c, c.dom.clientWidth * k, c.dom.clientHeight * k);
       over = body.scrollHeight - body.clientHeight;
     }
+    _fitMath(body);
     if (over > 1 && _shrinkText(body)) body.classList.add('scroll');
+  }
+  // Display math does not wrap, so an equation wider than the slide would run off its edge: set it
+  // smaller until it fits. The equations of a `::: derive` block share one size, so the sequence does
+  // not change scale as it transforms.
+  function _fitMath(body) {
+    const cs = getComputedStyle(body);
+    const avail = body.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const groups = new Map();
+    for (const k of body.querySelectorAll('.katex-display > .katex')) {
+      k.style.fontSize = '';
+      const dv = k.closest('.derive');
+      const key = dv || k;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(k);
+    }
+    for (const ks of groups.values()) {
+      let f = 1;
+      for (const k of ks) {
+        const html = k.querySelector('.katex-html');
+        const need = html ? html.getBoundingClientRect().width : k.scrollWidth;
+        if (need > avail && avail > 0) f = Math.min(f, avail / need);
+      }
+      if (f < 1) for (const k of ks) k.style.fontSize = (parseFloat(getComputedStyle(k).fontSize) * Math.max(0.4, f * 0.98)) + 'px';
+    }
   }
   function _sizeCanvas(slide, vw, vh) {
     const [W, H] = _canvasSize();

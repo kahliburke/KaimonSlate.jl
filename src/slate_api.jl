@@ -1280,7 +1280,10 @@ See also `save_asset`, `FileUpload`."""),
           The label is TEXT: put math in it as `\$…\$` (`{mass \$\\times\$ acceleration}`), and keep it about as
           wide as its term, because a wider label pushes the rest of the equation apart.
         - `\\note{text}` sets a small dim annotation beside an equation saying what a step did. It is TEXT
-          too: write the math after it, outside: `… = 0 \\qquad \\note{use} \; \\omega^2 = g/L`.
+          too: write the math after it, outside: `… = 0 \\qquad \\note{use} \; \\omega^2 = g/L`. Keep it to two
+          to four words ("divide by m", "factor it out"); the explanation belongs in a step paragraph. Display
+          math never wraps: an equation wider than the slide is set smaller to fit (a whole derive block
+          together), so a long note shrinks the equation it annotates.
         STEPS. A slide has ONE step counter. Every build item on it takes a step: in document order each
         item without an explicit number takes the next one, `stepat-n`/`step=n` items take step n, and the
         slide's step count is the largest. Items sharing a number arrive together. In a `::: derive` block
