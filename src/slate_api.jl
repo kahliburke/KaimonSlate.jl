@@ -1321,6 +1321,9 @@ See also `save_asset`, `FileUpload`."""),
         time; each step turns it into the next. Pieces sharing a `\\term` name in consecutive equations (by
         name and occurrence) glide to their new place; the rest crossfades. The same matching runs between
         consecutive SLIDES, so making the last equation of one slide the first of the next carries it over.
+        To put one equation on a chosen step, wrap the block in `:::: derive` and that equation in
+        `::: {step=4}` … `:::`. LIGHTING: a step that names terms (`terms = "t01"` on a `slide_figure` step,
+        `::: {.step terms="t01"}` in markdown) rings those terms in their colour while it is current.
         Small moves explain best: one per equation, each with a `\\note` (divide through, name a combination,
         substitute a guess, factor, cancel). Split a long derivation over slides of 3 to 6 equations.
         FIGURES. A Makie figure builds with `slide_figure` (see that entry). Put the chart in its own code cell; tag it `column=2` to sit beside the markdown cell before
