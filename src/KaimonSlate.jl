@@ -3337,6 +3337,43 @@ function create_tools(GateTool::Type)
     end
 
     """
+        settings(notebook; key="", value="", clear="false") -> String
+
+    Read or change a notebook's own settings: the ones under Settings → This notebook, kept in the
+    `.jl` so they travel with it. Among them the slide deck's style (`deckstyle`), default transition
+    (`slidetransition`), autoplay seconds (`slideauto`), aspect ratio (`slideratio`) and the heading level
+    that starts a slide (`slidelevel`), and the citation style.
+
+    With no `key`: every setting with its current value and, for a choice, the allowed values. With
+    `key` and `value`: set it (open pages update). `clear="true"`: back to its default.
+    """
+    function settings_tool(notebook::String; key::String = "", value::String = "", clear::String = "false")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        NS = NotebookServer
+        if isempty(strip(key))
+            io = IOBuffer()
+            for it in NS.notebook_config_payload(nb)["items"]
+                ch = isempty(it["choices"]) ? "" : "  (" * join(map(c -> isempty(c) ? "\"\"" : c, it["choices"]), " | ") * ")"
+                println(io, rpad(it["key"], 16), " = ", repr(it["value"]), it["overridden"] ? "  [set here]" : "",
+                        ch, it["readonly"] ? "  read-only" : "", "  — ", it["label"])
+            end
+            return String(take!(io))
+        end
+        it = NS._config_item(String(key))
+        it === nothing && return "⛔ no setting '$key'. Call settings(notebook) with no key to list them."
+        get(it, :readonly, false) && return "⛔ '$key' is read-only here."
+        doclear = lowercase(strip(clear)) in ("true", "1", "yes")
+        if !doclear && !isempty(it.choices) && !(value in it.choices)
+            return "⛔ '$value' is not a choice for '$key': " * join(map(c -> isempty(c) ? "\"\"" : c, it.choices), " | ")
+        end
+        res = NS.set_notebook_config!(nb, key, value; clear = doclear)
+        get(res, "ok", false) === true || return "⛔ " * string(get(res, "message", "could not set '$key'"))
+        NS._agent_push!(nb)
+        now = get(nb.report.meta, String(key), it.default)
+        return "✅ $key = $(repr(now))" * (doclear ? "  (default)" : "")
+    end
+
+    """
         diag(notebook) -> String
 
     Browser diagnostics for an OPEN notebook tab: console errors, failed resource loads
@@ -4140,6 +4177,7 @@ function create_tools(GateTool::Type)
         GateTool("view", view_cell),
         GateTool("inspect", inspect_cell),
         GateTool("set_bind", set_bind_tool),
+        GateTool("settings", settings_tool),
         GateTool("diag", notebook_diag),
         GateTool("eval", scratch_eval),
         GateTool("check_eval", check_scratch_eval),

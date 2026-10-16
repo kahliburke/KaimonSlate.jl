@@ -149,7 +149,11 @@ const SLATE_API = SlateApiEntry[
         default to `progressive=0` (ECharts' progressive layers keep a stale blit under a roaming
         coordinate system — the dots stop following the map); pass an explicit `progressive=N` to
         re-enable for huge data.
-        Worked examples: `examples/echarts_dsl.jl`, `examples/seismic_month.jl`. See also `series`."""),
+        ON SLIDES: a series whose `name` is a math term's name (see "math slides") takes that term's colour;
+        `steps = [(x = (a, b),), (x = (c, d), y = (e, f)), (x = (g, h), band = true)]` moves the chart
+        through those axis windows (or shades an x band) on the slide's build steps without a recompute;
+        a presented chart is restyled for the room (slide-sized text, heavier lines) and restored after.
+        Worked examples: `examples/echarts_dsl.jl`, `examples/seismic_month.jl`. See also `series`, `slides`."""),
     # Real functions — documented in their own docstrings (echarts_dsl.jl / animation.jl).
     SlateApiEntry("zoom", "Charts",
         "Make a chart zoomable — ECharts does NOT zoom by default. `zoom=true` adds the gesture AND visible buttons.",
@@ -571,6 +575,14 @@ dropdown, a chart selection that should move its slider, a "reset" button. Witho
 sit visibly contradicting what the app is showing, with no way to correct it.
 No-op if nothing declares `name`, and inert on a standalone run. Distinct from the AGENT tool
 `slate.set_bind` below, which drives a control from OUTSIDE the notebook."""),
+    SlateApiEntry("settings", "Document",
+        "A notebook's own settings (deck style, transition, autoplay, aspect ratio, heading level, citations).",
+        ["config", "preferences", "deck style", "transition", "theme", "options"],
+        "settings(notebook) · settings(notebook; key, value) · settings(notebook; key, clear=\"true\")",
+        """The tool `settings` reads and changes what Settings → This notebook shows, kept in the `.jl` so it
+        travels with the notebook. With no key it lists every setting, its value and the allowed choices;
+        with `key` and `value` it sets one (a choice is checked) and open pages update. Deck settings:
+        `deckstyle`, `slidetransition`, `slideauto`, `slideratio`, `slidelevel` (see "slides")."""),
     SlateApiEntry("set_bind", "Live",
         "AGENT TOOL — drive a `@bind` from outside the browser (headless); omit `value` to CLICK a Button.",
         ["drive", "click", "headless", "test", "simulate", "agent"],
@@ -1164,7 +1176,7 @@ See also `save_asset`, `FileUpload`."""),
     # ── Cell tags (header) ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("cell tags", "Cell tags",
         "Per-cell behaviour/presentation/role tags carried in the `#%%` header.",
-        ["hidecode", "nocache", "collapsed", "needs", "slide", "trace", "cache", "header"],
+        ["hidecode", "nocache", "collapsed", "needs", "slide", "trace", "cache", "header", "column", "layout", "step", "morph"],
         "#%% code id=… <tag> …    (or the 🏷 tag editor)",
         """Per-cell tags travel in the `#%%` header (set them with the 🏷 button in the cell header, or
         an explicit header token). Behaviour tags: `collapsed` (fold the cell), `hidecode` (hide the
@@ -1177,7 +1189,11 @@ See also `save_asset`, `FileUpload`."""),
         this cell's source; pair with an `@asset` on the backing file if the resource can drift
         externally), `everywhere` (re-run this cell WHOLE on every region worker — see "regions").
         Presentation tags: `slide` (force a
-        new slide), `notes` (speaker notes, presenter-only). Document-metadata ROLE tags: `title`,
+        new slide), `notes` (speaker notes, presenter-only), `step` / `step=N` (the cell arrives on a click),
+        `morph=name` (carried to the next slide: a chart there with the same name morphs its data),
+        `ghost` (a presented chart keeps a faint copy of its previous state), and the slide tags
+        `layout=`, `bg=`, `bgdim=`, `transition=`, `auto=`, `class=` (see "slides"). `column=N` (N ≥ 2)
+        sets the cell beside the one before it, in the notebook and on a slide. Document-metadata ROLE tags: `title`,
         `abstract`, `bibliography` (see "front matter"). Site tags (see "site"): `home` (this notebook is
         the published site's FRONT PAGE), `docindex` (marks where the document listing is injected).
         `needs=<id>,<id>` asserts MANUAL dependency edges on EARLIER code cells — for effects no
@@ -1230,7 +1246,7 @@ See also `save_asset`, `FileUpload`."""),
     SlateApiEntry("slides", "Document",
         "Present the notebook as a 16:9 deck — a `##` heading starts a slide.",
         ["presentation", "deck", "present", "talk", "speaker notes"],
-        "▶ Present  ·  Export PDF (slides)  ·  `slide` / `notes` cell tags",
+        "▶ Present (⌘⇧P)  ·  slide tags  ·  `::: step` builds  ·  `::: columns`  ·  settings(notebook)",
         """The same notebook is also a PRESENTATION. A `##` heading starts a new slide (the heading
         level is configurable in Settings), so a well-structured document usually needs no extra
         markup. For explicit control, tag a cell `slide` (force a new slide here) or `notes` (speaker
@@ -1247,8 +1263,11 @@ See also `save_asset`, `FileUpload`."""),
         `.fade-out`; `.dim` once passed; `step=3` orders it), `::: incremental`
         around a list (one item per click), and a `. . .` line (the rest of the cell is one step).
         COLUMNS: `:::: columns` / `::: {.column width="40%"}` … `:::` / `::::`. MEDIA:
-        `![autoplay loop](clip.mp4)` is a video that starts when it comes on screen. MORPH: a heading
-        or image that appears on two consecutive slides glides between them. DATA MORPH: two chart cells
+        `![autoplay loop](clip.mp4)` is a video that starts when its step comes up (alt-text flags:
+        `autoplay`, `loop`, `muted`, `nocontrols`; `![](talk.m4a)` is audio; a relative path is beside the
+        notebook). MORPH: a heading,
+        an image, or a named math term (see "math slides") that appears on two consecutive slides glides
+        between them. DATA MORPH: two chart cells
         on consecutive slides tagged with the same `morph=name` are one figure changing form; data items
         sharing a `groupId` travel to the item with that `groupId` on the next slide (points gathering
         into histogram bars, a line becoming columns). FIGURE STEPS: `echart(…; steps = [(x = (a, b),),
@@ -1258,7 +1277,13 @@ See also `save_asset`, `FileUpload`."""),
         keeps a faint copy of its previous settled state while a control on the slide changes it. `class=serif` on a slide sets
         its headings in a book face. REACTIVE builds:
         `@bind k SlideSteps(n)` follows the slide's step counter (0…n) so a figure can build from
-        computed state. See also `SlideSteps`, `cell tags`, `front matter`."""),
+        computed state. DECK SETTINGS (`settings(notebook)` lists them, `settings(notebook; key, value)` sets
+        one): `deckstyle` (a background preset for every slide), `slidetransition`, `slideauto` (autoplay
+        seconds per step), `slideratio` (16:9 or 4:3), `slidelevel`. PRESENTING (what the presenter has, to
+        advise on): a presenter window with notes, previews, timer and rehearsal pacing; `t` rehearses and
+        saves timings that autoplay (`a`) follows; `o` overview; `l` laser, `d` draw, `b` black screen;
+        `r` records the deck (microphone and slide sound chosen with ⇧R) into `recordings/` beside the
+        notebook, with chapters. See also `math slides`, `SlideSteps`, `cell tags`, `front matter`."""),
     SlateApiEntry("math slides", "Document",
         "Explain mathematics on slides: named terms, equations that build, derivations that transform in place.",
         ["math", "equation", "derivation", "latex", "katex", "explain", "physics", "3blue1brown", "term", "build", "morph"],
@@ -1342,7 +1367,12 @@ See also `save_asset`, `FileUpload`."""),
         A FENCED block whose language an extension claimed (SlateExtensionsBase
         `register_fence_renderer!`) renders as that extension's output instead of a code block, through
         the same machinery a returned value uses — so it works live and in a static export. A language
-        nobody claimed stays an ordinary code block, so this costs an existing notebook nothing."""),
+        nobody claimed stays an ordinary code block, so this costs an existing notebook nothing.
+        Pandoc-style `:::` FENCED DIVS become `<div>`s with the given classes: `:::: columns` holding
+        `::: {.column width="40%"}` … `:::` blocks sets columns side by side; `::: step`,
+        `::: incremental` and a line of `. . .` are slide builds (see "slides"). `![alt](clip.mp4)` is a
+        video and `![](talk.m4a)` audio; a relative image or clip path resolves beside the notebook. Math
+        may use the presentation macros `\\term`, `\\stepat`, `\\braceat`, `\\note`, … (see "math slides")."""),
     SlateApiEntry("@trace", "Cell tags",
         "Inspect EVERY intermediate value in a cell (usually via the 🔍 button / `trace` tag).",
         ["debug", "values", "inspect", "step through"],

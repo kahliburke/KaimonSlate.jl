@@ -256,3 +256,13 @@ end
         @test occursin("#let $h(", pre)
     end
 end
+
+@testset "the API reference covers the deck" begin
+    r = NS.slate_api_reference
+    @test all(k -> occursin(k, r("cell tags")), ("layout=", "bg=", "transition=", "step", "morph=", "ghost", "column="))
+    @test occursin("steps =", r("echart"))
+    @test all(k -> occursin(k, r("markdown")), (":::", "columns", ". . .", "clip.mp4", "math slides"))
+    @test all(k -> occursin(k, r("slides")), ("deckstyle", "settings(notebook)", "nocontrols", "recordings/"))
+    @test occursin("deckstyle", r("settings"))
+    @test all(k -> occursin(k, r("math slides")), ("\\term", "\\braceat", "\\note", "::: derive", "STEPS."))
+end
