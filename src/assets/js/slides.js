@@ -401,13 +401,12 @@
     }
     _spotlight();
     for (const dv of _derives()) { const eq = _deriveTarget(dv, s); for (const c of dv.children) c.classList.toggle('derive-cur', c === eq); }
-    _lightTerms();
+    _lightTerms(document.querySelector('#deckstage .deck-slide .slide-body'));
   }
   // A current step that names math terms (`data-terms` from a `slide_figure` step's `terms`, or a
   // `terms="…"` attribute on a markdown step) lights those terms wherever they are on the slide, so a
   // cycle in a figure and its symbol in an equation are picked out together.
-  function _lightTerms() {
-    const body = document.querySelector('#deckstage .deck-slide .slide-body');
+  function _lightTerms(body) {
     if (!body) return;
     const names = new Set();
     for (const el of body.querySelectorAll('.current[data-terms], .current[terms]'))
@@ -651,19 +650,24 @@
       for (const c of charts) _sizeChart(c, c.dom.clientWidth * k, c.dom.clientHeight * k);
       over = body.scrollHeight - body.clientHeight;
     }
-    // Slide figures (`slide_figure`) give up height the same way; they keep their aspect, so a
-    // narrower box is a shorter one.
+    over = _fitFigures(body, over);
+    _fitMath(body);
+    if (over > 1 && _shrinkText(body)) body.classList.add('scroll');
+  }
+  // Slide figures (`slide_figure`) give up height the way charts do; they keep their aspect, so a
+  // narrower box is a shorter one. Returns what still overflows.
+  function _fitFigures(body, over) {
     const figs = [...body.querySelectorAll('.slidefig')];
+    if (!figs.length) return over;
     figs.forEach(f => f.style.removeProperty('max-width'));
-    if (figs.length) over = body.scrollHeight - body.clientHeight;
-    for (let pass = 0; pass < 3 && over > 1 && figs.length; pass++) {
+    over = body.scrollHeight - body.clientHeight;
+    for (let pass = 0; pass < 3 && over > 1; pass++) {
       const tot = figs.reduce((a, f) => a + f.clientHeight, 0);
       const k = Math.max(0.6, 1 - over / Math.max(1, tot));
       for (const f of figs) f.style.setProperty('max-width', (f.clientWidth * k) + 'px', 'important');
       over = body.scrollHeight - body.clientHeight;
     }
-    _fitMath(body);
-    if (over > 1 && _shrinkText(body)) body.classList.add('scroll');
+    return over;
   }
   // Display math does not wrap, so an equation wider than the slide would run off its edge: set it
   // smaller until it fits. The equations of a `::: derive` block share one size, so the sequence does
@@ -684,7 +688,10 @@
       for (const k of ks) {
         const html = k.querySelector('.katex-html');
         const need = html ? html.getBoundingClientRect().width : k.scrollWidth;
-        if (need > avail && avail > 0) f = Math.min(f, avail / need);
+        // An equation in a column (text beside a figure) fits the column, not the slide.
+        const row = k.closest('.cell-row > .cell');
+        const room = row ? row.getBoundingClientRect().width : avail;
+        if (need > room && room > 0) f = Math.min(f, room / need);
       }
       if (f < 1) for (const k of ks) k.style.fontSize = (parseFloat(getComputedStyle(k).fontSize) * Math.max(0.4, f * 0.98)) + 'px';
     }
@@ -1411,7 +1418,12 @@
       for (const c of dv.children) { const it = items.find(x => x.el === c); if (it && it.idx <= step) cur = c; }
       for (const c of dv.children) c.classList.toggle('derive-cur', c === cur);
     }
-    _shrinkText(slide.querySelector('.slide-body'));
+    // The same fitting and lighting as the deck, so the preview is what the audience sees.
+    const body = slide.querySelector('.slide-body');
+    _lightTerms(body);
+    _fitFigures(body, body.scrollHeight - body.clientHeight);
+    _fitMath(body);
+    _shrinkText(body);
   }
   function _renderPreviews() {
     const root = document.getElementById('presenter'); if (!root) return;
