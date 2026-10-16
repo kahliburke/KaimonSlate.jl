@@ -94,6 +94,8 @@ were written when they went out. They are marked.
 - `echart(…; steps = …)` moves a chart through axis windows on build steps. `slide_figure` builds a
   Makie figure on a slide (plots appear, others dim, the camera moves or turns in 3-D, orbits draw
   themselves with `trace!`, steps light the math terms they show), with `callout!` and `slate_color`.
+- `slide_view(notebook; slide, step)` lets an agent see a slide at a build step as the audience sees
+  it, captured in a headless Chrome. A notebook URL with `?deck=S.K` opens presenting slide S at step K.
 - The presenter window shows the current and next step, a timer, rehearsal pacing and notes. Rehearsal
   (`t`) saves per-step timings that autoplay (`a`) follows. Overview (`o`), laser (`l`), drawing (`d`),
   black screen (`b`), go-to and a key list (`?`).

@@ -503,11 +503,29 @@
     const slide = document.querySelector('#deckstage .deck-slide'); if (!slide) return;
     for (const v of slide.querySelectorAll('.slidefig > video.sf-anim')) {
       const it = D.items.find(x => x.el === v); if (!it) continue;
-      const end = () => { try { v.pause(); v.currentTime = Math.max(0, (v.duration || 0) - 0.04); } catch (e) {} };
-      if (it.idx > s) { try { v.pause(); v.currentTime = 0; } catch (e) {} }
-      else if (it.idx === s && s === prev + 1 && !quiet) { try { v.currentTime = 0; v.play().catch(end); } catch (e) {} }
-      else if (v.paused) { if (v.readyState >= 1) end(); else v.addEventListener('loadedmetadata', end, { once: true }); }
+      if (it.idx > s) _clipAt(v, 'start');
+      else if (it.idx === s && s === prev + 1 && !quiet) {
+        v._sfWant = 'play';
+        try { v.currentTime = 0; v.play().catch(() => _clipAt(v, 'end')); } catch (e) {}
+      } else if (v.paused) _clipAt(v, 'end');
     }
+  }
+  // Hold a clip at its first or last frame. The wish is remembered and applied again whenever the
+  // video (re)loads, since its source is set once the asset resolves, which resets it to the start.
+  function _clipAt(v, where) {
+    v._sfWant = where;
+    const apply = () => {
+      try {
+        if (v._sfWant === 'start') { v.pause(); v.currentTime = 0; }
+        else if (v._sfWant === 'end' && v.paused && isFinite(v.duration) && v.duration > 0) v.currentTime = Math.max(0, v.duration - 0.04);
+      } catch (e) {}
+    };
+    if (!v._sfHooked) {
+      v._sfHooked = true;
+      v.addEventListener('loadedmetadata', apply);
+      v.addEventListener('durationchange', apply);
+    }
+    if (v.readyState >= 1) apply();
   }
   function _playVisibleMedia() {
     const slide = document.querySelector('#deckstage .deck-slide');
@@ -1410,6 +1428,7 @@
     const slide = _buildSlide(i, nodes);
     slide.classList.add('deck-preview');
     host.appendChild(slide);
+    _typesetSlide(slide);         // a cell copied before the page typeset it carries raw math and unresolved images
     _sizeCanvas(slide, host.clientWidth, host.clientHeight);
     const { items } = _scanSteps(slide.querySelector('.slide-body'), sld, null);
     for (const it of items) { it.el.classList.toggle('on', it.idx <= step); it.el.classList.toggle('current', it.idx === step); }
@@ -1424,6 +1443,24 @@
     _fitFigures(body, body.scrollHeight - body.clientHeight);
     _fitMath(body);
     _shrinkText(body);
+  }
+  // Every slide at its last step, numbered, in a grid over the page.
+  function _contactSheet(done, whenLoaded) {
+    D.slides = buildSlides();
+    document.documentElement.classList.add('deck-sheet-mode');
+    const [W, H] = _canvasSize();
+    const grid = document.createElement('div');
+    grid.className = 'deck-sheet';
+    grid.style.setProperty('--sheet-ar', W + '/' + H);
+    document.body.appendChild(grid);
+    D.slides.forEach((sl, i) => {
+      const host = document.createElement('div'); host.className = 'deck-sheet-cell';
+      grid.appendChild(host);
+      _previewInto(host, i, Infinity);
+      const n = document.createElement('span'); n.className = 'deck-sheet-n'; n.textContent = String(i + 1);
+      host.appendChild(n);
+    });
+    whenLoaded(grid, done);
   }
   function _renderPreviews() {
     const root = document.getElementById('presenter'); if (!root) return;
@@ -1496,6 +1533,34 @@
     tries = tries || 0;
     if (typeof nbState !== 'undefined' && nbState && nbState.cells && document.querySelector('#nb .cell')) cb();
     else if (tries < 100) setTimeout(() => _waitForCells(cb, tries + 1), 100);
+  }
+  // `?deck=S.K` opens the page presenting slide S (from 1) at step K (`end`, or omitted, for its last
+  // step), with any clip shown at its end, so a headless browser can capture exactly what the
+  // audience sees; `&shot=1` also hides the deck's controls. The page marks
+  // `<html data-deck-shot="ready">` once the slide and its images are in.
+  // `?deck=sheet` lays every slide out at its last step, as a contact sheet of the whole deck.
+  const DECK_AT = new URLSearchParams(location.search).get('deck');
+  if (DECK_AT && !IS_PRESENTER) {
+    if (new URLSearchParams(location.search).get('shot') === '1') document.documentElement.classList.add('deck-shot');
+    const settled = () => !document.querySelector('#nb .cell.state-running, #nb .cell.state-queued');
+    const whenLoaded = (root, done, n = 0) => {
+      const loaded = [...root.querySelectorAll('img, video')].every(m => m.tagName === 'IMG' ?
+        (!m.getAttribute('src') || m.complete) : (m.readyState >= 2 && !m.seeking) || !m.getAttribute('src'));
+      if (!loaded && n < 100) return setTimeout(() => whenLoaded(root, done, n + 1), 100);
+      done();
+    };
+    const mark = () => setTimeout(() => { document.documentElement.dataset.deckShot = 'ready'; }, 600);
+    const go = (tries = 0) => {
+      if (!settled() && tries < 600) return setTimeout(() => go(tries + 1), 100);
+      if (DECK_AT === 'sheet') return _contactSheet(mark, whenLoaded);
+      const [s, k] = DECK_AT.split('.');
+      enterPresent(Math.max(0, (parseInt(s, 10) || 1) - 1));
+      _applyStep(k == null || k === 'end' ? D.total : Math.max(0, parseInt(k, 10) || 0), true);
+      const slide = document.querySelector('#deckstage .deck-slide');
+      if (!slide) return mark();
+      whenLoaded(slide, () => { _relayout(slide); mark(); });
+    };
+    document.addEventListener('DOMContentLoaded', () => _waitForCells(() => setTimeout(go, 300)));
   }
   if (IS_PRESENTER) {
     document.addEventListener('DOMContentLoaded', () => _waitForCells(() => {

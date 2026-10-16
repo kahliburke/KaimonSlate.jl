@@ -1070,22 +1070,32 @@ end
 # byte ranges, and Safari will not play a clip at all from a server that answers them with the whole
 # file. Reads only the requested slice, so seeking in a large clip does not read all of it each time.
 function _asset_response(req, p::AbstractString)
-    ctype = _site_ctype(p)
-    hdrs = ["Content-Type" => ctype, "Cache-Control" => "no-store", "Accept-Ranges" => "bytes"]
-    rng = HTTP.header(req, "Range", "")
-    m = match(r"^bytes=(\d*)-(\d*)$", strip(rng))
-    m === nothing && return HTTP.Response(200, hdrs, read(p))
-    n = filesize(p)
+    hdrs = ["Content-Type" => _site_ctype(p), "Cache-Control" => "no-store", "Accept-Ranges" => "bytes"]
+    return _ranged(req, hdrs, filesize(p), () -> read(p),
+                   (lo, hi) -> open(io -> (seek(io, lo); read(io, hi - lo + 1)), p))
+end
+
+# The byte range a `Range: bytes=a-b` header asks of `n` bytes: `nothing` for the whole body, `:bad`
+# for a range past the end.
+function _byte_range(req, n::Integer)
+    m = match(r"^bytes=(\d*)-(\d*)$", strip(HTTP.header(req, "Range", "")))
+    m === nothing && return nothing
     a, b = m.captures
     lo, hi = if isempty(a)                      # `bytes=-k`: the last k bytes
-        isempty(b) && return HTTP.Response(200, hdrs, read(p))
+        isempty(b) && return nothing
         (max(0, n - parse(Int, b)), n - 1)
     else
         (parse(Int, a), isempty(b) ? n - 1 : min(parse(Int, b), n - 1))
     end
-    (lo > hi || lo >= n) && return HTTP.Response(416, ["Content-Range" => "bytes */$n"])
-    body = open(p) do io; seek(io, lo); read(io, hi - lo + 1); end
-    return HTTP.Response(206, vcat(hdrs, ["Content-Range" => "bytes $lo-$hi/$n"]), body)
+    return (lo > hi || lo >= n) ? :bad : (lo, hi)
+end
+
+function _ranged(req, hdrs, n::Integer, whole, slice)
+    r = _byte_range(req, n)
+    r === nothing && return HTTP.Response(200, hdrs, whole())
+    r === :bad && return HTTP.Response(416, ["Content-Range" => "bytes */$n"])
+    lo, hi = r
+    return HTTP.Response(206, vcat(hdrs, ["Content-Range" => "bytes $lo-$hi/$n"]), slice(lo, hi))
 end
 
 function _make_router(h::Hub)
@@ -2211,8 +2221,11 @@ function _make_router(h::Hub)
         b = blob_lookup(string(HTTP.getparam(req, "id"), "/", HTTP.getparam(req, "hash")))
         b === nothing && return HTTP.Response(404, "no such blob")
         hdrs = ["Content-Type" => b[1], "Cache-Control" => "public, max-age=31536000, immutable"]
-        isempty(b[3]) || push!(hdrs, "Content-Encoding" => b[3])
-        HTTP.Response(200, hdrs, b[2])
+        isempty(b[3]) || (push!(hdrs, "Content-Encoding" => b[3]); return HTTP.Response(200, hdrs, b[2]))
+        # A clip (a slide figure's step) is seeked by byte range: answered with the whole body, the
+        # browser cannot seek it at all.
+        push!(hdrs, "Accept-Ranges" => "bytes")
+        _ranged(req, hdrs, length(b[2]), () -> b[2], (lo, hi) -> b[2][lo+1:hi+1])
     end)
     # Full result for a truncated output — only serves temp files WE registered (no path traversal).
     HTTP.register!(router, "GET", "/api/{id}/output/{name}", req -> begin

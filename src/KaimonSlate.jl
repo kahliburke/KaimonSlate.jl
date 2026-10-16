@@ -3284,6 +3284,35 @@ function create_tools(GateTool::Type)
     end
 
     """
+        slide_view(notebook; slide = 1, step = "end") -> image
+
+    SEE a slide of the notebook's deck as the audience sees it: slide `slide` (counting from 1, as the
+    deck numbers them) at build step `step` ("end" for its last step, or a number; 0 is the slide
+    before any build). Figures show their state at that step, clips their last frame, math terms
+    lit as they would be. Use it after building a slide to check that the text fits beside the
+    figure, that a step brings in what it should, and that nothing is cut off. `slide = 0` shows
+    the WHOLE DECK as a contact sheet, every slide at its last step: start a review there. The reply
+    also gives the deck's position (which slide of how many, which step of how many) and the error of
+    any math on the slide that failed to typeset. Needs Chrome or Chromium on the hub's machine (or
+    KAIMONSLATE_CHROME pointing at one).
+    """
+    function slide_view(notebook::String; slide::Int = 1, step::String = "end")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        isdefined(Main, :Kaimon) || return "Image view needs the Kaimon host (unavailable in standalone mode)."
+        k = lowercase(strip(step))
+        (k == "end" || tryparse(Int, k) !== nothing) || return "step must be \"end\" or a number, got '$step'."
+        at = slide <= 0 ? "sheet" : "$(slide).$(k)"
+        png, pos, errs = try
+            NotebookServer.deck_shot("$(_base())/n/$(nb.id)?deck=$(at)&shot=1")
+        catch e
+            return "Could not capture the slide: " * sprint(showerror, e)
+        end
+        text = slide <= 0 ? "The whole deck, each slide at its last step" : "Slide $slide, step $k — deck position: $pos"
+        isempty(errs) || (text *= "\nMath that failed to typeset:\n" * join(("  • " * e for e in errs), "\n"))
+        return getfield(Main, :Kaimon).KaimonGate.image_result(png; text)
+    end
+
+    """
         inspect(notebook, cell) -> String
 
     Everything about one cell, for inspecting while you build: its state (kind/state/deps/
@@ -4175,6 +4204,7 @@ function create_tools(GateTool::Type)
         GateTool("acquire_floor", acquire_floor),
         GateTool("release_floor", release_floor),
         GateTool("view", view_cell),
+        GateTool("slide_view", slide_view),
         GateTool("inspect", inspect_cell),
         GateTool("set_bind", set_bind_tool),
         GateTool("settings", settings_tool),

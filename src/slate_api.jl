@@ -1331,8 +1331,9 @@ See also `save_asset`, `FileUpload`."""),
         cell tagged `hidecode` (it is hidden on slides; in the notebook it is a slider for scrubbing).
         Use `SlideSteps` when the figure's CONTENT changes per step (a series appears: recomputed), and
         `echart(…; steps=…)` when only the VIEW changes (zoom, shaded band: no recompute).
-        CHECK. Markdown cells render on the page, so a TeX error is not reported back; `slate.export_pdf`
-        with `layout="slides"` shows each slide as printed (final state, uncoloured terms).
+        CHECK. Markdown cells render on the page, so a TeX error is not reported back. LOOK at each slide
+        you build with `slate.slide_view(notebook; slide, step)`: the slide at that build step as the
+        audience sees it (figures at that step, terms lit); check every step of a slide that builds.
         EXAMPLE (one slide, then a figure beside it):
         ```
         #%% md id=forces layout=center
@@ -1380,7 +1381,8 @@ See also `save_asset`, `FileUpload`."""),
         figure beside text: tag the figure cell `column=2` after a markdown cell, and pair an `::: incremental`
         list with the figure's steps (both follow the slide's step counter). To carry a figure onto the next
         slide (full width here, beside text there), tag both figure cells `morph=name`: the figure glides to
-        its new place, so draw the second one starting from the state the first ends in.
+        its new place, so draw the second one starting from the state the first ends in. Check each step
+        with `slate.slide_view(notebook; slide, step)`.
         ```julia
         let fig = Figure(size = (1100, 1000)), ax = Axis(fig[1, 1]; aspect = DataAspect())
             scatter!(ax, R, Z; markersize = 1, color = (:gray70, 0.4))

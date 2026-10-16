@@ -223,6 +223,10 @@ end
         @test NS._asset_response(req("bytes=7-"), p).body == UInt8[7, 8, 9]
         @test NS._asset_response(req("bytes=-3"), p).body == UInt8[7, 8, 9]
         @test NS._asset_response(req("bytes=20-"), p).status == 416
+        # Bytes held in memory (a slide figure's clip in the blob store) answer ranges the same way
+        bytes = collect(UInt8, 10:19)
+        mem(r) = NS._ranged(req(r), ["Accept-Ranges" => "bytes"], length(bytes), () -> bytes, (lo, hi) -> bytes[lo+1:hi+1])
+        @test mem(nothing).status == 200 && mem("bytes=0-1").body == UInt8[10, 11] && mem("bytes=-2").body == UInt8[18, 19]
     end
 end
 

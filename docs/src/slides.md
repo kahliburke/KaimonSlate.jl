@@ -29,6 +29,11 @@ In the deck:
 | `s` / `f` / `?` | presenter window / fullscreen / key list |
 | `Esc` | exit |
 
+A notebook URL can open the deck at a given place: `…/n/talk?deck=3.2` presents slide 3 at its
+second step (`?deck=3.end` at its last), and `?deck=sheet` lays out every slide at its last step on
+one page. An agent looks at slides the same way, with `slide_view(notebook; slide, step)`, which
+captures that page in a headless Chrome (`slide = 0` for the sheet).
+
 ### The presenter window
 
 Press `s` (or the 🪞 button, or *Open presenter window* in the palette) for a second window showing

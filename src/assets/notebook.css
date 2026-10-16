@@ -3131,6 +3131,20 @@ body.presenting { overflow: hidden; }
 .deck-slide[data-layout="title"] .slide-num, .deck-slide[data-layout="section"] .slide-num,
 .deck-slide[data-layout="cover"] .slide-num { display: none; }
 
+/* `?deck=…&shot=1`: a capture of the slide alone. */
+html.deck-shot .deck-hud, html.deck-shot .deck-edge, html.deck-shot .deck-progress { display: none !important; }
+html.deck-shot .deck-slide *, html.deck-shot .deck-slide { transition: none !important; }
+html.deck-shot .slidefig > .sf-layer.step.on:has(~ .sf-layer.on) { transition: none !important; }
+
+/* `?deck=sheet`: every slide at its last step, for a look at the whole deck at once. */
+html.deck-sheet-mode body > *:not(.deck-sheet) { display: none !important; }
+.deck-sheet { position: absolute; top: 0; left: 0; right: 0; z-index: 10000; min-height: 100vh; padding: 14px;
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; background: #04060b; }
+.deck-sheet-cell { position: relative; aspect-ratio: var(--sheet-ar, 16/9); overflow: hidden; border-radius: 6px;
+  outline: 1px solid rgba(255, 255, 255, .08); }
+.deck-sheet-n { position: absolute; left: 8px; top: 6px; font: 600 13px/1 system-ui, sans-serif; color: #fff;
+  background: rgba(0, 0, 0, .55); padding: 3px 7px; border-radius: 4px; z-index: 2; }
+
 /* The moved-in cells lose their notebook chrome. */
 .deck-slide .cell { border: none !important; background: none !important; margin: 0 !important; padding: 0 !important;
   box-shadow: none !important; max-width: none !important; width: auto !important; }
