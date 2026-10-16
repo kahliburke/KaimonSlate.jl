@@ -3284,17 +3284,17 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
    equation is a box, so it can move as it arrives. A cancel line draws in on its step. */
 .deck-slide .katex { font-size: 1.1em; color: var(--deck-strong); }
 .deck-slide .katex-display { margin: .5em 0 .7em; }
+/* The deck fits each equation to its width (slides.js `_fitMath`), so display math need not clip: a
+   ring around a superscript reaches above the line. */
+.deck-slide .md .katex-display { overflow: visible; }
 .deck-slide .katex-display > .katex { font-size: 1.4em; }
 .deck-slide[data-layout="center"] .katex-display > .katex, .deck-slide[data-layout="title"] .katex-display > .katex { font-size: 1.8em; }
 .deck-slide .slide-body .derive .katex-display > .katex { font-size: 2.2em; }
 .katex .step, .katex .term { display: inline-block; }
-/* In math a highlight is a glow around the glyphs in the accent colour: a background box takes KaTeX's
-   strut height and runs past superscripts and into the symbols beside it. */
-.deck-slide .katex .step.highlight.on { background-color: transparent; box-shadow: none;
-  text-shadow: 0 0 .1em color-mix(in srgb, var(--deck-accent) 90%, transparent),
-    0 0 .5em color-mix(in srgb, var(--deck-accent) 80%, transparent),
-    0 0 1.1em color-mix(in srgb, var(--deck-accent) 45%, transparent); }
-.deck-slide .katex .step.highlight { transition: text-shadow .35s ease; }
+/* In math a highlight's box is sized the same way as a lit term's, with a ring in em, so it fits the
+   piece of the equation it marks. */
+.deck-slide .katex .step.highlight { line-height: 1; border-radius: .16em; }
+.deck-slide .katex .step.highlight.on { box-shadow: 0 0 0 .07em color-mix(in srgb, var(--deck-accent) 22%, transparent); }
 .deck-slide .mcancel svg { transition: opacity .35s ease, clip-path .5s ease; }
 .deck-slide .mcancel:not(.on) svg { opacity: 0; clip-path: inset(0 100% 0 0); }
 /* A brace under (or over) a term draws in on its step; the term is there all along. */
@@ -3306,13 +3306,14 @@ body.zen #nb .md .step, body.zen #nb .md .incremental { box-shadow: none; paddin
 /* `\note{…}`: a quiet word on what a step of a derivation does, set beside the equation. */
 .katex .eqnote { color: var(--dim); font-size: .62em; font-family: var(--deck-font, inherit); letter-spacing: .01em; }
 .deck-slide .katex .eqnote { color: var(--deck-dim); }
-/* A term a figure step names (`terms`) glows in its own colour while that step is current. The glow
-   is the glyphs' own shadow, so it follows the symbol in a superscript or in running text: a box
-   around the term would take KaTeX's strut height and cover its neighbours. */
-.deck-slide .katex .term { transition: text-shadow .35s ease, transform .35s cubic-bezier(.34, 1.4, .64, 1); }
-.deck-slide .katex .term.lit-term { transform: scale(1.12);
-  text-shadow: 0 0 .12em currentColor, 0 0 .45em color-mix(in srgb, currentColor 85%, transparent),
-    0 0 1em color-mix(in srgb, currentColor 45%, transparent); }
+/* A term a figure step names (`terms`) is ringed in its own colour while that step is current. The
+   box is the term's own: at line-height 1 it spans the symbol rather than KaTeX's taller line, so it
+   sits centred on a superscript or a symbol in a line of text. */
+.deck-slide .katex .term { line-height: 1; border-radius: .16em;
+  transition: background-color .35s ease, box-shadow .35s ease; }
+.deck-slide .katex .term.lit-term { background-color: color-mix(in srgb, currentColor 16%, transparent);
+  box-shadow: 0 0 0 .07em color-mix(in srgb, currentColor 75%, transparent),
+    0 0 .5em color-mix(in srgb, currentColor 30%, transparent); }
 /* Spotlight: on a `focus` step everything but that item recedes. */
 .deck-slide .slide-body .spot-dim { opacity: .22; filter: saturate(.4); transition: opacity .45s ease, filter .45s ease; }
 .deck-slide .slide-body.spotlit .slide-num { opacity: .2; }
