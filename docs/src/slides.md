@@ -59,6 +59,16 @@ With both off the video has no audio track. The video is written beside the note
 Press `v` for a camera bubble, which is part of the recording; drag it to move it, double-click to
 enlarge it. The presenter window shows the recording time and a stop button.
 
+To make a video of a set length without presenting it, use **Render a video** in the same panel:
+give the length (`m:ss`) and the hub steps through the deck in a headless Chrome and writes a silent
+MP4 exactly that long, with a chapter per slide, to `recordings/`. Only the motion is recorded as it
+plays (transitions, builds, figure clips); each step then holds for its share of the length, which is
+its rehearsed time when it has one and otherwise a reading time from the words it brings in (more for
+a new slide or a figure that changes), all scaled to fill the length. No step is cut shorter than its
+own motion. A render takes about as long as the deck's motion plays, a minute or so for a typical
+deck, not the length of the video. It needs Chrome (or Chromium) and `ffmpeg` on the hub's machine;
+an agent starts one with `render_deck(notebook; length)`.
+
 A `notes` cell shows while you are **authoring** — marked with a dashed rule so you can tell at a
 glance which cells are yours alone — and nowhere else. It never reaches a slide, the reading view
 (`zen`, and an app) hides it, and the HTML and markdown exports omit it entirely rather than hiding

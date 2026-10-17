@@ -96,6 +96,8 @@ were written when they went out. They are marked.
   themselves with `trace!`, steps light the math terms they show), with `callout!` and `slate_color`.
 - `slide_view(notebook; slide, step)` lets an agent see a slide at a build step as the audience sees
   it, captured in a headless Chrome. A notebook URL with `?deck=S.K` opens presenting slide S at step K.
+- Render the deck to a silent video of a set length (record panel, or `render_deck`): the hub records
+  only the motion and holds each step for its share, by rehearsed time or reading time.
 - The presenter window shows the current and next step, a timer, rehearsal pacing and notes. Rehearsal
   (`t`) saves per-step timings that autoplay (`a`) follows. Overview (`o`), laser (`l`), drawing (`d`),
   black screen (`b`), go-to and a key list (`?`).

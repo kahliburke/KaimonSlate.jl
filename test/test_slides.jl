@@ -308,3 +308,27 @@ end
     @test NS._slidefig_final_png(out) == UInt8[4]          # the final clip's poster frame
     @test NS._slidefig_final_png((; display = [(; mime = "text/html", data = UInt8[0x3c])], assets)) === nothing
 end
+
+@testset "deck video: the length is shared out among the steps" begin
+    st(t0, t1; words = 0, step = 1, timing = nothing) =
+        Dict{String,Any}("t0" => t0, "t1" => t1, "words" => words, "step" => step, "timing" => timing)
+    steps = [st(0, 0; step = 0, words = 10), st(0, 2.0), st(0, 0.5; words = 40), st(0, 0.2; step = 0, words = 5)]
+    h = NS.deck_hold_times(steps, 60)
+    @test isapprox(sum(h), 60; atol = 1e-6)
+    # no step is shorter than its own motion, and a step that brings in more words holds longer
+    @test all(i -> h[i] >= steps[i]["t1"] - steps[i]["t0"], eachindex(h)) && h[3] > h[2]
+    @test_throws ErrorException NS.deck_hold_times(steps, 2)          # the motion alone is longer
+    # rehearsed times set the proportions
+    r = NS.deck_hold_times([st(0, 0; timing = 4.0), st(0, 0; timing = 12.0)], 32)
+    @test isapprox(r[2] / r[1], 3; atol = 1e-3)
+end
+
+@testset "deck video: timeline and chapters" begin
+    # frames at 0, 1, 1.1, 1.2 s; step 1 starts on frame 1 and holds 2 s, step 2 moves 1.0..1.25 then holds to 3 s
+    ts = [0.0, 1.0, 1.1, 1.2]
+    steps = [Dict{String,Any}("t0" => 0.0, "t1" => 0.0), Dict{String,Any}("t0" => 1.0, "t1" => 1.25)]
+    seq = NS._deck_timeline(ts, steps, [2.0, 3.0])
+    @test isapprox(sum(last.(seq)), 5.0; atol = 1e-9)
+    @test first.(seq) == [1, 2, 3, 4] && isapprox(seq[end][2], 2.8; atol = 1e-9)   # the last motion frame holds
+    @test NS._vtt_time(3725.5) == "01:02:05.500" && NS._vtt_time(0) == "00:00:00.000"
+end

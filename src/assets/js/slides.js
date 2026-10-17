@@ -1452,6 +1452,71 @@
     _fitMath(body);
     _shrinkText(body);
   }
+  // ── Rendering the deck to a video ───────────────────────────────────────────
+  // The renderer (server_deckshot.jl `deck_render`) steps the deck with `slideNext` and, after each
+  // step, asks whether it has settled and what the step showed: the words it brought in and the clip
+  // it played, from which the video's length is shared out, and any rehearsed time for it.
+  function _settled() {
+    if (D.swapPending || D.vt) return false;
+    const slide = document.querySelector('#deckstage .deck-slide'); if (!slide) return false;
+    // Endless animations (a background's drift) never finish; everything else must have.
+    const moving = document.getAnimations().some(a => a.playState === 'running' &&
+      (a.effect && a.effect.getComputedTiming ? a.effect.getComputedTiming().iterations !== Infinity : true));
+    if (moving) return false;
+    for (const v of slide.querySelectorAll('.slidefig > video.sf-anim')) if (!v.paused && !v.ended) return false;
+    return true;
+  }
+  // Words a step brings onto the slide (on step 0, everything shown before any build). Display math
+  // counts as a short sentence and inline math as a couple of words.
+  function _stepWords(s) {
+    const body = document.querySelector('#deckstage .deck-slide .slide-body'); if (!body) return 0;
+    const stepOf = n => {
+      for (let e = n.nodeType === 1 ? n : n.parentElement; e && e !== body; e = e.parentElement) {
+        if (!e.classList.contains('step')) continue;
+        const it = D.items.find(x => x.el === e); if (it) return it.idx;
+      }
+      return 0;
+    };
+    const skip = '.katex, .srcedit, .srchost, .cm-editor, .slide-num, .slidefig, .deck-ctl-hidden, .cellhead, .cellmove';
+    // Only what the slide displays: the cells' notebook chrome is in the DOM but not shown.
+    const shown = el => el.checkVisibility ? el.checkVisibility() : !!el.offsetParent;
+    let words = 0;
+    const walk = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    for (let n; (n = walk.nextNode());) {
+      const p = n.parentElement;
+      if (!p || p.closest(skip) || stepOf(n) !== s || !shown(p)) continue;
+      words += (n.textContent.match(/\S+/g) || []).length;
+    }
+    for (const k of body.querySelectorAll('.katex'))
+      if (!k.closest('.srcedit, .srchost') && stepOf(k) === s) words += k.closest('.katex-display') ? 8 : 2;
+    return words;
+  }
+  function _stepClip(s) {
+    let d = 0;
+    const slide = document.querySelector('#deckstage .deck-slide');
+    for (const v of slide ? slide.querySelectorAll('.slidefig > video.sf-anim') : []) {
+      const it = D.items.find(x => x.el === v);
+      if (it && it.idx === s && isFinite(v.duration)) d = Math.max(d, v.duration);
+    }
+    return d;
+  }
+  // Whether step `s` changes a figure: a slide figure's state, a chart's window, a reactive build.
+  function _stepFigure(s) {
+    if (s <= 0) return false;
+    const slide = document.querySelector('#deckstage .deck-slide');
+    for (const l of slide ? slide.querySelectorAll('.slidefig > .sf-layer') : []) {
+      const it = D.items.find(x => x.el === l); if (it && it.idx === s) return true;
+    }
+    return (D.chartSteps || []).some(c => c.steps.length >= s) || D.reactive.some(r => r.n >= s);
+  }
+  window.deckRenderInfo = () => ({
+    slide: D.idx, slides: D.slides.length, step: D.step, total: D.total,
+    title: _slideTitle(D.slides[D.idx]) || '', words: _stepWords(D.step), clip: _stepClip(D.step),
+    figure: _stepFigure(D.step),
+    timing: _timings()[_posKey()] || null, settled: _settled(),
+    end: D.idx >= D.slides.length - 1 && D.step >= D.total,
+  });
+
   // Every slide at its last step, numbered, in a grid over the page.
   function _contactSheet(done, whenLoaded) {
     D.slides = buildSlides();
@@ -1547,9 +1612,13 @@
   // audience sees; `&shot=1` also hides the deck's controls. The page marks
   // `<html data-deck-shot="ready">` once the slide and its images are in.
   // `?deck=sheet` lays every slide out at its last step, as a contact sheet of the whole deck.
+  // `&render=1` is the video renderer's mode (server_deckshot.jl `deck_render`): the controls are
+  // hidden, but transitions run, since they are what it records.
   const DECK_AT = new URLSearchParams(location.search).get('deck');
   if (DECK_AT && !IS_PRESENTER) {
-    if (new URLSearchParams(location.search).get('shot') === '1') document.documentElement.classList.add('deck-shot');
+    const q = new URLSearchParams(location.search);
+    if (q.get('shot') === '1') document.documentElement.classList.add('deck-shot');
+    if (q.get('render') === '1') document.documentElement.classList.add('deck-render');
     const settled = () => !document.querySelector('#nb .cell.state-running, #nb .cell.state-queued');
     const whenLoaded = (root, done, n = 0) => {
       const loaded = [...root.querySelectorAll('img, video')].every(m => m.tagName === 'IMG' ?

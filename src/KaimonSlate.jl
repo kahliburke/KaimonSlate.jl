@@ -3313,6 +3313,36 @@ function create_tools(GateTool::Type)
     end
 
     """
+        render_deck(notebook; length = "5:00", fps = 30) -> String
+
+    Render the notebook's whole deck to a silent MP4 exactly `length` long ("m:ss", or seconds), with a
+    chapter per slide (a .vtt beside it), into `recordings/` beside the notebook. The deck is stepped
+    through in a headless Chrome on the hub: transitions, builds and figure clips are recorded as they
+    play, and each step then holds for its share of the length, by its rehearsed time if it has one,
+    else by the words it brings in. A step is never shorter than its own motion; if the motion alone
+    is longer than `length`, the reply says how long it needs. Rendering takes about as long as the
+    deck's motion plays, not the video's length. Waits up to about four minutes; a longer render keeps
+    going, and calling this again reports how far it has got (it does not start a second one). Needs
+    Chrome or Chromium and ffmpeg on the hub's machine.
+    """
+    function render_deck(notebook::String; length::String = "5:00", fps::Int = 30)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        m = match(r"^\s*(?:(\d+):)?(\d+(?:\.\d+)?)\s*$", length)
+        m === nothing && return "length must be m:ss or seconds, got '$length'."
+        secs = parse(Int, something(m.captures[1], "0")) * 60 + parse(Float64, m.captures[2])
+        st = NotebookServer.deck_render_start!(nb, _base(); seconds = secs, fps = clamp(fps, 10, 60))
+        t0 = time()
+        while st["state"] == "running" && time() - t0 < 240
+            sleep(2)
+            st = NotebookServer.deck_render_status(nb)
+        end
+        file = get(st, "file", "")
+        st["state"] == "done" && return "Rendered $(file) ($(length)), with chapters beside it (.vtt)."
+        st["state"] == "error" && return "The render failed: $(st["message"])"
+        return "Still rendering ($(st["message"])) into $(file); call render_deck again to check on it."
+    end
+
+    """
         inspect(notebook, cell) -> String
 
     Everything about one cell, for inspecting while you build: its state (kind/state/deps/
@@ -4205,6 +4235,7 @@ function create_tools(GateTool::Type)
         GateTool("release_floor", release_floor),
         GateTool("view", view_cell),
         GateTool("slide_view", slide_view),
+        GateTool("render_deck", render_deck),
         GateTool("inspect", inspect_cell),
         GateTool("set_bind", set_bind_tool),
         GateTool("settings", settings_tool),

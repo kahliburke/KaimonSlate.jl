@@ -72,6 +72,11 @@
       .deck-rec-opts button { flex: 1; padding: 6px; border-radius: 8px; border: 1px solid var(--border, #333);
         background: var(--bg3, #262b38); color: inherit; cursor: pointer; font: inherit; }
       .deck-rec-opts button.go { background: #e5484d; border-color: #e5484d; color: #fff; }
+      .deck-rec-opts .rnd { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border, #333); }
+      .deck-rec-opts input[data-k=len] { width: 5.5em; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--border, #333);
+        background: var(--bg, #11141c); color: inherit; font: inherit; font-variant-numeric: tabular-nums; }
+      .deck-rec-opts .rstat { margin-top: 6px; max-width: 260px; font-size: 12px; opacity: .8; word-break: break-word; }
+      .deck-rec-opts .rstat.err { color: #ff8f8f; opacity: 1; }
       .deck-cam.cam-dragging { cursor: grabbing; }
       body.is-presenter .deck-rec-pill { opacity: 1; pointer-events: auto; top: auto; bottom: 12px; left: 12px;
         background: #2a1215; border: 1px solid #e5484d; font-size: 13px; padding: 6px 10px; }
@@ -401,14 +406,51 @@
     box.innerHTML = '<div class="hd">Record</div>' +
       '<label><input type="checkbox" data-k="mic"' + (p.mic ? ' checked' : '') + '> Microphone</label>' +
       '<label><input type="checkbox" data-k="tab"' + (p.tab ? ' checked' : '') + '> Slide sound</label>' +
-      '<div class="bt"><button class="go">● Start</button><button class="no">Cancel</button></div>';
+      '<div class="bt"><button class="go">● Start</button><button class="no">Cancel</button></div>' +
+      '<div class="hd rnd">Render a video</div>' +
+      '<label>Length <input type="text" data-k="len" spellcheck="false" value="' + _renderLen() + '"> m:ss</label>' +
+      '<div class="bt"><button class="rn">Render</button></div><div class="rstat"></div>';
     const read = () => ({ mic: box.querySelector('[data-k=mic]').checked, tab: box.querySelector('[data-k=tab]').checked });
+    box.querySelector('.rn').onclick = () => _renderStart(box);
+    _renderPoll(box);
     box.querySelector('.go').onclick = () => { const q = read(); _savePrefs(q); box.remove(); start(q); };
     box.querySelector('.no').onclick = () => box.remove();
     box.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); box.remove(); } });
     _host().appendChild(box);
     box.querySelector('.go').focus();
   };
+  // ── Render the deck to a video of a set length (on the hub: server_deckshot.jl) ──
+  // The hub steps the deck in a headless browser and shares the length out among the steps; this
+  // panel only starts it and shows how far it has got.
+  const RAPI = '/api/' + encodeURIComponent(NBID) + '/deck-render';
+  function _renderLen() { try { return localStorage.getItem('slate-render-length') || '5:00'; } catch (e) { return '5:00'; } }
+  function _parseLen(v) {
+    const m = String(v).trim().match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
+    return m ? (parseInt(m[1] || '0', 10) * 60 + parseFloat(m[2])) : NaN;
+  }
+  function _renderShow(box, st) {
+    const el = box.querySelector('.rstat'); if (!el) return false;
+    el.classList.toggle('err', st.state === 'error');
+    el.textContent = st.state === 'running' ? 'Rendering: ' + (st.message || '…') :
+                     st.state === 'done' ? 'Saved ' + st.file :
+                     st.state === 'error' ? st.message : '';
+    box.querySelector('.rn').disabled = st.state === 'running';
+    return st.state === 'running';
+  }
+  function _renderPoll(box) {
+    fetch(RAPI).then(r => r.json()).then(st => {
+      if (_renderShow(box, st) && box.isConnected) setTimeout(() => _renderPoll(box), 1500);
+    }).catch(() => {});
+  }
+  function _renderStart(box) {
+    const v = box.querySelector('[data-k=len]').value, secs = _parseLen(v);
+    if (!(secs > 0)) { _renderShow(box, { state: 'error', message: 'Give the length as m:ss, e.g. 4:30' }); return; }
+    try { localStorage.setItem('slate-render-length', v.trim()); } catch (e) {}
+    fetch(RAPI, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seconds: secs }) })
+      .then(r => r.ok ? r.json() : r.text().then(t => ({ state: 'error', message: t })))
+      .then(st => { if (_renderShow(box, st)) setTimeout(() => _renderPoll(box), 1500); })
+      .catch(e => _renderShow(box, { state: 'error', message: String(e) }));
+  }
   window.deckCameraToggle = cameraToggle;
   window.deckRecording = () => R.on;
 })();

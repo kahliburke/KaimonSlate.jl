@@ -3132,7 +3132,9 @@ body.presenting { overflow: hidden; }
 .deck-slide[data-layout="cover"] .slide-num { display: none; }
 
 /* `?deck=…&shot=1`: a capture of the slide alone. */
-html.deck-shot .deck-hud, html.deck-shot .deck-edge, html.deck-shot .deck-progress { display: none !important; }
+html.deck-shot .deck-hud, html.deck-shot .deck-edge, html.deck-shot .deck-progress,
+html.deck-render .deck-hud, html.deck-render .deck-edge { display: none !important; }
+html.deck-render, html.deck-render * { cursor: none !important; }
 html.deck-shot .deck-slide *, html.deck-shot .deck-slide { transition: none !important; }
 html.deck-shot .slidefig > .sf-layer.step.on:has(~ .sf-layer.on) { transition: none !important; }
 

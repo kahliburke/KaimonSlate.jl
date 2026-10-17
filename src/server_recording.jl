@@ -128,4 +128,22 @@ function _register_recording_routes!(router, h::Hub)
                               vtt = String(get(b, "chapters_vtt", "")), timings = get(b, "timings", nothing))
         r === nothing ? HTTP.Response(404, "no such recording") : _json(r)
     end))
+    # The deck rendered to a video of a set length, in the background (server_deckshot.jl).
+    HTTP.register!(router, "POST", "/api/{id}/deck-render", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        secs = something(tryparse(Float64, string(get(b, "seconds", ""))), 0.0)
+        secs > 0 || return HTTP.Response(400, "seconds must be a positive number")
+        fps = clamp(something(tryparse(Int, string(get(b, "fps", 30))), 30), 10, 60)
+        _json(_render_status_json(nb, deck_render_start!(nb, _hub_url(h); seconds = secs, fps)))
+    end))
+    HTTP.register!(router, "GET", "/api/{id}/deck-render", req -> _withnb(h, req, nb ->
+        _json(_render_status_json(nb, deck_render_status(nb)))))
+end
+
+# A render's status for the page: the file named relative to the notebook, as recordings are.
+function _render_status_json(nb, st)
+    out = Dict{String,Any}(k => v for (k, v) in st if k != "file")
+    f = get(st, "file", "")
+    isempty(f) || (out["file"] = relpath(f, dirname(abspath(nb.path))))
+    return out
 end
