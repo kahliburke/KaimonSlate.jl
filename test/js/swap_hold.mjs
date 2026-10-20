@@ -48,11 +48,12 @@ const document = {
 };
 const page = (html, ...nodes) => { pages.set(html, nodes); return nodes; };
 
-let swap;
+// The stand-in for `_carryMounted` carries nothing. A test can set `carry` to act as a carry does.
+let swap, carry = () => () => {};
 try {
   swap = (0, eval)('(function (document, setTimeout, clearTimeout, requestAnimationFrame, _carryMounted,' +
                    ' runScripts, mountOutputComponents) {' + m[0] + '\nreturn _swapOutput; })')(
-    document, setTimeout, clearTimeout, requestAnimationFrame, () => () => {}, () => {}, () => {});
+    document, setTimeout, clearTimeout, requestAnimationFrame, (o, s) => carry(o, s), () => {}, () => {});
 } catch (e) {
   console.error('swap_hold: could not evaluate _swapOutput: ' + e.message);
   process.exit(2);
@@ -116,6 +117,21 @@ function output() {
   swap(out, 'T4', ''); runFrames();           // T commits and releases at once
   runTimers();                                // the deadline of A fires, but T superseded A
   eq(out.style.minHeight, '', 'no hold after the superseded swap');
+}
+
+// ── the hold has the height of the output before the carry takes the kept figure out ──────────────
+// The carry moves a kept figure out of the output and into the stage. If the hold has the height
+// after the carry, the page gets shorter during the swap and the browser moves the scroll position.
+{
+  timers = []; frames = [];
+  const out = output();
+  page('K5', text());
+  carry = o => { o.offsetHeight = 0; return () => {}; };
+  swap(out, 'K5', '');
+  carry = () => () => {};
+  eq(out.style.minHeight, '300px', 'the hold has the height with the kept figure');
+  runFrames();
+  eq(out.style.minHeight, '', 'the frame after the swap releases the hold');
 }
 
 process.exit(bad ? 1 : 0);
