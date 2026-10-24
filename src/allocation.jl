@@ -417,6 +417,15 @@ function request_allocation!(kind::Symbol, host::AbstractString, name::AbstractS
          kind === :pbs   ? _pbs_request_script : _unsupported_scheduler(kind)
     ok, out = run_there(host, mk(name; walltime, partition, cpus, mem, gpus, account, extra, options))
     a = find_allocation(kind, host, name)
+    # A job the scheduler has just accepted is not always listed at once: on Derecho `qselect`
+    # returns the new id immediately while `qstat -f` leaves the job out for about two seconds, so
+    # one lookup right after `qsub` reads an accepted request as refused. A submission that
+    # returned normally is looked up again, briefly, before its absence is read as a refusal.
+    for pause in (ok ? (0.5, 1.0, 2.0, 3.0, 5.0) : ())
+        a.state === :none || break
+        sleep(pause)
+        a = find_allocation(kind, host, name)
+    end
     a.state === :none || return a
     # Nothing queued: the scheduler refused the request, and its words are the only account of why.
     said = _refusal(out)
