@@ -2755,6 +2755,14 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .chip .pval { color:var(--val); font-family:'Cascadia Code',monospace;
   min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .chip.hosted { opacity:.7; }
+/* A form: its name and field count on the first line, then its fields as a two-column list. */
+.chip.formchip { flex-wrap:wrap; row-gap:4px; }
+.chip .pval.pcount { color:var(--dim); font-family:inherit; font-size:.72rem; }
+.chip .pfields { flex:1 0 100%; display:grid; grid-template-columns:auto minmax(0,1fr); column-gap:10px; row-gap:1px;
+  padding:4px 0 1px 8px; border-left:1px solid var(--border); margin-left:2px; font-size:.74rem; }
+.chip .pfname { color:var(--dim); font-family:'Cascadia Code',monospace; white-space:nowrap; }
+.chip .pfval { color:var(--val); font-family:'Cascadia Code',monospace; text-align:right;
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* Blurred like every other full-screen overlay (disconnect, run-cell, package install) — this was
    the one that dimmed without it, so a busy notebook stayed legible enough behind a dialog to
    compete with it. 3px matches the blocking overlays; the dialog is modal, so the page behind is

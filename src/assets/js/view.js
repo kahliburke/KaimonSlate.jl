@@ -37,6 +37,22 @@ function _ctrlValLabel(el, v, p) {
   if (!p && _hasKey(v)) p = (_bindSpec(el.dataset.bind, el.dataset.name) || {}).params;
   return _showVal(_keyText(p, v));
 }
+// A bound value as text, for lists and tooltips that show it away from its control. A form's value
+// is its fields, each as its own control would read; a fraction is cut to six significant figures.
+const _numText = v => typeof v === 'number' && !Number.isInteger(v) ? Number(v.toPrecision(6)) : v;
+function _fieldText(kind, p, v) {
+  p = p || {};
+  if (v == null) return '';
+  if (kind === 'toggle' && (p.on != null || p.off != null)) return String(v ? (p.on != null ? p.on : 'on') : (p.off != null ? p.off : 'off'));
+  return String(_showVal(_keyText(p, Array.isArray(v) ? v.map(_numText) : _numText(v))));
+}
+const _formEntries = b => { const v = b.value || {};
+  return ((b.params || {}).fields || []).map(f => [f.name, _fieldText(f.kind, f.params, v[f.name])]); };
+function _bindText(b) {
+  if (b.widget === 'form') return _formEntries(b).map(([k, t]) => k + ' = ' + t).join(', ');
+  return _fieldText(b.widget, b.params, b.value);
+}
+window.slateBindText = _bindText;
 
 // ── Custom widget registry (extension point) ─────────────────────────────────
 // Third-party packages register a widget KIND's front-end here, so a widget can
@@ -2100,7 +2116,8 @@ function paletteChips() {
   cells.forEach(h => (h.controls || []).flat().forEach(s => { (hosts[s.name] ||= []).push(h.id); }));
   const chips = [];
   cells.forEach(c => (c.binds || []).forEach(b =>
-    chips.push({ name: b.name, widget: b.widget, value: _keyText(b.params, b.value), def: c.id, hosts: hosts[b.name] || [] })));
+    chips.push({ name: b.name, widget: b.widget, value: _bindText(b), fields: b.widget === 'form' ? _formEntries(b) : null,
+                 def: c.id, hosts: hosts[b.name] || [] })));
   return chips;
 }
 function togglePalette() { document.getElementById('palette').classList.toggle('open'); }
@@ -2113,12 +2130,16 @@ function renderPalette() {
     const host = c.hosts.length ? '→ ' + c.hosts.join(', ') : '';
     // The value is ellipsised in a 300px drawer, so carry it in the tooltip — otherwise a long one
     // (a URL, a path) is truncated with no way to read the rest.
-    const vt = String(c.value == null ? '' : c.value);
-    return `<div class="chip${c.hosts.length ? ' hosted' : ''}" draggable="true" data-pname="${c.name}" data-def="${c.def}"` +
-      ` title="${window.slateEscHtml(c.name + ' = ' + vt)}&#10;drag into a cell to surface it · click to jump to ‘${c.def}’${c.hosts.length ? ' · surfaced in ' + c.hosts.map(h => '‘' + h + '’').join(', ') : ''}">` +
+    // A form lists its fields under its name, one per line, and so does its tooltip.
+    const vt = c.fields ? c.fields.map(([k, t]) => '\n  ' + k + ' = ' + t).join('') : ' = ' + c.value;
+    const val = c.fields ? `${c.fields.length} field${c.fields.length === 1 ? '' : 's'}` : c.value;
+    const fields = c.fields ? `<span class="pfields">${c.fields.map(([k, t]) =>
+      `<span class="pfname">${_esc(k)}</span><span class="pfval">${_esc(t)}</span>`).join('')}</span>` : '';
+    return `<div class="chip${c.hosts.length ? ' hosted' : ''}${c.fields ? ' formchip' : ''}" draggable="true" data-pname="${c.name}" data-def="${c.def}"` +
+      ` title="${_esc(c.name + vt)}&#10;drag into a cell to surface it · click to jump to ‘${c.def}’${c.hosts.length ? ' · surfaced in ' + c.hosts.map(h => '‘' + h + '’').join(', ') : ''}">` +
       `<span class="cname">${c.name}</span><span class="ctype">${c.widget}</span>` +
       `<span class="cright">${host ? `<span class="chost">${host}</span>` : ''}` +
-      `<span class="pval" data-pname="${c.name}">${_esc(String(c.value))}</span></span></div>`;
+      `<span class="pval${c.fields ? ' pcount' : ''}" data-pname="${c.name}">${_esc(val)}</span></span>${fields}</div>`;
   }).join('');
 }
 
