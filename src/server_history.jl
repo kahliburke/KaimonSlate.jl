@@ -1296,6 +1296,9 @@ end
 # reactive heart of @bind). A group cell's blast radius is by cell id, which is
 # conservative (touches readers of any of its vars) but never under-invalidates.
 function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, value)
+    # A value parsed from JSON (a form's object, from the page or the tool) is made of the JSON
+    # library's types, which a worker without that library cannot receive.
+    value = _plainify(value)
     idx = findfirst(c -> c.id == id, nb.report.cells)
     idx === nothing && return nb
     cell = nb.report.cells[idx]
