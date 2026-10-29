@@ -1677,9 +1677,25 @@ body.celldnd #nb { padding-bottom: 96px; }
 .dropline { position:absolute; left:0; right:0; height:3px; background:var(--purple); border-radius:2px;
             box-shadow:0 0 8px var(--purple); display:none; z-index:5; pointer-events:none; }
 .cell.bind { border-left-color:var(--teal); }
-.widget { display:flex; align-items:center; gap:12px; padding:12px 14px; }
-.wname { font-family:'Cascadia Code',monospace; color:var(--accent); min-width:64px; }
-.widget input[type=range] { flex:1; accent-color:var(--purple); }
+/* A bind cell: one row per control, the rows sharing their columns so every control starts at the
+   same place. The label column is as wide as the labels, wrapping past a cap; the control column has
+   a width a slider reads well at; the readout sits beside it; the last column takes what is left.
+   Each row is a subgrid of the cell's grid. */
+.binds { display:grid; grid-template-columns:fit-content(20rem) minmax(8rem, 34rem) auto 1fr; }
+.binds > .widget, .binds > .hostedph { grid-column:1 / -1; }
+.widget { display:grid; grid-template-columns:subgrid; align-items:center; column-gap:16px; padding:8px 14px; }
+.widget > .wname { grid-column:1; }
+.widget > input, .widget > select, .widget > .pick-ro, .widget > .playhead-ro { grid-column:2; justify-self:start; max-width:100%; }
+.widget > input[type=range] { justify-self:stretch; }
+/* What takes a row's width: a list, a group of options, a viewer, a form, a button on its own. */
+.widget > textarea, .widget > .mslist, .widget > .checkgroup, .widget > .radiogroup, .widget > .customwidget { grid-column:2 / -1; }
+.widget > .formctl { grid-column:1 / -1; }
+.widget > .actionbtn { grid-column:1 / -1; justify-self:start; }
+.wname { font-family:'Cascadia Code',monospace; color:var(--accent); font-size:.86rem; overflow-wrap:anywhere; }
+/* A label is prose: read as text, not as code. */
+.wname.wlabel { font-family:inherit; color:color-mix(in srgb, var(--text) 82%, var(--dim)); font-size:.88rem; line-height:1.3; }
+.widget input[type=range], .control input[type=range] { accent-color:var(--purple); }
+.widget input[type=number] { width:10ch; }
 /* An AFM / custom-widget mount hosts anything from a compact control to a full-bleed viewer (Mol*, a
    canvas app). Let it claim the row's width like the other expanded controls (min-width:0 so it can
    shrink below its content), and make it a positioning context + clip so a viewer that positions itself
@@ -1687,7 +1703,10 @@ body.celldnd #nb { padding-bottom: 96px; }
 .widget .customwidget, .control .customwidget { flex:1 1 auto; min-width:0; position:relative; overflow:hidden; }
 .widget input[type=text], .widget input[type=number], .widget select {
   background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
-.wval { font-family:'Cascadia Code',monospace; color:var(--val); min-width:48px; text-align:right; }
+/* A slider's number, beside it. */
+.wval { font-family:'Cascadia Code',monospace; color:var(--val); font-size:.84rem; font-variant-numeric:tabular-nums;
+        min-width:5ch; white-space:nowrap; }
+.widget > .wval { grid-column:3; }
 /* Control strip: bound widgets surfaced *with* a cell's output (presentation layer). */
 .controls { display:flex; flex-wrap:wrap; align-items:stretch; gap:8px; padding:10px 14px;
             border-top:1px solid var(--border); background:linear-gradient(var(--bg3),var(--bg2)); }
@@ -1708,10 +1727,11 @@ body.cdnd .controls.empty::before { content:'drop a control here'; color:var(--d
 .control .wname { min-width:auto; }
 /* A Form: its fields in a grid, an Apply/Revert bar beside its name. Edited and not yet applied, the
    form is outlined and the bar says how many fields wait. */
-.formctl { display:flex; flex-direction:column; gap:6px; flex:1 1 auto; min-width:0; padding:6px 8px;
+.formctl { display:flex; flex-direction:column; gap:8px; flex:1 1 auto; min-width:0; padding:8px 10px 10px;
            border:1px solid var(--border); border-radius:6px; }
 .formctl.dirty { border-color:var(--gold); }
-.formhead { display:flex; align-items:center; gap:10px; }
+.formhead { display:flex; align-items:center; gap:10px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+.formhead .wname { font-weight:600; }
 .formbar { display:flex; align-items:center; gap:6px; margin-left:auto; }
 .formstate { color:var(--dim); font-size:.78rem; }
 .formctl.dirty .formstate { color:var(--gold); }
@@ -1719,10 +1739,16 @@ body.cdnd .controls.empty::before { content:'drop a control here'; color:var(--d
                   background:var(--bg3); color:var(--text); cursor:pointer; }
 .formbar .formapply:not(:disabled) { border-color:var(--teal); color:var(--teal); }
 .formbar button:disabled { opacity:.45; cursor:default; }
-.formfields { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:4px 16px; }
-.formfield { min-width:0; }
-.formfield .wname { min-width:96px; }
-.formfield input[type=range] { flex:1; min-width:80px; accent-color:var(--purple); }
+/* The fields share columns the way a bind cell's rows do; a field's wrapper takes no box, so its
+   label, control and readout sit in the form's grid. */
+.formfields { display:grid; grid-template-columns:fit-content(20rem) minmax(8rem, 34rem) auto 1fr; gap:6px 16px; align-items:center; }
+.control.formfield { display:contents; }
+.formfield > .wname { grid-column:1; }
+.formfield > input, .formfield > select, .formfield > .pick-ro { grid-column:2; justify-self:start; max-width:100%; }
+.formfield > input[type=range] { justify-self:stretch; }
+.formfield > textarea, .formfield > .mslist, .formfield > .checkgroup, .formfield > .radiogroup, .formfield > .customwidget { grid-column:2 / -1; }
+.formfield > .wval { grid-column:3; }
+.formfield input[type=number] { width:10ch; }
 .formfield input[type=text], .formfield input[type=number], .formfield select {
   background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
 .cgrip { cursor:grab; color:var(--dim); user-select:none; font-size:.9rem; padding:3px 6px;
@@ -1757,7 +1783,8 @@ body.cdnd .controls.empty::before { content:'drop a control here'; color:var(--d
 .msopt.on, .msopt.on:hover { background:var(--purple); color:#160d18; }
 /* TableSelect reuses the shared interactive table (.slatetable — sort/filter/paginate) with row
    selection layered on. The widget stacks (name above the table) instead of the usual inline row. */
-.widget:has(.tablesel), .control:has(.tablesel) { flex-direction:column; align-items:stretch; }
+.control:has(.tablesel) { flex-direction:column; align-items:stretch; }
+.widget > .tablesel { grid-column:1 / -1; }
 .tablesel { width:100%; min-width:0; overflow:auto; max-height:360px; }
 .slatetable.selectable tbody tr { cursor:pointer; }
 .slatetable tbody tr.on, .slatetable tbody tr.on:hover { background:color-mix(in srgb, var(--purple) 32%, transparent); }
@@ -1781,7 +1808,7 @@ input.toggle:checked::after { left:18px; }
 .control .wval { min-width:40px; }
 /* A bind/control-group cell stacks one row per bound variable. */
 .binds > .widget + .widget, .binds > .widget + .hostedph, .binds > .hostedph + .widget,
-.binds > .hostedph + .hostedph { border-top:1px solid var(--border); }
+.binds > .hostedph + .hostedph { border-top:1px solid color-mix(in srgb, var(--border) 55%, transparent); }
 /* A bound control surfaced in a strip elsewhere collapses to this slim chip. */
 .hostedph { display:flex; align-items:center; gap:8px; padding:6px 14px; color:var(--dim); font-size:.78rem; }
 .hostedph .wname { min-width:auto; }

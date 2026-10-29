@@ -283,8 +283,13 @@ function controlMarkup(bindId, b) {
     ctrl = `<span class="customwidget" ${a}></span>`; // empty container; its wire() builds + wires the DOM
     wval = '';
   }
-  const nm = p.label != null ? p.label : b.name;   // a widget's `label=` overrides the displayed var name
-  return `<span class="wname" title="${_esc(b.name)}">${_esc(nm)}</span>${ctrl}${wval}`;
+  // A readout only where the control does not show its value itself: a slider's number, a toggle's
+  // word, a pick's coordinates. A select, a field or a radio group already shows what it holds.
+  if (!(w === 'slider' || w === 'pick' || (w === 'toggle' && (p.on != null || p.off != null)))) wval = '';
+  // A widget's `label=` is prose and reads as text; a bare variable name stays code.
+  const lab = p.label != null;
+  const nm = lab ? p.label : (b.display != null ? b.display : b.name);
+  return `<span class="wname${lab ? ' wlabel' : ''}" title="${_esc(b.name)}">${_esc(nm)}</span>${ctrl}${wval}`;
 }
 
 // ── Forms ──
@@ -298,8 +303,7 @@ const _formDraft = (bindId, name) => _formDrafts[_formKey(bindId, name)] || {};
 function formFieldsMarkup(bindId, b) {
   const vals = Object.assign({}, b.value || {}, _formDraft(bindId, b.name));
   return ((b.params || {}).fields || []).map(f => {
-    const child = { name: b.name + '.' + f.name, widget: f.kind, params: Object.assign({}, f.params || {},
-                    (f.params || {}).label != null ? {} : { label: f.name }), value: vals[f.name] };
+    const child = { name: b.name + '.' + f.name, display: f.name, widget: f.kind, params: f.params || {}, value: vals[f.name] };
     return `<span class="control formfield" data-field="${_esc(f.name)}">${controlMarkup(bindId, child)}</span>`;
   }).join('');
 }
@@ -315,7 +319,7 @@ function formMarkup(bindId, b) {
   const nm = p.label != null ? p.label : b.name;
   const dirty = Object.keys(_formDraft(bindId, b.name)).length ? ' dirty' : '';
   return `<span class="formctl${dirty}" data-bind="${bindId}" data-name="${b.name}" data-widget="form">` +
-    `<span class="formhead"><span class="wname" title="${_esc(b.name)}">${_esc(nm)}</span>` +
+    `<span class="formhead"><span class="wname${p.label != null ? ' wlabel' : ''}" title="${_esc(b.name)}">${_esc(nm)}</span>` +
     `<span class="formbar">${formStateMarkup(bindId, b)}</span></span>` +
     `<span class="formfields">${formFieldsMarkup(bindId, b)}</span></span>`;
 }
