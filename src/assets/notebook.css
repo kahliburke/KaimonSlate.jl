@@ -1706,6 +1706,25 @@ body.cdnd .controls.empty::before { content:'drop a control here'; color:var(--d
   padding:8px; align-self:center; }
 .control { display:flex; align-items:center; gap:8px; }
 .control .wname { min-width:auto; }
+/* A Form: its fields in a grid, an Apply/Revert bar beside its name. Edited and not yet applied, the
+   form is outlined and the bar says how many fields wait. */
+.formctl { display:flex; flex-direction:column; gap:6px; flex:1 1 auto; min-width:0; padding:6px 8px;
+           border:1px solid var(--border); border-radius:6px; }
+.formctl.dirty { border-color:var(--gold); }
+.formhead { display:flex; align-items:center; gap:10px; }
+.formbar { display:flex; align-items:center; gap:6px; margin-left:auto; }
+.formstate { color:var(--dim); font-size:.78rem; }
+.formctl.dirty .formstate { color:var(--gold); }
+.formbar button { font-size:.78rem; padding:2px 10px; border-radius:5px; border:1px solid var(--border);
+                  background:var(--bg3); color:var(--text); cursor:pointer; }
+.formbar .formapply:not(:disabled) { border-color:var(--teal); color:var(--teal); }
+.formbar button:disabled { opacity:.45; cursor:default; }
+.formfields { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:4px 16px; }
+.formfield { min-width:0; }
+.formfield .wname { min-width:96px; }
+.formfield input[type=range] { flex:1; min-width:80px; accent-color:var(--purple); }
+.formfield input[type=text], .formfield input[type=number], .formfield select {
+  background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
 .cgrip { cursor:grab; color:var(--dim); user-select:none; font-size:.9rem; padding:3px 6px;
          border-radius:4px; display:flex; align-items:center; }
 .cgrip:hover { background:var(--bg); color:var(--accent); }

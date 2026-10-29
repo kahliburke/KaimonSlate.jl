@@ -233,6 +233,8 @@ function controlMarkup(bindId, b) {
       `<span class="optlbl">${_esc(o.label)}</span></label>`).join('') + '</span>';
   else if (w === 'button')                           // self-labeled — no name span, no value chrome
     return `<button type="button" class="actionbtn" data-count="${b.value}" ${a}>${_esc(p.label || 'Click')}</button>`;
+  else if (w === 'form')                             // several controls applied at once
+    return formMarkup(bindId, b);
   else if (w === 'playhead')                          // driven by the animation player — read-only frame readout
     ctrl = `<span class="playhead-ro" ${a} title="driven by the animation player">▶ frame</span>`;
   else if (w === 'tableselect') {                     // clickable data table → binds the clicked row (a NamedTuple)
@@ -267,6 +269,77 @@ function controlMarkup(bindId, b) {
   }
   const nm = p.label != null ? p.label : b.name;   // a widget's `label=` overrides the displayed var name
   return `<span class="wname" title="${_esc(b.name)}">${_esc(nm)}</span>${ctrl}${wval}`;
+}
+
+// ── Forms ──
+// A form's fields are ordinary controls whose edits go to a DRAFT instead of the server; Apply sends
+// the whole form as one value, so its readers run once. A field's element is named `form.field`
+// (Julia names hold no dot), which is how the value sync and `_bindSpec` find it. The draft is kept
+// here by cell and form, so a re-render while it is pending (another cell's push) shows the edits.
+const _formDrafts = {};
+const _formKey = (bindId, name) => bindId + '\u0000' + name;
+const _formDraft = (bindId, name) => _formDrafts[_formKey(bindId, name)] || {};
+function formFieldsMarkup(bindId, b) {
+  const vals = Object.assign({}, b.value || {}, _formDraft(bindId, b.name));
+  return ((b.params || {}).fields || []).map(f => {
+    const child = { name: b.name + '.' + f.name, widget: f.kind, params: Object.assign({}, f.params || {},
+                    (f.params || {}).label != null ? {} : { label: f.name }), value: vals[f.name] };
+    return `<span class="control formfield" data-field="${_esc(f.name)}">${controlMarkup(bindId, child)}</span>`;
+  }).join('');
+}
+function formStateMarkup(bindId, b) {
+  const n = Object.keys(_formDraft(bindId, b.name)).length;
+  const sub = (b.params || {}).submit || 'Apply';
+  return `<span class="formstate">${n ? n + (n === 1 ? ' change' : ' changes') : 'applied'}</span>` +
+    `<button type="button" class="formapply" ${n ? '' : 'disabled'}>${_esc(sub)}</button>` +
+    `<button type="button" class="formrevert" ${n ? '' : 'disabled'}>Revert</button>`;
+}
+function formMarkup(bindId, b) {
+  const p = b.params || {};
+  const nm = p.label != null ? p.label : b.name;
+  const dirty = Object.keys(_formDraft(bindId, b.name)).length ? ' dirty' : '';
+  return `<span class="formctl${dirty}" data-bind="${bindId}" data-name="${b.name}" data-widget="form">` +
+    `<span class="formhead"><span class="wname" title="${_esc(b.name)}">${_esc(nm)}</span>` +
+    `<span class="formbar">${formStateMarkup(bindId, b)}</span></span>` +
+    `<span class="formfields">${formFieldsMarkup(bindId, b)}</span></span>`;
+}
+// Every rendering of one form (its cell, and a strip that surfaces it), each showing the draft.
+const _formEls = (bindId, name) =>
+  [...document.querySelectorAll('.formctl[data-widget="form"]')].filter(e => e.dataset.bind === bindId && e.dataset.name === name);
+function _formRefresh(bindId, name, fields) {
+  const b = _bindSpec(bindId, name); if (!b) return;
+  const dirty = Object.keys(_formDraft(bindId, name)).length > 0;
+  _formEls(bindId, name).forEach(el => {
+    el.classList.toggle('dirty', dirty);
+    const bar = el.querySelector('.formbar'); if (bar) bar.innerHTML = formStateMarkup(bindId, b);
+    if (fields) {                                   // a revert, or another rendering's edit: the fields too
+      const box = el.querySelector('.formfields');
+      if (box) { box.innerHTML = formFieldsMarkup(bindId, b); box.querySelectorAll('[data-bind]').forEach(wireControl); typeset(box); }
+    }
+  });
+}
+// A field's edit: into the draft, dropped again when it is back at the applied value.
+function _formEdit(bindId, name, field, v, from) {
+  const b = _bindSpec(bindId, name); if (!b) return;
+  const d = Object.assign({}, _formDraft(bindId, name));
+  if (_valKey(v) === _valKey((b.value || {})[field])) delete d[field]; else d[field] = v;
+  Object.keys(d).length ? (_formDrafts[_formKey(bindId, name)] = d) : delete _formDrafts[_formKey(bindId, name)];
+  // The other renderings of this form show the edit too; the one edited already does.
+  _formEls(bindId, name).forEach(el => { if (!el.contains(from)) { const box = el.querySelector('.formfields');
+    if (box) { box.innerHTML = formFieldsMarkup(bindId, b); box.querySelectorAll('[data-bind]').forEach(wireControl); } } });
+  _formRefresh(bindId, name, false);
+}
+function _formApply(bindId, name) {
+  const b = _bindSpec(bindId, name); if (!b) return;
+  const value = Object.assign({}, b.value || {}, _formDraft(bindId, name));
+  delete _formDrafts[_formKey(bindId, name)];
+  b.value = value;                                  // shown as applied now; the server's push confirms it
+  _formRefresh(bindId, name, false);
+  api('POST', '/api/bind/' + bindId, { name, value }).then(applyAck);
+}
+function _formRevert(bindId, name) {
+  delete _formDrafts[_formKey(bindId, name)];
+  _formRefresh(bindId, name, true);
 }
 
 // One row inside a bind/group cell: the live widget, or — when its control is
@@ -1088,8 +1161,20 @@ function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTi
 // immediately, so the end state is always correct regardless of the rate limit.
 function wireControl(el) {
   const id = el.dataset.bind, name = el.dataset.name, widget = el.dataset.widget;
+  if (widget === 'form') {                          // the form's own bar: Apply and Revert
+    el.addEventListener('click', e => {
+      if (e.target.closest('.formfields')) return;
+      if (e.target.closest('.formapply')) _formApply(id, name);
+      else if (e.target.closest('.formrevert')) _formRevert(id, name);
+    });
+    return;
+  }
+  // A form's field: its edits go to the form's draft, not to the server.
+  const dot = name ? name.indexOf('.') : -1;
+  const form = dot > 0 ? name.slice(0, dot) : null, field = dot > 0 ? name.slice(dot + 1) : null;
   let inflight = false, pending = null, lastSent = 0, timer = null;
   const fire = v => {
+    if (form) { pending = null; clearTimeout(timer); timer = null; _formEdit(id, form, field, v, el); return; }
     lastSent = performance.now(); inflight = true; pending = null;
     clearTimeout(timer); timer = null;
     // A `ui_theme` bind doubles as the Slate theme switch: swap the client CSS + ECharts here, and let
@@ -1195,6 +1280,14 @@ function wireControl(el) {
 // used by widgets (TableSelect) that need their full params (the table data) when wiring behavior.
 function _bindSpec(bindId, name) {
   const c = _cellById(bindId); if (!c) return null;
+  const dot = name ? name.indexOf('.') : -1;
+  if (dot > 0) {                                    // a form's field, as a spec of its own
+    const fb = (c.binds || []).find(b => b.name === name.slice(0, dot)); if (!fb) return null;
+    const fname = name.slice(dot + 1), f = ((fb.params || {}).fields || []).find(f => f.name === fname);
+    if (!f) return null;
+    const d = _formDraft(bindId, fb.name);
+    return { name, widget: f.kind, params: f.params || {}, value: fname in d ? d[fname] : (fb.value || {})[fname] };
+  }
   return (c.binds || []).find(b => b.name === name) || null;
 }
 // The descriptor {v, component, props} of a component placeholder, from its sibling JSON script.
@@ -2053,9 +2146,19 @@ window.syncControlValuesSoon = syncControlValuesSoon;
 
 function syncControlValues(state) {
   const val = {}, par = {};
+  // A form's fields sync as `form.field`, showing the draft where there is one; the form's own
+  // element holds no value of its own to set.
+  const addForm = (cid, b) => {
+    const d = _formDraft(cid, b.name);
+    ((b.params || {}).fields || []).forEach(f => {
+      val[b.name + '.' + f.name] = f.name in d ? d[f.name] : (b.value || {})[f.name];
+      par[b.name + '.' + f.name] = f.params || {};
+    });
+  };
   state.cells.forEach(c => {
-    (c.binds || []).forEach(b => { val[b.name] = b.value; par[b.name] = b.params || {}; });
-    (c.controls || []).flat().forEach(s => { val[s.name] = s.value; par[s.name] = s.params || {}; });   // controls is columns-of-specs
+    (c.binds || []).forEach(b => { if (b.widget === 'form') { addForm(c.id, b); return; } val[b.name] = b.value; par[b.name] = b.params || {}; });
+    (c.controls || []).flat().forEach(s => { if (s.widget === 'form') { addForm(s.id, s); return; }
+                                              val[s.name] = s.value; par[s.name] = s.params || {}; });   // controls is columns-of-specs
   });
   const now = performance.now();
   document.querySelectorAll('#nb [data-bind][data-name]').forEach(el => {

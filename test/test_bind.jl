@@ -307,6 +307,33 @@ end
         @test c((1500, 1800)) == Any[1500.0, 1800.0]
     end
 
+    # A Form applies several controls at once: its value is every field's, each through its own
+    # kind's coercion, and a cell reads it as a NamedTuple in the fields' order.
+    @testset "Form: fields coerce, reconcile and wrap as their own controls" begin
+        f = RE.Form(years = RE.Slider(1:10; default = 5), span = RE.RangeSlider(0:1:100; default = (20, 80)),
+                    mode = RE.Select(["fast" => "Fast", "slow" => "Slow"], "slow"), label = "settings")
+        @test f.kind == "form" && f.default == Dict("years" => 5, "span" => Any[20.0, 80.0], "mode" => "slow")
+        @test [x["name"] for x in f.params["fields"]] == ["years", "span", "mode"] && f.params["submit"] == "Apply"
+        # What the page sends on Apply, as JSON gives it: every field coerced by its own kind.
+        v = RE.coerce_bind(f, Dict("years" => 7.0, "span" => [90, 10], "mode" => "fast"))
+        @test v == Dict("years" => 7, "span" => Any[10.0, 90.0], "mode" => "fast")
+        s = RE.wrap_value(f, v)
+        @test keys(s) == (:years, :span, :mode) && s.years == 7 && s.span == (lo = 10.0, hi = 90.0) && s.mode == "fast"
+        # A field left out takes its default; what a cell reads can be written straight back.
+        @test RE.coerce_bind(f, Dict("years" => 2))["span"] == Any[20.0, 80.0]
+        @test RE.coerce_bind(f, s) == v
+        @test RE.coerce_bind(f, "nonsense") == f.default
+        # A re-run of the cell keeps each field still there; a new field starts at its default.
+        f2 = RE.Form(years = RE.Slider(1:10; default = 5), rate = RE.Slider(0.0:0.5:2.0; default = 1.0))
+        @test RE.reconcile_bind(f, v, f2) == Dict("years" => 7, "rate" => 1.0)
+        f3 = RE.Form(years = RE.Slider(1:4; default = 2))
+        @test RE.reconcile_bind(f, v, f3) == Dict("years" => 2)      # out of the new range → the default
+        # The fields' params leave the worker as their own controls' would.
+        @test [x["params"] for x in RE._wire_params(f)["fields"]][1]["max"] == 10
+        @test_throws "holds no value a form can apply" RE.Form(go = RE.Button("go"))
+        @test_throws "at least one field" RE.Form()
+    end
+
     # A pick reads its value off a figure, so every guarantee a cell relies on has to hold against
     # whatever the browser posts: a click lands in data coordinates, inside the axis, on the grid.
     @testset "Pick: coercion clamps, snaps and normalises" begin

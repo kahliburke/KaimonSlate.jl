@@ -536,6 +536,50 @@ function _rangeslider(lo, hi, st, default, label)
     return Widget("rangeslider", p, Any[a, b])
 end
 
+# ── Forms ─────────────────────────────────────────────────────────────────────
+"""
+    Form(; submit = "Apply", label = nothing, fields...) -> Widget
+
+Several controls that change together, applied at once. Moving a field changes nothing until the
+form is applied: the cells reading the form run once, with every field's new value, instead of
+running again for each control as it moves. That suits settings that feed an expensive cell (a
+campaign, a long simulation), where a reader sets a few of them and then wants one run.
+
+Binds a NamedTuple of the fields' values, each as its own control would bind it (a `Choice` for a
+labeled `Select`, `(lo, hi)` for a `RangeSlider`).
+
+```julia
+@bind costs Form(horizon = Slider(1:10; default = 5, label = "years"),
+                 pump_price = Slider(5_000:5_000:200_000; default = 45_000),
+                 spread = Slider(0.1:0.05:1.0; default = 0.5))
+
+costs.horizon * 8760     # a field by name
+horizon, price = costs   # or in order
+```
+
+A field may be any control that holds a value; a `Button`, a `FileUpload`, a figure pick, a
+playhead and another `Form` cannot be fields. `set_bind(:costs, (; horizon = 3, …))` applies values
+from a cell, a field left out taking its default.
+"""
+function Form(; submit::AbstractString = "Apply", label = nothing, fields...)
+    isempty(fields) && throw(ArgumentError("Form needs at least one field: Form(name = Slider(…), …)"))
+    specs = Any[]
+    for (k, w0) in fields
+        w = to_widget(w0)
+        w.kind in _FORM_EXCLUDED && throw(ArgumentError("Form: field `$k` is a $(w.kind) control, which holds no value a form can apply"))
+        push!(specs, Dict{String,Any}("name" => String(k), "kind" => w.kind, "params" => w.params, "default" => w.default))
+    end
+    p = merge(_wparams(label), Dict{String,Any}("fields" => specs, "submit" => String(submit)))
+    return Widget("form", p, Dict{String,Any}(f["name"] => f["default"] for f in specs))
+end
+const _FORM_EXCLUDED = ("form", "button", "file", "pick", "playhead")
+_form_fields(w::Widget) = get(w.params, "fields", Any[])
+_form_field(f) = Widget(String(f["kind"]), f["params"], f["default"])
+# A form's value as it arrives: a Dict from the browser, a NamedTuple from a cell.
+_form_source(v::AbstractDict) = Dict{String,Any}(String(k) => x for (k, x) in v)
+_form_source(v::NamedTuple) = Dict{String,Any}(String(k) => x for (k, x) in pairs(v))
+_form_source(v) = nothing
+
 # ── Picking on a figure ───────────────────────────────────────────────────────
 # A pick control reads its coordinates off a Makie axis: the reader clicks the rendered figure and
 # the value arrives in DATA coordinates. The three modes share one kind — the pixel→data mapping,
@@ -813,7 +857,7 @@ custom_widget(kind::AbstractString, default = ""; kwargs...) =
 const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :TextArea,
                        :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
                        :TimeField, :Button, :SlideSteps, :FileUpload, :RangeSlider, :playhead, :TableSelect,
-                       :PickPoint, :PickRegion, :PickPath,
+                       :PickPoint, :PickRegion, :PickPath, :Form,
                        :custom_widget,
                        # Not a widget but a modifier over one — injected alongside so
                        # `@bind x hidden(Slider(…))` needs no import.
@@ -926,9 +970,17 @@ function _carry_option(ow::Widget, ov, nw::Widget)
     return k in keep ? k : nothing
 end
 const _OPTION_KINDS = ("select", "radio", "multiselect", "multicheck")
-# The params that leave the worker: the option values of a keyed widget stay here.
-_wire_params(w::Widget) =
-    w.kind in _OPTION_KINDS && haskey(w.params, "values") ? delete!(copy(w.params), "values") : w.params
+# The params that leave the worker: the option values of a keyed widget stay here, a form's fields'
+# among them.
+function _wire_params(w::Widget)
+    w.kind in _OPTION_KINDS && haskey(w.params, "values") && return delete!(copy(w.params), "values")
+    if w.kind == "form"
+        p = copy(w.params)
+        p["fields"] = Any[merge(f, Dict{String,Any}("params" => _wire_params(_form_field(f)))) for f in _form_fields(w)]
+        return p
+    end
+    return w.params
+end
 
 # Register the value lifecycle for each built-in kind through SlateExtensionsBase's `register_kind!`
 # — the SAME seam a third-party widget uses. Hooks: coerce(w, v) (browser value → Julia value),
@@ -1219,6 +1271,27 @@ function _register_builtin_kinds!()
             wrap = (w, v) -> get(w.params, "labeled", false) === true ? Selection(Choice[_choice(w, x) for x in v]) :
                              haskey(w.params, "values") ? Any[_unkey(w, x) for x in v] : v)
     end
+    # Form — each field's value through its own kind's hooks. The registry value is a Dict by field
+    # name (what the browser sends on Apply); a cell reads a NamedTuple in the fields' order. A
+    # field the value leaves out takes its default, and a re-run of the bind cell keeps each field
+    # that is still there, as its own control would.
+    register_kind!("form";
+        coerce = function (w, v)
+            src = _form_source(v)
+            Dict{String,Any}(String(f["name"]) => (src !== nothing && haskey(src, f["name"]) ? coerce_bind(_form_field(f), src[f["name"]]) : f["default"])
+                             for f in _form_fields(w))
+        end,
+        reconcile = function (ow, ov, nw)
+            old = Dict(String(f["name"]) => f for f in _form_fields(ow))
+            Dict{String,Any}(String(f["name"]) => (haskey(old, f["name"]) && ov isa AbstractDict && haskey(ov, f["name"]) ?
+                                                   reconcile_bind(_form_field(old[f["name"]]), ov[f["name"]], _form_field(f)) : f["default"])
+                             for f in _form_fields(nw))
+        end,
+        wrap = function (w, v)
+            fs = _form_fields(w)
+            vals = Tuple(wrap_value(_form_field(f), v isa AbstractDict && haskey(v, f["name"]) ? v[f["name"]] : f["default"]) for f in fs)
+            NamedTuple{Tuple(Symbol(f["name"]) for f in fs)}(vals)
+        end)
     return nothing
 end
 _register_builtin_kinds!()
