@@ -339,6 +339,22 @@ separate sliders let the reader cross them; this cannot be put into that state.
 @bind span RangeSlider(400:4000; default = (1500, 1800), label = "region")
 lo, hi = span            # destructures  ·  span.lo / span.hi by name
 ```"""),
+    SlateApiEntry("Form", "Widgets",
+        "Several controls applied at once: readers run once, on Apply, not as each field moves.",
+        ["form", "apply", "submit", "commit", "batch", "settings", "several", "group", "confirm",
+         "expensive", "defer", "parameters"],
+        "Form(; submit = \"Apply\", label, fields...)",
+        """Several controls that change together, applied at once. Moving a field edits a draft in
+the page; Apply sends every field, and the cells reading the form run once. Use it for settings
+that feed an expensive cell (a campaign, a long simulation). Binds a NamedTuple of the fields'
+values, each as its own control would bind it. A `Button`, `FileUpload`, pick, playhead or another
+`Form` cannot be a field.
+```julia
+@bind costs Form(years = Slider(1:10; default = 5), price = Slider(5_000:5_000:200_000; default = 45_000))
+costs.years * 8760       # a field by name  ·  years, price = costs
+```
+`set_bind(:costs, (; years = 3, price = 60_000))` applies values from a cell (a field left out takes
+its default); the `set_bind` tool takes the same as a JSON object."""),
     SlateApiEntry("PickPoint", "Widgets",
         "Click a figure to choose a point; binds `(x, y)` in the axis's DATA coordinates.",
         ["click", "pick", "figure", "image map", "crosshair", "probe", "coordinates", "canvas",
