@@ -15,6 +15,24 @@ function _latex(s)
     filter(!isempty, String[RE._comp_text(c) for c in comps])
 end
 
+@testset "ACP agent model discovery" begin
+    codex = only(filter(src -> src.agent == "codex", NS._ACP_MODEL_SOURCES))
+    @test codex.exe == "codex-acp"
+    @test NS._acp_model_ids([codex]; which = _ -> nothing) == String[]
+    @test NS._acp_model_ids([codex]; which = _ -> "/tools/codex-acp") == ["acp:codex"]
+
+    # A missing executable must not trigger model enumeration (or start an agent).
+    absent = (agent = "absent", exe = "absent", list = () -> error("must not run"))
+    @test NS._acp_model_ids([absent]; which = _ -> nothing) == String[]
+
+    # Preserve another adapter's explicit ids, including separators inside the model half.
+    other = (agent = "other", exe = "other-acp", list = () -> ["provider/model:variant"])
+    @test NS._acp_model_ids([codex, other]; which = identity) ==
+          ["acp:codex", "acp:other:provider/model:variant"]
+    @test NS._acp_model_ids([codex, other]; which = exe -> exe == "codex-acp" ? nothing : exe) ==
+          ["acp:other:provider/model:variant"]
+end
+
 @testset "cell-local completion" begin
     L(code) = sort(String[String(s) for s in NS._cell_locals(code)])
 

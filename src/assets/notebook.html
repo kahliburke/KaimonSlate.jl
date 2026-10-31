@@ -491,8 +491,8 @@
       <option value="haiku">Haiku</option>
       <option value="__custom__">Custom…</option>
     </select></div>
-  <div class="setrow" id="setmodelcustomrow" style="display:none"><label title="An exact model id/version passed straight to the agent (claude --model), or a prefixed local model. E.g. claude-opus-4-8, sonnet[1m], ollama:llama3.1">Custom model</label>
-    <input id="setmodelcustom" class="settext" type="text" placeholder="e.g. claude-opus-4-8, sonnet[1m], ollama:llama3.1" autocomplete="off" spellcheck="false"/></div>
+  <div class="setrow" id="setmodelcustomrow" style="display:none"><label title="An exact model id/version or a backend-prefixed agent selection. E.g. claude-opus-4-8, acp:codex, acp:codex:&lt;model-id&gt;, ollama:llama3.1">Custom model</label>
+    <input id="setmodelcustom" class="settext" type="text" placeholder="e.g. acp:codex:&lt;model-id&gt;, ollama:llama3.1" autocomplete="off" spellcheck="false"/></div>
   <div class="setrow"><label title="Your default permission preset for every notebook. A notebook can override it locally (never written to the file) under “This notebook”.">Agent permissions (global default)</label>
     <select id="setperm">
       <option value="">Notebook (default — slate tools, no shell)</option>
