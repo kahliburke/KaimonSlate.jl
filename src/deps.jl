@@ -1467,33 +1467,47 @@ the not-yet-defined name, or silently consumed the previous run's value) — wit
 writer is restaled once ("staleness never under-invalidates") and the caller's runner re-arms.
 A serial drain executes in document order — a valid topological order even without the edge —
 so the default skips the restale. Returns `true` iff something newly resolved (deps rebuilt).
+
+With `rebuild=false` the caller rebuilds the graph and restales (`restale_macro_racers!`) itself;
+pass a set as `recovered` to receive the cells whose recovery included a write.
 """
 function refine_macros!(report::Report, kernel::Kernel = InProcessKernel(); restale_racers::Bool = false,
-                        rebuild::Bool = true)
+                        rebuild::Bool = true, recovered::Union{Nothing,Set{String}} = nothing)
     cells = pending_macro_cells(report)
     isempty(cells) && return false
     resolve_macros!(report, kernel, cells; mark_tried = true) || return false
-    # `rebuild=false`: this ran the kernel resolve OFF a notebook lock (the protocol); the caller re-takes
-    # the lock to `rebuild_precise!`. The racer-restale needs the rebuilt graph, so it's the caller's job
-    # too — its post-refine drain re-arm catches any stale cell either way.
-    rebuild || return true
-    rebuild_precise!(report)
-    restale_racers || return true
-    recovered = Set{String}()   # attempted cells whose recovery included a WRITE (new downstream edges)
+    writers = Set{String}()   # attempted cells whose recovery included a WRITE (new downstream edges)
     lock(_MACRO_LOCK) do
         nb = get(_MACRO_BINDS, report.id, nothing)
         nb === nothing && return
         for c in cells
             rec = get(nb, c.src_hash, nothing)
-            rec !== nothing && !isempty(rec[2]) && push!(recovered, c.id)
+            rec !== nothing && !isempty(rec[2]) && push!(writers, c.id)
         end
     end
-    if !isempty(recovered)
-        for id in dependents_of(report, recovered)
-            id in recovered && continue
-            c = get(report.byid, id, nothing)
-            c === nothing || restale!(c)
-        end
-    end
+    recovered === nothing || union!(recovered, writers)
+    # `rebuild=false`: this ran the kernel resolve OFF a notebook lock (the protocol); the caller re-takes
+    # the lock to `rebuild_precise!`, and the racer-restale needs the rebuilt graph, so it's the caller's
+    # job too (with `recovered`).
+    rebuild || return true
+    rebuild_precise!(report)
+    restale_racers && restale_macro_racers!(report, writers)
     return true
+end
+
+"""
+    restale_macro_racers!(report, writers)
+
+Restale every cell downstream of a cell in `writers`, whose macro-hidden write was just recovered:
+a parallel drain ran it without that edge, so it may have raced its producer, even if it ran
+without error. A cell isn't restaled for its own recovery, but is when it lies downstream of another
+(two cells that write one name). Needs the rebuilt graph.
+"""
+function restale_macro_racers!(report::Report, writers::Set{String})
+    for w in writers, id in dependents_of(report, Set([w]))
+        id == w && continue
+        c = get(report.byid, id, nothing)
+        c === nothing || restale!(c)
+    end
+    return nothing
 end
