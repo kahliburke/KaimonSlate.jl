@@ -389,9 +389,11 @@ function run_cleanups!(::InProcessKernel, report::Report, ids)
 end
 
 "Evaluate `source` in the kernel and capture stdout + rich output → `CellOutput`. `region`/`regions`
-seed the task-local Slate execution context (see `_build_slate_ctx`); `region=\"\"` ⇒ the main kernel."
+seed the task-local Slate execution context (see `_build_slate_ctx`); `region=\"\"` ⇒ the main kernel.
+`lane` says which of a worker's thread pools runs it (`\"ui\"` for reactive refreshes, see worker.jl
+`_route_request`); kernels without lanes ignore it."
 eval_capture(k::InProcessKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
-             region::AbstractString = "", regions::AbstractVector = String[]) =
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
     _in_notebook_env(k) do
         _eval_capture(report_module(report), source, filename;
                       slate_ctx = _build_slate_ctx(report_module(report), report.id, region, regions))
@@ -399,10 +401,12 @@ eval_capture(k::InProcessKernel, report::Report, source::AbstractString, filenam
 
 # Memo-aware entry (5-arg `memo` = (; key, names, threshold)). Default: ignore caching and just
 # evaluate — only the gate kernel (real notebooks) implements durable memoization. Keeps in-process
-# and test kernels working unchanged. `region`/`regions` flow through to the execution context.
+# and test kernels working unchanged. `region`/`regions` flow through; `lane` only when set, so a
+# kernel that doesn't take it is unaffected.
 eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo;
-             region::AbstractString = "", regions::AbstractVector = String[]) =
-    eval_capture(k, report, source, filename; region = region, regions = regions)
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
+    isempty(lane) ? eval_capture(k, report, source, filename; region = region, regions = regions) :
+                    eval_capture(k, report, source, filename; region = region, regions = regions, lane = lane)
 
 """
     PendingKernel <: Kernel
@@ -453,11 +457,11 @@ end
 prepare!(k::PendingKernel, report::Report) = prepare!(_await_real(k), report)
 reset!(k::PendingKernel, report::Report) = reset!(_await_real(k), report)
 eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
-             region::AbstractString = "", regions::AbstractVector = String[]) =
-    eval_capture(_await_real(k), report, source, filename; region = region, regions = regions)
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
+    eval_capture(_await_real(k), report, source, filename; region = region, regions = regions, lane = lane)
 eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
-             region::AbstractString = "", regions::AbstractVector = String[]) =
-    eval_capture(_await_real(k), report, source, filename, memo; region = region, regions = regions)
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
+    eval_capture(_await_real(k), report, source, filename, memo; region = region, regions = regions, lane = lane)
 complete(k::PendingKernel, report::Report, code::AbstractString, pos::Integer) =
     complete(_await_real(k), report, code, pos)
 assign_bind!(k::PendingKernel, report::Report, name::Symbol, value) =

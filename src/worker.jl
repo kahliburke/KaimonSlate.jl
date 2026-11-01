@@ -909,7 +909,8 @@ function __slate_eval(source::String; filename::String = "string",
                      memo_always::Bool = false, memo_unread::Vector{String} = String[],
                      memo_safe::Vector{String} = String[],
                      ctx_region::String = "", ctx_notebook::String = "",
-                     ctx_regions::Vector{String} = String[])
+                     ctx_regions::Vector{String} = String[],
+                     lane::String = "")   # read by `_route_request` before this runs; "ui" ⇒ the UI threads
     # Register this eval's task under its cell id so __slate_cancel can interrupt it (the server runs
     # parallel cells as concurrent __slate_eval calls; a stop throws InterruptException into them).
     cid = replace(filename, r"^cell:" => "")
@@ -1288,7 +1289,7 @@ sitting on the ~75s OS TCP timeout. Never throws. Returns (; reachable::Bool, rt
 function __slate_probe_peer(ip::String, port::Int)
     result = Threads.Atomic{Int}(0)              # 0 pending · 1 open · 2 refused/error
     t0 = time()
-    Threads.@spawn begin
+    _spawn_infra() do
         r = try
             s = Sockets.connect(ip, port); close(s); 1
         catch
@@ -1773,6 +1774,85 @@ catch e
     false
 end
 _blog("ExpressionExplorer loaded (ok=$(_EE_OK))")
+
+# ── Infrastructure threads ────────────────────────────────────────────────────────────────────
+# Cell code runs on `:default`. When it saturates that pool (CPU-bound tasks that rarely yield), any
+# worker machinery also scheduled there stalls with it. So the worker keeps two pools of its own OS
+# threads, from DedicatedThreads (an optional env on LOAD_PATH, see gate_kernel.jl `_pools_env`):
+#   • `:slate` — the control plane: status, cancel, the hub heartbeat, telemetry, blob transfers.
+#     Never runs notebook code, so it always answers.
+#   • `:slate_ui` — what keeps the page live: markdown interpolation, live re-renders, table pages,
+#     completions, and cells re-run by a reactive push. These do run notebook code (`show` methods,
+#     `{{ }}` expressions, reader cells), so they are kept off `:slate`: a slow one delays only UI work.
+# Everything else, including every cell a user runs, stays on `:default`. Without the package the
+# control plane runs on `:interactive` and UI work on `:default`.
+const _POOLS_OK = try
+    @eval import DedicatedThreads
+    true
+catch e
+    @info "slate: DedicatedThreads unavailable — worker control plane runs on :interactive" error = sprint(showerror, e)
+    false
+end
+_blog("DedicatedThreads loaded (ok=$(_POOLS_OK))")
+
+const _INFRA_THREADS = 2
+const _UI_THREADS = 2
+const _INFRA_POOL = Ref{Any}(nothing)
+const _UI_POOL = Ref{Any}(nothing)
+
+function _start_worker_pools!()
+    _POOLS_OK || return nothing
+    _INFRA_POOL[] = DedicatedThreads.DedicatedPool(_INFRA_THREADS; name = :slate)
+    _UI_POOL[] = DedicatedThreads.DedicatedPool(_UI_THREADS; name = :slate_ui)
+    return nothing
+end
+
+"Run `f()` on the control-plane threads (never notebook code); returns its Task."
+function _spawn_infra(f)
+    pool = _INFRA_POOL[]
+    pool === nothing && return Threads.@spawn :interactive f()
+    return DedicatedThreads.spawn(f, pool)
+end
+
+"Run `f()`, which may run notebook code, on the UI threads; returns its Task."
+function _spawn_ui(f)
+    pool = _UI_POOL[]
+    pool === nothing && return Threads.@spawn f()
+    # Outside the pool's scope, so notebook code's own `spawn(f)` still defaults to `:default`.
+    return DedicatedThreads.spawn(() -> DedicatedThreads.with_pool(f, nothing), pool)
+end
+
+# Gate requests that never run notebook code → the control plane.
+const _CONTROL_TOOLS = Set([
+    "__slate_running", "__slate_cancel", "__slate_cancel_cells", "__slate_ports",
+    "__slate_client_key", "__slate_server_key", "__slate_authorize_client", "__slate_revoke_client",
+    "__slate_probe_peer",
+])
+
+# Gate requests that render or answer the page → the UI threads. Each may run notebook code, but
+# only display-sized work: an expression, a `show`, a page of a table.
+const _UI_TOOLS = Set([
+    "__slate_interp", "__slate_rerender_live", "__slate_rerender_fig", "__slate_table_page",
+    "__slate_matrix_render", "__slate_complete", "__slate_get_served_asset",
+    "__slate_extension_manifest", "__slate_module_help",
+])
+
+# KaimonGate request router (`set_request_router!`): a spawner for requests that leave the default
+# lane, `nothing` for those that stay on it.
+function _route_request(request)
+    type = get(request, :type, nothing)
+    type === :ping && return _spawn_infra
+    type === :tool_call || return nothing
+    name = get(request, :name, "")
+    name in _CONTROL_TOOLS && return _spawn_infra
+    name in _UI_TOOLS && return _UI_POOL[] === nothing ? nothing : _spawn_ui
+    # A cell re-run by a reactive push (the hub tags it, server.jl `_UI_LANE_CELLS`).
+    if name == "__slate_eval" && _UI_POOL[] !== nothing
+        args = get(request, :arguments, nothing)
+        args isa AbstractDict && get(args, "lane", "") == "ui" && return _spawn_ui
+    end
+    return nothing
+end
 
 "Macro-expand cell sources in the live notebook namespace (recursive, NO evaluation) and ANALYZE
 them right here, where the macros live — returns id → {reads, writes} name lists. A cell whose
@@ -2864,6 +2944,11 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                 (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)
             end)))
     catch e; @warn "slate: timestamp logger install failed" exception = e; end
+    # The worker's own thread pools, started before the port opens, and the gate routing requests onto
+    # them (see `_route_request`). With a KaimonGate that has no `set_request_router!`, every request
+    # still gets a `:default` task.
+    try; _start_worker_pools!(); catch e; @warn "slate: worker thread pools failed to start; using the built-in pools" exception = e; end
+    isdefined(KaimonGate, :set_request_router!) && KaimonGate.set_request_router!(_route_request)
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
     # key — proper mutual auth. Local + :ssh_tunnel workers leave them off (loopback / SSH-encrypted).
@@ -2885,7 +2970,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # ALWAYS CURVE (decoupled from hub transport): allow-listed on :direct (its OWN Slate-side ZAP
     # handler + allow-file, not the gate's), encryption-only behind SSH on :tunnel. No plaintext blob
     # path on any worker. Needs the memo/CAS layer (MemoStore + codecs) — memo-off means no store to serve.
-    data_port > 0 && _MEMO_OK && Threads.@spawn begin
+    data_port > 0 && _MEMO_OK && _spawn_infra() do
         sleep(5)   # DEFERRED: another CURVE-server setup; keep it out of the hub's handshake window
         # The blob server binds `blob_bind` when given (remote workers → 0.0.0.0 so same-subnet PEERS can
         # reach it for direct pulls) else the gate's `host` (local → loopback). CURVE-protected regardless
@@ -2925,19 +3010,23 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
             end
         end
     end
-    # Dedicated transfer executor — pumps queued peer pulls (verb `X`) on a default-pool thread, off the
-    # gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
-    data_port > 0 && _MEMO_OK && Threads.@spawn try; _xfer_executor!(); catch e
-        @warn "slate worker: transfer executor died" exception = e
+    # Dedicated transfer executor — pumps queued peer pulls (verb `X`) on an infrastructure thread, off
+    # the gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
+    data_port > 0 && _MEMO_OK && _spawn_infra() do
+        try; _xfer_executor!(); catch e
+            @warn "slate worker: transfer executor died" exception = e
+        end
     end
     # Reap idle/dead pooled ssh forwards so a peer pair that stops transferring releases its held SSH
     # connection; kill them all on shutdown so exit never orphans the standing ssh children.
     if data_port > 0 && _MEMO_OK
         atexit(_ssh_fwd_killall!)
-        Threads.@spawn try
-            while true; sleep(30); _ssh_fwd_reap_idle!(); end
-        catch e
-            @warn "slate worker: ssh-forward reaper died" exception = e
+        _spawn_infra() do
+            try
+                while true; sleep(30); _ssh_fwd_reap_idle!(); end
+            catch e
+                @warn "slate worker: ssh-forward reaper died" exception = e
+            end
         end
     end
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
@@ -2994,10 +3083,12 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # Sample every worker — local kernels too. The `.stats` sidecar is still remote-only (empty
     # stats_path skips it), but the `slate_telemetry` PUB now flows from every worker process, so the
     # hub's watchdog can see cpu/rss/gc on a local kernel and not just remote regions.
-    Threads.@spawn try
-        _telemetry_loop!(stats_path)
-    catch e
-        @warn "slate worker: telemetry sampler died" exception = e
+    _spawn_infra() do
+        try
+            _telemetry_loop!(stats_path)
+        catch e
+            @warn "slate worker: telemetry sampler died" exception = e
+        end
     end
     # `serve` runs the message loop on a spawned thread and returns — but this is
     # a non-interactive `-e` process, so we must block to keep it alive until a

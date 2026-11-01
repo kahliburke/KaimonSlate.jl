@@ -668,8 +668,9 @@ end
 # The shared body of a reactive push (a `@bind`/data/asset change): restale every cell the
 # `seed_predicate` selects (the direct triggers), then their dependents, recompute, and broadcast a
 # lightweight `refresh:` patch of ONLY the cells that recomputed — the browser patches just those
-# (charts `setOption`, output swap) instead of pulling the whole state.
-function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
+# (charts `setOption`, output swap) instead of pulling the whole state. `lane = "ui"` marks the
+# restaled cells to re-run on the worker's UI threads (see `_UI_LANE_CELLS`).
+function _reactive_refresh!(nb::LiveNotebook, seed_predicate; lane::AbstractString = "")
     msg = ""
     lock(nb.lock) do
         seed = String[]
@@ -687,6 +688,7 @@ function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
             i === nothing && continue
             ReportEngine.restale!(nb.report.cells[i]) && push!(changed, id)
         end
+        lane == "ui" && union!(get!(Set{String}, _UI_LANE_CELLS, nb.id), changed)
         # A reactive push CONTINUES whatever is running rather than starting a run: a dashboard that
         # pushes every few steps produces a long train of these, and treating each as a new run would
         # reset the pill constantly (as treating none of them as one makes it count forever).
@@ -722,7 +724,7 @@ function server_refresh(nb::LiveNotebook, vars)
             ReportEngine.note_state_write!(nb.report.id, name, s[nextind(s, i):end])
         end
     end
-    return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms))
+    return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms); lane = "ui")
 end
 
 # Reactive push triggered by the asset watcher (`_start_asset_watcher!`): one or more `@asset` or
@@ -809,6 +811,13 @@ const _RUNNER_STALE_HITS = Dict{String,Int}()         # nb.id → consecutive st
 # write — so the symptom is a progress bar that never clears while every value behind it is correct.
 # Guarded by `nb.lock`: every reader and writer here already holds it.
 const _DIRTY_WHILE_RUNNING = Dict{String,Set{String}}()
+
+# nb.id → ids of cells restaled by a reactive value push, whose next run goes to the worker's UI
+# threads (`lane = "ui"`, worker.jl `_route_request`) rather than `:default`. Such re-runs are
+# machine-driven, frequent and usually display work, and on the UI threads they keep updating while
+# cell code saturates `:default`. A run the user starts clears them (`_eval!` with `fresh`), so
+# anything started by hand runs on `:default`. Guarded by `nb.lock`.
+const _UI_LANE_CELLS = Dict{String,Set{String}}()
 const _RUNNER_STALE_AFTER = 600.0                     # 10 min with pending work + no progress ⇒ suspect
 const _RUNNER_STALE_CONFIRMATIONS = 3                 # consecutive 5s sweeps before self-healing (~15s)
 
@@ -2757,12 +2766,16 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
              unread = unread, safe = safe)
         (s, cell.src_hash, m, locked)
     end
+    # A reactive push's re-run goes to the worker's UI threads (see `_UI_LANE_CELLS`).
+    lane = lock(nb.lock) do
+        pop!(get!(Set{String}, _UI_LANE_CELLS, nb.id), cell.id, nothing) === nothing ? "" : "ui"
+    end
     out = try
         # `region`/`regions` seed the cell's task-local Slate execution context (`slate_context()`): the
         # effective side it runs on ("" = main) + the notebook's declared regions. Generic — a region-aware
         # package reads it to default its own args; no package-specific knowledge lives here.
         ReportEngine.eval_capture(kernel, nb.report, src, "cell:" * cell.id, memo;
-                                  region = side, regions = _nb_region_names(nb))
+                                  region = side, regions = _nb_region_names(nb), lane = lane)
     catch e
         ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[],
                                 "", sprint(showerror, e), nothing, 0.0)
@@ -3318,7 +3331,10 @@ function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool 
     # edit, an agent's add/edit, a restart. The exception is a reactive cascade, which continues the
     # run in progress and says so; making that the explicit case rather than the default means a new
     # call site is counted as a run rather than silently folded into the previous one.
-    p = lock(nb.lock) do; count(c -> c.state in (STALE, RUNNING), nb.report.cells); end
+    p = lock(nb.lock) do
+        fresh && delete!(_UI_LANE_CELLS, nb.id)   # a user-started run: everything on `:default`
+        count(c -> c.state in (STALE, RUNNING), nb.report.cells)
+    end
     p > 0 && _emit_pending(nb, p; fresh = fresh)
     _ensure_runner!(nb)
     (isempty(wait_for) && !wait_all) && return nb

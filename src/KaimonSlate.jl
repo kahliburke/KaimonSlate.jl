@@ -451,6 +451,31 @@ function set_worker_extra_flags!(spec::AbstractString; respawn::Bool = true)
     return s
 end
 
+"""
+Where workers get DedicatedThreads, which gives them dedicated threads for the control plane
+and UI work (see `ReportEngine._pools_env`): \"\" installs it by name from the depot's registries,
+\"off\" disables it, and anything else is a local checkout or a git URL. Falls back to the
+`KAIMONSLATE_WORKER_POOLS` environment variable when slate.json doesn't set it.
+"""
+worker_pools_source()::String =
+    String(get(_slate_config(), "worker_pools_source", get(ENV, "KAIMONSLATE_WORKER_POOLS", "")))
+
+"""
+    set_worker_pools_source!(spec) -> String
+
+Persist where workers get DedicatedThreads (see `worker_pools_source`). Workers spawned once
+the env for that source has built use it; running workers are left alone.
+"""
+function set_worker_pools_source!(spec::AbstractString)
+    s = strip(String(spec))
+    ReportEngine.WORKER_POOLS_SOURCE[] = s
+    cfg = _slate_config(); cfg["worker_pools_source"] = s
+    _persist_slate_config!(cfg)
+    ReportEngine._pools_env(; retry_failed = true)   # start building it now, ahead of the next spawn
+    @info "slate: worker pools source set" spec = s
+    return s
+end
+
 "Persisted hub port; 0 means unset — the `KAIMONSLATE_PORT` env var or the 8765 default applies."
 configured_port()::Int = something(tryparse(Int, string(get(_slate_config(), "port", ""))), 0)
 
@@ -606,6 +631,8 @@ set_run_location_default!(spec::AbstractString) = NotebookServer.set_runon_defau
 function _load_slate_config!()
     s = worker_threads()
     isempty(s) || (ReportEngine.WORKER_THREADS[] = s)
+    ReportEngine.WORKER_POOLS_SOURCE[] = worker_pools_source()
+    ReportEngine._pools_env(; retry_failed = true)   # build (or retry) the optional pools env in the background, ahead of spawns
     ef = worker_extra_flags()
     isempty(ef) || (ReportEngine.WORKER_EXTRA_FLAGS[] = ef)
     ReportEngine.MEMO_CAP_GB[] = memo_cap_gb()
