@@ -317,7 +317,12 @@
     if (!active()) {
       clearTimeout(idleTimer);
       if (revealed) {
-        idleTimer = setTimeout(() => { total = 0; done = 0; restored = 0; revealed = false; renderPill(); }, 600);
+        // The counters wait out the gap so a cascade's next wave continues the same k/N, but the reveal
+        // ends now: a run starting in that window goes through its own reveal delay. A reactive cell
+        // refreshing at ~10 Hz never leaves a 600 ms gap, so a reveal held across it marked every
+        // 30 ms re-run "running" for as long as the cell kept updating.
+        revealed = false;
+        idleTimer = setTimeout(() => { total = 0; done = 0; restored = 0; renderPill(); }, 600);
         // Converge the topbar after a VISIBLE run: `celldone` patches update each cell, but the worker
         // dot and the "Run stale" count only recompute on a full state pull — and a parallel/initial
         // run's final pull can be raced. One pull here settles the dot, the stale count, and any state

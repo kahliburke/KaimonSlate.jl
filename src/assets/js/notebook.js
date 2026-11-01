@@ -9,7 +9,7 @@
 // diffs the keyed <Cell>/<Editor> children so editors are preserved across re-renders.
 import { html, render } from 'htm/preact';
 import { Component } from 'preact';
-import { useRef, useEffect } from 'preact/hooks';
+import { useRef, useEffect, useState } from 'preact/hooks';
 import { effect, signal } from '@preact/signals';
 import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal, editing as editingSignal, localDirty as dirtySignal, isDirty, srcEq, clearEdited } from './store.js';
 
@@ -410,6 +410,31 @@ function _keepFocus(host, rebuild) {
   } catch (_) {}
 }
 
+// A fresh cell that leaves `fresh` only briefly keeps reading as fresh: `stale` or `running` shows
+// once it has lasted SETTLE_MS. A reactive push restales its reader cells and they re-run in tens of
+// milliseconds, so without this a cell refreshing at ~10 Hz flashed stale/running on every push. A
+// cell that was never shown fresh (stale on load, after an upstream edit) shows its state at once.
+// Same delay as runstatus.js REVEAL_MS, before a fast run shows as running.
+const SETTLE_MS = 140;
+function useSettledState(state) {
+  const s = useRef({ shown: state, left: 0, timer: null }).current;   // left: when it left `fresh`
+  const [, bump] = useState(0);
+  useEffect(() => () => clearTimeout(s.timer), []);
+  if ((state === 'stale' || state === 'running') && (s.shown === 'fresh' || s.left)) {
+    const t = performance.now();
+    if (!s.left) s.left = t;
+    const wait = SETTLE_MS - (t - s.left);
+    if (wait > 0) {
+      if (!s.timer) s.timer = setTimeout(() => { s.timer = null; bump(n => n + 1); }, wait + 1);
+      return 'fresh';
+    }
+  }
+  s.left = 0;
+  if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+  s.shown = state;
+  return state;
+}
+
 function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed }) {
   const c = cell;
   const ref = useRef(null);
@@ -422,6 +447,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
   if (state !== 'running') {
     if (isDirty(c.id, c.source)) state = 'edited';
   }
+  state = useSettledState(state);
 
   // Dep-focus: cells outside the focused cone collapse out of the flow (and expand back) rather
   // than unmounting, so the transition is smooth and editors/figures survive. Animate only on a
