@@ -52,8 +52,8 @@ const page = (html, ...nodes) => { pages.set(html, nodes); return nodes; };
 let swap, carry = () => () => {};
 try {
   swap = (0, eval)('(function (document, setTimeout, clearTimeout, requestAnimationFrame, _carryMounted,' +
-                   ' runScripts, mountOutputComponents) {' + m[0] + '\nreturn _swapOutput; })')(
-    document, setTimeout, clearTimeout, requestAnimationFrame, (o, s) => carry(o, s), () => {}, () => {});
+                   ' runScripts, mountOutputComponents, observeHeight) {' + m[0] + '\nreturn _swapOutput; })')(
+    document, setTimeout, clearTimeout, requestAnimationFrame, (o, s) => carry(o, s), () => {}, () => {}, () => {});
 } catch (e) {
   console.error('swap_hold: could not evaluate _swapOutput: ' + e.message);
   process.exit(2);
