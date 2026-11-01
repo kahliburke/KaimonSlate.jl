@@ -1586,7 +1586,7 @@ function _runAfterSwap() {
   _afterSwapPending = false;
   const items = [..._afterSwap].filter(([el]) => el.isConnected);
   _afterSwap.clear();
-  if (window._heightObserver) items.forEach(([el]) => { if (!el.__slateObserved) { window._heightObserver.observe(el); el.__slateObserved = true; } });
+  items.forEach(([el]) => observeHeight(el));
   const h = window.innerHeight || 800;
   const near = items.map(([el]) => { const r = el.getBoundingClientRect(); return r.top < h + 300 && r.bottom > -300; });
   items.forEach(([el, w], i) => {
@@ -1646,6 +1646,10 @@ function _clampNow(roots) {
 window._heightObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(entries => {
   for (const e of entries) e.target.__slateHeight = e.borderBoxSize && e.borderBoxSize[0] ? e.borderBoxSize[0].blockSize : e.contentRect.height;
 });
+// Record `el`'s height from its next layout on (once per element).
+function observeHeight(el) {
+  if (window._heightObserver && !el.__slateObserved) { window._heightObserver.observe(el); el.__slateObserved = true; }
+}
 // Synchronously typeset every cell currently in/near the viewport — call right AFTER a programmatic
 // scroll (e.g. position restore), before paint, so deferred math doesn't render late and shift.
 window.typesetInView = () => {
@@ -1663,7 +1667,7 @@ window.typesetInView = () => {
 window.addEventListener('load', () => {
   document.querySelectorAll('#nb .cell .md, #nb .cell .output').forEach((el, i) => {
     window.typesetSoon(el, 'load:' + i);
-    if (window._heightObserver && !el.__slateObserved) { window._heightObserver.observe(el); el.__slateObserved = true; }
+    observeHeight(el);
   });
 });
 // Align the agent drawer's top with the first content cell (as positioned when scrolled

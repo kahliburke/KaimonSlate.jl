@@ -5727,9 +5727,12 @@ function _run_loop!(nb::LiveNotebook)
         # bump (report mutations). Holding nb.lock across these was the teardown-deadlock hazard. (`again`
         # re-arm below re-drains any cell left stale — covering the racer-restale refine_macros! skips.)
         resolved_u = ReportEngine.refine_usings!(nb.report, nb.kernel; rebuild = false)
-        # `rebuild=false` returns before the racer-restale (it needs the rebuilt graph) — a parallel drain's
-        # raced readers are re-drained by the `again` re-arm below instead.
-        resolved_m = ReportEngine.refine_macros!(nb.report, nb.kernel; rebuild = false)
+        # `rebuild=false` returns before the racer-restale (it needs the rebuilt graph): the cells a
+        # parallel drain ran ahead of a newly-recovered producer are restaled after the rebuild below,
+        # and the `again` re-arm re-drains them. They may have run without error, so nothing else
+        # would mark them stale.
+        racers = Set{String}()
+        resolved_m = ReportEngine.refine_macros!(nb.report, nb.kernel; rebuild = false, recovered = racers)
         # A package loaded this drain may have declared front-end scripts (widget renderers, editor
         # extensions) from `__init__` — pull the worker's extension manifest into the notebook registry so
         # the browser injects them. Once-per-drain; no-ops unless a NEW package registered something.
@@ -5737,6 +5740,7 @@ function _run_loop!(nb::LiveNotebook)
         if resolved_u || resolved_m || resolved_x
             with_report(nb) do report
                 (resolved_u || resolved_m) && ReportEngine.rebuild_precise!(report)   # rebuild only if the graph changed
+                _parallel_enabled(nb) && ReportEngine.restale_macro_racers!(report, racers)
                 nb.version += 1
             end
             _broadcast(nb, string(nb.version))   # version token → browser re-pulls the precise-graph state
