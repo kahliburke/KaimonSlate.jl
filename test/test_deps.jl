@@ -572,7 +572,7 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
         # Two cells define the same name through a macro. Recovered after a parallel drain, the second
         # depends on the first and may have raced it, so it re-runs even though it didn't error; being a
-        # recovered writer itself must not exempt it.
+        # recovered writer itself must not exempt it. They ran together, so the first re-runs too.
         r = parse_report("#%% code id=m\nmacro mk2(name, v)\n    esc(:(\$name = \$v))\nend\n" *
                          "#%% code id=w1\n@mk2 twice_val 1\n" *
                          "#%% code id=w2\n@mk2 twice_val 2")
@@ -585,7 +585,7 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         ReportEngine.rebuild_precise!(r)
         ReportEngine.restale_macro_racers!(r, writers)
         @test findcell(r, "w2").state == STALE
-        @test findcell(r, "w1").state != STALE        # nothing upstream of it was recovered
+        @test findcell(r, "w1").state == STALE        # it ran alongside w2, which may have disturbed it
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
     end
 

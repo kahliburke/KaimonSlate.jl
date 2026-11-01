@@ -1500,14 +1500,19 @@ end
 
 Restale every cell downstream of a cell in `writers`, whose macro-hidden write was just recovered:
 a parallel drain ran it without that edge, so it may have raced its producer, even if it ran
-without error. A cell isn't restaled for its own recovery, but is when it lies downstream of another
-(two cells that write one name). Needs the rebuilt graph.
+without error. A writer with another recovered writer downstream (two cells that write one name)
+is restaled too: they ran at the same time, so the later one may have disturbed the earlier, as two
+macros declaring one name in state the analysis can't see would. Needs the rebuilt graph.
 """
 function restale_macro_racers!(report::Report, writers::Set{String})
-    for w in writers, id in dependents_of(report, Set([w]))
-        id == w && continue
-        c = get(report.byid, id, nothing)
-        c === nothing || restale!(c)
+    for w in writers
+        downstream = setdiff(dependents_of(report, Set([w])), Set([w]))
+        isempty(downstream) && continue
+        any(in(writers), downstream) && push!(downstream, w)
+        for id in downstream
+            c = get(report.byid, id, nothing)
+            c === nothing || restale!(c)
+        end
     end
     return nothing
 end
