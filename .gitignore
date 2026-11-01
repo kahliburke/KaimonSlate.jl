@@ -24,6 +24,7 @@ build/cm6/package-lock.json
 # Machine-local: Julia local prefs + per-project agent config (not package source)
 /LocalPreferences.toml
 /.claude/
+/.codex/
 
 # Standalone-expand artifacts (a single-source .jl expanded into a reproducible project tree)
 *.standalone.jl

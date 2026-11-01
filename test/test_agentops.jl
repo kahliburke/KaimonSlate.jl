@@ -934,7 +934,7 @@ end
                        "keymap_resolve.mjs", "bytes_fmt.mjs", "dag_spline.mjs", "sched_opts.mjs",
                        "rebaseline_all.mjs", "rebaseline_callsites.mjs", "reconcile_verdict.mjs",
                        "keymap_key_owner.mjs", "keep_focus.mjs", "ansi_html.mjs",
-                       "settings_section_links.mjs", "logview_window.mjs",
+                       "settings_section_links.mjs", "agent_models.mjs", "logview_window.mjs",
                        "sweep_tile_panel.mjs", "agent_toolrow.mjs",
                        "specialist_ask_routing.mjs", "echarts_dark_labels.mjs",
                        "teardown_output.mjs", "carry_mounted.mjs", "duration_fmt.mjs",

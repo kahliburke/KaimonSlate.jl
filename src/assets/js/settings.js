@@ -519,6 +519,25 @@ async function loadAgentRoles() {
     box.textContent = 'unavailable';
   }
 }
+// ACP ids may omit the model to use the adapter's configured default. Both the main selector and
+// specialist selectors present that choice with a label while keeping its exact backend id.
+function _acpModelLabel(id) {
+  const parts = id.split(':');
+  const agent = parts[1] === 'codex' ? 'Codex' : (parts[1] || 'ACP');
+  const model = parts.slice(2).join(':');
+  return model ? agent + ' · ' + model : agent;
+}
+function _setAcpModelOptions(select, models) {
+  [...select.options].filter(o => o.value.startsWith('acp:')).forEach(o => o.remove());
+  const custom = [...select.options].find(o => o.value === '__custom__') || null;
+  models.forEach(id => {
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = _acpModelLabel(id);
+    select.insertBefore(option, custom);
+  });
+}
+
 // What a role may be set to: the notebook's own model, the Claude aliases, and whatever ACP agents
 // are installed. Fetched once per dialog — the ACP list shells out, and the answer rarely moves.
 let _roleModelCache = null;
@@ -530,7 +549,7 @@ async function _roleModelOptions() {
                 { v: 'haiku', label: 'Haiku' }];
   try {
     const r = await api('GET', '/api/acp-models');
-    for (const m of ((r && r.models) || [])) base.push({ v: m, label: m.replace(/^acp:/, '') });
+    for (const m of ((r && r.models) || [])) base.push({ v: m, label: _acpModelLabel(m) });
   } catch (e) {}
   _roleModelCache = base;
   return base;
@@ -712,7 +731,7 @@ function openSettings(scope, section) {
   const switchSetting = (sel, key, verb, noun) =>
     commitSetting(key, sel.value, _selText(sel), verb, noun, () => { sel.value = localStorage.getItem(key) || ''; });
   // ── Agent model, with a free-text "Custom…" escape hatch ──────────────────────
-  // The stored model is the exact string sent per turn (server → `claude --model`). A preset
+  // The stored model is the exact agent/model id sent to Kaimon per turn. A preset
   // (opus/haiku/local) is picked from the dropdown; anything else (an exact id/version like
   // `claude-opus-4-8`) is a custom value: the dropdown shows "Custom…" and the text input holds it.
   const crow = document.getElementById('setmodelcustomrow');
@@ -752,19 +771,13 @@ function openSettings(scope, section) {
   addLocalModels('/api/ollama-models', 'ollama', 'Ollama');
   addLocalModels('/api/vmlx-models', 'vmlx', 'vmlx');
   // Agents reached over the Agent Client Protocol (opencode, …). Unlike the local
-  // servers above these ids arrive fully assembled — `acp:<agent>:<model>`, where
+  // servers above these ids arrive fully assembled — `acp:<agent>[:<model>]`, where
   // the model half may itself contain colons — so they're used verbatim rather
   // than built from a prefix.
   const addAcpModels = () => {
-    [...mdl.querySelectorAll('option[value^="acp:"]')].forEach(o => o.remove());
+    _setAcpModelOptions(mdl, []);
     return api('GET', '/api/acp-models').then(r => {
-      (r && r.models || []).forEach(id => {
-        const parts = id.split(':');
-        const o = document.createElement('option');
-        o.value = id;
-        o.textContent = (parts[1] || 'acp') + ' · ' + parts.slice(2).join(':');
-        mdl.appendChild(o);
-      });
+      _setAcpModelOptions(mdl, r && r.models || []);
       reflectModel();
     }).catch(() => {});
   };

@@ -453,7 +453,8 @@ const _ACP_MODEL_TTL = 300.0
 Per-agent model enumeration: the ACP agent name, the executable that has to be on PATH, and how
 to list its models.
 
-`list` returns bare ids; `_acp_models` adds the `acp:<agent>:` prefix. Agents differ in whether
+`list` returns bare ids; an empty id selects the agent's configured default model. `_acp_models`
+adds the `acp:<agent>[:<model>]` prefix. Agents differ in whether
 they can be asked: opencode prints its catalogue, while `claude-agent-acp` only offers a list
 inside a live session, so its ids are named here. `agent` must match Kaimon's `ACP_AGENTS`.
 
@@ -463,21 +464,29 @@ be replaced with `opus`.
 """
 const _ACP_MODEL_SOURCES = [
     (agent = "opencode", exe = "opencode",
-     list = () -> (String(strip(l)) for l in split(_capture(`opencode models`, 8), '\n'))),
+     list = () -> (String(strip(l)) for l in split(_capture(`opencode models`, 8), '\n') if !isempty(strip(l)))),
     (agent = "claude", exe = "claude-agent-acp",
      list = () -> ["default", "sonnet", "haiku"]),
+    # Codex publishes its catalogue inside a live session. Leave model selection to its own
+    # configuration instead of hard-coding ids or starting an agent just to open Settings.
+    (agent = "codex", exe = "codex-acp", list = () -> [""]),
 ]
+
+function _acp_model_ids(sources = _ACP_MODEL_SOURCES; which = Sys.which)
+    models = String[]
+    for src in sources
+        which(src.exe) === nothing && continue
+        for id in src.list()
+            push!(models, isempty(id) ? "acp:$(src.agent)" : "acp:$(src.agent):$id")
+        end
+    end
+    models
+end
 
 function _acp_models()
     at, cached = _ACP_MODEL_CACHE[]
     (time() - at) < _ACP_MODEL_TTL && return cached
-    models = String[]
-    for src in _ACP_MODEL_SOURCES
-        Sys.which(src.exe) === nothing && continue
-        for id in src.list()
-            isempty(id) || push!(models, "acp:$(src.agent):$id")
-        end
-    end
+    models = _acp_model_ids()
     _ACP_MODEL_CACHE[] = (time(), models)
     models
 end
