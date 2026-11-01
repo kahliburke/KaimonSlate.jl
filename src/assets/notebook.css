@@ -1065,7 +1065,9 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .disp.latex { overflow-x:auto; padding:6px 2px; } .disp.latex .katex-display { margin:.3em 0; }
 .disp.latex .katex { font-size:1.3em; }                 /* output equations: match markdown display math */
 .md .katex { font-size:1.12em; }                        /* markdown math: a touch above body text */
-.md .katex-display { overflow-x:auto; overflow-y:hidden; }
+/* A display that scrolls sideways clips vertically too, and big operators (∫, ∑ with limits) draw a
+   little outside KaTeX's box: padding keeps them in, and the margin gives back what it adds. */
+.md .katex-display { overflow-x:auto; overflow-y:hidden; padding:.3em 0; margin:.7em 0; }
 .md .katex-display .katex { font-size:1.3em; }
 .md { padding:12px 16px; }
 /* The CELL also carries a bare `md` class (`class="cell md …"`), so the rule above would pad the whole
@@ -2491,7 +2493,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   /* Math in a docstring. The dock is narrow, so a wide display equation scrolls sideways rather
      than stretching the pane; inline maths sits a touch above the small body text. */
   .docmd .katex { font-size: 1.1em; }
-  .docmd .katex-display { overflow-x: auto; overflow-y: hidden; margin: .4em 0; }
+  .docmd .katex-display { overflow-x: auto; overflow-y: hidden; padding: .3em 0; margin: .1em 0; }
   .doclink { color: var(--accent); cursor: pointer; border-bottom: 1px dotted var(--accent);
              font-family: 'Cascadia Code', ui-monospace, monospace; font-size: 11.5px; }
   .doclink:hover { background: rgba(120,160,255,.14); }
