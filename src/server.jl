@@ -1270,6 +1270,7 @@ function _offer_prepare_for_package!(nb::LiveNotebook, name::AbstractString, err
     why = _missing_package_reason(nb, name, pkg)
     why === nothing && return nothing
     r = ReportEngine.region_get(name)
+    ReportEngine._rlog("region[$(r.name)]: $pkg is in the notebook's environment but not installed there — a prepare installs it")
     (_in_opening_run(nb.id) && isempty(get(_FORCE_RUN, nb.id, ()))) || _announce_prepare!(nb, r; reason = why)
     return r
 end
