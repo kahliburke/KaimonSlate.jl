@@ -14,12 +14,27 @@ were written when they went out. They are marked.
 
 ### Added
 
+- A notebook's worker runs its own machinery on dedicated threads, so a notebook that saturates
+  `:default` with CPU-bound work no longer stalls it. A `:slate` pool serves status, cancel, the hub
+  heartbeat, telemetry and blob transfers, and never runs notebook code. A `:slate_ui` pool serves
+  markdown `{{ }}` values, live re-renders, table pages, completions, and cells re-run by a reactive
+  value push. Cells you run, and cells re-run by a control, stay on `:default`. Needs KaimonGate with
+  `set_request_router!`. The pools come from DedicatedThreads, which the hub installs in the
+  background into an optional environment of its own; `worker_pools_source` in slate.json (or
+  `KAIMONSLATE_WORKER_POOLS`) can point it at a local checkout or git URL, or turn it `off`. Without
+  it, the worker behaves as before.
+
 - The Files panel shows a markdown file rendered, the way a markdown cell is, with **✎ Source** to
   edit it. Images resolve from the file's own folder, and a link to another project file opens it in
   the panel.
 
 ### Fixed
 
+- A cell re-run by a fast reactive value (a live chart updating ten times a second) reads as fresh
+  between updates instead of flashing running and stale on every one. A run or a stale state now shows
+  only once it has lasted 140 ms; a batch of three or more cells still shows at once.
+- Worker CPU usage in telemetry reads correctly on Apple Silicon Macs, where it was about 42 times too
+  low.
 - In an exported page, a figure's `@replay` marks on one control move together or not at all. The
   control moves the figure only when every one of those marks has its data over the same positions;
   otherwise the figure stays as exported and the browser console names the marks. A figure could

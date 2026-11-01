@@ -1109,7 +1109,8 @@ function __slate_eval(source::String; filename::String = "string",
                      ctx_regions::Vector{String} = String[],
                      ctx_attrs::Vector{String} = String[],
                      ctx_clusters::Vector{String} = String[],
-                     run_id::String = "")
+                     run_id::String = "",
+                     lane::String = "")   # read by `_route_request` before this runs; "ui" ⇒ the UI threads
     filename == "cell:__prewarm__" || (_HUB_SEEN[] = true)   # an eval is the hub attached, too
     # Register this eval's task under its run id, which is what the hub stops and what it asks about
     # (the server runs parallel cells as concurrent __slate_eval calls). An eval outside a run (a
@@ -1420,7 +1421,7 @@ sitting on the ~75s OS TCP timeout. Never throws. Returns (; reachable::Bool, rt
 function __slate_probe_peer(ip::String, port::Int)
     result = Threads.Atomic{Int}(0)              # 0 pending · 1 open · 2 refused/error
     t0 = time()
-    Threads.@spawn begin
+    _spawn_infra() do
         r = try
             s = Sockets.connect(ip, port); close(s); 1
         catch
@@ -1916,6 +1917,89 @@ end
 
 # ExpressionExplorer for macro-aware analysis.
 import ExpressionExplorer
+
+# ── Infrastructure threads ────────────────────────────────────────────────────────────────────
+# Cell code runs on `:default`. When it saturates that pool (CPU-bound tasks that rarely yield), any
+# worker machinery also scheduled there stalls with it. So the worker keeps two pools of its own OS
+# threads, from DedicatedThreads (an optional env on LOAD_PATH, see gate_kernel.jl `_pools_env`):
+#   • `:slate` — the control plane: status, cancel, the hub heartbeat, telemetry, blob transfers.
+#     Never runs notebook code, so it always answers.
+#   • `:slate_ui` — what keeps the page live: markdown interpolation, live re-renders, table pages,
+#     completions, and cells re-run by a reactive push. These do run notebook code (`show` methods,
+#     `{{ }}` expressions, reader cells), so they are kept off `:slate`: a slow one delays only UI work.
+# Everything else, including every cell a user runs, stays on `:default`. Without the package the
+# control plane runs on `:interactive` and UI work on `:default`.
+#
+# Loaded when the worker starts, by UUID (the hub's `_POOLS_PKG_UUID`), rather than imported here: it
+# is not a SlateWorker dependency, and an import in the module body would be resolved once, when the
+# package image is built, instead of in each worker's environment.
+const _POOLS_PKG = Base.PkgId(Base.UUID("9d6577c3-9664-4440-a53f-cec765ebc045"), "DedicatedThreads")
+const _POOLS_MOD = Ref{Union{Module,Nothing}}(nothing)
+
+const _INFRA_THREADS = 2
+const _UI_THREADS = 2
+const _INFRA_POOL = Ref{Any}(nothing)
+const _UI_POOL = Ref{Any}(nothing)
+
+function _start_worker_pools!()
+    if Base.locate_package(_POOLS_PKG) === nothing
+        _blog("DedicatedThreads is not in this worker's environment")
+        return nothing
+    end
+    dt = _POOLS_MOD[] = Base.require(_POOLS_PKG)
+    _INFRA_POOL[] = Base.invokelatest(dt.DedicatedPool, _INFRA_THREADS; name = :slate)
+    _UI_POOL[] = Base.invokelatest(dt.DedicatedPool, _UI_THREADS; name = :slate_ui)
+    _blog("DedicatedThreads pools started")
+    return nothing
+end
+
+"Run `f()` on the control-plane threads (never notebook code); returns its Task."
+function _spawn_infra(f)
+    pool = _INFRA_POOL[]
+    pool === nothing && return Threads.@spawn :interactive f()
+    return Base.invokelatest(_POOLS_MOD[].spawn, f, pool)
+end
+
+"Run `f()`, which may run notebook code, on the UI threads; returns its Task."
+function _spawn_ui(f)
+    pool = _UI_POOL[]
+    pool === nothing && return Threads.@spawn f()
+    dt = _POOLS_MOD[]
+    # Outside the pool's scope, so notebook code's own `spawn(f)` still defaults to `:default`.
+    return Base.invokelatest(dt.spawn, () -> Base.invokelatest(dt.with_pool, f, nothing), pool)
+end
+
+# Gate requests that never run notebook code → the control plane.
+const _CONTROL_TOOLS = Set([
+    "__slate_running", "__slate_cancel", "__slate_cancel_cells", "__slate_ports",
+    "__slate_client_key", "__slate_server_key", "__slate_authorize_client", "__slate_revoke_client",
+    "__slate_probe_peer",
+])
+
+# Gate requests that render or answer the page → the UI threads. Each may run notebook code, but
+# only display-sized work: an expression, a `show`, a page of a table.
+const _UI_TOOLS = Set([
+    "__slate_interp", "__slate_rerender_live", "__slate_rerender_fig", "__slate_table_page",
+    "__slate_matrix_render", "__slate_complete", "__slate_get_served_asset",
+    "__slate_extension_manifest", "__slate_module_help",
+])
+
+# KaimonGate request router (`set_request_router!`): a spawner for requests that leave the default
+# lane, `nothing` for those that stay on it.
+function _route_request(request)
+    type = get(request, :type, nothing)
+    type === :ping && return _spawn_infra
+    type === :tool_call || return nothing
+    name = get(request, :name, "")
+    name in _CONTROL_TOOLS && return _spawn_infra
+    name in _UI_TOOLS && return _UI_POOL[] === nothing ? nothing : _spawn_ui
+    # A cell re-run by a reactive push (the hub tags it, server.jl `_UI_LANE_CELLS`).
+    if name == "__slate_eval" && _UI_POOL[] !== nothing
+        args = get(request, :arguments, nothing)
+        args isa AbstractDict && get(args, "lane", "") == "ui" && return _spawn_ui
+    end
+    return nothing
+end
 
 "Macro-expand cell sources in the live notebook namespace (recursive, NO evaluation) and ANALYZE
 them right here, where the macros live — returns id → {reads, writes} name lists. A cell whose
@@ -3512,6 +3596,11 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # spawned) runs without them.
     # A cluster prompt raised in here has to reach the hub's dialog; nothing in this process has one.
     try; _install_sshop_delegate!(); catch e; @warn "slate: cluster delegate install failed" exception = e; end
+    # The worker's own thread pools, started before the port opens, and the gate routing requests onto
+    # them (see `_route_request`). With a KaimonGate that has no `set_request_router!`, every request
+    # still gets a `:default` task.
+    try; _start_worker_pools!(); catch e; @warn "slate: worker thread pools failed to start; using the built-in pools" exception = e; end
+    isdefined(KaimonGate, :set_request_router!) && KaimonGate.set_request_router!(_route_request)
     # DEFERRED (~5s): Revise/src-watcher setup is heavy compilation; running it now would contend for
     # the codegen lock with the hub's CURVE handshake in the first seconds after the port opens (the
     # handshake path is precompiled but still needs the lock free to run fast). Let the attach win the
@@ -3522,15 +3611,15 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # handler + allow-file, not the gate's), encryption-only behind SSH on :tunnel. No plaintext blob
     # path on any worker. Needs the memo/CAS layer (MemoStore + codecs) — memo-off means no store to serve.
     data_port > 0 && _MEMO_OK &&
-        Threads.@spawn _blob_channel(host, blob_bind, blob_free_port, data_port, blob_curve)
-    # Dedicated transfer executor — pumps queued peer pulls (verb `X`) on a default-pool thread, off the
-    # gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
-    data_port > 0 && _MEMO_OK && Threads.@spawn _xfer_executor_task()
+        _spawn_infra(() -> _blob_channel(host, blob_bind, blob_free_port, data_port, blob_curve))
+    # Dedicated transfer executor — pumps queued peer pulls (verb `X`) on an infrastructure thread, off
+    # the gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
+    data_port > 0 && _MEMO_OK && _spawn_infra(_xfer_executor_task)
     # Reap idle/dead pooled ssh forwards so a peer pair that stops transferring releases its held SSH
     # connection; kill them all on shutdown so exit never orphans the standing ssh children.
     if data_port > 0 && _MEMO_OK
         atexit(_ssh_fwd_killall!)
-        Threads.@spawn _ssh_fwd_reaper()
+        _spawn_infra(_ssh_fwd_reaper)
     end
     # The gate opens LAST. A hub dials as soon as the port accepts (it asks over its ssh session), and
     # the handshake that follows needs compiled code; while this function was still compiling the
@@ -3557,10 +3646,10 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # Sample every worker — local kernels too. The `.stats` sidecar is still remote-only (empty
     # stats_path skips it), but the `slate_telemetry` PUB now flows from every worker process, so the
     # hub's watchdog can see cpu/rss/gc on a local kernel and not just remote regions.
-    # On an interactive thread: Julia never preempts a task, so a sampler in the default pool waits
-    # behind cells that keep every default thread busy (BLAS calls, tight loops), and a worker that is
-    # working hard would look silent.
-    Threads.@spawn :interactive _telemetry_task(stats_path)
+    # On the control-plane threads, or `:interactive` without them: Julia never preempts a task, so a
+    # sampler in the default pool waits behind cells that keep every default thread busy (BLAS calls,
+    # tight loops), and a worker that is working hard would look silent.
+    _spawn_infra(() -> _telemetry_task(stats_path))
     # `serve` runs the message loop on a spawned thread and returns — but this is
     # a non-interactive `-e` process, so we must block to keep it alive until a
     # remote `:shutdown` (which calls `exit(0)` from the gate task). Flush each

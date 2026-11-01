@@ -810,8 +810,9 @@ end
 # The shared body of a reactive push (a `@bind`/data/asset change): restale every cell the
 # `seed_predicate` selects (the direct triggers), then their dependents, recompute, and broadcast a
 # lightweight `refresh:` patch of ONLY the cells that recomputed — the browser patches just those
-# (charts `setOption`, output swap) instead of pulling the whole state.
-function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
+# (charts `setOption`, output swap) instead of pulling the whole state. `lane = "ui"` marks the
+# restaled cells to re-run on the worker's UI threads (see `_UI_LANE_CELLS`).
+function _reactive_refresh!(nb::LiveNotebook, seed_predicate; lane::AbstractString = "")
     msg = ""
     lock(nb.lock) do
         seed = String[]
@@ -827,6 +828,7 @@ function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
             i === nothing && continue
             ReportEngine.restale!(nb.report.cells[i]) && push!(changed, id)
         end
+        lane == "ui" && union!(get!(Set{String}, _UI_LANE_CELLS, nb.id), changed)
         # A reactive push CONTINUES whatever is running rather than starting a run: a dashboard that
         # pushes every few steps produces a long train of these, and treating each as a new run would
         # reset the pill constantly (as treating none of them as one makes it count forever).
@@ -885,7 +887,7 @@ function server_refresh(nb::LiveNotebook, vars)
             ReportEngine.note_state_write!(nb.report.id, name, s[nextind(s, i):end])
         end
     end
-    return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms))
+    return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms); lane = "ui")
 end
 
 # Reactive push triggered by the asset watcher (`_start_asset_watcher!`): one or more `@asset` or
@@ -958,6 +960,12 @@ const _RUNNER_CANCEL = Dict{String,Bool}()
 # leaving a notebook silently wedged until something notices and restarts the whole hub.
 const _RUNNER_STARTED = Dict{String,Float64}()
 const _RUNNER_STALE_HITS = Dict{String,Int}()         # nb.id → consecutive stuck-sweep confirmations
+# nb.id → ids of cells restaled by a reactive value push, whose next run goes to the worker's UI
+# threads (`lane = "ui"`, worker.jl `_route_request`) rather than `:default`. Such re-runs are
+# machine-driven, frequent and usually display work, and on the UI threads they keep updating while
+# cell code saturates `:default`. A run the user starts clears them (`_eval!` with `fresh`), so
+# anything started by hand runs on `:default`. Guarded by `nb.lock`.
+const _UI_LANE_CELLS = Dict{String,Set{String}}()
 const _RUNNER_STALE_AFTER = 600.0                     # 10 min with pending work + no progress ⇒ suspect
 const _RUNNER_STALE_CONFIRMATIONS = 3                 # consecutive 5s sweeps before self-healing (~15s)
 
@@ -5214,12 +5222,14 @@ function _eval_one_run!(nb::LiveNotebook, cid::AbstractString, run::ReportEngine
         run.gen = _kernel_gen(kernel)
         s = (:trace in c.flags) ? string("@trace begin ", c.source, "\nend") : c.source
         frc = _take_force!(nb.id, cid)   # consume a one-shot ▶ force marker
-        (; src = s, memo = _memo_spec(nb, c; forced = frc), locked = :locked in c.flags)
+        # A reactive push's re-run goes to the worker's UI threads (see `_UI_LANE_CELLS`).
+        lane = pop!(get!(Set{String}, _UI_LANE_CELLS, nb.id), cid, nothing) === nothing ? "" : "ui"
+        (; src = s, memo = _memo_spec(nb, c; forced = frc), locked = :locked in c.flags, lane = lane)
     end
     spec === nothing && return nothing
     spec === :edited && return _settle!(c -> nothing, nb, cid, run)
     spec === :stopped && return _settle!(c -> ReportEngine.mark_stopped!(c, c.output), nb, cid, run)
-    src, memo, locked = spec.src, spec.memo, spec.locked
+    src, memo, locked, lane = spec.src, spec.memo, spec.locked, spec.lane
     # Nothing to restore from: a locked cell with no key is held without asking the worker.
     (memo.restore_only && isempty(memo.key)) && return _hold_locked!(nb, cid, run)
     armed = _arm_requested_profile!(nb, cell, kernel, side)   # server_profile.jl: a profile asked of this run
@@ -5229,7 +5239,7 @@ function _eval_one_run!(nb::LiveNotebook, cid::AbstractString, run::ReportEngine
         # package reads it to default its own args; no package-specific knowledge lives here.
         ReportEngine.with_run_id(run.id) do
             ReportEngine.eval_capture(kernel, nb.report, src, "cell:" * cid, memo;
-                                      region = side, regions = _nb_region_names(nb))
+                                      region = side, regions = _nb_region_names(nb), lane = lane)
         end
     catch e
         ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[],
@@ -5811,6 +5821,7 @@ function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool 
     # A run asked for (rather than a reactive cascade continuing one) ends a Stop's halt.
     p = lock(nb.lock) do
         fresh && (nb.halted = false)
+        fresh && delete!(_UI_LANE_CELLS, nb.id)   # a user-started run: everything on `:default`
         _pending_count(nb.report)
     end
     p > 0 && _emit_pending(nb, p; fresh = fresh)

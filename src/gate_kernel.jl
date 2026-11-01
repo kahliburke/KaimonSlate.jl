@@ -234,6 +234,69 @@ function _infra_env()::String
     end
 end
 
+# ── Optional worker env: dedicated worker threads ────────────────────────────────────────────────
+# The worker runs its control plane and UI work on thread pools from DedicatedThreads (worker.jl
+# `_POOLS_OK`). That package is optional, so it gets its own env rather than a place in `worker_infra`:
+# a failed build leaves workers on Julia's built-in pools and costs nothing else. It is built in the
+# background, once per (source, Julia version), so a worker spawn never waits for it; workers spawned
+# before it is ready start without it. Source, from `worker_pools_source` (slate.json) or
+# KAIMONSLATE_WORKER_POOLS: "" installs it from the depot's registries, by name and UUID so no other
+# package of that name is ever installed; "off" disables it; anything else is a local checkout
+# (developed) or a git URL.
+const WORKER_POOLS_SOURCE = Ref{String}("")
+const _POOLS_PKG_UUID = "9d6577c3-9664-4440-a53f-cec765ebc045"
+const _POOLS_ENV_ROOT = joinpath(get(DEPOT_PATH, 1, joinpath(homedir(), ".julia")),
+                                 "scratchspaces", "kaimonslate-pools")
+const _POOLS_ENV_LOCK = ReentrantLock()
+const _POOLS_ENV_BUILDING = Set{String}()   # guarded by _POOLS_ENV_LOCK
+# A failed build is retried after this long, and at every hub start, so a package that becomes
+# installable later (a new registration) is picked up.
+const _POOLS_RETRY_S = 3600.0
+
+"""
+The optional pools env for new workers, or \"\" when it is disabled, failed, or still building.
+`retry_failed` retries a failed build now rather than after `_POOLS_RETRY_S`.
+"""
+function _pools_env(; retry_failed::Bool = false)::String
+    src = strip(WORKER_POOLS_SOURCE[])
+    src == "off" && return ""
+    dir = joinpath(_POOLS_ENV_ROOT, string(hash(("DedicatedThreads", src, string(VERSION))); base = 16))
+    isfile(joinpath(dir, ".ready")) && return dir
+    failed = joinpath(dir, ".failed")
+    !retry_failed && isfile(failed) && time() - mtime(failed) < _POOLS_RETRY_S && return ""
+    lock(_POOLS_ENV_LOCK) do
+        dir in _POOLS_ENV_BUILDING && return
+        push!(_POOLS_ENV_BUILDING, dir)
+        Threads.@spawn _build_pools_env!(dir, src)
+    end
+    return ""
+end
+
+function _build_pools_env!(dir::String, src::AbstractString)
+    buildlog = joinpath(dir, "build.log")
+    try
+        mkpath(dir)
+        rm(joinpath(dir, ".failed"); force = true)
+        path = expanduser(src)
+        spec = isempty(src) ? "Pkg.add(Pkg.PackageSpec(name = \"DedicatedThreads\", uuid = \"$(_POOLS_PKG_UUID)\"))" :
+               isdir(path)   ? "Pkg.develop(path = $(repr(abspath(path))))" :
+                               "Pkg.add(url = $(repr(String(src))))"
+        code = "using Pkg; $spec; Pkg.precompile()"
+        open(buildlog, "w") do io
+            run(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$dir -e $code`;
+                         stdout = io, stderr = io))
+        end
+        write(joinpath(dir, ".ready"), String(src))
+        @info "slate: dedicated worker threads available to new workers" dir
+    catch
+        touch(joinpath(dir, ".failed"))
+        @info "slate: dedicated worker threads unavailable; workers use Julia's built-in pools" reason = _env_build_error(buildlog) buildlog
+    finally
+        lock(_POOLS_ENV_LOCK) do; delete!(_POOLS_ENV_BUILDING, dir); end
+    end
+    return nothing
+end
+
 # Per-worker TCP ports. A counter hands out the next block, and every port in it is PROBED before it
 # is handed out — because a counter alone is not enough and the failure it produces is silent.
 #
@@ -929,6 +992,9 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # lib/KaimonGate dir only resolves from a dev checkout.
     kgate_dir = _kgate_env()
     infra_dir = _infra_env()   # materialised (instantiated for THIS Julia) — see `_infra_env`
+    pools_dir = _pools_env()   # optional; "" until built (see `_pools_env`)
+    pools_line = isempty(pools_dir) ? "" :
+        "insert!(LOAD_PATH, 4, $(repr(pools_dir)))   # optional dedicated worker threads — after infra"
     # No LOAD_PATH stacking: the notebook runs in a SINGLE active env (`@`, set by
     # `--project`) — either the parent directly (base mode) or a forked env that already
     # contains the parent's deps (forked mode). `PARENT_PROJECT` is recorded only so the
@@ -937,6 +1003,7 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # $(worker_owner_tag())
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
     insert!(LOAD_PATH, 3, $(repr(infra_dir)))   # slate-owned infra (SlateWorker + Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
+    $pools_line
     import KaimonGate
     # SlateWorker before Revise, which tracks only packages loaded after it: a live worker keeps the
     # code it booted with.
@@ -1586,7 +1653,7 @@ _flush_sources!(k::GateKernel) =
     k.target isa RemoteTarget && (try; sync_flush!(k); catch e; _rlog("sync: flush before a cell failed — " * first(sprint(showerror, e), 160)); end)
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
-                      region::AbstractString = "", regions::AbstractVector = String[])
+                      region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "")
     wire = try
         # prepare! is INSIDE the try: a worker spawn/connect or env-reconstruction failure must
         # surface as this cell's error, NOT propagate up through eval_stale!/sync_from_file! and 500
@@ -1598,7 +1665,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         # `ctx_*` seed the worker's task-local Slate execution context (see `_build_slate_ctx`).
         _tool(k, "__slate_eval", Dict{String,Any}("source" => String(source), "filename" => String(filename),
               "run_id" => current_run_id(),
-              _ctx_args(report, region, regions, filename)...); timeout = _eval_timeout())
+              _ctx_args(report, region, regions, filename)..., _lane_args(lane)...); timeout = _eval_timeout())
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", _eval_failure(k, e), nothing, 0.0)
     end
@@ -1654,6 +1721,10 @@ function _attr_args(report::Report, filename::AbstractString)
     isempty(d) && return String[]
     return String[string(k, "=", v) for (k, v) in d]
 end
+
+# The worker thread pool an eval runs on (worker.jl `_route_request`). Sent only when set, so an
+# ordinary eval's arguments are unchanged.
+_lane_args(lane::AbstractString) = isempty(lane) ? () : ("lane" => String(lane),)
 
 # Ask the worker to re-render a native (Makie) figure cell under a Slate PALETTE, for a themed PDF
 # export that overrides the notebook's live theme (see worker.jl `__slate_rerender_fig`). Returns
@@ -1830,15 +1901,15 @@ function rerender_live(::InProcessKernel, report::Report)
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
-                      region::AbstractString = "", regions::AbstractVector = String[])
-    (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions)
+                      region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "")
+    (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions, lane = lane)
     wire = try
         prepare!(k, report)
         _flush_sources!(k)
         _tool(k, "__slate_eval", Dict{String,Any}(
             "source" => String(source), "filename" => String(filename),
             "run_id" => current_run_id(),
-            _ctx_args(report, region, regions, filename)...,
+            _ctx_args(report, region, regions, filename)..., _lane_args(lane)...,
             "memo_key" => String(memo.key), "memo_names" => collect(String, memo.names),
             "memo_threshold" => Float64(memo.threshold),
             # ▶ force: skip the restore (an explicit play must re-evaluate) but still store the fresh
