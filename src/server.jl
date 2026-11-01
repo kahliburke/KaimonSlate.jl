@@ -1236,6 +1236,44 @@ function _prepare_reason(r, origin_env::AbstractString)
     return ""
 end
 
+# The package a failed `using` or `import` names when the environment it loads from lacks it.
+const _MISSING_PKG_RE = r"Package (\w+)(?: \[[0-9a-f-]+\])? (?:not found in current path|is required but does not seem to be installed)"
+_missing_package(err::AbstractString) = (m = match(_MISSING_PKG_RE, err); m === nothing ? nothing : String(m.captures[1]))
+
+# The packages environment `env` has: its project's direct dependencies and everything its manifest resolves.
+function _env_package_names(env::AbstractString)
+    names = Set{String}()
+    pf = joinpath(env, "Project.toml")
+    isfile(pf) && union!(names, keys(get(ReportEngine.Sweep.TOML.parsefile(pf), "deps", Dict{String,Any}())))
+    mf = ReportEngine.parent_manifest(env)
+    (!isempty(mf) && isfile(mf)) && union!(names, keys(get(ReportEngine.Sweep.TOML.parsefile(mf), "deps", Dict{String,Any}())))
+    return names
+end
+
+# Why region `name` should be prepared for `nb` after a cell there could not load `pkg`, or `nothing`.
+# Only when the notebook's environment has the package and has changed since the region was prepared
+# for it: preparing installs it there. A package the notebook lacks is the cell's own error.
+function _missing_package_reason(nb::LiveNotebook, name::AbstractString, pkg::AbstractString)
+    r = ReportEngine.region_get(name)
+    r === nothing && return nothing
+    origin = _nb_origin_env(nb)
+    (isempty(origin) || !(pkg in _env_package_names(origin))) && return nothing
+    isempty(_prepare_reason(r, origin)) && return nothing
+    return "$pkg is in the notebook's environment but not yet installed on region $(r.name)."
+end
+
+# Offer to prepare a region whose worker could not load a package the notebook has. Not while the
+# notebook's opening run is in progress, unless someone ran a cell, as for a region's first prepare.
+function _offer_prepare_for_package!(nb::LiveNotebook, name::AbstractString, err::AbstractString)
+    pkg = _missing_package(err)
+    pkg === nothing && return nothing
+    why = _missing_package_reason(nb, name, pkg)
+    why === nothing && return nothing
+    r = ReportEngine.region_get(name)
+    (_in_opening_run(nb.id) && isempty(get(_FORCE_RUN, nb.id, ()))) || _announce_prepare!(nb, r; reason = why)
+    return r
+end
+
 # The environment a notebook's region workers replicate: its own fork env when it has one, else its
 # project's; "" for a notebook with neither.
 function _nb_origin_env(nb::LiveNotebook)
@@ -5197,6 +5235,16 @@ function _eval_one_run!(nb::LiveNotebook, cid::AbstractString, run::ReportEngine
                                 "", sprint(showerror, e), nothing, 0.0)
     end
     profiled = armed === nothing ? "" : _collect_requested_profile!(nb, cell, kernel, side, armed)
+    # A region worker set up before the notebook gained a package cannot load it. The cell waits for the
+    # region to be prepared, which installs the notebook's environment there, and runs again after it.
+    if !isempty(side) && out.exception !== nothing
+        r = _offer_prepare_for_package!(nb, side, String(out.exception))
+        if r !== nothing
+            _settle!(c -> ReportEngine.mark_blocked!(c, WAIT_NEEDS_PREPARE, r.host, r.name), nb, cid, run)
+            try; facts_changed!(); catch; end
+            return nothing
+        end
+    end
     # Namespace parity: a pure `using`/`import` cell runs on EVERY active side when a region is
     # in play — region cells need the same modules loaded. Mirrors run on main + each region any
     # cell references, except the side that just ran. Results discarded (the main run's output
@@ -5213,8 +5261,10 @@ function _eval_one_run!(nb::LiveNotebook, cid::AbstractString, run::ReportEngine
             try
                 other = _side_kernel!(nb, sd)
                 r2 = ReportEngine.eval_capture(other, nb.report, src, "cell:" * cid * "#mirror", nothing)
-                r2.exception === nothing ||
+                if r2.exception !== nothing
                     ReportEngine._rlog("region: `using` mirror of $(cid) failed on $(_side_label(nb, sd)): $(first(String(r2.exception), 200))")
+                    isempty(sd) || _offer_prepare_for_package!(nb, sd, String(r2.exception))
+                end
             catch e
                 ReportEngine._rlog("region: `using` mirror of $(cid) errored on $(_side_label(nb, sd)): $(first(sprint(showerror, e), 200))")
             end

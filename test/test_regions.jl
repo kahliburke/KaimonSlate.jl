@@ -613,8 +613,16 @@ end
                     r = RE.region_get("gpu")
                     @test NS._prepare_reason(r, d) == "Since the last prepare, X was added."
                     @test only(values(RE.readiness_view(r)["envs"]))["changed"] === true
+                    # A cell there that cannot load X waits for that prepare. Both of Julia's wordings
+                    # name the package; a package the notebook lacks is the cell's own error.
+                    @test NS._missing_package("ArgumentError: Package X not found in current path.\n- Run `import Pkg; Pkg.add(\"X\")`") == "X"
+                    @test NS._missing_package("ArgumentError: Package Example [7876af07-990d-54b4-ab0e-23690620f79a] is required but does not seem to be installed:") == "Example"
+                    @test NS._missing_package("UndefVarError: `x` not defined in `Main`") === nothing
+                    @test occursin("X is in the notebook's environment", something(NS._missing_package_reason(nb, "gpu", "X"), ""))
+                    @test NS._missing_package_reason(nb, "gpu", "Y") === nothing
                     write(joinpath(d, "Project.toml"), "name = \"P\"\n")
                     @test why() == NS.WAIT_NOT_REQUESTED
+                    @test NS._missing_package_reason(nb, "gpu", "X") === nothing     # gone from the notebook too
                     # A machine that changed since sends it back through preparing.
                     gh = RE.region_get("gpu").host
                     RE.host_facts_merge!(gh, Dict{String,Any}("stale" => "changed"))
