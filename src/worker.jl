@@ -3629,7 +3629,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
                      allow_restart = false, spawned_by = "slate",
-                     curve = curve, allowed_clients = allowed_clients)
+                     curve = curve, allowed_clients = allowed_clients, _owner_wake_kw()...)
     _blog("start(): gate SERVING — port reachable (hub can dial now)")
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
     # A memo-off worker used to be SILENT (every store/restore just returned early) — the single
@@ -3662,6 +3662,12 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
 end
 
 
+# The gate's event-driven request loop, where this KaimonGate has one: each reply goes out as soon as
+# it is ready, which is what a cell run's sequence of requests waits on. Left to
+# KAIMON_GATE_OWNER_WAKE when that is set, so it can still be switched off.
+_owner_wake_kw() = hasmethod(KaimonGate.serve, Tuple{}, (:owner_wake,)) && !haskey(ENV, "KAIMON_GATE_OWNER_WAKE") ?
+                   (; owner_wake = true) : (;)
+
 # Precompile workload, run while this module is compiled into a package image so a worker does not
 # compile these paths at boot. Cells go into `_WarmNS` because precompilation can only evaluate into
 # the module being compiled; `__init__` replaces it.
@@ -3684,7 +3690,7 @@ function _gate_workload()
             KaimonGate.serve(; mode = :tcp, host = "127.0.0.1", port = port, stream_port = port + 1,
                              tools = tools(), force = true, allow_mirror = false,
                              allow_restart = false, spawned_by = "slate",
-                             curve = true, allowed_clients = [cpub])
+                             curve = true, allowed_clients = [cpub], _owner_wake_kw()...)
         end
         ctx = ZMQ.Context()
         sock = ZMQ.Socket(ctx, ZMQ.DEALER)
