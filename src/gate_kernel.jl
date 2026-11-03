@@ -857,6 +857,36 @@ function _slate_logdir()
     end
 end
 
+"""
+    _confined_worker(cmd, k) -> Cmd
+
+A local worker under the host's confinement policy (`KAIMON_CONFINE_POLICY`, with the launcher in
+`KAIMON_CONFINE`; see Kaimon's `confine`), on Linux: it can read everything but what the policy
+denies, and write only its notebook's folder, its project, and a depot, cache and temporary
+directory kept for confined workers (the depot first, for what it compiles and installs, before the
+ones it reads). Without a policy, or elsewhere, `cmd` as it is.
+"""
+function _confined_worker(cmd::Cmd, k::GateKernel)
+    launcher, policy = get(ENV, "KAIMON_CONFINE", ""), get(ENV, "KAIMON_CONFINE_POLICY", "")
+    (isempty(launcher) || isempty(policy) || !Sys.islinux()) && return cmd
+    root = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "confined")
+    depot, cache, tmp = mkpath(joinpath(root, "depot")), mkpath(joinpath(root, "cache")), mkpath(joinpath(root, "tmp"))
+    depots = get(ENV, "JULIA_DEPOT_PATH", "")
+    cmd = addenv(cmd, "JULIA_DEPOT_PATH" => depot * ":" * depots,   # an empty last entry stands for the default ones
+                 "KAIMONSLATE_CACHE_HOME" => cache, "TMPDIR" => tmp)
+    args = [launcher, "--policy", policy]
+    for w in filter(!isempty, [k.nbdir, k.project, depot, cache, tmp])
+        push!(args, "--write", w)
+    end
+    # Nor the host's credentials, which no notebook needs (the token its agents run on, keys); Kaimon's
+    # own variables stay, as the worker connects with them.
+    env = filter(kv -> !_credential_var(first(split(kv, '='; limit = 2))), cmd.env)
+    return Cmd(Cmd([args; "--"; cmd.exec]); env, dir = cmd.dir, ignorestatus = cmd.ignorestatus)
+end
+
+_credential_var(name::AbstractString) =
+    !startswith(name, "KAIMON") && occursin(r"TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|PRIVATE_KEY|AUTH"i, name)
+
 function _spawn_worker!(k::GateKernel)
     k.ns_gen += 1   # a fresh LOCAL process ⇒ blank namespace (mirrors spawn_and_connect_remote!): the
                     # ns_gen-keyed re-establish re-primes it — main-kernel @bind registrations here, and
@@ -903,6 +933,7 @@ function _spawn_worker!(k::GateKernel)
     # Memo-store cap: forward the panel/config setting into the worker (its env/adaptive default
     # applies when unset — passing nothing keeps the worker's own resolution intact).
     MEMO_CAP_GB[] > 0 && (cmd = addenv(cmd, "KAIMONSLATE_MEMO_CAP_GB" => string(MEMO_CAP_GB[])))
+    cmd = _confined_worker(cmd, k)
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing
     # each chunk, so the log is tailable in real time. A plain `stdout=<file>`
     # redirect is block-buffered and only lands on disk when the worker exits —
