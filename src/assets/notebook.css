@@ -1834,6 +1834,9 @@ body.apresizing iframe { pointer-events:none; }
                            padding:1px 0 1px 8px; }
 .apmsg.toolrun .toolline.expandable { cursor:pointer; }
 .apmsg.toolrun .toolline.err { color:var(--red,#e57575); }
+.apmsg.toolrun .toolx { margin-left:6px; padding:0 5px; border-radius:8px; font-size:.68rem;
+  color:var(--text); background:var(--bg3); }
+.apmsg.toolrun .tdcall { color:var(--text); margin-top:6px; }
 .apmsg.toolrun .toolline .tooldetail { display:none; }
 .apmsg.toolrun .toolline.expanded .tooldetail { display:block; }
 /* The block heading's name — the inline badge's palette, on a heading line rather than in a run of

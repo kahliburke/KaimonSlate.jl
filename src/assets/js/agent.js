@@ -283,17 +283,30 @@ function _agentMsgHtml(m) {
   }
   if (m.role === 'toolrun') {
     // The crew once, at the top, then the calls as a list. Each line keeps its own expandable
-    // args/result — the compaction is of the repeated chrome, not of the detail.
-    const lines = m.items.map(x => {
-      const cid = x.cid ? ` <span class="toolnav" data-cid="${_esca(x.cid)}">→ ${_esca(x.cid)}</span>` : '';
+    // args/result: the compaction is of the repeated chrome, not of the detail.
+    // The same call made again and again (a cell run until it passes, a status polled) is one line
+    // with a count. Its detail lists every call, numbered, so each result can still be read.
+    const same = (a, b) => a.text === b.text && (a.cid || '') === (b.cid || '') &&
+                           !!a.external === !!b.external && !!a.resultErr === !!b.resultErr;
+    const groups = [];
+    for (const x of m.items) {
+      const g = groups[groups.length - 1];
+      if (g && same(g[0], x)) g.push(x); else groups.push([x]);
+    }
+    const detailOf = (x, label) => {
       const a = x.args != null ? _argsPretty(x.args) : '';
       const r = x.resultText || x.result || '';
-      const detail = (a || r) ? `<div class="tooldetail">` +
+      return (a || r) ? (label ? `<div class="tdlabel tdcall">${label}</div>` : '') +
         (a ? `<div class="tdlabel">args</div><pre class="toolargs">${_esca(a)}</pre>` : '') +
-        (r ? `<div class="tdlabel">result</div><pre class="toolresult${x.resultErr ? ' err' : ''}">${_esca(r)}</pre>` : '') +
-        `</div>` : '';
-      return `<div class="toolline${(a || r) ? ' expandable' : ''}${x.resultErr ? ' err' : ''}">` +
-             `${_extBadge(x.external)}${_esca(x.text)}${cid}${detail}</div>`;
+        (r ? `<div class="tdlabel">result</div><pre class="toolresult${x.resultErr ? ' err' : ''}">${_esca(r)}</pre>` : '') : '';
+    };
+    const lines = groups.map(g => {
+      const x = g[0], n = g.length;
+      const cid = x.cid ? ` <span class="toolnav" data-cid="${_esca(x.cid)}">→ ${_esca(x.cid)}</span>` : '';
+      const body = g.map((y, k) => detailOf(y, n > 1 ? `call ${k + 1} of ${n}` : '')).join('');
+      const detail = body ? `<div class="tooldetail">${body}</div>` : '';
+      return `<div class="toolline${body ? ' expandable' : ''}${x.resultErr ? ' err' : ''}">` +
+             `${_extBadge(x.external)}${_esca(x.text)}${cid}${n > 1 ? `<span class="toolx">×${n}</span>` : ''}${detail}</div>`;
     }).join('');
     return `<div class="apmsg toolrun${lane}" ${tag}>` +
       `<div class="toolrunh">${_crewLabel(m.crew)}<span class="toolrunn">${m.items.length} actions</span></div>` +
