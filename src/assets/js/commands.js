@@ -238,6 +238,10 @@ R({ id: 'cell.collapse', label: 'Fold / unfold the selected cell', group: 'Cells
     available: _has('toggleCollapse'), run: _onSel(t => _fn('toggleCollapse', t.id)) });
 R({ id: 'cell.toggleCode', label: 'Hide / show the selected cell’s code', group: 'Cells',
     ctx: ['command'], available: _has('toggleHideCode'), run: _onSel(t => _fn('toggleHideCode', t.id)) });
+R({ id: 'cell.profile', label: 'Profile the selected cell', group: 'Cells', ctx: ['command'],
+    available: _has('slateProfileCell'), run: _onSel(t => _fn('slateProfileCell', t.id)) });
+R({ id: 'cell.debug', label: 'Debug the selected cell (step through it line by line)', group: 'Cells',
+    ctx: ['command'], available: _has('slateDebugCell'), run: _onSel(t => _fn('slateDebugCell', t.id)) });
 R({ id: 'cell.trace', label: 'Trace values in the selected cell', group: 'Cells', ctx: ['command'],
     available: _has('toggleTrace'), run: _onSel(t => _fn('toggleTrace', t.id)) });
 // Notebook-level undo, as distinct from the editor's text undo. `global` but NOT `editor`, which is how
