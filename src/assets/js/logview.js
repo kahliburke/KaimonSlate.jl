@@ -277,8 +277,8 @@
       S.src = call; S.key = key || 'source'; S.ch = '';
       S.path = ''; S.pages = []; S.hits = null; S.counts = null;
       q('.logv-sweep').style.display = 'none';
-      loadFiles();
       if (!S.timer) S.timer = setInterval(poll, POLL_MS);
+      return loadFiles();
     }
 
     // Every sweep in the notebook, from the registry each card reports into. A sweep with no channel
@@ -306,9 +306,10 @@
       loadFiles();
     }
 
+    // Settles once the chosen file's first window is in.
     function loadFiles() {
       fail('');
-      call('logs').then(s => {
+      return call('logs').then(s => {
         setSev(s.logsev);
         S.files = s.loglist || [];
         S.filesSig = sigOf(S.files); S.lastPass = false;
@@ -320,7 +321,8 @@
         const asked = S.wantChunk && S.files.find(f => f.chunk === S.wantChunk);
         S.wantChunk = '';
         const want = asked || S.files.find(f => f.path === S.path) || S.files[0];
-        if (want) selectFile(want.path); else paintPre();
+        if (want) return selectFile(want.path);
+        paintPre();
       }).catch(fail);
     }
 
@@ -425,12 +427,13 @@
       S.mark = -1;
       q('.logv-search').value = '';
       paintFiles();
-      reload();
+      const loaded = reload();
       countLevels();
       // With a level chosen, the level IS the search, and a new file has to be asked the same
       // question. Without this the pane fell back to filtering the loaded window, so a chip counting
       // the file sat above the subset of it that happened to be on screen.
       runSearch();
+      return loaded;
     }
 
     // ── The window ─────────────────────────────────────────────────────────────────────────────
@@ -440,7 +443,15 @@
       S.pages = []; S.behind = 0;
       q('.logv-jump').style.display = 'none';
       const at = S.order === 'new' ? -PAGE : 0;
-      fetchPage(at).then(() => { q('.logv-pane').scrollTop = 0; });
+      return fetchPage(at).then(() => { q('.logv-pane').scrollTop = 0; });
+    }
+
+    // Land on the line starting at byte `offset`, marked the way an opened search result is, with the
+    // whole file left in view.
+    function reveal(offset) {
+      S.filter = 'all'; S.needle = ''; q('.logv-search').value = '';
+      S.hits = null; S.rawHits = null; S.hitAt = -1; S.mark = offset;
+      paintBar(); seek(offset);
     }
 
     function fetchPage(offset) {
@@ -889,7 +900,7 @@
       }).catch(() => {});
     }
 
-    return { open, openSource, close, refresh: poll,
+    return { open, openSource, close, refresh: poll, reveal,
              _test: { S, cut, visible, recordHtml, hitLines, refilterHits, fileStatus, levelPattern } };
   }
 

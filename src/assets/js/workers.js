@@ -60,25 +60,27 @@ function _wpStatsChips(statsJson, note) {
 // searchable however large the log is, with its colour kept. One viewer of the dock's own, so a sweep's
 // log open over the page is a different one.
 let _wpLogView = null;
+// One of the log viewer's reads of the worker on `side`: `logs`, `log_stat`, `log_slice` or `log_search`.
+const _wpLogIO = (side, action, opts) => fetch('/api/' + encodeURIComponent((window.__slateState || {}).id) + '/worker-log-io', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(Object.assign({}, opts, { side, action, arg: '' })) }).then(r => r.json());
+// Settles once the viewer has the log's newest window, so a caller can then move it.
 function _wpShowLog() {
   const nbid = (window.__slateState || {}).id, box = document.getElementById('wdock-log');
-  if (!nbid || !box || !window.slateLogs) return;
+  if (!nbid || !box || !window.slateLogs) return Promise.resolve();
   const refusedBox = box.querySelector('.wplog-none');
   if ((_wpProv[_wpSide] || {}).refused) {
     _wpLogView && _wpLogView.close();
     if (!refusedBox) box.insertAdjacentHTML('afterbegin', '<div class="wplog-none">Worker logs are an operator view, ' +
       'not a reader one — a log can carry the notebook\'s own data, so an app does not serve them here.<br>' +
       '<a href="/status" target="_blank" rel="noopener">/status</a> has them, one worker at a time.</div>');
-    return;
+    return Promise.resolve();
   }
   refusedBox && refusedBox.remove();
   if (!_wpLogView) _wpLogView = window.slateLogs.create(box);
   const side = _wpSide;
-  _wpLogView.openSource({
-    key: 'worker:' + side, title: 'Worker log',
-    call: (action, arg, opts) => fetch('/api/' + encodeURIComponent(nbid) + '/worker-log-io', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({}, opts, { side, action, arg })) }).then(r => r.json()) });
+  return _wpLogView.openSource({ key: 'worker:' + side, title: 'Worker log',
+                                 call: (action, arg, opts) => _wpLogIO(side, action, opts) }) || Promise.resolve();
 }
 
 // The Telemetry tab: the telemetry view (telemetry.js) drawn into the dock, following this notebook's
@@ -106,8 +108,9 @@ function _wpPaintTab() {
   log && log.classList.toggle('on', _wpTab === 'log');
   tel && tel.classList.toggle('on', _wpTab === 'tel');
   // Only the tab showing polls: the other one is closed, not hidden.
-  if (_wpTab === 'log') { window.closeTelemetry && window.closeTelemetry(); _wpShowLog(); }
-  else { _wpLogView && _wpLogView.close(); _wpShowTelemetry(); }
+  if (_wpTab === 'log') { window.closeTelemetry && window.closeTelemetry(); return _wpShowLog(); }
+  _wpLogView && _wpLogView.close(); _wpShowTelemetry();
+  return Promise.resolve();
 }
 
 // A COMPACT at-a-glance stat for the pill face (cpu% · rss) — the full breakdown is in the dock.
@@ -283,33 +286,56 @@ let _wpRecent = [], _wpMsgsT = null;
 const _WP_HEAD = /(?:^|\s)([┌\[])\s+(?:(\d\d:\d\d:\d\d)\s+)?(Debug|Info|Warning|Error):\s*(.*)$/;
 const _WP_FIELD = /^[│└]\s+([\w.]+)\s*=\s*(.*)$/;
 const _WP_CORE = /^(WARNING|ERROR):\s*(.*)$/;
+// `lines` are strings, or `{ t, o }` with the byte offset the line starts at, which a record keeps.
 function _wpRecords(lines) {
   const recs = [];
   let open = null;                                  // a `┌` record still taking its `│`/`└` lines
-  for (const styled of lines) {
+  for (const ln of lines) {
+    const styled = typeof ln === 'string' ? ln : ln.t, o = typeof ln === 'string' ? -1 : ln.o;
     const t = window.slateAnsiText(styled);
     let m;
     if ((m = _WP_HEAD.exec(t))) {
-      const r = { ts: m[2] || '', lvl: m[3], msg: m[4], fields: [] };
+      const r = { ts: m[2] || '', lvl: m[3], msg: m[4], fields: [], o };
       recs.push(r); open = m[1] === '┌' ? r : null;
     } else if (open && (t[0] === '│' || t[0] === '└')) {
       if ((m = _WP_FIELD.exec(t))) open.fields.push(m[1] + '=' + m[2]);
       if (t[0] === '└') open = null;
     } else if ((m = _WP_CORE.exec(t))) {
-      recs.push({ ts: '', lvl: m[1] === 'ERROR' ? 'Error' : 'Warning', msg: m[2], fields: [] }); open = null;
+      recs.push({ ts: '', lvl: m[1] === 'ERROR' ? 'Error' : 'Warning', msg: m[2], fields: [], o }); open = null;
     } else open = null;
   }
   return recs;
 }
+const _wpRecKey = r => [r.ts, r.lvl, r.msg, ...r.fields].join('\x00');
+// Each shown record with how many identical ones came after it, which is how its line is found again.
+let _wpShown = [];
 function _wpPaintMsgs() {
   const box = document.getElementById('wdock-msgs'); if (!box) return;
-  const recs = _wpRecords(_wpRecent).slice(-_WP_RECENT_SHOWN).reverse();
-  _wpSetHtml(box, !recs.length ? '' : '<div class="wdm-h">Recent messages</div>' + recs.map(r => {
+  const all = _wpRecords(_wpRecent), recs = all.slice(-_WP_RECENT_SHOWN).reverse();
+  _wpShown = recs.map(r => { const k = _wpRecKey(r);
+    return { k, fromEnd: all.slice(all.indexOf(r) + 1).filter(x => _wpRecKey(x) === k).length }; });
+  _wpSetHtml(box, !recs.length ? '' : '<div class="wdm-h">Recent messages</div>' + recs.map((r, i) => {
     const f = r.fields.join(' · '), cls = r.lvl === 'Error' ? ' error' : r.lvl === 'Warning' ? ' warn' : '';
-    return '<div class="wdm-row' + cls + '" data-wdmsg title="' + _wpEsc((r.ts ? r.ts + ' ' : '') + r.lvl + ': ' + r.msg + (f ? '\n' + r.fields.join('\n') : '')) + '">' +
+    return '<div class="wdm-row' + cls + '" data-wdmsg="' + i + '" title="' + _wpEsc((r.ts ? r.ts + ' ' : '') + r.lvl + ': ' + r.msg + (f ? '\n' + r.fields.join('\n') : '')) + '">' +
       '<span class="wdm-ts">' + _wpEsc(r.ts) + '</span><span class="wdm-msg">' + _wpEsc(r.msg) +
       (f ? '<span class="wdm-f">' + _wpEsc(f) + '</span>' : '') + '</span></div>';
   }).join(''));
+}
+// A recent message, clicked: the Log tab, at that record's line. The line is found in a fresh read of
+// the log's tail, the bytes the viewer itself pages through, so the offset is the file's own; a record
+// pushed over the WS carries none.
+const _WP_SLICE = 1 << 18;
+async function _wpOpenMsg(i) {
+  const shown = _wpShown[i], side = _wpSide; if (!shown) return;
+  _wpTab = 'log';
+  const [, sl] = await Promise.all([_wpPaintTab(), _wpLogIO(side, 'log_slice', { offset: -_WP_SLICE, nbytes: _WP_SLICE }).catch(() => null)]);
+  if (_wpSide !== side || !sl || !sl.text || !_wpLogView) return;
+  const enc = new TextEncoder(), lines = [];
+  let o = sl.from;
+  for (const t of sl.text.split('\n')) { lines.push({ t, o }); o += enc.encode(t).length + 1; }
+  const same = _wpRecords(lines).filter(r => _wpRecKey(r) === shown.k);
+  const hit = same[same.length - 1 - shown.fromEnd];
+  hit && hit.o >= 0 && _wpLogView.reveal(hit.o);
 }
 
 // ── The dock's worker list: every worker, so comparing their logs is a click ─────────────────────
@@ -573,7 +599,8 @@ document.addEventListener('click', e => {
   if (!e.target || !e.target.closest) return;
   const drow = e.target.closest('#wdock-list [data-wdrow]');
   if (drow) { openWorkerDock(drow.getAttribute('data-wdrow')); return; }
-  if (e.target.closest('#wdock-msgs [data-wdmsg]')) { _wpTab = 'log'; _wpPaintTab(); return; }
+  const msg = e.target.closest('#wdock-msgs [data-wdmsg]');
+  if (msg) { _wpOpenMsg(+msg.dataset.wdmsg); return; }
   const dtab = e.target.closest('#workerdock [data-wdtab]');
   // The open tab again: the log keeps its place, the telemetry view (which a profiled run closes) reopens.
   if (dtab) { if (dtab.dataset.wdtab !== _wpTab || _wpTab === 'tel') { _wpTab = dtab.dataset.wdtab; _wpPaintTab(); } return; }
