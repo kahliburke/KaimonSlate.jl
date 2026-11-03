@@ -290,11 +290,6 @@ end
 # WITHOUT a rebuild, via the `"remote"` object in slate.json (installed at init) → the KAIMONSLATE_<ENV>
 # env var → the default. See `_rcfg` in gate_kernel.jl for the precedence + install mechanism. Values
 # are SECONDS unless noted. slate.json key / env var / default / what it governs:
-#   ssh_connect_timeout     KAIMONSLATE_SSH_CONNECT_TIMEOUT     15    ConnectTimeout for every ssh op
-#   ssh_control_persist     KAIMONSLATE_SSH_CONTROL_PERSIST     600   mux master warm-hold past the last op
-#   tunnel_alive_interval   KAIMONSLATE_TUNNEL_ALIVE_INTERVAL   5     supervised tunnel ServerAliveInterval
-#   tunnel_alive_count      KAIMONSLATE_TUNNEL_ALIVE_COUNT      3     supervised tunnel ServerAliveCountMax
-#   tunnel_respawn_backoff  KAIMONSLATE_TUNNEL_RESPAWN_BACKOFF  1     backoff after a dropped forward before respawn
 #   probe_timeout           KAIMONSLATE_PROBE_TIMEOUT           4     :direct TCP port-open probe
 #   firewall_giveup         KAIMONSLATE_FIREWALL_GIVEUP         10    sustained SYN-drop ⇒ declare firewall, fail fast
 #   dial_deadline_cold      KAIMONSLATE_DIAL_DEADLINE_COLD      120   cold-spawn dial (covers remote boot + KaimonGate load)
@@ -305,12 +300,7 @@ end
 #   blob_xfer_timeout       KAIMONSLATE_BLOB_XFER_TIMEOUT       600   whole-binding / direct-blob move gate timeout
 #   sysimage_lock_stale     KAIMONSLATE_SYSIMAGE_LOCK_STALE     1800  concurrent sysimage-build lock staleness window
 #   peer_bw_mbps            KAIMONSLATE_PEER_BW_MBPS            30    assumed rate (MB/s) for an unmeasured peer link
-_ssh_connect_timeout()    = round(Int, _rcfg("ssh_connect_timeout",    "KAIMONSLATE_SSH_CONNECT_TIMEOUT",    15))
-_ssh_control_persist()    = round(Int, _rcfg("ssh_control_persist",    "KAIMONSLATE_SSH_CONTROL_PERSIST",    600))
-_tunnel_alive_interval()  = round(Int, _rcfg("tunnel_alive_interval",  "KAIMONSLATE_TUNNEL_ALIVE_INTERVAL",  5))
-_tunnel_alive_count()     = round(Int, _rcfg("tunnel_alive_count",     "KAIMONSLATE_TUNNEL_ALIVE_COUNT",     3))
-_tunnel_respawn_backoff() = _rcfg("tunnel_respawn_backoff", "KAIMONSLATE_TUNNEL_RESPAWN_BACKOFF", 1.0)
-_fwd_ready_wait()         = _rcfg("fwd_ready_wait",         "KAIMONSLATE_FWD_READY_WAIT",         8.0)   # bounded wait for an async ssh -L local port to accept before the first connect
+_fwd_ready_wait()         = _rcfg("fwd_ready_wait",         "KAIMONSLATE_FWD_READY_WAIT",         8.0)   # bounded wait for a forwarded local port to accept before the first connect
 _probe_timeout()          = _rcfg("probe_timeout",          "KAIMONSLATE_PROBE_TIMEOUT",          4.0)
 _firewall_giveup()        = _rcfg("firewall_giveup",        "KAIMONSLATE_FIREWALL_GIVEUP",        10.0)
 _dial_deadline_cold()     = _rcfg("dial_deadline_cold",     "KAIMONSLATE_DIAL_DEADLINE_COLD",     120.0)

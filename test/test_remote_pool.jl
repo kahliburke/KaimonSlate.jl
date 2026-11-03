@@ -478,7 +478,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
             RE._REMOTE_CFG[] = Dict{String,Any}()
             # 1. defaults (no config, no env) — the exact literals that used to be hardcoded
             withenv("KAIMONSLATE_DIAL_DEADLINE_COLD" => nothing,
-                    "KAIMONSLATE_SSH_CONNECT_TIMEOUT" => nothing,
+                    "KAIMONSLATE_PROBE_TIMEOUT" => nothing, "KAIMONSLATE_FWD_READY_WAIT" => nothing,
                     "KAIMONSLATE_BLOB_CHUNK_TIMEOUT" => nothing,
                     "KAIMONSLATE_PEER_BW_MBPS" => nothing,
                     "KAIMONSLATE_SYSIMAGE_LOCK_STALE" => nothing) do
@@ -493,9 +493,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
                 finally
                     RE._DIALED[] = dialed
                 end
-                @test RE._ssh_connect_timeout() == 15 && RE._ssh_connect_timeout() isa Int
-                @test RE._ssh_control_persist() == 600
-                @test RE._tunnel_alive_interval() == 5 && RE._tunnel_alive_count() == 3
+                @test RE._probe_timeout() == 4.0 && RE._fwd_ready_wait() == 8.0
                 @test RE._firewall_giveup() == 10.0
                 @test RE._connect_deadline_local() == 90.0
                 @test RE._pkg_op_timeout() == 900.0

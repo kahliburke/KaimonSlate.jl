@@ -1623,7 +1623,7 @@ _eval_timeout() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_EVAL_TIMEOUT
 # The SSH/connect/tunnel/transfer timings scattered through gate_kernel.jl + remote.jl default to
 # values that are fine on a LAN but can be too tight for a slow-auth, high-latency, or cold
 # (heavy-precompile) host. They're tunable WITHOUT a rebuild via a `"remote"` object in slate.json —
-# e.g. {"remote": {"dial_deadline_cold": 300, "ssh_connect_timeout": 30}} — which KaimonSlate installs
+# e.g. {"remote": {"dial_deadline_cold": 300, "probe_timeout": 8}} — which KaimonSlate installs
 # here at init (it reads slate.json; ReportEngine loads before it, so the table is pushed IN, exactly
 # as RUNON_DEFAULT / the transfer refs are). Precedence per key: slate.json value → KAIMONSLATE_<ENV>
 # env var → the hardcoded default. Values are SECONDS unless the name says otherwise. Every key/env/
