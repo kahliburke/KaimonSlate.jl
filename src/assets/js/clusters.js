@@ -253,8 +253,6 @@ export function Clusters() {
       <div class="mchhead"><div class="rppformhead">${e ? e.name : 'New machine'}</div>
         ${e ? html`<span class="pddim">${clusterSummary(e)}</span>
           <button class="rppregdel" title="forget this machine" onClick=${() => del(e.name)}>Delete</button>` : null}</div>
-      ${e && e.host ? MachineReadiness(e.name) : null}
-      ${e && e.host && !isExecKind(e.kind) ? html`<${SchedUse} host=${e.host} />` : null}
       <div class="rpprow"><label>Name</label>
         <input class="rppname" autocomplete="off" spellcheck="false" placeholder="e.g. hpc, gpu, here" value=${kName.value} onInput=${ev => kName.value = ev.target.value}/>
         <span class="pddim">${'cluster=<name> in a job cell'}</span></div>
@@ -344,6 +342,8 @@ export function Clusters() {
         <div class="rpprow"><label>Note</label>
           <input class="rppname" autocomplete="off" placeholder="note" value=${kNote.value} onInput=${ev => kNote.value = ev.target.value}/></div>`}
       <div class="rppact"><button class="rppsavereg" onClick=${save}>${e ? 'Save' : 'Create'}</button></div>
+      ${e && e.host ? MachineReadiness(e.name) : null}
+      ${e && e.host && !isExecKind(e.kind) ? html`<${SchedUse} host=${e.host} />` : null}
     </div>`}
     <div class=${'rppmsg' + (cmsg.value && cmsg.value.err ? ' err' : '')}>${cmsg.value ? cmsg.value.text : ''}</div>
     </div></div>
