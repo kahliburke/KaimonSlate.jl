@@ -846,6 +846,26 @@ document.getElementById('apin').addEventListener('input', apAutoGrow);
 // so size it once at load too, rather than leaving a prefilled box the wrong height.
 apAutoGrow();
 document.getElementById('apin').addEventListener('blur', () => setTimeout(_closeMention, 150));
+// Up on the box's first line and Down on its last step through what you sent before, newest
+// first, as a shell does. Past the newest, the draft you were typing comes back. Editing a recalled
+// message makes it the draft.
+const _apHist = { i: -1, draft: '' };
+function _apSentTexts() {
+  const out = [];
+  for (const m of agentMsgs) if (m.role === 'user' && m.text && out[out.length - 1] !== m.text) out.push(m.text);
+  return out;
+}
+function _apHistStep(el, dir) {
+  const xs = _apSentTexts();
+  if (_apHist.i < 0) { if (dir > 0 || !xs.length) return false; _apHist.draft = el.value; _apHist.i = xs.length; }
+  const j = _apHist.i + dir;
+  if (j < 0) return true;   // already at the oldest
+  if (j >= xs.length) { _apHist.i = -1; el.value = _apHist.draft; } else { _apHist.i = j; el.value = xs[j]; }
+  el.setSelectionRange(el.value.length, el.value.length);
+  apAutoGrow();
+  return true;
+}
+document.getElementById('apin').addEventListener('input', () => { _apHist.i = -1; });
 document.getElementById('apin').addEventListener('keydown', e => {
   if (_mention.open) {                                  // mention menu intercepts nav keys
     if (e.key === 'ArrowDown') { e.preventDefault(); _mention.sel = Math.min(_mention.sel + 1, _mention.items.length - 1); _paintMention(); return; }
@@ -853,6 +873,12 @@ document.getElementById('apin').addEventListener('keydown', e => {
     if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); _insertMention(_mention.sel); return; }
     if (e.key === 'Escape') { e.preventDefault(); _closeMention(); return; }
   }
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); agentSend(); }
+  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+    const el = e.currentTarget, v = el.value, c = el.selectionStart;
+    const edge = el.selectionStart === el.selectionEnd &&
+                 (e.key === 'ArrowUp' ? c === 0 || v.lastIndexOf('\n', c - 1) < 0 : v.indexOf('\n', c) < 0);
+    if (edge && _apHistStep(el, e.key === 'ArrowUp' ? -1 : 1)) { e.preventDefault(); return; }
+  }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); _apHist.i = -1; agentSend(); }
 });
 
