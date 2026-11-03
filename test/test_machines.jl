@@ -112,6 +112,18 @@ const RE = KaimonSlate.ReportEngine
             @test RE.region_get("mx") === nothing
         end
 
+        @testset "a PBS machine's options become qsub flags, and an old directive line is kept" begin
+            e = RE._shape_into_entry!(Dict{String,Any}("kind" => "pbs", "directives" => "#PBS -l place=scatter\n--old=1"),
+                                      Dict("q" => "debug", "W" => "group_list=x", "ncpus_per_task" => "2", "licenses" => ""))
+            lines = split(e["directives"], '\n')
+            @test "-q debug" in lines && "-W group_list=x" in lines
+            @test "-l ncpus_per_task=2" in lines && "-l licenses" in lines
+            @test "-l place=scatter" in lines          # kept as written
+            @test !any(startswith("--"), lines)        # nothing in sbatch's long form
+            s = RE._shape_into_entry!(Dict{String,Any}("kind" => "slurm"), Dict("licenses" => "scratch"))
+            @test s["directives"] == "--licenses=scratch"
+        end
+
         @testset "what preparing found is kept per host" begin
             @test isempty(RE.host_facts("perlmutter"))
             RE.host_facts_merge!("perlmutter", Dict("scratch" => "/pscratch/sd/k/me"))

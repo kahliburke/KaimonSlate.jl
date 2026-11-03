@@ -89,20 +89,38 @@ _machine_region_dict(d::AbstractDict) =
 # job script spells (`constraint`, `qos`, `gres`, …), and anything the script has no key for goes in
 # as a flag of its own. The entry's own fields win over an option naming the same setting.
 function _shape_into_entry!(e::AbstractDict, opts::AbstractDict)
+    pbs = lowercase(string(get(e, "kind", ""))) == "pbs"
     flags = String[]
     for (k, v) in sort!(collect(opts); by = first)
         key = replace(String(k), '-' => '_')
         if Symbol(key) in Sweep._ATTR_RESOURCES && !isempty(strip(String(v)))
             isempty(strip(string(get(e, key, "")))) && (e[key] = String(v))
         else
-            push!(flags, isempty(strip(String(v))) ? "--" * String(k) : "--" * String(k) * "=" * String(v))
+            push!(flags, _option_flag(String(k), strip(String(v)); pbs))
         end
     end
+    # A directive an older entry wrote in another form (`-l place=scatter`) is not an option, so it
+    # goes through as it was written.
+    append!(flags, _verbatim_directives(get(e, "directives", "")))
     delete!(e, "options"); delete!(e, "qos")
     isempty(flags) ? delete!(e, "directives") : (e["directives"] = join(flags, "\n"))
     haskey(opts, "qos") && (e["qos"] = String(opts["qos"]))
     return e
 end
+
+# One scheduler option as its scheduler spells it. sbatch takes every option long (`--licenses=x`).
+# qsub has no long options: a one-letter name is its own flag (`-q debug`, `-W group_list=x`), and any
+# other name is a resource (`-l place=scatter`).
+function _option_flag(k::AbstractString, v::AbstractString; pbs::Bool = false)
+    pbs || return isempty(v) ? "--$k" : "--$k=$v"
+    length(k) == 1 && return isempty(v) ? "-$k" : "-$k $v"
+    return isempty(v) ? "-l $k" : "-l $k=$v"
+end
+
+# The lines of a `directives` text that `machine_options` cannot read as an option.
+_verbatim_directives(text) =
+    String[s for s in (replace(strip(l), r"^#(SBATCH|PBS)\s+" => "") for l in split(String(text), '\n'))
+           if startswith(s, "-") && !occursin(r"^--[A-Za-z0-9_-]+(=.*)?$", s)]
 
 """
     clusters_resolved(; tested = true, only = nothing) -> Vector{Dict}
