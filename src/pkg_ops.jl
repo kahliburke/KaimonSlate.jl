@@ -2,6 +2,19 @@
 # (`__slate_pkg`) and the in-process kernel (`pkg_op`) so both accept the same specs. They run
 # against the active project; the caller activates the right one.
 
+# Pkg reads the project and manifest through Base's TOML cache, and while a `require` is in flight on
+# any task that cache serves each file as it was when the load began. A Pkg operation then misses what
+# an earlier one added: its precompile fails with "Unknown package", or it writes back a project
+# without that add. The hub serializes package ops with cell evals; this waits out a load the hub
+# did not start (a background warm-up, a hot reload).
+function _await_loads(; timeout::Real = 300)
+    isdefined(Base, :LOADING_CACHE) || return
+    t0 = time()
+    while Base.LOADING_CACHE[] !== nothing && time() - t0 < timeout
+        sleep(0.05)
+    end
+end
+
 # Classify each add-token into a registry/git spec (→ Pkg.add) or a local-path spec (→ Pkg.develop),
 # with a human label. Shared by the notebook-env add and the parent-project add.
 function _pkg_add_specs(tokens)
@@ -39,6 +52,7 @@ function _pkg_apply(op, name)
     tokens = filter(!isempty, split(String(name), r"[\s,]+"))
     isempty(tokens) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
     o = String(op)
+    _await_loads()
     try
         if o == "rm"
             Pkg.rm(String.(tokens))

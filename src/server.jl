@@ -3205,25 +3205,32 @@ end
 
 function _run_loop!(nb::LiveNotebook)
     try
-        _reestablish_fresh_namespace!(nb)   # a swapped/fresh worker → seed binds from host + re-stale (before draining)
-        # Resolve bare-`using` exports BEFORE the first eval of a session, so the dependency graph —
-        # and every memo key derived from it — is precise from the FIRST run. Otherwise the post-drain
-        # barrier→precise flip (refine_usings!) changed downstream cells' memo keys between the first
-        # and second run of each session, and the durable cache missed exactly on cold opens. Phased:
-        # the import round-trip (a possible worker spawn + package load, seconds) runs OUTSIDE nb.lock
-        # so UI state requests stay live; only the graph rebuild takes the lock. No-op after the first
-        # drain that sees each module.
-        paths = lock(nb.lock) do; ReportEngine.unresolved_using_paths(nb.report); end
-        if !isempty(paths) && ReportEngine.resolve_usings!(nb.report, nb.kernel, paths)
-            lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
-        end
-        # Same pre-run phasing for macro-recovered bindings: package macros (`@kwdef`, `@enum`,
-        # `@chain`, …) are expandable as soon as their modules are imported (just above), so the
-        # graph + memo keys see macro-hidden writes from the FIRST eval. Notebook-defined macros
-        # resolve post-drain (refine_macros! below). Round-trip outside nb.lock, like the usings.
-        pending = lock(nb.lock) do; ReportEngine.pending_macro_cells(nb.report); end
-        if !isempty(pending) && ReportEngine.resolve_macros!(nb.report, nb.kernel, pending)
-            lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+        # The prelude loads packages in the worker (priming re-runs `using` cells, resolving exports
+        # imports modules), so it holds the eval mutex like a cell eval does. A package operation takes
+        # the same mutex: Pkg run while a `require` is in flight reads the project through Base's
+        # loading cache as it was before the load began, then fails to find what it just added or
+        # writes back a project missing an earlier add.
+        lock(_eval_mutex(nb)) do
+            _reestablish_fresh_namespace!(nb)   # a swapped/fresh worker → seed binds from host + re-stale (before draining)
+            # Resolve bare-`using` exports BEFORE the first eval of a session, so the dependency graph —
+            # and every memo key derived from it — is precise from the FIRST run. Otherwise the post-drain
+            # barrier→precise flip (refine_usings!) changed downstream cells' memo keys between the first
+            # and second run of each session, and the durable cache missed exactly on cold opens. Phased:
+            # the import round-trip (a possible worker spawn + package load, seconds) runs OUTSIDE nb.lock
+            # so UI state requests stay live; only the graph rebuild takes the lock. No-op after the first
+            # drain that sees each module.
+            paths = lock(nb.lock) do; ReportEngine.unresolved_using_paths(nb.report); end
+            if !isempty(paths) && ReportEngine.resolve_usings!(nb.report, nb.kernel, paths)
+                lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+            end
+            # Same pre-run phasing for macro-recovered bindings: package macros (`@kwdef`, `@enum`,
+            # `@chain`, …) are expandable as soon as their modules are imported (just above), so the
+            # graph + memo keys see macro-hidden writes from the FIRST eval. Notebook-defined macros
+            # resolve post-drain (refine_macros! below). Round-trip outside nb.lock, like the usings.
+            pending = lock(nb.lock) do; ReportEngine.pending_macro_cells(nb.report); end
+            if !isempty(pending) && ReportEngine.resolve_macros!(nb.report, nb.kernel, pending)
+                lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+            end
         end
         cancelled = false
         while true

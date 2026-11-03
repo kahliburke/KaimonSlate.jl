@@ -1967,6 +1967,7 @@ end
 # activate + `dev` the parent package in so `using ParentModule` works, preserving the parent's
 # pinned versions. One consistent env.
 function _seed_notebook_env!(envdir::AbstractString, parent::AbstractString)
+    _await_loads()
     pname = seed_env_project!(envdir, parent)   # shared policy (envprep.jl)
     stamp_env!(envdir, parent)
     Pkg.activate(envdir)
@@ -2019,6 +2020,7 @@ two stay one consistent environment. On failure the env is restored as it was. R
 `{ok, adds, skipped}` or `{ok=false, message}`."
 function __slate_sync_parent(envdir, parent)
     e = String(envdir); p = String(parent)
+    _await_loads()
     saved = _env_snapshot(e)
     try
         fdeps = Set{String}()
@@ -2148,6 +2150,7 @@ function __slate_pkg_parent(op, name, parent)
     isempty(String(parent)) && return Dict{String,Any}("ok" => false, "message" => "no parent project")
     tokens = filter(!isempty, split(String(name), r"[\s,]+"))
     isempty(tokens) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
+    _await_loads()
     cur = try; dirname(Pkg.project().path); catch; ""; end
     try
         Pkg.activate(String(parent))
