@@ -326,37 +326,11 @@ async function probe(expr) {
 }
 
 // ── the specialist ────────────────────────────────────────────────────────────────────────────────
-// Summoned from inside the session you are already in, on the model set for the role (Settings →
-// agent roles, else the notebook's agent model).
-const summoning = signal(false);
+// Summoned by the orchestrating agent (spec_summon), on the model set for the role.
 const specialist = signal(null); // {agent_id, cell, model} once one is here
-
-async function summon() {
-  const s = st.value;
-  if (!s || summoning.value) return;
-  summoning.value = true;
-  try {
-    const r = await A('POST', '/api/debug/agent', { cell: s.cell });
-    if (r && r.ok) {
-      specialist.value = { agent_id: r.agent_id, cell: r.cell, model: r.model || '' };
-      focus.value = true;   // the debugging workspace is where it works — and where you watch it
-    }
-  } catch (e) {} finally { summoning.value = false; }
-}
 
 // The bare model name: `acp:opencode:opencode/claude-sonnet-5` → `claude-sonnet-5`.
 const bareModel = (m) => String(m).replace(/^acp:\w+:/, '').replace(/^.*\//, '');
-function Summon() {
-  const s = st.value;
-  if (!s || s.finished) return null;
-  if (specialist.value) {
-    return html`<button class="dbgspec on" title="a debugging specialist is working on this — open the workspace"
-      onClick=${() => focus.value = true}>🐞 specialist</button>`;
-  }
-  return html`<button class="dbgspec" disabled=${summoning.value}
-    title="bring in a debugging specialist to work on this cell with you"
-    onClick=${summon}>${summoning.value ? 'summoning…' : '＋ specialist'}</button>`;
-}
 
 // ── the specialist's transcript ────────────────────────────────────────────────────────────────
 // Its own, not the chat panel's. A debugging transcript wants different things on screen: a step
@@ -364,19 +338,10 @@ function Summon() {
 // answer; and the whole thing sits beside the frame it is talking about.
 const convo = signal([]);   // [{role:'said'|'think'|'act'|'brief'|'you', text, verb, detail, done}]
 const working = signal(false);
-// The standing instructions and toolset, which go in at spawn and never appear on the event bus.
-const brief = signal(null);
-const briefOpen = signal(false);
-async function loadBrief() {
-  briefOpen.value = !briefOpen.value;
-  if (brief.value || !briefOpen.value) return;
-  try { brief.value = await A('GET', '/api/debug/brief'); } catch (e) { brief.value = { system: '(unavailable)' }; }
-}
-
-// A tool call, named the way a debugger session reads. Everything the specialist can call is one
-// of seven verbs, so the row is the verb plus what came back — not the tool name and its arguments.
+// A tool call, named the way a debugger session reads: the verb plus what came back, not the tool
+// name and its arguments.
 const VERB = {
-  dbg_start: 'start', dbg_step: 'step', dbg_frame: 'frame', dbg_eval: 'eval',
+  dbg_start: 'start', dbg_step: 'step', dbg_frame: 'frame', dbg_eval: 'eval', dbg_watch: 'watch',
   dbg_break: 'breakpoint', spec_ask: 'ask', spec_done: 'done',
 };
 const verbOf = (title) => {
@@ -455,21 +420,6 @@ window.onDebugAgentEvent = (env) => {
   convo.value = list;
 };
 
-// Clearing the transcript is a VIEW action, not `chat-clear` — that reaps every agent and wipes
-// the notebook's whole conversation, which would kill the specialist mid-thought. So the pane
-// empties and a watermark records how much of the server's log has been read, which is what makes
-// the clear survive a reload without destroying anything.
-const _wmKey = () => 'slateDbgSeen:' + (window.NB_ID || '');
-const seenMark = () => { const n = parseInt(localStorage.getItem(_wmKey()), 10); return isFinite(n) ? n : 0; };
-
-async function clearConvo() {
-  convo.value = [];
-  try {
-    const log = await A('GET', '/api/agent-log');
-    localStorage.setItem(_wmKey(), String(((log && log.events) || []).length));
-  } catch (e) {}
-}
-
 // Talking to it WHILE it works.
 //
 // A turn cannot take a second message: the backend fires another `session/prompt` on the same ACP
@@ -482,14 +432,6 @@ const queued = signal([]);
 async function deliver(text) {
   try { await A('POST', '/api/chat', { text, crew: DEBUG_ROLE }); }
   catch (e) { working.value = false; }
-}
-
-function sayToSpecialist(text) {
-  if (!text.trim()) return;
-  convo.value = [...convo.value, { role: 'you', text, done: true, held: working.value }];
-  if (working.value) { queued.value = [...queued.value, text]; return; }
-  working.value = true;
-  deliver(text);
 }
 
 // Flush on the turn boundary, joined into ONE turn — several notes typed while it worked are one
@@ -563,10 +505,7 @@ window.onDebugPush = (p) => {
     const aid = (log && log.agents && log.agents.debugger) || '';
     if (aid) specialist.value = { agent_id: aid, cell: '', model: '' };
     const events = (log && log.events) || [];
-    // Skip what was cleared. The server's log is capped and pops from the front, so a watermark
-    // past the end means it has rotated — treat that as nothing to skip rather than showing blank.
-    const skip = seenMark() <= events.length ? seenMark() : 0;
-    for (const line of events.slice(skip)) {
+    for (const line of events) {
       try { window.onDebugAgentEvent(JSON.parse(line)); } catch (e) {}
     }
     working.value = false;   // a turn that was live when the page went away is not live now
@@ -620,33 +559,6 @@ function Vals({ title, items, hint }) {
     <div class="dbgvhead" title=${hint || ''}>${title}<span class="dbgvn-count">${items.length}</span></div>
     ${items.map(v => html`<${Val} key=${v.name} v=${v} flash=${ch.has(v.name)} />`)}
   </div>`;
-}
-
-// A watched expression is a series, not a reading: `n` samples taken as the run went on, and what
-// makes it worth having is the shape. So it is drawn, in its own strip.
-//
-// The series is already fetched (`loadTraces`) and was never drawn anywhere, which left a sampled
-// watch showing a single number — the one thing a series is least useful reduced to.
-function Spark({ xs }) {
-  if (!xs || xs.length < 2) return null;
-  const pts = xs.filter(v => v !== null && v !== undefined && isFinite(v));
-  if (pts.length < 2) return null;
-  const lo = Math.min(...pts), hi = Math.max(...pts);
-  if (hi === lo) return null;          // a flat line says less than the words beside it
-  const span = hi - lo;
-  const W = 132, H = 26;
-  // Non-finite samples break the line rather than being drawn as zero: a gap is what happened.
-  let d = '', pen = false;
-  xs.forEach((v, i) => {
-    const x = (i / (xs.length - 1)) * W;
-    if (v === null || v === undefined || !isFinite(v)) { pen = false; return; }
-    const y = H - ((v - lo) / span) * H;
-    d += (pen ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
-    pen = true;
-  });
-  return html`<svg class="dbgspark" viewBox=${'0 0 ' + W + ' ' + H} preserveAspectRatio="none">
-    <path d=${d.trim()} fill="none" stroke="currentColor" stroke-width="1.2" />
-  </svg>`;
 }
 
 // Which watch is opened out, as "file:line", or null. Click rather than hover: the plot is worth
@@ -1384,12 +1296,6 @@ style.textContent = `
   background:color-mix(in srgb, var(--purple) 10%, transparent); }
 .dbgloc.big { font-size:.78rem; padding:3px 10px; }
 
-.dbgspec { padding:3px 9px; font-size:.75rem; border-radius:6px; background:var(--bg3);
-  color:var(--dim); border:1px dashed var(--border); cursor:pointer; white-space:nowrap; }
-.dbgspec:hover:not(:disabled) { color:var(--teal); border-color:var(--teal); border-style:solid; }
-.dbgspec.on { color:var(--teal); border-color:var(--teal); border-style:solid;
-  background:color-mix(in srgb, var(--teal) 12%, var(--bg3)); }
-
 .dbgowner { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:11px;
   font-size:.72rem; white-space:nowrap; color:var(--teal); border:1px solid var(--teal);
   background:color-mix(in srgb, var(--teal) 10%, transparent); }
@@ -1646,7 +1552,6 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
 .dbgwrm { cursor:pointer; background:none; border:none; padding:0 2px; color:var(--dim); font-size:.7rem; }
 .dbgwrm:hover { color:var(--red,#e57575); }
 .dbgwnow { font-family:'Cascadia Code',monospace; font-size:.76rem; color:var(--strong); }
-.dbgspark { display:block; width:100%; height:26px; color:var(--teal); margin:2px 0 1px; }
 .dbgwrange { font-size:.66rem; color:var(--dim); }
 .dbgwempty { font-size:.7rem; color:var(--dim); font-style:italic; padding:2px 0; }
 .dbgwadd { cursor:pointer; background:none; border:1px dashed var(--border); border-radius:4px;
