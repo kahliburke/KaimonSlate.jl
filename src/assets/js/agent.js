@@ -420,7 +420,13 @@ function renderAgentMsgs() {
 (() => { const el = document.getElementById('apmsgs'); if (!el) return;
   el.addEventListener('click', e => {
     const nav = e.target.closest('.toolnav');
-    if (nav && nav.dataset.cid) { try { window.selectCell && window.selectCell(nav.dataset.cid, true); } catch (_) {} return; }
+    if (nav && nav.dataset.cid) {
+      // Full screen covers the cells, so going to one leaves it. The docked width is unchanged, so
+      // the cell is already where the scroll lands.
+      if (document.getElementById('agentpanel').classList.contains('maximized')) toggleAgentMax();
+      try { window.selectCell && window.selectCell(nav.dataset.cid, true); } catch (_) {}
+      return;
+    }
     const line = e.target.closest('.toolline.expandable');   // one call inside a grouped run
     if (line) { line.classList.toggle('expanded'); return; }
     const find = e.target.closest('.apmsg.finding.expandable');

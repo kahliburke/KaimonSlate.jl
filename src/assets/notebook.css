@@ -314,10 +314,13 @@ body:has(.filespanel.open) .cellmove { display:none; }
 .cellhead { display:flex; flex-wrap:nowrap; align-items:center; gap:8px; padding:3px 10px; background:var(--bg3);
             border-bottom:1px solid var(--border); font-size:.82rem; min-height:27px; }
 .cellhead .run { padding:0 7px; font-size:.80rem; }
-/* Lead takes the slack and truncates its rightmost chips (dup-warnings first, then the region name)
-   when the row is tight; trail is fixed so the action buttons and the state badge never leave. */
-.cellhdr-lead { display:flex; align-items:center; gap:8px; flex:1 1 auto; min-width:0; overflow:hidden; }
-.cellhdr-trail { position:relative; display:flex; align-items:center; gap:8px; flex:0 0 auto; }
+/* Lead takes the slack, and when the row is tight its chips (region, machine, warnings) wrap onto
+   further lines rather than being cut off. Trail is fixed on the first line, so the action buttons
+   and the state badge never leave or move. */
+.cellhdr-lead { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; flex:1 1 auto; min-width:0; }
+.cellhdr-lead > * { flex:0 0 auto; }
+.cellhdr-lead > .cid { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cellhdr-trail { position:relative; display:flex; align-items:center; gap:8px; flex:0 0 auto; align-self:flex-start; min-height:21px; }
 .cellhdr-info { display:flex; align-items:center; gap:8px; transition:opacity .12s; }
 /* The action buttons are laid over the run-info (they share the right-hand space, so the two never
    add up and clip on a narrow cell). Hidden and out of flow at rest, they fade in over the run-info
