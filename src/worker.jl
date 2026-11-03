@@ -2129,6 +2129,7 @@ end
 # activate + `dev` the parent package in so `using ParentModule` works, preserving the parent's
 # pinned versions. One consistent env.
 function _seed_notebook_env!(envdir::AbstractString, parent::AbstractString)
+    _await_loads()
     pname = seed_env_project!(envdir, parent)   # shared policy (envprep.jl)
     stamp_env!(envdir, parent)
     Pkg.activate(envdir)
@@ -2154,22 +2155,24 @@ function __slate_fork(envdir, parent)
     end
 end
 
+"Re-create the notebook's own packages after a re-seed, each the way it was added (`readd_specs`,
+envprep.jl). Returns the names of local checkouts that are missing on this machine."
+function _readd!(delta; pinned::Bool = false, preserve = Pkg.PRESERVE_TIERED)
+    s = readd_specs(delta; pinned)
+    isempty(s.devs) || Pkg.develop([Pkg.PackageSpec(; d...) for d in s.devs]; preserve)
+    isempty(s.adds) || Pkg.add([Pkg.PackageSpec(; a...) for a in s.adds]; preserve)
+    return s.skipped
+end
+
 "Reconstruct a notebook env from its `.jl` footer: seed from the parent, then add the
 notebook's own packages at the recorded versions. Called on open when the env dir is
-absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is a list of
-`{name, version, uuid}`. Returns `{ok, message}`."
+absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is the footer's
+`{name, version, uuid[, source, origin]}` records. Returns `{ok, skipped}` or `{ok=false, message}`."
 function __slate_reconstruct(envdir, parent, pkgs)
     try
         _seed_notebook_env!(String(envdir), String(parent))
-        specs = Pkg.PackageSpec[]
-        for p in pkgs
-            nm = String(get(p, "name", get(p, :name, "")))
-            isempty(nm) && continue
-            v = string(get(p, "version", get(p, :version, "")))
-            push!(specs, isempty(v) ? Pkg.PackageSpec(name = nm) : Pkg.PackageSpec(name = nm, version = VersionNumber(v)))
-        end
-        isempty(specs) || Pkg.add(specs)
-        return Dict{String,Any}("ok" => true)
+        skipped = _readd!(pkgs; pinned = true)
+        return Dict{String,Any}("ok" => true, "skipped" => skipped)
     catch e
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end
@@ -2265,6 +2268,7 @@ function __slate_pkg_parent(op, name, parent)
     isempty(String(parent)) && return Dict{String,Any}("ok" => false, "message" => "no parent project")
     tokens = filter(!isempty, split(String(name), r"[\s,]+"))
     isempty(tokens) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
+    _await_loads()
     cur = try; dirname(Pkg.project().path); catch; ""; end
     try
         Pkg.activate(String(parent))

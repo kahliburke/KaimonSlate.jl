@@ -216,6 +216,20 @@ function _notebook_adds(nb::LiveNotebook)
             detached = info.parent === nothing, ok = true)
 end
 
+# One footer record. A local checkout or git package also records where it came from, so a rebuild
+# can develop or clone it again instead of looking its name up in a registry.
+function _env_record(d)
+    r = Dict{String,Any}("name" => string(get(d, "name", "")), "version" => string(get(d, "version", "")),
+                         "uuid" => string(get(d, "uuid", "")))
+    src = string(get(d, "source", "registry")); origin = string(get(d, "origin", ""))
+    # A checkout under the home directory is recorded `~/…`, so the footer holds for anyone who keeps
+    # it at the same place.
+    home = homedir()
+    src == "path" && startswith(origin, home * "/") && (origin = "~" * origin[ncodeunits(home)+1:end])
+    src in ("path", "git") && !isempty(origin) && (r["source"] = src; r["origin"] = origin)
+    return r
+end
+
 # Sync the `.jl` reproducibility footer (`report.meta["env"]`) to the notebook's current
 # package delta and persist if it changed. Called after package operations.
 function _refresh_env_meta!(nb::LiveNotebook)
@@ -223,10 +237,7 @@ function _refresh_env_meta!(nb::LiveNotebook)
     # nb.lock (protocol), then apply the change + persist under the lock. Sole caller: `notebook_pkg_op!`.
     info = _notebook_adds(nb)
     info.ok || return nb   # env probe failed transiently — leave the footer as-is rather than wiping it
-    env = Dict{String,Any}[Dict{String,Any}("name" => string(get(d, "name", "")),
-                                             "version" => string(get(d, "version", "")),
-                                             "uuid" => string(get(d, "uuid", "")))
-                           for d in info.adds]
+    env = Dict{String,Any}[_env_record(d) for d in info.adds]
     @report_op nb report begin
         cur = get(report.meta, "env", Dict{String,Any}[])
         changed = if isempty(env)

@@ -155,6 +155,9 @@ Cells that have not been scrolled to yet still contribute to the count — their
 last saved source. Stepping onto a match in a markdown or `@bind` cell opens that cell's source so
 the match can be shown.
 
+Cell names are searched as well, so typing a cell's id finds the cell; the count reads **· cell
+name** while you are on one. The replace row leaves names alone and only rewrites cell contents.
+
 **Replace All is a single action.** It rewrites every match across the notebook in one step, which
 means one **⌘Z** puts it all back — the toast names what it undid — and the [timeline](history.md)
 gets one checkpoint labelled with the search and replacement, so you can also restore it later from

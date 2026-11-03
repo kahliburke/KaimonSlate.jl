@@ -30,12 +30,18 @@ were written when they went out. They are marked.
   KaimonGate 1.6; with an older one the worker serves as before. `KAIMON_GATE_OWNER_WAKE=0` turns
   it off.
 
+- Find in notebook (⌘F) matches cell names, so a cell can be found by its id. Replace does not
+  touch them.
+
 - The Files panel shows a markdown file rendered, the way a markdown cell is, with **✎ Source** to
   edit it. Images resolve from the file's own folder, and a link to another project file opens it in
   the panel.
 
 ### Fixed
 
+- Copying rendered math gives its LaTeX source, `$…$` inline and `$$…$$` for display, with a line
+  break between paragraphs, in the notebook and in exported pages. A selection that ends inside a
+  formula takes the whole formula.
 - A cell re-run by a fast reactive value (a live chart updating ten times a second) reads as fresh
   between updates instead of flashing running and stale on every one. A run or a stale state now shows
   only once it has lasted 140 ms; a batch of three or more cells still shows at once.

@@ -266,4 +266,21 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         @test !occursin("vscode://file\\\\", h2)
     end
 
+    @testset "a precompile failure names loaded packages whose compiled cache is gone" begin
+        # Nothing built on a loaded package can be precompiled once its cache file is deleted, and the
+        # error itself only says the precompile process exited.
+        msg = "Failed to precompile Dependent [11111111-2222-3333-4444-555555555555] to \"/x.ji\" (ProcessExited(1))."
+        @test ReportEngine._stale_cache_hint("UndefVarError: `x` not defined") == ""
+        fake = Base.PkgId(Base.UUID("aaaaaaaa-1111-2222-3333-777777777777"), "GoneDep")
+        Base.pkgorigins[fake] = Base.PkgOrigin(nothing, joinpath(tempdir(), "no-such-cache.ji"), nothing)
+        try
+            h = ReportEngine._stale_cache_hint(msg)
+            @test occursin("GoneDep " * ReportEngine.STALE_CACHE_NOTE, h)
+            @test occursin("Restart the worker", h)
+        finally
+            delete!(Base.pkgorigins, fake)
+        end
+        @test !occursin("GoneDep", ReportEngine._stale_cache_hint(msg))
+    end
+
 end

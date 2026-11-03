@@ -90,6 +90,7 @@ module WsOrder;   include("test_ws_order.jl");   end
 module BindObs;   include("test_bind_observable.jl"); end
 module RecordDisplay; include("test_record_display.jl"); end
 module MatrixDisplay; include("test_matrix_display.jl"); end
+module Confine;   include("test_confine.jl");   end
 
 # Every module above belongs here. A file that is `include`d but left out of this tuple is still
 # COMPILED, so it never looks broken — it is simply never run, and its testsets pass silently by
@@ -100,7 +101,7 @@ const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memos
                    Engine, Eval, Deps, Envprep, Gateauth, PeerOwnerT, SshTransportT, Tools, Registry, Toolcell, Web,
                    Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, RunRecord, History, SlateApi,
                    Agentops, Repro, Slides, Debugger, Profiler, Specialist, Findings, ToolDocs, AppRender,
-                   Frontmatter, Export, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, FramePoolT, EmitChannelT, WsOrder, BindObs, RecordDisplay, MatrixDisplay)
+                   Frontmatter, Export, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, FramePoolT, EmitChannelT, WsOrder, BindObs, RecordDisplay, MatrixDisplay, Confine)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
 # ReTest matches a plain String LITERALLY (regex metacharacters escaped), so "deps|eval" would match

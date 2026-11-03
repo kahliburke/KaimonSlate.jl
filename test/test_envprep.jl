@@ -85,9 +85,9 @@ end
                                   "uuid" => "872c559c-99b0-510c-b3b7-b6c96a88d5cd")]
         code = ReportEngine.env_add_code(delta)
         @test occursin("Pkg.add(", code)
-        @test occursin("name=raw\"FFTW\"", code)
-        @test occursin("uuid=raw\"7a1cc6ca-52ef-59f5-83cd-3a7055c09341\"", code)
-        @test occursin("name=raw\"NNlib\"", code)
+        @test occursin("name=\"FFTW\"", code)
+        @test occursin("uuid=\"7a1cc6ca-52ef-59f5-83cd-3a7055c09341\"", code)
+        @test occursin("name=\"NNlib\"", code)
         # The recorded VERSION is deliberately not pinned — it would fight the parent's fresh resolve.
         @test !occursin("1.10.0", code)
         # A notebook that added nothing rebuilds exactly as before.
@@ -128,11 +128,37 @@ end
             delta = [Dict{String,Any}("name" => "VRS", "uuid" => "22222222-2222-2222-2222-222222222222"),
                      Dict{String,Any}("name" => "FFTW", "uuid" => "7a1cc6ca-52ef-59f5-83cd-3a7055c09341")]
             code = ReportEngine.env_add_code(delta, devs)
-            @test occursin("Pkg.develop([", code) && occursin("path=raw\"$(normpath(vrs))\"", code)
-            @test occursin("path=raw\"$(normpath(seb))\"", code)
-            @test occursin("name=raw\"FFTW\"", code) && !occursin("name=raw\"VRS\"", code)
+            @test occursin("Pkg.develop([", code) && occursin("path=$(repr(normpath(vrs)))", code)
+            @test occursin("path=$(repr(normpath(seb)))", code)
+            @test occursin("name=\"FFTW\"", code) && !occursin("name=\"VRS\"", code)
             @test findfirst("Pkg.develop", code).start < findfirst("Pkg.add", code).start
         end
+    end
+    @testset "a rebuild re-creates each package the way it was added" begin
+        # A developed checkout is not in any registry: re-adding it by name fails the whole add, and
+        # every package the notebook added goes with it.
+        dev = mktempdir()
+        delta = [Dict{String,Any}("name" => "Dev", "version" => "0.3.0", "uuid" => "e4421f97-9838-4fd0-9fa5-94f11373bf78",
+                                  "source" => "path", "origin" => dev),
+                 Dict{String,Any}("name" => "Gone", "version" => "0.1.0", "uuid" => "f4c9f34b-fa6a-4506-9309-e8c0bac809fa",
+                                  "source" => "path", "origin" => joinpath(dev, "missing")),
+                 Dict{String,Any}("name" => "Git", "source" => "git", "origin" => "https://example.com/Git.jl#v1.2"),
+                 Dict{String,Any}("name" => "Reg", "version" => "2.1.0", "uuid" => "2edaba10-b0f1-5616-af89-8c11ac63239a")]
+        s = ReportEngine.readd_specs(delta)
+        @test s.devs == [(; name = "Dev", path = abspath(dev))]
+        @test s.skipped == ["Gone"]
+        @test (; url = "https://example.com/Git.jl", rev = "v1.2") in s.adds
+        @test (; name = "Reg", uuid = "2edaba10-b0f1-5616-af89-8c11ac63239a") in s.adds
+        @test (; name = "Reg", uuid = "2edaba10-b0f1-5616-af89-8c11ac63239a", version = "2.1.0") in
+              ReportEngine.readd_specs(delta; pinned = true).adds
+        # Symbol keys (a delta that crossed the gate) read the same.
+        @test ReportEngine.readd_specs([Dict(:name => "Reg")]).adds == [(; name = "Reg")]
+        code = ReportEngine.env_add_code(delta)
+        # Checkouts first, so a package that depends on one resolves against it.
+        @test occursin("; Pkg.develop([Pkg.PackageSpec(path=$(repr(abspath(dev))))]); Pkg.add([", code)
+        @test occursin("Pkg.PackageSpec(url=\"https://example.com/Git.jl\", rev=\"v1.2\")", code)
+        @test !occursin("Gone", code)
+        @test Meta.parse("begin" * replace(code, r"^; " => "\n") * "\nend") isa Expr
     end
 
     @testset "a named parent is reported, and the fork is not itself a package" begin

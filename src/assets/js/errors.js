@@ -80,6 +80,26 @@ function _applyMissingPkg(c) {
 }
 window._applyMissingPkg = _applyMissingPkg;
 
+// A precompile that failed because the worker holds packages whose compiled cache was since deleted
+// (capture.jl `_stale_cache_hint`): only a fresh process can build against the current caches, so the
+// banner offers the restart.
+const _STALE_CACHE_RE = /were loaded from compiled caches that have since been deleted/;
+function _applyStaleCache(c) {
+  const cellEl = c && document.querySelector('.cell[data-cid="' + c.id + '"]');
+  if (!cellEl) return;
+  const out = cellEl.querySelector('.output');
+  const existing = cellEl.querySelector(':scope > .pkgstale');
+  const hit = out && _STALE_CACHE_RE.test(out.textContent || '');
+  if (!hit) { if (existing) existing.remove(); return; }
+  if (existing) return;
+  const b = document.createElement('div');
+  b.className = 'pkgmissing pkgstale';
+  b.innerHTML = '<span class="pmicon">\u{1F4E6}</span><span class="pmtext">Compiled packages changed under this worker</span>' +
+    '<button class="pmadd" onclick="restartWorker()">Restart worker</button>';
+  cellEl.insertBefore(b, cellEl.firstChild);
+}
+window._applyStaleCache = _applyStaleCache;
+
 // The live install status from the worker log: the last few lines of Pkg's own output. Precompilation
 // prints a "✓ <pkg>" line as EACH package finishes (there's no in-progress line in a non-TTY log), so
 // a tail advances package-by-package instead of sitting on "Precompiling packages…".

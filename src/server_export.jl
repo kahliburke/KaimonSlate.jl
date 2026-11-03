@@ -2100,6 +2100,8 @@ end
 # ONCE into the page's `<script>` and run immediately (tables precede the script in the body).
 # The live page's image zoom (assets/js/imgzoom.js), carried as is: it brings its own styles.
 _imgzoom_js() = read(joinpath(@__DIR__, "assets", "js", "imgzoom.js"), String)
+# Copying typeset math as its LaTeX (assets/js/copymath.js), as on the live page.
+_copymath_js() = read(joinpath(@__DIR__, "assets", "js", "copymath.js"), String)
 
 const _EXPORT_TABLE_JS = raw"""(function(){
 function esc(s){s=String(s);return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;}
@@ -3251,6 +3253,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         print(io, "<script>")
         print(io, _EXPORT_TABLE_JS)   # hydrate every `.exp-table` → sortable/filterable/paged + CSV (no server)
         print(io, _imgzoom_js())      # zoom/pan + full-window view for figure images, as on the live page
+        print(io, _copymath_js())     # a copied formula gives its LaTeX source
         # …then let a `@replay`-marked table follow its control, using the hook each enhancer just
         # registered. Nothing is emitted for a notebook with no replayed table.
         isempty(tablemarks) || print(io, "var _slateTableMarks=", JSON.json(tablemarks), ";",
