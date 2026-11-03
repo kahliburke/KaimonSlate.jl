@@ -33,6 +33,9 @@ were written when they went out. They are marked.
 
 ### Fixed
 
+- Copying rendered math gives its LaTeX source, `$…$` inline and `$$…$$` for display, with a line
+  break between paragraphs, in the notebook and in exported pages. A selection that ends inside a
+  formula takes the whole formula.
 - A cell re-run by a fast reactive value (a live chart updating ten times a second) reads as fresh
   between updates instead of flashing running and stale on every one. A run or a stale state now shows
   only once it has lasted 140 ms; a batch of three or more cells still shows at once.
