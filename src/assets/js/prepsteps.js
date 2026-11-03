@@ -2,6 +2,7 @@
 // (regionprep.js) and the Remotes region panel, so a prepare reads the same in both places.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
+import { ago } from './workerbar.js';
 
 const STEP_MARK = { ok: '✓', warn: '⚠', fail: '✗' };
 
@@ -127,3 +128,39 @@ export function HistoryPane(name, key) {
 }
 // A history to read again from the start the next time the pane opens (a prepare just ended).
 export const forgetHistory = key => { const v = { ...hist.value }; delete v[key]; hist.value = v; };
+
+// The environments a test task has loaded on a machine or region: one line of counts that opens to a
+// table, newest first. `self` is the panel's own name, left out of the "by" column. Open or shut per
+// `key` across re-renders.
+const openEnvs = signal({});
+const ENV_MARK = { ready: '✓', changed: '⚠', fail: '✗' };
+const envState = t => t.status === 'fail' ? 'fail' : t.changed ? 'changed' : 'ready';
+const nodeOf = t => String(t.node_type || '').replace(/^\/|\/$/g, '');
+const cudaOf = t => t.cuda ? (String(t.cuda.functional).startsWith('true') ? 'ok' : 'not functional') : '';
+export function Environments(list, key, self = '') {
+  if (!list || !list.length) return null;
+  const rows = [...list].sort((a, b) => (+b.tested_at || 0) - (+a.tested_at || 0));
+  const n = { ready: 0, changed: 0, fail: 0 };
+  for (const t of rows) n[envState(t)]++;
+  const counts = [n.ready ? n.ready + ' ready' : '', n.changed ? n.changed + ' changed' : '', n.fail ? n.fail + ' failed' : '']
+    .filter(Boolean).join(' · ');
+  const open = !!openEnvs.value[key];
+  const flip = () => { openEnvs.value = { ...openEnvs.value, [key]: !open }; };
+  const showNode = rows.some(nodeOf), showBy = rows.some(t => t.by && t.by !== self), showCuda = rows.some(t => t.cuda);
+  return html`<div class="rpplog">
+    <button type="button" class="rpplogbtn" onClick=${flip}>${open ? '▾' : '▸'} Environments <span class="pddim">${counts}</span></button>
+    ${!open ? null : html`<div class="rppenvs"><table class="rppenvtab">
+      <thead><tr><th></th><th>project</th>${showNode ? html`<th>node</th>` : null}${showBy ? html`<th>by</th>` : null}
+        <th class="num">loads</th>${showCuda ? html`<th>CUDA</th>` : null}<th class="num">tested</th></tr></thead>
+      <tbody>${rows.map(t => { const s = envState(t); return html`<tr class=${s}
+          title=${s === 'changed' ? 'packages changed since this test' : s === 'fail' ? 'failed to load' : ''}>
+        <td class="rppenvmark">${ENV_MARK[s]}</td>
+        <td class="rppenvproj" title=${t.project || ''}>${String(t.project || '').split('/').pop()}</td>
+        ${showNode ? html`<td>${nodeOf(t) || 'default'}</td>` : null}
+        ${showBy ? html`<td>${t.by && t.by !== self ? t.by : ''}</td>` : null}
+        <td class="num">${t.load_s ? t.load_s + 's' : ''}</td>
+        ${showCuda ? html`<td>${cudaOf(t)}</td>` : null}
+        <td class="num">${t.tested_at ? ago(t.tested_at) : ''}</td></tr>`; })}</tbody>
+    </table></div>`}
+  </div>`;
+}

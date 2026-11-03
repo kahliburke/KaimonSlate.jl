@@ -6,7 +6,7 @@ import { html } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
 import { detail, focusHost, editRegion, pendingRegion, regions, parked, loadRegions, schedInfo, loadScheduler } from './stores.js';
 import { hostTransport } from './hoststore.js';
-import { StepList, Activity, History } from './prepsteps.js';
+import { StepList, Activity, History, Environments, hasWarnings } from './prepsteps.js';
 import { clusters } from './clusters.js';
 import { OptionsTable } from './optstable.js';
 // One answer to "is a node held" and "what is giving it back called", shared with the notebook's
@@ -110,18 +110,15 @@ function ReadinessRow(name) {
       <div class="rppprephead">${head}
         ${running ? null : prepWait.value[name] ? html`<button class="rppsysbtn" disabled>Starting…</button>`
           : html`<button class="rppsysbtn" title="set up the host, read the site, and on a scheduler region try a worker on a node" onClick=${() => startPrepare(name)}>${has ? 'Prepare again' : 'Prepare'}</button>`}</div>
-      ${(running || has) ? StepList(running ? d.preparing.steps : rec.steps, running ? d.preparing.now : 0, running ? d.preparing.last_output : 0) : null}
-      ${Activity(running ? d.preparing.log : (d && d.last_log), 'reg:' + name)}
-      ${History(name, 'reg:' + name)}
+      ${running ? StepList(d.preparing.steps, d.preparing.now, d.preparing.last_output) : null}
+      ${running ? Activity(d.preparing.log, 'reg:' + name) : null}
+      ${!running && hasWarnings(rec) ? StepList((rec.steps || []).filter(s => s.status === 'warn' || s.status === 'fail')) : null}
+      ${!running && (site.prepared_at || rec.liveness_grace_s) ? html`<div class="pddim">${[
+          site.prepared_at ? 'depot ' + (site.depot || '~/.julia') : '',
+          rec.liveness_grace_s ? 'liveness grace ' + rec.liveness_grace_s + 's' : ''].filter(Boolean).join(' · ')}</div>` : null}
       ${(!running && site.site_prologue) ? html`<div class="pddim">site prologue <code>${site.site_prologue}</code></div>` : null}
-      ${(!running && site.prepared_at) ? html`<div class="pddim">depot <code>${site.depot || '~/.julia'}</code></div>` : null}
-      ${(!running && rec.liveness_grace_s) ? html`<div class="pddim">liveness grace ${rec.liveness_grace_s}s</div>` : null}
-      ${(!running && rec.envs) ? Object.values(rec.envs).map(e => html`<div class="pddim">${[
-          'tested ' + String(e.project || '').split('/').slice(-2).join('/'),
-          e.by && e.by !== name ? 'by ' + e.by : '',
-          e.load_s ? 'loads in ' + e.load_s + 's' : '',
-          e.cuda ? 'CUDA ' + (String(e.cuda.functional).startsWith('true') ? 'ok' : 'not functional') : '',
-          ago(e.tested_at || e.prepared_at)].filter(Boolean).join(' · ')}${e.changed ? html` · <span class="rppsyswarn">packages changed since</span>` : null}</div>`) : null}
+      ${!running && rec.envs ? Environments(Object.values(rec.envs).map(e => ({ ...e, tested_at: e.tested_at || e.prepared_at })), 'reg:' + name, name) : null}
+      ${History(name, 'reg:' + name)}
     </div></div>`;
 }
 

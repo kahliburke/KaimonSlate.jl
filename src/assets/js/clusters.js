@@ -11,7 +11,7 @@ import { html } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
 import { schedInfo, loadScheduler } from './stores.js';
 import { sessions, openSessions } from './sessions.js';
-import { StepList, Activity, History } from './prepsteps.js';
+import { StepList, Activity, History, Environments } from './prepsteps.js';
 import { OptionsTable, optionsMap, optionRows } from './optstable.js';
 import { SchedUse } from './schedusage.js';
 
@@ -219,17 +219,10 @@ function MachineReadiness(name) {
         ${running ? null : html`<button class="rppsysbtn" onClick=${() => prepareMachine(name)}>${site.prepared_at ? 'Prepare again' : 'Prepare'}</button>`}</div>
       ${running ? StepList(p.steps, p.now, p.last_output) : null}
       ${running ? Activity(p.log, 'm:' + name) : null}
-      ${History(d.key, 'm:' + name)}
       ${site.prepared_at ? html`<div class="pddim">${[julia, 'depot ' + (d.depot || '~/.julia')].filter(Boolean).join(' · ')}</div>` : null}
       ${site.site_prologue ? html`<div class="pddim">site prologue <code>${site.site_prologue}</code></div>` : null}
-      ${(d.tests || []).map(t => html`<div class="pddim">${[
-          'tested ' + String(t.project || '').split('/').slice(-2).join('/'),
-          t.node_type && t.node_type !== '/' ? 'on ' + t.node_type.replace(/\/$/, '').replace(/^\//, '') : '',
-          t.by ? 'by ' + t.by : '',
-          t.status === 'fail' ? 'failed' : '',
-          t.load_s ? 'loads in ' + t.load_s + 's' : '',
-          t.cuda ? 'CUDA ' + (String(t.cuda.functional).startsWith('true') ? 'ok' : 'not functional') : '',
-          t.tested_at ? ago(t.tested_at) : ''].filter(Boolean).join(' · ')}${t.changed ? html` · <span class="rppsyswarn">packages changed since</span>` : null}</div>`)}
+      ${Environments(d.tests, 'm:' + name)}
+      ${History(d.key, 'm:' + name)}
     </div></div>`;
 }
 

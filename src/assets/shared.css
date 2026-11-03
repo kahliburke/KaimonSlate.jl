@@ -225,3 +225,15 @@ html.scroll-locked { overflow:hidden; scrollbar-gutter:stable; }
 .tm-acts .rppsysbtn:hover { border-color:var(--accent, #569cd6); }
 .tm-acts .rppsysbtn.danger, .tm-acts .rppreap { color:#e57575; border-color:#5a2a35; background:rgba(229,117,117,.08); }
 .tm-acts .rppsysbtn.danger:hover, .tm-acts .rppreap:hover { border-color:#e57575; background:rgba(229,117,117,.16); }
+/* The environments a machine or region has tested (prepsteps.js Environments). */
+.rppenvs{margin-top:4px;max-height:280px;overflow:auto;}
+.rppenvtab{border-collapse:collapse;font-size:.74rem;width:100%;}
+.rppenvtab th{text-align:left;font-weight:500;color:var(--dim,#6a7090);padding:1px 8px 3px 0;position:sticky;top:0;background:#141828;}
+.rppenvtab td{padding:1px 8px 1px 0;white-space:nowrap;color:#aab2cc;}
+.rppenvtab .num{text-align:right;font-variant-numeric:tabular-nums;}
+.rppenvtab .rppenvproj{max-width:260px;overflow:hidden;text-overflow:ellipsis;}
+.rppenvtab .rppenvmark{width:1.2em;}
+.rppenvtab tr.ready .rppenvmark{color:#7fc8a0;}
+.rppenvtab tr.changed .rppenvmark{color:#e0c070;}
+.rppenvtab tr.fail .rppenvmark{color:#e07a7a;}
+.rppenvtab tr.changed td:not(.rppenvmark){opacity:.7;}
