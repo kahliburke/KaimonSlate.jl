@@ -1992,12 +1992,35 @@ function __slate_fork(envdir, parent)
     end
 end
 
+"Re-create the notebook's own packages after a re-seed, each the way it was added (`readd_specs`,
+envprep.jl). Returns the names of local checkouts that are missing on this machine."
+function _readd!(delta; pinned::Bool = false, preserve = Pkg.PRESERVE_TIERED)
+    s = readd_specs(delta; pinned)
+    isempty(s.devs) || Pkg.develop([Pkg.PackageSpec(; d...) for d in s.devs]; preserve)
+    isempty(s.adds) || Pkg.add([Pkg.PackageSpec(; a...) for a in s.adds]; preserve)
+    return s.skipped
+end
+
+# The top-level files of an env dir (project, manifest, stamps), so a rebuild that fails part-way
+# can put the env back as it was instead of leaving the bare parent seed.
+_env_snapshot(dir) = Dict(f => read(joinpath(dir, f)) for f in readdir(dir) if isfile(joinpath(dir, f)))
+function _env_restore!(dir, saved)
+    for f in readdir(dir)
+        isfile(joinpath(dir, f)) && !haskey(saved, f) && rm(joinpath(dir, f); force = true)
+    end
+    for (f, bytes) in saved
+        write(joinpath(dir, f), bytes)
+    end
+end
+
 "Re-resolve a forked notebook env against the CURRENT parent (called when the parent's
 Manifest changed): re-seed from the parent, then re-add the notebook's own packages so the
-two stay one consistent environment. Returns `{ok, adds}`."
+two stay one consistent environment. On failure the env is restored as it was. Returns
+`{ok, adds, skipped}` or `{ok=false, message}`."
 function __slate_sync_parent(envdir, parent)
+    e = String(envdir); p = String(parent)
+    saved = _env_snapshot(e)
     try
-        e = String(envdir); p = String(parent)
         fdeps = Set{String}()
         fpf = joinpath(e, "Project.toml")
         isfile(fpf) && (fdeps = Set(keys(get(Pkg.TOML.parsefile(fpf), "deps", Dict{String,Any}()))))
@@ -2008,31 +2031,28 @@ function __slate_sync_parent(envdir, parent)
             pdeps = Set(keys(get(pt, "deps", Dict{String,Any}())))
             pname = string(get(pt, "name", ""))
         end
-        adds = sort(collect(setdiff(fdeps, pdeps, Set([pname, ""]))))   # the notebook's own packages
+        names = setdiff(fdeps, pdeps, Set([pname, ""]))   # the notebook's own packages
+        # How each was added (path / git / registry), read from the env before the re-seed replaces it.
+        info = Dict(d["name"] => d for d in __slate_project_deps())
+        own = [get(info, n, Dict{String,Any}("name" => n)) for n in sort(collect(names))]
         _seed_notebook_env!(e, p)
-        isempty(adds) || Pkg.add(adds; preserve = Pkg.PRESERVE_ALL)
-        return Dict{String,Any}("ok" => true, "adds" => adds)
-    catch e
-        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+        skipped = _readd!(own; preserve = Pkg.PRESERVE_ALL)
+        return Dict{String,Any}("ok" => true, "adds" => [d["name"] for d in own], "skipped" => skipped)
+    catch err
+        try; _env_restore!(e, saved); Pkg.activate(e); catch; end
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, err))
     end
 end
 
 "Reconstruct a notebook env from its `.jl` footer: seed from the parent, then add the
 notebook's own packages at the recorded versions. Called on open when the env dir is
-absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is a list of
-`{name, version, uuid}`. Returns `{ok, message}`."
+absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is the footer's
+`{name, version, uuid[, source, origin]}` records. Returns `{ok, skipped}` or `{ok=false, message}`."
 function __slate_reconstruct(envdir, parent, pkgs)
     try
         _seed_notebook_env!(String(envdir), String(parent))
-        specs = Pkg.PackageSpec[]
-        for p in pkgs
-            nm = String(get(p, "name", get(p, :name, "")))
-            isempty(nm) && continue
-            v = string(get(p, "version", get(p, :version, "")))
-            push!(specs, isempty(v) ? Pkg.PackageSpec(name = nm) : Pkg.PackageSpec(name = nm, version = VersionNumber(v)))
-        end
-        isempty(specs) || Pkg.add(specs)
-        return Dict{String,Any}("ok" => true)
+        skipped = _readd!(pkgs; pinned = true)
+        return Dict{String,Any}("ok" => true, "skipped" => skipped)
     catch e
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end

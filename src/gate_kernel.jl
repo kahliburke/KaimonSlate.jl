@@ -1756,33 +1756,48 @@ end
 # footer's pinned packages. Runs once, before the first eval.
 function _reconstruct_env!(k::GateKernel)
     isempty(k.pending) && return
-    try
-        _tool(k, "__slate_reconstruct",
-              Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent, "pkgs" => k.pending);
-              timeout = _pkg_op_timeout())
-        _write_parent_marker!(k)
-        empty!(k.pending)   # clear ONLY on success — a failed rebuild keeps `pending` so the next use retries
-    catch e
-        e isa InterruptException && rethrow()
-        @warn "KaimonSlate: notebook env reconstruction failed — keeping pending packages to retry" exception = (e, catch_backtrace())
-    end
+    r = _env_rebuild_tool(k, "__slate_reconstruct",
+                          Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent, "pkgs" => k.pending),
+                          _pkg_op_timeout(), "could not rebuild the notebook's packages")
+    r === nothing && return   # a failed rebuild keeps `pending`, so the next spawn retries
+    _write_parent_marker!(k)
+    empty!(k.pending)
     return
 end
 
 # Auto re-resolve a forked notebook env when its parent's Manifest has changed since we
 # seeded it (keeps the one-env invariant: parent updates flow in, notebook adds preserved).
+# The marker is written only on success, so a failed re-resolve (the worker restores the env) is
+# retried at the next spawn.
 function _maybe_sync_parent!(k::GateKernel)
     (isempty(k.parent) || _base_mode(k)) && return
     cur = _parent_manifest_hash(k.parent)
     isempty(cur) && return
     prev = try; isfile(_parent_marker_path(k)) ? read(_parent_marker_path(k), String) : ""; catch; ""; end
     cur == prev && return
-    try
-        _tool(k, "__slate_sync_parent", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent); timeout = _sync_parent_timeout())
-        _write_parent_marker!(k)
-    catch
-    end
+    r = _env_rebuild_tool(k, "__slate_sync_parent", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent),
+                          _sync_parent_timeout(), "could not re-resolve the notebook's packages against its project")
+    r === nothing || _write_parent_marker!(k)
     return
+end
+
+# Run an env rebuild on the worker and report what went wrong (hub log + boot banner): a failure,
+# or local checkouts it had to skip because their path is missing here. `nothing` on failure.
+function _env_rebuild_tool(k::GateKernel, tool::AbstractString, args, timeout, what::AbstractString)
+    note(msg) = (@warn "KaimonSlate: $msg" notebook = k.label; k.online === nothing || (try; k.online(msg); catch; end))
+    r = try
+        _tool(k, tool, args; timeout = timeout)
+    catch e
+        e isa InterruptException && rethrow()
+        note("$what: " * sprint(showerror, e)); return nothing
+    end
+    field(key, d) = r isa AbstractDict ? get(r, Symbol(key), get(r, key, d)) : d
+    if field("ok", false) !== true
+        note("$what: " * string(field("message", "no response from worker"))); return nothing
+    end
+    skipped = field("skipped", String[])
+    isempty(skipped) || note("local checkouts not found on this machine, so not added: " * join(skipped, ", "))
+    return r
 end
 
 function assign_bind!(k::GateKernel, report::Report, name::Symbol, value)

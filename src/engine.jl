@@ -582,14 +582,19 @@ function _render_env_footer(env)::String
     println(io, _ENV_MARK_OPEN, " · notebook packages (auto-maintained — manage via the package panel)")
     for p in env
         nm = get(p, "name", ""); isempty(nm) && continue
-        println(io, "#   ", nm, " ", get(p, "version", ""), " ", get(p, "uuid", ""))
+        print(io, "#   ", nm, " ", get(p, "version", ""), " ", get(p, "uuid", ""))
+        src = get(p, "source", ""); origin = get(p, "origin", "")
+        src in ("path", "git") && !isempty(origin) && print(io, " ", src, "=", origin)
+        println(io)
     end
     print(io, _ENV_MARK_CLOSE)
     return String(take!(io))
 end
 
-# Parse the footer's body lines (`#   <name> <version> <uuid>`) back into the sorted
-# Vector of dicts. Tolerant of missing version/uuid (older/edited footers).
+const _UUID_RE = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"i
+
+# Parse the footer's body lines (`#   <name> <version> <uuid> [path=<dir> | git=<url#rev>]`) back
+# into the sorted Vector of dicts. Tolerant of a missing version/uuid (older/edited footers).
 function _parse_env_footer(lines)::Vector{Dict{String,Any}}
     out = Dict{String,Any}[]
     inenv = false                                       # only read entries inside the Slate.env block
@@ -597,11 +602,24 @@ function _parse_env_footer(lines)::Vector{Dict{String,Any}}
         startswith(l, _ENV_MARK_OPEN) && (inenv = true; continue)
         inenv || continue                               # a different Slate.* block (e.g. config) → skip
         startswith(l, _ENV_MARK_CLOSE) && break
-        m = match(r"^#\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?\s*$", l)
+        m = match(r"^#\s+(.*?)\s*$", l)
         m === nothing && continue
-        push!(out, Dict{String,Any}("name" => m.captures[1],
-                                    "version" => something(m.captures[2], ""),
-                                    "uuid" => something(m.captures[3], "")))
+        body = m.captures[1]
+        src = ""; origin = ""
+        o = match(r"(?:^|\s)(path|git)=(.*)$", body)   # last: a path may contain spaces
+        if o !== nothing
+            src = o.captures[1]; origin = strip(o.captures[2])
+            body = o.offset == 1 ? "" : body[1:prevind(body, o.offset)]
+        end
+        toks = split(body)
+        isempty(toks) && continue
+        ver = ""; uu = ""
+        for t in toks[2:end]
+            occursin(_UUID_RE, t) ? (uu = String(t)) : (ver = String(t))
+        end
+        d = Dict{String,Any}("name" => String(toks[1]), "version" => ver, "uuid" => uu)
+        isempty(origin) || (d["source"] = src; d["origin"] = String(origin))
+        push!(out, d)
     end
     return sort(out; by = p -> p["name"])
 end

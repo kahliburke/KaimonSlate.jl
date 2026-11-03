@@ -263,6 +263,12 @@ end
 # when the worker can't run yet (a stale env would crash it at boot). Streams into the boot banner.
 function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; online = nothing,
                                 delta = Dict{String,Any}[])
+    skipped = ReportEngine.readd_specs(delta).skipped
+    if !isempty(skipped)
+        msg = "local checkouts not found on this machine, so not added: " * join(skipped, ", ")
+        @warn "KaimonSlate: $msg" envdir
+        online === nothing || (try; online(msg); catch; end)
+    end
     build = function ()
         pname = ReportEngine.seed_env_project!(envdir, parent)
         dev = isempty(pname) ? "" :
