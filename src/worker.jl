@@ -2975,11 +2975,16 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
     # key — proper mutual auth. Local + :ssh_tunnel workers leave them off (loopback / SSH-encrypted).
+    # The gate's event-driven request loop, where this KaimonGate has one: each reply goes out as
+    # soon as it is ready, which is what a cell run's sequence of requests waits on. Left to
+    # KAIMON_GATE_OWNER_WAKE when that is set, so it can still be switched off.
+    owner_wake = hasmethod(KaimonGate.serve, Tuple{}, (:owner_wake,)) && !haskey(ENV, "KAIMON_GATE_OWNER_WAKE") ?
+                 (; owner_wake = true) : (;)
     _blog("start(): entering KaimonGate.serve")
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
                      allow_restart = false, spawned_by = "slate",
-                     curve = curve, allowed_clients = allowed_clients)
+                     curve = curve, allowed_clients = allowed_clients, owner_wake...)
     _blog("start(): gate SERVING — port reachable (hub can dial now)")
     # DEFERRED (~5s): Revise/src-watcher setup is heavy compilation; running it now would contend for
     # the codegen lock with the hub's CURVE handshake in the first seconds after the port opens (the
