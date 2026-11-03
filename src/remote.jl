@@ -2821,6 +2821,85 @@ stop_sync_job!(host::AbstractString, job::AbstractString) =
 # `-e` + nested-ssh quoting silently mangles the program). Resolves the provisioned KaimonGate env
 # + worker payload via `homedir()` on the remote, includes the payload, and serves. For :direct it
 # serves CURVE and allow-lists ONLY the hub's client pubkey (mutual auth: hub pins the server key).
+# ── Dedicated worker threads on a host ──────────────────────────────────────────────────────────────
+# The remote counterpart of `_pools_env` (gate_kernel.jl): DedicatedThreads in an env of its own under
+# the host's Slate cache, which the worker appends to its LOAD_PATH. The package depends only on a
+# stdlib, so stacking it cannot skew the notebook env's versions the way a stacked KaimonGate env did.
+#
+# The worker decides for itself, by the env's `.ready` file, so a worker started after a hub restart
+# still finds an env built earlier. The hub only starts the build, once per host and source; a build
+# that is already done exits at once. A worker started before it is ready runs on Julia's built-in
+# pools, as a local one does. A local checkout is shipped first, and its content is part of the key,
+# so an edited checkout builds again.
+const _REMOTE_POOLS = Dict{String,Any}()   # "host|key" => :building | :ready | (; failed = time)
+const _REMOTE_POOLS_LOCK = ReentrantLock()
+
+function _remote_pools_spec()
+    src = String(strip(WORKER_POOLS_SOURCE[]))
+    src == "off" && return nothing
+    path = expanduser(src)
+    checkout = !isempty(src) && isdir(path) ? abspath(path) : ""
+    content = isempty(checkout) ? "" :
+        string(src_tree_digest([joinpath(checkout, "src")]), try; read(joinpath(checkout, "Project.toml"), String); catch; ""; end)
+    key = string(hash(("DedicatedThreads", src, content, string(VERSION))); base = 16)
+    return (; src, checkout, key, dir = "$_REMOTE_ROOT/pools-env/$key", srcdir = "$_REMOTE_ROOT/pools-src/$key")
+end
+
+# The line a worker script runs to pick up the pools env, or "" when pools are off.
+function _remote_pools_line()
+    p = _remote_pools_spec()
+    p === nothing && return ""
+    return "let d = joinpath(homedir(), raw\"$(p.dir)\"); isfile(joinpath(d, \".ready\")) && push!(LOAD_PATH, d); end   # dedicated worker threads, when built\n    "
+end
+
+"Start building the pools env on `host` unless it is built, building, or failed within `_POOLS_RETRY_S`."
+function _ensure_remote_pools!(host::AbstractString; setup::AbstractString = "")
+    p = _remote_pools_spec()
+    p === nothing && return nothing
+    id = string(host, '|', p.key)
+    go = lock(_REMOTE_POOLS_LOCK) do
+        st = get(_REMOTE_POOLS, id, nothing)
+        (st === nothing || (st isa NamedTuple && time() - st.failed > _POOLS_RETRY_S)) || return false
+        _REMOTE_POOLS[id] = :building
+        true
+    end
+    go && Threads.@spawn _build_remote_pools!(String(host), id, p; setup = String(setup))
+    return nothing
+end
+
+function _build_remote_pools!(host::String, id::String, p; setup::String = "")
+    ok = try
+        if !isempty(p.checkout)
+            _send_dir!(host, p.checkout, p.srcdir; excludes = [".git", "test", "docs", "Manifest.toml"]) ||
+                error("could not send $(p.checkout)")
+        end
+        spec = !isempty(p.checkout) ? "Pkg.develop(path = joinpath(homedir(), raw\"$(p.srcdir)\"))" :
+               isempty(p.src)       ? "Pkg.add(Pkg.PackageSpec(name = \"DedicatedThreads\", uuid = \"$(_POOLS_PKG_UUID)\"))" :
+                                      "Pkg.add(url = $(repr(p.src)))"
+        code = """
+        d = joinpath(homedir(), raw"$(p.dir)")
+        if !isfile(joinpath(d, ".ready"))
+            import Pkg
+            mkpath(d)
+            Pkg.activate(d)
+            $spec
+            Pkg.precompile()
+            write(joinpath(d, ".ready"), "")
+        end
+        """
+        first(_ssh_julia!(host, code, "dedicated worker threads on $host"; setup))
+    catch e
+        _rlog("dedicated worker threads on $host: $(sprint(showerror, e))")
+        false
+    end
+    lock(_REMOTE_POOLS_LOCK) do
+        _REMOTE_POOLS[id] = ok ? :ready : (; failed = time())
+    end
+    _rlog(ok ? "dedicated worker threads available on $host to new workers" :
+               "dedicated worker threads unavailable on $host; its workers use Julia's built-in pools")
+    return ok
+end
+
 function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, parent::String,
                                client_pub::String; warm_deps::Bool = false,
                                routed::Bool = via(t.ssh_host) !== nothing)
@@ -2853,7 +2932,7 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     cr = isempty(t.cache_root) ? "" : "ENV[\"KAIMONSLATE_CACHE_HOME\"] = expanduser(raw\"$(t.cache_root)\")\n    "
     return """
     _t0 = time(); _bt(m) = try; println("[slate-boot] +" * string(round(time() - _t0; digits = 1)) * "s " * m); flush(stdout); catch; end
-    $(dd)$(cr)    _bt("script start (unix=" * string(round(Int, time())) * ")")   # correlate with the hub's launch time
+    $(dd)$(cr)$(_remote_pools_line())_bt("script start (unix=" * string(round(Int, time())) * ")")   # correlate with the hub's launch time
     _bt("image=" * try; basename(unsafe_string(Base.JLOptions().image_file)); catch; "?"; end)   # confirm plain vs `-J` sysimage boot
     import KaimonGate
     _bt("KaimonGate loaded")
@@ -2940,6 +3019,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     v = isempty(t.job) ? via(host) : _allocation_route(t)
     (isempty(t.job) || v !== nothing) || error(_allocation_ended(t))
     hubkey = _hub_client_pubkey()
+    _ensure_remote_pools!(host; setup = t.setup)   # background; this worker uses them if already built
     script = _remote_worker_script(t, port, stream_port, t.project, hubkey; warm_deps = warm_deps,
                                    routed = v !== nothing)
 

@@ -82,6 +82,32 @@ end
         @test Meta.parseall(s) isa Expr
     end
 
+    @testset "a remote worker picks up dedicated threads once the host has built them" begin
+        was = RE.WORKER_POOLS_SOURCE[]
+        try
+            RE.WORKER_POOLS_SOURCE[] = "off"
+            @test !occursin("pools-env", RE._remote_worker_script(RE.RemoteTarget("h"), 9100, 9101, "/p", "PUB"))
+            RE.WORKER_POOLS_SOURCE[] = ""
+            s = RE._remote_worker_script(RE.RemoteTarget("h"), 9100, 9101, "/p", "PUB")
+            # Only a built env joins LOAD_PATH, and before the worker loads anything.
+            @test occursin("pools-env/", s) && occursin(".ready", s)
+            @test findfirst("pools-env/", s)[1] < findfirst("import KaimonGate", s)[1]
+            @test Meta.parseall(s) isa Expr
+            # A local checkout is part of the key, so editing it builds a new env.
+            mktempdir() do dir
+                mkpath(joinpath(dir, "src")); write(joinpath(dir, "Project.toml"), "name = \"DedicatedThreads\"\n")
+                write(joinpath(dir, "src", "DedicatedThreads.jl"), "module DedicatedThreads end\n")
+                RE.WORKER_POOLS_SOURCE[] = dir
+                k1 = RE._remote_pools_spec()
+                @test k1.checkout == abspath(dir)
+                write(joinpath(dir, "src", "DedicatedThreads.jl"), "module DedicatedThreads\nf() = 1\nend\n")
+                @test RE._remote_pools_spec().key != k1.key
+            end
+        finally
+            RE.WORKER_POOLS_SOURCE[] = was
+        end
+    end
+
     @testset "a locally spawned worker allow-lists the hub too" begin
         # Loopback is open to every account on a shared machine (a login node), so the local boot
         # line carries the same CURVE allow-list as a remote one.
