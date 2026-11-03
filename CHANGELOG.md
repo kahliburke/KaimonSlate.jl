@@ -24,6 +24,9 @@ were written when they went out. They are marked.
   `KAIMONSLATE_WORKER_POOLS`) can point it at a local checkout or git URL, or turn it `off`. Without
   it, the worker behaves as before.
 
+- Find in notebook (⌘F) matches cell names, so a cell can be found by its id. Replace does not
+  touch them.
+
 - The Files panel shows a markdown file rendered, the way a markdown cell is, with **✎ Source** to
   edit it. Images resolve from the file's own folder, and a link to another project file opens it in
   the panel.

@@ -119,9 +119,36 @@
     } catch (_) { return null; }
   }
 
+  // The matches in the text a reader sees in `root`, appended to `out` with the DOM range each one
+  // covers and the fields in `extra`. Returns how many were added; sets `capped` at the cap.
+  function scanRendered(root, id, sq, Text, out, extra) {
+    const { text, segs } = visibleText(root);
+    if (!segs.length) return 0;
+    let cursor, n = 0;
+    try { cursor = sq.getCursor(Text.of(text.split('\n'))); } catch (_) { return 0; }
+    for (let r = cursor.next(); !r.done; r = cursor.next()) {
+      const range = domRange(segs, r.value.from, r.value.to);
+      if (!range) continue;
+      out.push({ cellId: id, from: r.value.from, to: r.value.to, groups: r.value.match || [], range, ...extra });
+      n++;
+      if (out.length >= MAX_MATCHES) { capped = true; break; }
+    }
+    return n;
+  }
+
+  // The id shown in a cell's header, if it is on screen.
+  function idView(id) {
+    const cell = document.getElementById('cell-' + id);
+    const cid = cell && cell.querySelector(':scope > .cellhead .cid');
+    return cid && cid.offsetParent !== null ? cid : null;
+  }
+
   // Every match in the notebook, in document order. `getCursor` takes an EditorState or a Text, so a
   // mounted cell is scanned in place and only an unmounted one pays for a `Text`. The capture groups
   // ride along for `$1` expansion in a regex replacement.
+  //
+  // A cell's id in its header is searched too, ahead of the cell's contents, so a cell can be found
+  // by name. Not while replacing: that rewrites source, and must not offer to rename cells.
   function findAll() {
     capped = false;
     const sq = query();
@@ -129,23 +156,15 @@
     const Text = window.CM6.cmState.Text;
     const out = [];
     const rendered = effScope() === 'rendered';
+    const replacing = rRow && !rRow.hidden;
     for (const id of cellIds()) {
+      const head = replacing ? null : idView(id);
+      if (head) { scanRendered(head, id, sq, Text, out, { inId: true }); if (capped) return out; }
       let inSource = false;
       const disp = rendered ? renderedView(id) : null;
       if (disp) {
-        const { text, segs } = visibleText(disp);
-        let n = 0;
-        if (segs.length) {
-          let cursor;
-          try { cursor = sq.getCursor(Text.of(text.split('\n'))); } catch (_) { cursor = null; }
-          for (let r = cursor ? cursor.next() : { done: true }; !r.done; r = cursor.next()) {
-            const range = domRange(segs, r.value.from, r.value.to);
-            if (!range) continue;
-            out.push({ cellId: id, from: r.value.from, to: r.value.to, groups: r.value.match || [], range });
-            n++;
-            if (out.length >= MAX_MATCHES) { capped = true; return out; }
-          }
-        }
+        const n = scanRendered(disp, id, sq, Text, out, {});
+        if (capped) return out;
         if (n) continue;
         inSource = true;                          // nothing visible: what the source holds, flagged
       }
@@ -228,7 +247,8 @@
   // known, so it must not be printed as though it were.
   const total = () => matches.length + (capped ? '+' : '');
 
-  const where = () => (matches[cur] && matches[cur].inSource ? ' · in source' : '');
+  const where = () => (!matches[cur] ? '' : matches[cur].inSource ? ' · in source'
+                       : matches[cur].inId ? ' · cell name' : '');
 
   function report() {
     status(!input.value ? ''
@@ -239,16 +259,18 @@
   }
 
   // Recompute, keeping the current match if it survived the edit, else the first one at or after
-  // where it used to be. `keep` is the {cellId, from} to re-find.
+  // where it used to be. `keep` is the {cellId, from, inId} to re-find; a cell's id comes before
+  // its contents, whose offsets start from zero as well.
   function recompute(keep) {
     if (query() === false) { matches = []; cur = -1; clearPaint(); status('Bad pattern', true); return; }
     matches = findAll();
     cur = -1;
     if (keep && matches.length) {
       const order = cellIds();
-      const rank = m => [order.indexOf(m.cellId), m.from];
+      const rank = m => [order.indexOf(m.cellId), m.inId ? 0 : 1, m.from];
       const want = rank(keep);
-      cur = matches.findIndex(m => { const r = rank(m); return r[0] > want[0] || (r[0] === want[0] && r[1] >= want[1]); });
+      const after = r => r[0] !== want[0] ? r[0] > want[0] : r[1] !== want[1] ? r[1] > want[1] : r[2] >= want[2];
+      cur = matches.findIndex(m => after(rank(m)));
       if (cur < 0) cur = 0;
     }
     paint();
