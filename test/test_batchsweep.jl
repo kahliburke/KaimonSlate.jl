@@ -774,6 +774,9 @@ end
                                       "root_remote" => "/s")).mode == "0700"
         @test Sweep.cluster_args(Dict("kind" => "exec", "host" => "h", "root_remote" => "/s",
                                       "mode" => "0750")).mode == "0750"
+        # "umask" is how a stored entry says "follow the site", since a blank field is not stored.
+        @test Sweep.cluster_args(Dict("kind" => "exec", "host" => "h", "root_remote" => "/s",
+                                      "mode" => "umask")).mode == ""
         @test_throws ErrorException Sweep.cluster_args(
             Dict("kind" => "exec", "host" => "h", "root_remote" => "/s", "mode" => "rwx"))
         @test_throws ErrorException Sweep.cluster_args(

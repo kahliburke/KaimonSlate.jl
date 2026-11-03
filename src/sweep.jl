@@ -579,11 +579,12 @@ function cluster_args(spec::AbstractDict)
     procs = something(tryparse(Int, get_("procs", "0")), 0)
     # How private the store is on a machine you share. Private by default: a store holds results,
     # job output and the body's own source, and it lives on scratch where a home directory's
-    # permissions do not reach. "" follows the site's umask, for a store meant to be shared.
+    # permissions do not reach. "umask" (or "") follows the site's umask, for a store meant to be shared.
     mode = get_("mode", "0700")
+    mode == "umask" && (mode = "")
     isempty(mode) || occursin(r"^0?[0-7]{3}$", mode) ||
         error("cluster `$name` has mode `$mode`; use an octal directory mode such as \"0700\" " *
-              "(private) or \"0750\" (your group may read), or \"\" to follow the site's umask")
+              "(private) or \"0750\" (your group may read), or \"umask\" to follow the site's umask")
     root_remote = get_("root_remote")
     # A cluster reached over ssh has ONE store, and it is the cluster's — `root` is for a local run,
     # or for the unusual case of a store this notebook has mounted. Requiring both was a hangover

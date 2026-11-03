@@ -47,14 +47,14 @@ const kName = signal(''), kKind = signal('slurm'), kHost = signal(''), kRootRemo
       kCpus = signal(''), kMem = signal(''), kChunk = signal(''), kAccount = signal(''),
       kRoot = signal(''), kPrologue = signal(''), kNote = signal(''), kProcs = signal(''),
       kDepot = signal(''), kJulia = signal(''), kTestQos = signal(''), kCompile = signal('node'),
-      kTransfer = signal('');
+      kTransfer = signal(''), kMode = signal('0700');
 const kOpts = signal([]), kOptMenu = signal(-1);   // scheduler options, as the region form edits them
 // Every key the form above collects. The registry is deliberately schema-light — the fields a
 // scheduler wants are the scheduler's business — so anything NOT in here is carried through a save
 // untouched rather than dropped by an editor that has not heard of it.
 const FORM_KEYS = ['name', 'kind', 'host', 'root', 'root_remote', 'project', 'payload', 'partition',
                    'walltime', 'cpus', 'mem', 'chunk', 'account', 'prologue', 'note', 'procs',
-                   'depot', 'julia', 'test_qos', 'compile', 'options', 'directives', 'qos', 'transfer_host'];
+                   'depot', 'julia', 'test_qos', 'compile', 'options', 'directives', 'qos', 'transfer_host', 'mode'];
 
 export function loadClusters() {
   return fetch('/api/clusters').then(r => r.json())
@@ -80,6 +80,7 @@ function seed(c) {
   kPrologue.value = g('prologue'); kNote.value = g('note'); kProcs.value = g('procs');
   kDepot.value = g('depot'); kJulia.value = g('julia'); kTestQos.value = g('test_qos');
   kTransfer.value = g('transfer_host');
+  kMode.value = g('mode') || '0700';
   kCompile.value = g('compile') === 'login' ? 'login' : 'node';
   kOpts.value = optionRows(c && c.options); kOptMenu.value = -1;
   if (c && c.host) loadMachine(c.name);
@@ -122,6 +123,7 @@ function save() {
   put('prologue', kPrologue.value); put('note', kNote.value);
   put('depot', kDepot.value); put('julia', kJulia.value); put('test_qos', kTestQos.value);
   put('transfer_host', kTransfer.value);
+  if (kHost.value.trim() && kMode.value !== '0700') put('mode', kMode.value);
   if (!isExecKind(kKind.value)) put('compile', kCompile.value);
   const om = optionsMap(kOpts.value);
   if (Object.keys(om).length) body.options = om;
@@ -156,6 +158,19 @@ function Session() {
     ${st && st.connected ? html`<span class="pddim">✓ signed in to ${h}</span>`
                          : html`<span class="pddim">not signed in — only needed where keys are refused</span>`}
     <button class="rppmore" onClick=${() => openSessions()}>Sign in…</button></div>`;
+}
+
+// Who on the machine may read its store: the directory mode Slate gives it (`mode`, sweep.jl).
+// Private by default, since a store holds results, job output and the cells' own source. An entry
+// that names some other octal mode keeps it, shown as a choice of its own.
+const STORE_ACCESS = [['0700', 'Only me'], ['0750', 'My group can read'], ['umask', 'Site default']];
+function StoreAccess() {
+  const known = STORE_ACCESS.some(([v]) => v === kMode.value);
+  return html`<div class="rpprow"><label>Store access</label>
+    <select class="rpptr" value=${kMode.value} onChange=${ev => kMode.value = ev.target.value}>
+      ${STORE_ACCESS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+      ${known ? null : html`<option value=${kMode.value}>mode ${kMode.value}</option>`}
+    </select></div>`;
 }
 
 // What the named host actually reports, once it has been asked. Detection is a suggestion, not the
@@ -273,6 +288,7 @@ export function Clusters() {
           ${kHost.value.trim()
             ? html`<input class="rpproot" autocomplete="off" spellcheck="false" placeholder="/path/to/store  (on THAT machine)" value=${kRootRemote.value} onInput=${ev => kRootRemote.value = ev.target.value}/>`
             : html`<input class="rpproot" autocomplete="off" spellcheck="false" placeholder="/path/to/store  (on THIS machine)" value=${kRoot.value} onInput=${ev => kRoot.value = ev.target.value}/>`}</div>
+        ${kHost.value.trim() ? StoreAccess() : null}
         ${/* With no scheduler there is nothing else deciding how much of the machine a sweep takes.
               Each task is a whole Julia loading the project, so this is a memory question rather than
               a core-count one — hence a default well under the core count, overridable here. */ null}
@@ -290,6 +306,7 @@ export function Clusters() {
         <div class="rpprow"><label>Store</label>
           <input class="rpproot" autocomplete="off" spellcheck="false" placeholder="/scratch/…  (a path ON the cluster)" value=${kRootRemote.value} onInput=${ev => kRootRemote.value = ev.target.value}/></div>
         <div class="rpprow"><label></label><span class="pddim">Use scratch, not $HOME.</span></div>
+        ${StoreAccess()}
         <div class="rpprow"><label>Partition</label>${Partitions()}</div>
         <div class="rpprow"><label>Per job</label>
       <div class="rppfields">
