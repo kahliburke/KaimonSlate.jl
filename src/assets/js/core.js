@@ -1102,6 +1102,29 @@ window.slateSplit = function (bar, pane, opts) {
   });
 };
 
+// ── A panel that keeps its wheel ─────────────────────────────────────────────────────────────
+// A docked panel sits beside or over the cells, and a wheel over it is meant for it. Whatever inside
+// it can still scroll that way takes the wheel as usual; once nothing can (a list at its end, or a
+// header that never scrolls), the wheel stops at the panel instead of moving the notebook.
+// Ctrl+wheel is the browser's zoom and passes through.
+window.slateOwnWheel = function (el) {
+  const can = (n, cs, d, axis) => {
+    if (!d || !/(auto|scroll)/.test(axis === 'y' ? cs.overflowY : cs.overflowX)) return false;
+    const [pos, size, view] = axis === 'y' ? [n.scrollTop, n.scrollHeight, n.clientHeight]
+                                           : [n.scrollLeft, n.scrollWidth, n.clientWidth];
+    return size > view && (d < 0 ? pos > 0 : pos + view < size - 1);
+  };
+  el.addEventListener('wheel', e => {
+    if (e.ctrlKey) return;
+    for (let n = e.target; n && n.nodeType === 1; n = n.parentNode) {
+      const cs = getComputedStyle(n);
+      if (can(n, cs, e.deltaY, 'y') || can(n, cs, e.deltaX, 'x')) return;
+      if (n === el) break;
+    }
+    e.preventDefault();
+  }, { passive: false });
+};
+
 window.slateSetBind = slateSetBind;
 
 // The current value of a control, for an extension seeding its own widget on first render.

@@ -54,6 +54,8 @@ function _apGripDown(e) {
 function _apGripReset() { localStorage.removeItem('slateAgentW'); _publishAgentWidth(); }
 { const g = document.getElementById('apgrip');   // this script loads after the panel's markup
   if (g) { g.addEventListener('pointerdown', _apGripDown); g.addEventListener('dblclick', _apGripReset); } }
+// A wheel over the panel scrolls the conversation, never the cells beside it.
+{ const p = document.getElementById('agentpanel'); p && window.slateOwnWheel(p); }
 // Full screen / restore: the whole window below the menu bar, for reading long replies.
 function toggleAgentMax() {
   const max = document.getElementById('agentpanel').classList.toggle('maximized');

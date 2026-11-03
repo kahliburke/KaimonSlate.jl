@@ -10,10 +10,6 @@ let _wpSide = null;
 const _wpProv = {};               // side → {origin, spawned} from the log route, for the open dock
 let _wpTab = localStorage.getItem('slateWorkerDockTab') === 'log' ? 'log' : 'tel';   // the dock's open tab
 let _wpWorkers = [];              // the model's workers for this notebook, as last painted
-// A small line chart, drawn in the text colour.
-const _WP_TEL_ICON = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M1.5 13.5h13" ' +
-  'stroke="currentColor" stroke-width="1.2" fill="none" opacity=".5"/><path d="M2 11l3.5-4 3 2.5L14 3.5" stroke="currentColor" ' +
-  'stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 // The record the open dock draws: the worker's facts, and what the log route added about it.
 const _wpCurrent = () => _wpSide === null ? null
   : Object.assign({ side: _wpSide }, _wpProv[_wpSide] || {}, window.slateModel.getWorker(_wpSide) || {});
@@ -96,7 +92,7 @@ function _wpShowTelemetry() {
   open({ nb: (window.__slateState || {}).id, side, mount: box,
          host: r.host && r.host !== 'local' ? r.host : '', port: r.port, label: _wpLabel(side, r.host) });
 }
-// The meters, and a row's chart button in the pill's list: the dock on that worker, at its telemetry.
+// The meters: the dock on that worker, at its telemetry.
 window.wpOpenTelemetry = function (side) {
   _wpTab = 'tel';
   const dock = document.getElementById('workerdock');
@@ -242,9 +238,7 @@ function _wpPaintStrip(ws) {
   const rows = ranked.map(w => {
     const f = _wpFace(w);
     return '<div class="wpill-menuitem" data-side="' + _wpEsc(w.side || '') + '">' + _wpOverflowDot(w) + ' ' +
-      _wpEsc(_wpLabel(w.side || '', w.host)) + (f ? ' <span class="wpmi-face">' + _wpEsc(f) + '</span>' : '') +
-      (w.state === 'none' ? '' : '<button class="wpmi-tel" data-tel-side="' + _wpEsc(w.side || '') +
-                                 '" title="Telemetry" aria-label="Telemetry">' + _WP_TEL_ICON + '</button>') + '</div>';
+      _wpEsc(_wpLabel(w.side || '', w.host)) + (f ? ' <span class="wpmi-face">' + _wpEsc(f) + '</span>' : '') + '</div>';
   }).join('');
   // Fixed single slot: the pill reserves a min-width so it doesn't jump as the top worker changes, and the
   // LABEL elides (CSS ellipsis) if a region name is long — icon/stat/caret stay put.
@@ -480,7 +474,9 @@ function toggleWorkerDock(side, ev) {
 }
 
 // The top edge: drag to resize, persisted. The page's reserved height follows through --wdockh.
+// A wheel over the dock scrolls the dock, never the cells behind it.
 (() => {
+  const dock = document.getElementById('workerdock'); dock && window.slateOwnWheel(dock);
   const grip = document.getElementById('wdock-grip'); if (!grip) return;
   try { const h = localStorage.getItem('slateWorkerDockH'); if (h) document.body.style.setProperty('--wdockh', h); } catch (_) {}
   const move = e => {
@@ -581,11 +577,6 @@ document.addEventListener('click', e => {
   const dtab = e.target.closest('#workerdock [data-wdtab]');
   // The open tab again: the log keeps its place, the telemetry view (which a profiled run closes) reopens.
   if (dtab) { if (dtab.dataset.wdtab !== _wpTab || _wpTab === 'tel') { _wpTab = dtab.dataset.wdtab; _wpPaintTab(); } return; }
-  const tel = e.target.closest('#workerpills .wpmi-tel[data-tel-side]');
-  if (tel) {                                                    // a row's chart button → the dock at its telemetry
-    _wpCloseMenu(); window.wpOpenTelemetry(tel.getAttribute('data-tel-side'));
-    e.stopPropagation(); return;
-  }
   const row = e.target.closest('#workerpills .wpill-menuitem[data-side]');
   if (row) { _wpCloseMenu(); openWorkerDock(row.getAttribute('data-side')); e.stopPropagation(); return; }
   const top = e.target.closest('#workerpills .wpill-top');
