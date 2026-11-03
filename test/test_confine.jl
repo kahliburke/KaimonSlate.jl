@@ -23,8 +23,9 @@ const RE = KaimonSlate.ReportEngine
             @test k.project in c.exec                                 # its project is written to
             env = Dict(split(kv, '='; limit = 2) for kv in c.env)
             @test !haskey(env, "CLAUDE_CODE_OAUTH_TOKEN") && env["KAIMON_SESSION_LABEL"] == "nb.jl"
-            depot = first(split(env["JULIA_DEPOT_PATH"], ':'))
-            @test isdir(depot) && depot in c.exec                     # a depot of its own, first
+            depots = split(env["JULIA_DEPOT_PATH"], ':')
+            @test isdir(depots[1]) && depots[1] in c.exec             # a depot of its own, first
+            @test all(in(depots), DEPOT_PATH)                         # then the host's, where its packages are
         else
             @test c === cmd
         end

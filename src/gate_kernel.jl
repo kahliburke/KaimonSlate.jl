@@ -871,8 +871,8 @@ function _confined_worker(cmd::Cmd, k::GateKernel)
     (isempty(launcher) || isempty(policy) || !Sys.islinux()) && return cmd
     root = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "confined")
     depot, cache, tmp = mkpath(joinpath(root, "depot")), mkpath(joinpath(root, "cache")), mkpath(joinpath(root, "tmp"))
-    depots = get(ENV, "JULIA_DEPOT_PATH", "")
-    cmd = addenv(cmd, "JULIA_DEPOT_PATH" => depot * ":" * depots,   # an empty last entry stands for the default ones
+    # This process's depots in full: an empty entry would stand for the bundled ones only, without the user's.
+    cmd = addenv(cmd, "JULIA_DEPOT_PATH" => join(unique([depot; DEPOT_PATH]), ':'),
                  "KAIMONSLATE_CACHE_HOME" => cache, "TMPDIR" => tmp)
     args = [launcher, "--policy", policy]
     for w in filter(!isempty, [k.nbdir, k.project, depot, cache, tmp])
