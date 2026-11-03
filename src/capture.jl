@@ -875,6 +875,27 @@ _ctx_save_asset(name, data; mime = "", dtype = nothing) =
     haskey(task_local_storage(), :slate_assets) ?
         string(_save_asset(name, data; mime = mime, dtype = dtype)) : nothing
 
+# A package is precompiled against the copies of its dependencies this process has already loaded.
+# Julia keeps a bounded number of compiled caches per package, so when other environments recompile a
+# loaded dependency, the cache file it was loaded from can be deleted. Nothing built on it can be
+# precompiled in this process after that, and the cause is only in the precompile subprocess's own
+# output. A precompile failure therefore names the loaded packages whose cache file is gone.
+const STALE_CACHE_NOTE = "were loaded from compiled caches that have since been deleted"
+function _stale_cache_hint(msg::AbstractString)
+    occursin("Failed to precompile", msg) || return ""
+    gone = String[]
+    try
+        for (id, o) in Base.pkgorigins
+            cp = o.cachepath
+            cp === nothing || isfile(cp) || push!(gone, id.name)
+        end
+    catch
+    end
+    isempty(gone) && return ""
+    return "\n\n" * join(sort!(gone), ", ") * " " * STALE_CACHE_NOTE *
+           ", so packages that depend on them cannot be precompiled in this session. Restart the worker."
+end
+
 function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";
                      capture::OutputCapture = RedirectCapture(), slate_ctx = nothing)
     chunks = Tuple{String,Vector{UInt8}}[]
@@ -1061,6 +1082,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # REAL error: UndefVarError, DomainError, …). Parse errors arrive as `ParseError` directly.
     realerr = err isa LoadError ? err.error : err
     exc = realerr === nothing ? nothing : sprint(showerror, realerr)
+    exc === nothing || (exc *= _stale_cache_hint(exc))
     # Trim our eval machinery (the `Core.eval`/`_eval_cell_source` + capture/gate frames below it)
     # from the backtrace — user/package frames sit above it — so the trace shows where the error
     # actually is. `Core.eval` appears as `:eval` in boot.jl.

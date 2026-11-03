@@ -586,6 +586,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     if (!_conflicted && !_stale && out && c.output !== last.current.out) { window.slateRevMark && window.slateRevMark(c); last.current.out = c.output; window._swapOutput(out, c.output, c.live, () => { window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); window.mountPicks && window.mountPicks(c, el); }); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     window._applyMissingPkg && window._applyMissingPkg(c);   // "Package X not found" → one-click install banner
+    window._applyStaleCache && window._applyStaleCache(c);   // deleted compiled cache → restart banner
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell
     // objects). Without this, every such re-render re-ran setOption on EVERY chart in the notebook
