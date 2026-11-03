@@ -50,7 +50,7 @@ function open(p) {
 
 // Pushed by the hub when an explicit run meets the wait (panels.js dispatch).
 window.onRegionPrep = p => open(p);
-// A sweep card's Prepare (sweep.jl `_prepare_html`): test this notebook's environment on the machine
+// A held sweep card's "testing" line (sweep.jl): test this notebook's environment on the machine
 // its job cell names. Progress is kept under the machine's batch key, as the server folds it.
 window.slatePrepareBatch = (machine, el) => {
   const cell = el && el.closest ? (el.closest('[data-cid]') || {}).dataset : null;

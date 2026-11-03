@@ -2168,7 +2168,7 @@ function _make_router(h::Hub)
         _json(Dict("ok" => true, "options" => isempty(cid) ? all : get(all, cid, Dict{String,String}())))
     end))
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _refresh_extensions_for_page!(nb); _json(state_json(nb)))))
-    # A worker's log tail + status for the topbar worker/region status popup. `?side=` selects the
+    # A worker's log tail + status for the worker dock. `?side=` selects the
     # worker (""=main, else a region); local reads the log file, remote ssh-tails it. Polled while open.
     HTTP.register!(router, "POST", "/api/{id}/worker-log-io", req -> _withnb(h, req, nb -> begin
         b = _body(req)

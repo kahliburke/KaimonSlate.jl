@@ -527,7 +527,7 @@ function showOptMenu(row, inp) {
           '</select>'
         : '<div class="swcfg-empty">No machines defined yet.</div>') +
       `<div class="swcfg-summary">${esc(clusterSummary(sel)) || (cur ? 'not defined on this machine' : 'the cell must name a target itself')}</div>` +
-      '<div class="swcfg-note">Set up on the front page: <strong>🖧 Remotes → Clusters</strong>.</div>';
+      '<div class="swcfg-note">Set up on the front page: <strong>🖧 Remotes → ⎈ Machines</strong>.</div>';
 
     // The scheduler options, as a list of pairs. One empty row is always kept at the end so adding
     // the next one is just typing — no button to find first.

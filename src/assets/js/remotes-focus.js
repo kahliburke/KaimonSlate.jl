@@ -299,7 +299,7 @@ function Editor() {
     <div class="rpprow"><label>Transport</label>
       <select class="rpptr" value=${fTr.value} onChange=${ev => fTr.value = ev.target.value}><option value="tunnel">tunnel</option><option value="direct">direct</option></select>
       ${fTr.value === 'direct' ? html`<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" value=${fPort.value} onInput=${ev => fPort.value = ev.target.value}/>` : null}</div>
-    <div class="rpprow"><label>Sysimage</label><label class="rppchk"><input type="checkbox" checked=${fSys.value} onChange=${ev => fSys.value = ev.target.checked}/><span>Use worker sysimage <span class="pddim">faster worker boot — built & kept fresh in the background; needs a C compiler + free RAM on the host</span></span></label></div>
+    <div class="rpprow"><label>Sysimage</label><label class="rppchk"><input type="checkbox" checked=${fSys.value} onChange=${ev => fSys.value = ev.target.checked}/><span>Use worker sysimage <span class="pddim">faster worker boot — built when the region is prepared; needs a C compiler + free RAM on the host</span></span></label></div>
     <div class="rpprow rppsysrow"><label></label><div class="rppsysbox">${sysNote(editing ? e.name : '', fSys.value, editing)}</div></div>
     <div class="rppact"><button class="rppsavereg" title=${fSched.value === 'none' ? 'save this region and reconcile toward its warm count' : 'save this region — its node is requested when a cell needs one'} onClick=${saveRegion}>${editing ? 'Save' : 'Create'}</button></div>
     ${ReadinessRow(editing ? e.name : '')}
