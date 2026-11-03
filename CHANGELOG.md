@@ -24,6 +24,12 @@ were written when they went out. They are marked.
   `KAIMONSLATE_WORKER_POOLS`) can point it at a local checkout or git URL, or turn it `off`. Without
   it, the worker behaves as before.
 
+- A notebook's worker serves its gate with KaimonGate's event-driven request loop, so each reply
+  goes out as soon as it is ready. A cell run, a control change and a completion are sequences of
+  requests, and each request now takes a fraction of a millisecond instead of several. Needs
+  KaimonGate 1.6; with an older one the worker serves as before. `KAIMON_GATE_OWNER_WAKE=0` turns
+  it off.
+
 - Find in notebook (⌘F) matches cell names, so a cell can be found by its id. Replace does not
   touch them.
 
