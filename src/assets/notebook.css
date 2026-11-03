@@ -164,12 +164,11 @@ body.fullwidth .page { max-width:none; }   /* Full page width overrides the colu
    dragged the column hard against the dock. On a wide monitor there is slack to swallow and the
    column visibly left the centre; on a narrow one there was none, which is why this never showed.
    Now it holds still until the dock would actually reach it, then gives way. */
-body.agent-open .page { margin-right:max(392px, calc((100% - var(--page-max, 980px)) / 2)); }
+body.agent-open .page { margin-right:max(calc(var(--agentw, 380px) + 12px), calc((100% - var(--page-max, 980px)) / 2)); }
 /* The TOC drawer mirrors the agent panel but on the LEFT: shift the notebook column right so the
    outline and the cells never overlap (fixed 300px drawer). Falls back to overlay when narrow.
-   312 is the drawer's 300 plus the same 12px clearance the agent side reserves (392 for a 380
-   panel) — the MINIMUMS match, though with slack to hold still in, the narrower drawer naturally
-   leaves the wider gap. The reorder rail needs nothing extra: it lives inside `.page`'s own 20px
+   312 is the drawer's 300 plus the same 12px clearance the agent side reserves past its panel's
+   width (`--agentw`, which the panel's edge drags). The reorder rail needs nothing extra: it lives inside `.page`'s own 20px
    padding, which is there whether a drawer is open or not, and reserving room for it here as well
    made this gap read as three times the one opposite. */
 body.toc-open .page { margin-left:max(312px, calc((100% - var(--page-max, 980px)) / 2)); }
@@ -180,8 +179,8 @@ body.toc-open .page { margin-left:max(312px, calc((100% - var(--page-max, 980px)
    every spare pixel to the right — so on a wide window the cells sat against the TOC. The slack
    term is clamped at zero, which is the full-width case and the narrow one, where there is none. */
 body.toc-open.agent-open .page {
-  margin-left:calc(312px + max(0px, (100% - 312px - 392px - var(--page-max, 980px)) / 2));
-  margin-right:392px;
+  margin-left:calc(312px + max(0px, (100% - 312px - var(--agentw, 380px) - 12px - var(--page-max, 980px)) / 2));
+  margin-right:calc(var(--agentw, 380px) + 12px);
 }
 /* Narrow: a drawer stops pushing and OVERLAYS the column, so there is nothing to reserve — and the
    margin the reorder rail sits in is underneath the TOC, so it stands down here and only here.
@@ -194,7 +193,7 @@ body.toc-open.agent-open .page {
 }
 /* Full width has no slack by definition — the column always runs up to the dock — and `--page-max`
    is not its width there, so the centring term above would be meaningless. Reserve outright. */
-body.fullwidth.agent-open .page { margin-right:392px; }
+body.fullwidth.agent-open .page { margin-right:calc(var(--agentw, 380px) + 12px); }
 body.fullwidth.toc-open .page { margin-left:312px; }
 /* Banner while a self-contained notebook's env reconstructs in the background; the cells below
    show the embedded frozen render until live cells are pushed in. */
@@ -1779,14 +1778,22 @@ input.toggle:checked::after { left:18px; }
   /* End 68px above the viewport bottom so the panel clears the bottom-right docs launcher (≈51px
      tall incl. its margin) instead of overlapping it. */
   height:calc(100vh - var(--agent-top, calc(var(--topbar-h, 49px) + var(--page-pad))) - 68px);
-  width:380px; max-width:92vw; background:var(--bg2);
+  width:var(--agentw, 380px); max-width:92vw; background:var(--bg2);
   border:1px solid var(--border); border-right:none; border-radius:14px 0 0 14px;
   transform:translateX(100%); transition:transform .18s ease; overflow:hidden;
   z-index:25; display:flex; flex-direction:column; }
 .agentpanel.open { transform:none; box-shadow:-8px 0 24px rgba(0,0,0,.35); }   /* shadow only when open (see .palette) */
-/* Maximized: a wide, near-full-height view for reading detailed replies (⛶). */
-.agentpanel.maximized { width:min(1080px, 94vw); top:calc(var(--topbar-h, 49px) + 6px);
-  height:calc(100vh - var(--topbar-h, 49px) - 12px); border-radius:14px 0 0 14px; }
+/* Full screen (⛶): the whole window below the menu bar, for reading long replies. The conversation
+   and the message box keep a readable line length in the middle of it. */
+.agentpanel.maximized { width:100vw; max-width:none; top:var(--topbar-h, 49px);
+  height:calc(100vh - var(--topbar-h, 49px)); border-radius:0; border-left:none; }
+.agentpanel.maximized .apmsgs, .agentpanel.maximized .apinput { padding-inline:max(18px, calc((100% - 920px) / 2)); }
+.agentpanel.maximized .apgrip { display:none; }
+/* The left edge, dragged to set the docked width (agent.js). */
+.apgrip { position:absolute; left:0; top:14px; bottom:14px; width:7px; cursor:ew-resize; z-index:2; touch-action:none; }
+.apgrip:hover, body.apresizing .apgrip { background:color-mix(in srgb, var(--accent) 35%, transparent); }
+body.apresizing { cursor:ew-resize; user-select:none; }
+body.apresizing iframe { pointer-events:none; }
 .aphead { display:flex; align-items:center; gap:8px; padding:16px 18px; border-bottom:1px solid var(--border); }
 .aphead strong { color:var(--strong); }
 .apmsgs { flex:1; overflow:auto; padding:16px 18px; display:flex; flex-direction:column; gap:10px; }

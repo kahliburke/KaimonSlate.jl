@@ -263,13 +263,14 @@
   <div class="pfoot hint">Browse &amp; edit the notebook's project files — source, config, and the .js/.css/media it uses. Save (⌘S) writes to disk; Revise reloads code and restales the cells that use it. Right-click for new/rename/duplicate/delete; drop files onto a folder to add them; ⌘F searches the open file.</div>
 </aside>
 <aside id="agentpanel" class="agentpanel">
+  <div id="apgrip" class="apgrip" title="drag to resize · double-click for the default width"></div>
   <div class="aphead"><strong>🤖 Agent</strong><span id="apstatus" class="hint"></span>
     <button id="thinkbtn" onclick="toggleThink()" title="show/hide the agent's thinking" style="margin-left:auto">💭</button>
     <button onclick="clearChat()" title="clear chat history" style="margin-left:6px">🧹</button>
     <!-- Model and permissions are settings, but they are read from HERE — so the panel that raises
          the question carries the way to answer it, opened straight onto its own section. -->
     <button onclick="openSettings('global', 'Agent')" title="Agent settings — model and permissions" style="margin-left:6px">⚙</button>
-    <button id="apmaxbtn" onclick="toggleAgentMax()" title="maximize / restore the panel" style="margin-left:6px">⛶</button>
+    <button id="apmaxbtn" onclick="toggleAgentMax()" title="full screen" style="margin-left:6px">⛶</button>
     <button class="pclose" onclick="toggleAgent()" title="close" style="margin-left:6px">✕</button></div>
   <div id="apmsgs" class="apmsgs"></div>
   <div class="apinput">

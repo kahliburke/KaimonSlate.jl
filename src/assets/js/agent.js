@@ -24,19 +24,41 @@ function toggleAgent() {
   _publishAgentWidth();
   if (open) { document.getElementById('apin').focus(); apAutoGrow(); setWorking(agentWorking); }
 }
-// The panel's real width, as a CSS variable on <body>. Read from the element rather than assumed,
-// so maximizing (or a narrow viewport clamping it) moves everything that sits clear of it.
+// The docked panel's width, as `--agentw` on <body>: the panel takes it, and the notebook column,
+// the ask card and the profiler and debugger overlays keep clear of it. Dragged by the panel's left
+// edge and kept as a preference. Full screen covers the window without changing it, so restoring
+// puts everything back where it was.
+const AP_DEFAULT_W = 380, AP_MIN_W = 320, AP_MIN_COLUMN = 480;
+const _apClamp = w => Math.round(Math.max(AP_MIN_W, Math.min(w, window.innerWidth - AP_MIN_COLUMN)));
 function _publishAgentWidth() {
-  const p = document.getElementById('agentpanel'); if (!p) return;
-  document.body.style.setProperty('--agentw', Math.round(p.getBoundingClientRect().width) + 'px');
+  const saved = +localStorage.getItem('slateAgentW') || AP_DEFAULT_W;
+  document.body.style.setProperty('--agentw', _apClamp(saved) + 'px');
 }
 window.addEventListener('resize', _publishAgentWidth);
-// Maximize / restore the agent panel — a wide near-fullscreen view for reading detailed replies.
+_publishAgentWidth();
+function _apGripDown(e) {
+  const p = document.getElementById('agentpanel');
+  if (!p || p.classList.contains('maximized') || e.button !== 0) return;
+  e.preventDefault();
+  const grip = e.currentTarget; grip.setPointerCapture(e.pointerId);
+  document.body.classList.add('apresizing');
+  const move = ev => document.body.style.setProperty('--agentw', _apClamp(window.innerWidth - ev.clientX) + 'px');
+  const up = ev => {
+    grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up);
+    document.body.classList.remove('apresizing');
+    localStorage.setItem('slateAgentW', String(_apClamp(window.innerWidth - ev.clientX)));
+  };
+  grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up);
+}
+// Double-click the edge: back to the default width.
+function _apGripReset() { localStorage.removeItem('slateAgentW'); _publishAgentWidth(); }
+{ const g = document.getElementById('apgrip');   // this script loads after the panel's markup
+  if (g) { g.addEventListener('pointerdown', _apGripDown); g.addEventListener('dblclick', _apGripReset); } }
+// Full screen / restore: the whole window below the menu bar, for reading long replies.
 function toggleAgentMax() {
   const max = document.getElementById('agentpanel').classList.toggle('maximized');
   const b = document.getElementById('apmaxbtn');
-  if (b) { b.textContent = max ? '🗗' : '⛶'; b.title = max ? 'restore the panel' : 'maximize the panel'; }
-  _publishAgentWidth();
+  if (b) { b.textContent = max ? '🗗' : '⛶'; b.title = max ? 'restore the panel' : 'full screen'; }
 }
 window.toggleAgentMax = toggleAgentMax;
 // Show/hide the agent's streamed thinking (.apmsg.think) — a persisted view preference.
