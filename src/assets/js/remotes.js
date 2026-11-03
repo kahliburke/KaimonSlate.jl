@@ -145,9 +145,9 @@ function Modal() {
   // A fixed header over a scrolling body: the tabs and ✕ stay put however long a tab's content runs.
   return html`<div class=${'modal remotesmodal' + (focused ? ' focusmode' : t === 'clusters' ? ' widemode' : '')}>
     <div class="rthead">
-      <div class="rttabs">
-        ${TABS.map(([k, label, title]) => html`<button class=${'rttab' + (t === k ? ' on' : '')} title=${title}
-          onClick=${() => tab.value = k}>${label}${k === 'clusters' && clusters.value.length ? html` <span class="rttabn">${clusters.value.length}</span>` : null}</button>`)}
+      <div class="slate-tabs">
+        ${TABS.map(([k, label, title]) => html`<button class=${t === k ? 'on' : ''} title=${title}
+          onClick=${() => tab.value = k}>${label}${k === 'clusters' && clusters.value.length ? html`<span class="n">${clusters.value.length}</span>` : null}</button>`)}
       </div>
       <button class="modalx" title="Close (Esc)" onClick=${close}>✕</button>
     </div>

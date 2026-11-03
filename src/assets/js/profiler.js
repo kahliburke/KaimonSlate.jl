@@ -1226,7 +1226,7 @@ function ColorKey() {
   const sw = (c, label, title) => html`<span title=${title}><i class="pfsw" style=${'background:' + c}></i>${label}</span>`;
   const pick = (k) => { colorBy.value = k; lsSet('slateProfColor', k); };
   return html`<span class="pfkey pfcolorkey">
-    <span class="pfseg pfseg-sm">${[['time', 'time'], ['code', 'code']].map(([k, l]) =>
+    <span class="slate-seg sm">${[['time', 'time'], ['code', 'code']].map(([k, l]) =>
       html`<button class=${colorBy.value === k ? 'on' : ''} onClick=${() => pick(k)}
         title=${k === 'code' ? 'colour each bar by whose code it is' : 'colour each bar by the time spent in it, not in what it calls'}>${l}</button>`)}</span>
     ${colorBy.value === 'time'
@@ -1521,7 +1521,7 @@ function Options() {
   if (!optsOpen.value) return null;
   const o = runOpts();
   const set = (k, v) => { opts.value = { ...opts.value, [k]: v }; lsSet('slateProfOpts', JSON.stringify(opts.value)); };
-  const seg = (k, choices) => html`<span class="pfseg">${choices.map(([v, l]) => html`
+  const seg = (k, choices) => html`<span class="slate-seg">${choices.map(([v, l]) => html`
     <button class=${o[k] === v ? 'on' : ''} onClick=${() => set(k, v)}>${l}</button>`)}</span>`;
   return html`<div class="pfopts" onClick=${e => e.stopPropagation()}>
     <div class="pforow"><span>measure</span>${seg('mode', [['cpu', 'CPU'], ['wall', 'wall time'], ['alloc', 'allocations'], ['gpu', 'GPU']])}</div>
@@ -1691,13 +1691,13 @@ function Dock() {
       </div>
       <${Facts} />
       <div class="pfbar2">
-        <span class="pftabs">${[['flame', 'Flame graph'], ['timeline', 'Timeline'], ['functions', 'Functions'], ['details', 'Details']].map(([k, l]) =>
+        <span class="slate-tabs">${[['flame', 'Flame graph'], ['timeline', 'Timeline'], ['functions', 'Functions'], ['details', 'Details']].map(([k, l]) =>
           html`<button class=${tab.value === k ? 'on' : ''} onClick=${() => setTab(k)}>${l}</button>`)}</span>
         <input class="pfsearch" ref=${el => (searchRef.current = el)} placeholder="search functions and files  /" value=${query.value}
           onInput=${e => query.value = e.target.value} onKeyDown=${e => { if (e.key === 'Escape') { query.value = ''; e.currentTarget.blur(); e.stopPropagation(); } }}/>
         ${mt ? html`<span class="pfdim">${mt.ids.size} · ${pct(mt.share) || '0%'}</span>` : null}
         <span class="pfsp"></span>
-        <span class="pfseg">${[['share', '%'], ['abs', model.value && model.value.bytes ? 'bytes' : 'time']].map(([k, l]) =>
+        <span class="slate-seg">${[['share', '%'], ['abs', model.value && model.value.bytes ? 'bytes' : 'time']].map(([k, l]) =>
           html`<button class=${unit.value === k ? 'on' : ''} onClick=${() => { unit.value = k; lsSet('slateProfUnit', k); }}>${l}</button>`)}</span>
         <label class="pftog" title="fold library code into one bar per package">
           <input type="checkbox" checked=${fold.value}
@@ -1790,11 +1790,6 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
   border-radius:8px; box-shadow:0 12px 32px rgba(0,0,0,.5); font-size:.74rem; }
 .pforow { display:flex; align-items:center; gap:10px; }
 .pforow > span:first-child { width:90px; color:var(--dim); }
-.pfseg { display:inline-flex; gap:2px; }
-.pfseg button { font:inherit; font-size:.72rem; padding:2px 8px; border:1px solid var(--border); border-radius:5px;
-  background:none; color:var(--dim); cursor:pointer; }
-.pfseg button:hover { color:var(--text); }
-.pfseg button.on { color:var(--text); background:color-mix(in srgb, #e8933a 20%, transparent); border-color:color-mix(in srgb, #e8933a 55%, transparent); }
 .pfx { padding:2px 8px; border-radius:6px; background:transparent; border:1px solid transparent; color:var(--dim); cursor:pointer; }
 .pfx:hover { color:var(--red); border-color:var(--border); background:var(--bg3); }
 .pftog { display:inline-flex; align-items:center; gap:6px; color:var(--dim); font-size:.74rem; cursor:pointer; user-select:none; }
@@ -1818,12 +1813,9 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
   border:1px solid color-mix(in srgb, #e8933a 50%, transparent); background:color-mix(in srgb, #e8933a 14%, transparent); }
 .pffacts .c b { color:#b9a3f5; }
 .pffacts .g b { color:#f08a92; }
-.pfbar2 { display:flex; align-items:center; gap:10px; padding:5px 12px; border-bottom:1px solid var(--border); font-size:.74rem; }
-.pftabs { display:inline-flex; gap:2px; }
-.pftabs button { font:inherit; font-size:.76rem; padding:3px 10px; border:1px solid transparent; border-radius:6px;
-  background:none; color:var(--dim); cursor:pointer; }
-.pftabs button:hover { color:var(--text); }
-.pftabs button.on { color:var(--text); border-color:var(--border); background:var(--bg3); }
+.pfbar2 { display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid var(--border); font-size:.74rem; }
+/* The view tabs (.slate-tabs) stand on the bar's own rule, so the bar has no padding above or below. */
+:root .pfbar2 .slate-tabs { border-bottom:none; align-self:stretch; }
 .pfsearch { font:inherit; font-size:.74rem; width:240px; padding:3px 8px; border-radius:5px; background:var(--bg);
   color:var(--text); border:1px solid var(--border); }
 .pfexport { display:inline-flex; align-items:center; gap:4px; color:var(--dim); }
@@ -1869,7 +1861,6 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pfcolorkey { margin-right:14px; padding-right:14px; border-right:1px solid var(--border); align-items:center; }
 .pfsw { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:-1px; }
 .pfgrad { width:46px; background:linear-gradient(90deg, hsl(222, 22%, 30%), hsl(212, 48%, 36%), hsl(292, 64%, 44%), hsl(12, 80%, 52%)); }
-.pfseg-sm button { padding:0 6px; font-size:.68rem; }
 .pfzoom { display:inline-flex; align-items:center; gap:3px; margin-left:10px; }
 .pfzoom button { font:inherit; min-width:24px; padding:1px 7px; border-radius:5px; cursor:pointer;
   background:var(--bg3); color:var(--text); border:1px solid var(--border); }

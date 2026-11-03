@@ -3,6 +3,56 @@
    notebook.css — so anything used on both belongs here or it renders unstyled on one of them. The
    home page also defines none of the theme variables, hence a fallback on every var(). */
 
+/* ── Tabs, value pickers and filter chips ─────────────────────────────────────────────────────
+   The three selection controls every page uses, so a tab, a picker and a filter look the same
+   wherever they are. Each is a container of plain <button>s, the chosen one marked `.on`.
+     .slate-tabs     switch what a panel shows: text tabs, an accent underline on the open one.
+                     `.vert` stacks them as a side navigation, the accent edge on the right.
+     .slate-seg      pick one value among a few: one joined group, the chosen segment accent-tinted.
+                     `.sm` for a compact one inside a key or a chart header.
+     .slate-chip     a filter that is on or off, alone or in a row: a round chip, accent-tinted when on.
+   A count inside a tab or a segment goes in <span class="n">; `.n.warn` for one that asks for attention.
+   Written under :root so they outrank a page's broad `.modal button` rules, which would otherwise
+   box and recolour a tab inside a dialog. */
+:root .slate-tabs { display:flex; align-items:flex-end; gap:2px; flex:0 0 auto; min-width:0;
+  border-bottom:1px solid var(--border, #2a2e40); }
+:root .slate-tabs > button { background:none; border:none; border-bottom:2px solid transparent; border-radius:0;
+  margin:0 0 -1px; padding:6px 12px 5px; font:inherit; font-size:.8rem; color:var(--dim, #6a7090);
+  cursor:pointer; white-space:nowrap; }
+:root .slate-tabs > button:hover:not(.on) { color:var(--text, #d4d8e8); border-bottom-color:transparent; }
+:root .slate-tabs > button.on { color:var(--text, #d4d8e8); border-bottom-color:var(--accent, #569cd6); }
+:root .slate-tabs > button:focus-visible { outline:1px solid var(--accent, #569cd6); outline-offset:-2px; }
+:root .slate-tabs.vert { flex-direction:column; align-items:stretch; gap:1px; border-bottom:none;
+  border-right:1px solid var(--border, #2a2e40); }
+:root .slate-tabs.vert > button { display:flex; align-items:center; justify-content:space-between; gap:8px;
+  text-align:left; border-bottom:none; border-right:2px solid transparent; margin:0 -1px 0 0; padding:7px 12px; }
+:root .slate-tabs.vert > button:hover:not(.on) { background:var(--bg3, #1a1e2e); }
+:root .slate-tabs.vert > button.on { border-right-color:var(--accent, #569cd6); background:var(--bg3, #1a1e2e); }
+:root .slate-seg { display:inline-flex; flex:0 0 auto; border:1px solid var(--border, #2a2e40); border-radius:6px;
+  overflow:hidden; background:var(--bg, #0d1120); }
+:root .slate-seg > button { background:none; border:none; border-radius:0; margin:0; padding:2px 9px;
+  font:inherit; font-size:.74rem; line-height:1.5; color:var(--dim, #6a7090); cursor:pointer; white-space:nowrap; }
+:root .slate-seg > button + button { border-left:1px solid var(--border, #2a2e40); }
+:root .slate-seg > button:hover:not(.on):not(:disabled) { color:var(--text, #d4d8e8); background:var(--bg3, #1a1e2e); }
+:root .slate-seg > button.on { color:var(--text, #d4d8e8); background:color-mix(in srgb, var(--accent, #569cd6) 24%, transparent); }
+:root .slate-seg > button:disabled { opacity:.5; cursor:default; }
+:root .slate-seg.sm > button { font-size:.68rem; padding:0 6px; }
+:root .slate-chip { display:inline-flex; align-items:center; gap:4px; flex:0 0 auto; margin:0; padding:2px 9px;
+  border:1px solid var(--border, #2a2e40); border-radius:10px; background:var(--bg3, #1a1e2e);
+  font:inherit; font-size:.72rem; color:var(--dim, #6a7090); cursor:pointer; white-space:nowrap; }
+:root .slate-chip:hover:not(.on) { color:var(--text, #d4d8e8); border-color:color-mix(in srgb, var(--accent, #569cd6) 45%, var(--border, #2a2e40)); }
+:root .slate-chip b { font-weight:600; color:var(--text, #d4d8e8); }
+:root .slate-chip .n { color:var(--dim, #6a7090); font-variant-numeric:tabular-nums; }
+:root .slate-chip.on { color:var(--text, #d4d8e8); border-color:color-mix(in srgb, var(--accent, #569cd6) 60%, transparent);
+  background:color-mix(in srgb, var(--accent, #569cd6) 16%, transparent); }
+:root :is(.slate-tabs, .slate-seg) > button .n { margin-left:5px; padding:0 5px; border-radius:8px; font-size:.68rem;
+  background:var(--bg3, #1a1e2e); color:var(--dim, #6a7090); font-variant-numeric:tabular-nums; }
+:root :is(.slate-tabs, .slate-seg) > button.on .n { background:color-mix(in srgb, var(--accent, #569cd6) 22%, transparent);
+  color:var(--text, #d4d8e8); }
+/* A count that asks for attention (updates waiting), whichever tab is open. */
+:root :is(.slate-tabs, .slate-seg) > button .n.warn { background:color-mix(in srgb, var(--gold, #ffd700) 22%, transparent);
+  color:var(--gold, #ffd700); }
+
 /* The small inline spinner. Only ever existed as `.hydbanner .hydspin` / `.rlstep .hydspin`, so the
    half-dozen places that write a bare one (sign-in, host probes, region status, remote tests) drew
    nothing at all. The scoped rules are more specific and still win where they apply. */
@@ -144,9 +194,6 @@
 .tm-head > div:first-child { flex:1 1 auto; min-width:0; }
 .tm-title { font-weight:600; font-size:1.02rem; color:var(--text, #d4d8e8); }
 .tm-sub { font-size:.78rem; color:var(--dim, #6a7090); margin-top:2px; }
-.tm-ranges { display:flex; gap:2px; background:var(--bg3, #1a1e2e); border:1px solid var(--border, #2a2e40); border-radius:8px; padding:2px; }
-.tm-ranges button { background:none; border:none; color:var(--dim, #6a7090); font-size:.78rem; padding:4px 11px; border-radius:6px; cursor:pointer; }
-.tm-ranges button.on { background:var(--bg, #0d1120); color:var(--text, #d4d8e8); box-shadow:0 0 0 1px var(--border, #2a2e40); }
 .tm-x { background:none; border:none; color:var(--dim, #6a7090); font-size:1rem; cursor:pointer; padding:4px 6px; }
 .tm-x:hover { color:var(--text, #d4d8e8); }
 .tm-acts { padding:7px 16px; border-bottom:1px solid var(--border, #2a2e40); background:var(--bg2, #141828); }
@@ -172,12 +219,7 @@
 .tm-sechead { display:flex; align-items:baseline; gap:10px; margin-bottom:4px; }
 .tm-sechead h3 { margin:0; font-size:.82rem; font-weight:600; color:var(--text, #d4d8e8); }
 .tm-key { display:flex; gap:12px; font-size:.72rem; color:var(--dim, #6a7090); }
-.tm-seg { display:inline-flex; gap:2px; margin-left:auto; }
-.tm-segb { font:inherit; font-size:.72rem; padding:1px 8px; border:1px solid var(--border, #2a3045); border-radius:5px;
-  background:none; color:var(--dim, #6a7090); cursor:pointer; }
-.tm-segb:hover { color:var(--text, #d4d8e8); }
-.tm-segb.on { color:var(--text, #d4d8e8); background:color-mix(in srgb, var(--accent, #569cd6) 22%, transparent);
-  border-color:color-mix(in srgb, var(--accent, #569cd6) 55%, transparent); }
+.tm-sechead .slate-seg { margin-left:auto; }
 .tm-gcctl { display:inline-flex; align-items:center; gap:6px; margin-left:auto; font-size:.72rem; }
 .tm-btn { font:inherit; font-size:.72rem; padding:2px 10px; border-radius:6px; cursor:pointer;
   background:var(--bg3, #1a1e2e); color:var(--text, #d4d8e8); border:1px solid var(--border, #2a2e40); }
@@ -261,17 +303,9 @@ html.scroll-locked { overflow:hidden; scrollbar-gutter:stable; }
    same lines. */
 .rppane { display:flex; flex-direction:column; min-height:0; border:1px solid var(--border, #2a2e40); border-radius:8px; background:var(--bg, #0d1120); }
 .rppane .rptabbody { padding:8px 10px; }
-/* A pane with one view has a heading in its strip, not a tab: the same height and text line as the
-   tabs beside it, unframed. */
-.rptabs .rpstriplabel { border:1px solid transparent; border-bottom:none; margin-bottom:-1px; padding:5px 14px 6px;
-                        font-size:.8rem; color:var(--text, #d4d8e8); }
-.rptabs { display:flex; gap:2px; padding:6px 6px 0; border-bottom:1px solid var(--border, #2a2e40); flex:0 0 auto;
-          background:var(--bg2, #141828); border-radius:8px 8px 0 0; }
-/* Folder tabs: the open one is framed over its top and sides and opens into the panel below. */
-.rptabs button { background:none; border:1px solid transparent; border-bottom:none; border-radius:6px 6px 0 0;
-                 color:var(--dim, #6a7090); padding:5px 14px; font-size:.8rem; cursor:pointer; margin-bottom:-1px; }
-.rptabs button:hover:not(.on) { color:var(--text, #d4d8e8); }
-.rptabs button.on { color:var(--text, #d4d8e8); background:var(--bg, #0d1120); border-color:var(--border, #2a2e40); padding-bottom:6px; }
+/* The pane's strip: its tabs (.slate-tabs), or a heading when it has one view, on the same line. */
+.rpstrip { padding:2px 6px 0; background:var(--bg2, #141828); border-radius:8px 8px 0 0; }
+.rpstrip .rpstriplabel { padding:6px 12px 7px; font-size:.8rem; color:var(--text, #d4d8e8); }
 .rptabbody { flex:1 1 auto; min-height:0; overflow:auto; padding:6px 8px; }
 @media (max-width: 720px) { .rpsplit { grid-template-columns:1fr; height:auto; } }
 .rptabbody { overscroll-behavior:contain; }

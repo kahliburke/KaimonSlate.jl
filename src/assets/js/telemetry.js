@@ -321,7 +321,7 @@ function Telemetry({ into = null }) {
       <div><div class="tm-title">Telemetry · ${v.label}</div>
         <div class="tm-sub">${subWhere(v)}
           ${last ? html` · ${s.length} samples · updated ${Math.max(0, Math.round(Date.now() / 1000 - last.t))}s ago` : null}</div></div>
-      <div class="tm-ranges">${RANGES.map(([r, l]) => html`<button class=${range.value === r ? 'on' : ''} onClick=${() => range.value = r}>${l}</button>`)}</div>
+      <div class="slate-seg">${RANGES.map(([r, l]) => html`<button class=${range.value === r ? 'on' : ''} onClick=${() => range.value = r}>${l}</button>`)}</div>
       ${into ? null : html`<button class="tm-x" title="Close (Esc)" onClick=${close}>✕</button>`}</div>`;
   const acts = v.actions ? html`<div class="tm-acts">${v.actions()}</div>` : null;
   const frame = (body) => into ? html`<div class="tm-embed">${head}${acts}<div class="tm-body">${body}</div></div>`
@@ -558,8 +558,8 @@ function Telemetry({ into = null }) {
       : [line('power', series(s, gv(g => g.power_w, sum))),
          line('temperature', series(s, gv(g => g.temp, top)), { yAxisIndex: 1, tooltip: { valueFormatter: C } })] });
   const picked = each ? 'each' : sel == null ? 'all' : String(sel);
-  const gpuSel = gpus.length > 1 ? html`<span class="tm-seg">${[['all', 'all'], ['each', 'each'], ...gpus.map(g => [String(g.i), 'gpu' + g.i])]
-      .map(([k, l]) => html`<button class=${'tm-segb' + (picked === k ? ' on' : '')}
+  const gpuSel = gpus.length > 1 ? html`<span class="slate-seg sm">${[['all', 'all'], ['each', 'each'], ...gpus.map(g => [String(g.i), 'gpu' + g.i])]
+      .map(([k, l]) => html`<button class=${picked === k ? 'on' : ''}
                                     onClick=${() => { gpuPick.value = k; }}>${l}</button>`)}</span>` : null;
   const gpuSec = gpus.length ? html`<${Section} title="GPU" aside=${gpuSel}>
       <div class="tm-gpus">${mine.map(g => html`<div class="tm-gpu">

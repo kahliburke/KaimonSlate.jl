@@ -154,7 +154,7 @@
             <div class="logv-split" title="drag to resize"></div>
             <div class="logv-main">
               <div class="logv-bar">
-                <div class="logv-levels">
+                <div class="logv-levels slate-seg">
                   <button data-lv="all" class="on">all</button>
                   <button data-lv="info">info</button>
                   <button data-lv="warn">warn</button>
@@ -666,7 +666,7 @@
       q('.logv-levels').querySelectorAll('[data-lv]').forEach(b => {
         const lv = b.dataset.lv, n = S.counts && S.counts[lv];
         b.classList.toggle('on', lv === S.filter);
-        b.textContent = lv + (n == null ? '' : ' ' + n);
+        b.innerHTML = esc(lv) + (n == null ? '' : '<span class="n">' + n + '</span>');
       });
       const ord = q('.logv-order');
       ord.textContent = S.order === 'new' ? '↓' : '↑';

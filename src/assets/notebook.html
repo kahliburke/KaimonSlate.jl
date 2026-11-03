@@ -122,7 +122,7 @@
     <div id="wdock-msgs" class="wdock-msgs"></div>
   </div>
   <div class="wdock-main">
-    <div class="rptabs wdock-bar">
+    <div class="slate-tabs wdock-bar">
       <button data-wdtab="tel">Telemetry</button><button data-wdtab="log">Log</button>
       <span class="wdock-sp"></span>
       <span id="wdock-full" class="wdock-btn" role="button" onclick="wpToggleFull()" title="Fill the window">⤢</span>
@@ -425,14 +425,14 @@
   <div class="msg"><strong>Settings</strong></div>
   <!-- Two scopes, one dialog: your global preferences and this notebook's overrides. Several
        settings exist in both (agent model, permissions) — see `setSettingsScope` in settings.js. -->
-  <div class="setscope">
+  <div class="setscope slate-tabs">
     <button type="button" data-scope="global" class="on" onclick="setSettingsScope('global')">Global</button>
     <button type="button" data-scope="notebook" onclick="setSettingsScope('notebook')">This notebook</button>
     <span id="configstatus" class="setscopehint"></span>
   </div>
   <div class="setsearch"><input id="setfilter" type="search" placeholder="Search settings…" autocomplete="off" spellcheck="false"/></div>
   <div class="setcols">
-  <div class="setnav" id="settabs"><!-- built from the group headers of the active scope (settings.js) --></div>
+  <div class="setnav slate-tabs vert" id="settabs"><!-- built from the group headers of the active scope (settings.js) --></div>
   <!-- Per-notebook rows, built from /api/config by config.js. Same section list + filter as the
        global scope drives it; only the group/row selectors differ. -->
   <div class="setbody configlist" id="configlist" style="display:none"></div>

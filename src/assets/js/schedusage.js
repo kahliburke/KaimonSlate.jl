@@ -85,7 +85,7 @@ function Dashboard() {
   const head = html`<div class="tm-head">
       <div><div class="tm-title">Scheduler use · ${v.host}</div>
         <div class="tm-sub">commands this hub sent ${v.host}'s scheduler${d ? ' · budget ' + d.budget + '/min (KAIMONSLATE_SCHED_BUDGET)' : ''}</div></div>
-      <div class="tm-ranges">${RANGES.map(([h, l]) => html`<button class=${v.hours === h ? 'on' : ''} onClick=${() => setRange(h)}>${l}</button>`)}</div>
+      <div class="slate-seg">${RANGES.map(([h, l]) => html`<button class=${v.hours === h ? 'on' : ''} onClick=${() => setRange(h)}>${l}</button>`)}</div>
       <button class="tm-x" title="Close (Esc)" onClick=${close}>✕</button></div>`;
   const body = !d ? html`<div class="tm-empty">loading…</div>` : html`
     <div class="tm-tiles">

@@ -2583,13 +2583,14 @@ body.wdock-open.dag-open.dag-bottom .page { padding-bottom:calc(var(--wdockh, 34
 .wchip-v { display:inline-block; text-align:left; }
 .wchip-note { color:var(--dim); background:transparent; border:none; padding:1px 0; }
 .wdock-main { display:flex; flex-direction:column; min-width:0; min-height:0; }
-/* The shared folder tabs (.rptabs), opening into the pane below; the controls sit at the strip's end. */
-.wdock-bar.rptabs { border-radius:0; padding:5px 8px 0 10px; align-items:flex-end; }
+/* The tabs, then the dock's controls at the strip's end. */
+.wdock-bar { padding:0 8px 0 4px; }
+.wdock-bar .wdock-btn, .wdock-bar .wdock-x { margin-bottom:3px; }
 .wdock-sp { flex:1 1 auto; }
 .wdock-btn { align-self:center; border:1px solid transparent; border-radius:5px; color:var(--dim);
-  font-size:.95rem; line-height:1; padding:3px 6px; margin-bottom:4px; cursor:pointer; }
+  font-size:.95rem; line-height:1; padding:3px 6px; cursor:pointer; }
 .wdock-btn:hover, .wdock-btn.on { color:var(--text); border-color:var(--border); }
-.wdock-x { align-self:center; margin-bottom:4px; cursor:pointer; color:var(--dim); font-size:1.25rem; line-height:1; padding:0 4px; }
+.wdock-x { align-self:center; cursor:pointer; color:var(--dim); font-size:1.25rem; line-height:1; padding:0 4px; }
 .wdock-x:hover { color:var(--text); }
 .wdock-pane { flex:1 1 auto; min-height:0; display:none; flex-direction:column; }
 .wdock-pane.on { display:flex; }
@@ -2824,18 +2825,10 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
    HEADERS are redundant while the list is showing one section (the list already names it) and
    reappear when filtering, where they group results that span sections again. */
 #setbg .modal { max-width:660px; }
-/* Scope switch: your global preferences vs this notebook's overrides. It sits above the section
-   list because the sections BELONG to a scope. Folder tabs, as in the Prepare dialog: the open one
-   is framed over its top and sides and opens into the rule below, so it reads as part of the
-   surface rather than as one more box beside the section list and the search field. The hint on the
-   right is the override count. */
-.setmodal .setscope { display:flex; align-items:flex-end; gap:2px; margin:14px 0 0;
-  border-bottom:1px solid var(--border); }
-.setmodal .setscope button { background:none; border:1px solid transparent; border-bottom:none;
-  border-radius:6px 6px 0 0; margin-bottom:-1px; padding:6px 14px 7px; color:var(--dim); font:inherit;
-  font-size:.84rem; cursor:pointer; }
-.setmodal .setscope button:hover:not(.on) { color:var(--text); }
-.setmodal .setscope button.on { color:var(--text); background:var(--bg2); border-color:var(--border); padding-bottom:8px; }
+/* Scope switch: your global preferences vs this notebook's overrides (.slate-tabs). It sits above
+   the section list because the sections BELONG to a scope. The hint on the right is the override
+   count. */
+.setmodal .setscope { margin:14px 0 0; }
 .setmodal .setscopehint { align-self:center; }
 .setmodal .setscopehint { margin-left:auto; color:var(--dim); font-size:.76rem; }
 .setmodal .setsearch { margin:10px 0; }
@@ -2843,31 +2836,14 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:.84rem; }
 .setmodal .setsearch input:focus { outline:none; border-color:var(--accent); }
 .setmodal .setcols { display:flex; gap:16px; align-items:flex-start; }
-/* One bordered block with contiguous rules between items, not a stack of separate buttons: the
-   sections are a single list, and shared 1px edges say that where gaps and eight rounded outlines
-   don't. `overflow:hidden` lets the container's radius clip the first/last row's corners, so no
-   item needs to know where it sits. The selected row takes an accent bar on its inside edge rather
-   than a coloured outline, which would break the shared grid it sits in. */
-.setnav { flex:0 0 auto; width:140px; display:flex; flex-direction:column;
-  border:1px solid var(--border); border-radius:8px; overflow:hidden; }
-/* Set in the accent, uppercase and letter-spaced — the same treatment the Notebook config panel
-   gives a group heading (.cfggroup), because these name the same kind of thing. Unselected entries
-   carry it at reduced opacity rather than a different colour, so the list reads as one family. */
-.setnav button { display:flex; align-items:center; justify-content:space-between; gap:6px;
-  width:100%; text-align:left; background:transparent; color:var(--accent); opacity:.62;
-  border:0; border-bottom:1px solid var(--border); border-radius:0; padding:9px 12px;
-  font:inherit; font-size:.7rem; font-weight:600; text-transform:uppercase; letter-spacing:.06em; cursor:pointer; }
-.setnav button:last-child { border-bottom:0; }
-.setnav button:hover { opacity:1; background:var(--bg3); }
-.setnav button.on { opacity:1; background:var(--bg3); box-shadow:inset 2px 0 0 var(--accent); }
+/* The section list: vertical tabs (.slate-tabs.vert), each with room at its end for a count. */
+.setnav { flex:0 0 auto; width:150px; }
 /* While filtering, a section that contributed matches shows how many — so a capped result set still
    says where the rest of them are. */
-.setnav button.hit { opacity:1; }
 .setnav button.hit::after { content:attr(data-hits); flex:0 0 auto; color:var(--text);
   font-size:.7rem; font-weight:600; font-variant-numeric:tabular-nums; }
 /* Browsing the notebook scope, an entry shows how many of its settings are pinned to this notebook,
    so the list doubles as a summary of what has been changed. */
-.setnav button.marked { opacity:1; }
 .setnav button.marked::after { content:attr(data-marks); flex:0 0 auto; color:var(--accent);
   font-size:.7rem; font-weight:600; font-variant-numeric:tabular-nums; }
 /* A filter result is a flat list across sections, so each row names the one it came from — as the
@@ -3580,13 +3556,14 @@ body.slate-dragging { cursor:col-resize; user-select:none; }
 body.slate-dragging .logv-body *, body.slate-dragging .swcfg-body * { pointer-events:none; }
 .logv-ffilter { margin:8px; background:var(--bg); color:var(--text); border:1px solid var(--border);
   border-radius:5px; padding:4px 7px; font-size:.8rem; }
-.logv-levels button, .logv-order, .logv-pause, .logv-icase, .logv-rx,
+.logv-order, .logv-pause, .logv-icase, .logv-rx,
 .logv-prev, .logv-next, .logv-jump {
   background:var(--bg); color:var(--dim); border:1px solid var(--border); border-radius:5px;
   padding:2px 7px; font-size:.74rem; cursor:pointer; }
 .logv-order, .logv-pause { min-width:26px; text-align:center; font-size:.8rem; line-height:1.1; }
-.logv-levels button.on, .logv-pause.on, .logv-icase.on, .logv-rx.on {
-  color:var(--text); border-color:var(--val); background:color-mix(in srgb, var(--val) 14%, transparent); }
+.logv-pause.on, .logv-icase.on, .logv-rx.on {
+  color:var(--text); border-color:color-mix(in srgb, var(--accent) 60%, transparent);
+  background:color-mix(in srgb, var(--accent) 16%, transparent); }
 .logv-files { flex:1 1 auto; overflow:auto; min-height:0; }
 
 /* One table, sorted by clicking a heading and reversed by clicking it again — the same gesture the
@@ -3621,7 +3598,6 @@ body.slate-dragging .logv-body *, body.slate-dragging .swcfg-body * { pointer-ev
 .logv-bar, .logv-bar2 { display:flex; align-items:center; gap:8px; padding:7px 12px; }
 .logv-bar { border-bottom:1px solid color-mix(in srgb, var(--border) 60%, transparent); }
 .logv-bar2 { border-bottom:1px solid var(--border); }
-.logv-levels { display:flex; gap:4px; }
 .logv-search { flex:1 1 auto; min-width:120px; background:var(--bg); color:var(--text);
   border:1px solid var(--border); border-radius:5px; padding:3px 8px; font-size:.8rem; }
 .logv-hits, .logv-meta { font-size:.74rem; color:var(--dim); white-space:nowrap; }

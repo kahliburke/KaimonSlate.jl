@@ -169,9 +169,6 @@ style.textContent = `
     padding:7px 10px;font-size:.8rem;box-sizing:border-box;}
   .extsearch input:focus{outline:none;border-color:#3f6fd0;}
   .extcats{display:flex;flex-wrap:wrap;gap:5px;}
-  .extcat{font-size:.68rem;padding:2px 8px;border-radius:9px;cursor:pointer;color:#8a90a8;
-    background:#171b2b;border:1px solid #2a2e40;}
-  .extcat.on{color:#7cc0ff;border-color:rgba(124,192,255,.45);background:rgba(124,192,255,.1);}
   .extlist{overflow-y:auto;flex:1;min-height:0;}
   .extitem{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;cursor:pointer;
     border-bottom:1px solid rgba(35,39,57,.7);}
@@ -188,14 +185,6 @@ style.textContent = `
   .extpill.installed{color:#56d364;background:rgba(86,211,100,.13);border:1px solid rgba(86,211,100,.3);}
   .extpill.parent{color:#8a90a8;background:rgba(138,144,168,.12);border:1px solid rgba(138,144,168,.28);}
   .extpill.update{color:#e8a13f;background:rgba(232,161,63,.14);border:1px solid rgba(232,161,63,.32);}
-  .extviews{display:flex;gap:4px;}
-  .extview{flex:1;text-align:center;font-size:.7rem;padding:4px 6px;border-radius:7px;cursor:pointer;
-    color:#8a90a8;background:#171b2b;border:1px solid #2a2e40;user-select:none;}
-  .extview:hover{color:#dfe3f0;}
-  .extview.on{color:#dfe3f0;border-color:#3f6fd0;background:rgba(63,111,208,.14);}
-  .extview b{font-weight:700;opacity:.85;}
-  .extview.has{color:#e8a13f;border-color:rgba(232,161,63,.32);}
-  .extview.has.on{color:#e8a13f;border-color:#e8a13f;background:rgba(232,161,63,.14);}
   .extright{flex:1;min-width:0;overflow-y:auto;padding:18px 22px;}
   .extempty{color:#6a7090;font-size:.8rem;padding:40px 0;text-align:center;}
   .exttitle{display:flex;align-items:center;gap:10px;margin-bottom:2px;}
@@ -376,20 +365,20 @@ function Modal() {
             <div class="extsearch">
               <input placeholder="Search extensions…" value=${query.value}
                      onInput=${(ev) => (query.value = ev.target.value)} autofocus />
-              <div class="extviews">
+              <div class="slate-tabs">
                 ${[['all', 'All', entries.value.length],
                    ['installed', 'Installed', d.installedCount || 0],
                    ['updates', 'Updates', d.updatableCount || 0]].map(([k, label, n]) => html`
-                  <span class=${'extview' + (view.value === k ? ' on' : '') + (k === 'updates' && n ? ' has' : '')}
-                        onClick=${() => (view.value = k)}>${label}${n ? html` <b>${n}</b>` : ''}</span>`)}
+                  <button class=${view.value === k ? 'on' : ''} onClick=${() => (view.value = k)}>${label}${n
+                    ? html`<span class=${'n' + (k === 'updates' ? ' warn' : '')}>${n}</span>` : ''}</button>`)}
               </div>
               ${cats.length ? html`
                 <div class="extcats">
-                  <span class=${'extcat' + (category.value === '' ? ' on' : '')}
-                        onClick=${() => (category.value = '')}>all</span>
+                  <button class=${'slate-chip' + (category.value === '' ? ' on' : '')}
+                        onClick=${() => (category.value = '')}>all</button>
                   ${cats.map((c) => html`
-                    <span class=${'extcat' + (category.value === c ? ' on' : '')}
-                          onClick=${() => (category.value = category.value === c ? '' : c)}>${c}</span>`)}
+                    <button class=${'slate-chip' + (category.value === c ? ' on' : '')}
+                          onClick=${() => (category.value = category.value === c ? '' : c)}>${c}</button>`)}
                 </div>` : null}
             </div>
             <div class="extlist">

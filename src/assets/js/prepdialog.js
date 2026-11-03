@@ -113,7 +113,7 @@ function PrepareDialog() {
     <div class="pddim rpsub">${d.sub || ''}${!s ? html` <span class="hydspin"></span>` : null}</div>
     <div class="rpsplit">
       <div class="rppane">
-        <div class="rptabs"><span class="rpstriplabel">Steps</span></div>
+        <div class="slate-tabs rpstrip"><span class="rpstriplabel">Steps</span></div>
         <div class="rptabbody" ref=${el => follow(el)} onScroll=${noteScroll}>
         ${steps ? StepList(steps, running ? s.preparing.now : 0, running ? s.preparing.last_output : 0)
                 : html`<div class="rppprepsteps">${(d.planned || []).map(t => html`<div class="rppprepstep planned"><span class="rppprepmark">·</span><span class="rppprepname">${t}</span></div>`)}</div>`}
@@ -124,8 +124,8 @@ function PrepareDialog() {
         </div>
       </div>
       <div class="rppane">
-        <div class="rptabs">
-          <button class=${tab.value === 'activity' ? 'on' : ''} onClick=${() => tab.value = 'activity'}>Activity${log && log.length ? html` <span class="pddim">${log.length}</span>` : null}</button>
+        <div class="slate-tabs rpstrip">
+          <button class=${tab.value === 'activity' ? 'on' : ''} onClick=${() => tab.value = 'activity'}>Activity${log && log.length ? html`<span class="n">${log.length}</span>` : null}</button>
           <button class=${tab.value === 'history' ? 'on' : ''} onClick=${() => tab.value = 'history'}>History</button>
         </div>
         <div class="rptabbody">${tab.value === 'activity' ? ActivityPane(log) : HistoryPane(d.key, 'dlg:' + d.key)}</div>

@@ -149,15 +149,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .remotesmodal .modalx{position:static;margin:0 0 0 auto;align-self:center;}
 /* Tabs. Hosts, clusters and transfer settings share a modal but not a train of thought — one
    scrolling column put a host you were setting up, a queue's defaults and a global transfer knob in
-   the same field of view. */
-.rttabs{display:flex;gap:4px;}
-.modal .rttab{background:none;border:none;box-shadow:none;border-radius:0;border-bottom:2px solid transparent;
-  color:#7a82a4;font-size:.84rem;padding:7px 12px;margin-bottom:-1px;cursor:pointer;white-space:nowrap;}
-.modal .rttab:hover{color:#c8cde0;background:rgba(86,156,214,.06);}
-.modal .rttab.on{color:#e6ebf7;border-bottom-color:#569cd6;background:none;}
-.rttabn{display:inline-block;min-width:16px;padding:0 4px;margin-left:5px;border-radius:8px;
-  background:#21253a;color:#9aa3c0;font-size:.7rem;line-height:16px;text-align:center;vertical-align:1px;}
-.modal .rttab.on .rttabn{background:rgba(86,156,214,.22);color:#a9d4ff;}
+   the same field of view. The tabs are the shared .slate-tabs; the header carries the rule they sit on,
+   so it runs under the close button too. */
+:root .rthead .slate-tabs{border-bottom:none;}
 .remotesmodal .imrow{flex-direction:row;align-items:center;gap:10px;}
 .remotesmodal .imrow>label{flex:0 0 70px;color:#8a90a8;font-size:.82rem;}
 .remotesmodal #rthost{flex:1 1 auto;min-width:0;background:#0d1120;color:#d4d8e8;border:1px solid #2a2e40;border-radius:7px;padding:7px 10px;font-family:Menlo,monospace;font-size:.82rem;}
@@ -196,7 +190,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 /* Warm-pool + live-worker management: a focused per-host view inside the Remotes modal */
 .rthexp{flex:0 0 auto;background:none;border:1px solid #2a2e40;color:#8a90a8;cursor:pointer;font-size:.72rem;padding:2px 8px;border-radius:6px;transition:background .1s,color .1s,border-color .1s;}
 .rthexp:hover{background:rgba(88,110,240,.16);color:#cdd3e6;border-color:#3a4b7a;}
-.remotesmodal.focusmode .rtbody>*:not(.rtfocus),.remotesmodal.focusmode .rttabs{display:none;}
+.remotesmodal.focusmode .rtbody>*:not(.rtfocus),.remotesmodal.focusmode .rthead .slate-tabs{display:none;}
 /* With the tabs hidden the header holds only the ✕, so it floats in the corner and the breadcrumb
    takes the top line instead of sitting under an empty band. */
 .remotesmodal.focusmode .rthead{position:absolute;top:0;right:0;z-index:3;border-bottom:none;padding:12px 14px 0 0;}
@@ -500,9 +494,6 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pddocitem>.pdrow:hover{background:rgba(86,156,214,.05);border-radius:7px;}
 .pddocchev{display:inline-block;transition:transform .12s;color:#6a7090;margin-right:4px;}
 .pddocdetail{padding:2px 12px 10px 26px;border-top:1px solid #21253a;margin-top:2px;}
-.pdtabs{display:flex;gap:2px;border-bottom:1px solid #2a2e40;}
-.pdtab{background:none;border:none;color:#8a90b0;padding:7px 15px;cursor:pointer;font-size:.85rem;border-bottom:2px solid transparent;margin-bottom:-1px;}
-.pdtab:hover{color:#d4d8e8;} .pdtab.on{color:#e6ebf7;border-bottom-color:#569cd6;}
 .pdarr-sec{border:1px solid #2a2e40;border-radius:8px;padding:8px 10px;margin:8px 0;background:#10131f;}
 .pdarr-sec.secdragging{opacity:.5;border-color:#58a6ff;}
 .pdarr-hd{margin-bottom:5px;display:flex;align-items:center;gap:6px;}
