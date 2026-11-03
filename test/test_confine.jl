@@ -26,6 +26,7 @@ const RE = KaimonSlate.ReportEngine
             depots = split(env["JULIA_DEPOT_PATH"], ':')
             @test isdir(depots[1]) && depots[1] in c.exec             # a depot of its own, first
             @test all(in(depots), DEPOT_PATH)                         # then the host's, where its packages are
+            @test startswith(env["KAIMON_CACHE_DIR"], env["KAIMONSLATE_CACHE_HOME"])   # its gate's folder, writable
         else
             @test c === cmd
         end

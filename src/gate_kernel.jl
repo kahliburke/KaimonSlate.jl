@@ -872,8 +872,9 @@ function _confined_worker(cmd::Cmd, k::GateKernel)
     root = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "confined")
     depot, cache, tmp = mkpath(joinpath(root, "depot")), mkpath(joinpath(root, "cache")), mkpath(joinpath(root, "tmp"))
     # This process's depots in full: an empty entry would stand for the bundled ones only, without the user's.
+    # Its gate's folder is its own too: the worker serves over TCP and finds no Kaimon by its files.
     cmd = addenv(cmd, "JULIA_DEPOT_PATH" => join(unique([depot; DEPOT_PATH]), ':'),
-                 "KAIMONSLATE_CACHE_HOME" => cache, "TMPDIR" => tmp)
+                 "KAIMONSLATE_CACHE_HOME" => cache, "KAIMON_CACHE_DIR" => joinpath(cache, "kaimon"), "TMPDIR" => tmp)
     args = [launcher, "--policy", policy]
     for w in filter(!isempty, [k.nbdir, k.project, depot, cache, tmp])
         push!(args, "--write", w)
