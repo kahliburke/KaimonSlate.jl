@@ -8,7 +8,7 @@
 // not carry: the worker's log and where it came from (`_wpProv`).
 let _wpSide = null;
 const _wpProv = {};               // side → {origin, spawned} from the log route, for the open dock
-let _wpTab = localStorage.getItem('slateWorkerDockTab') === 'tel' ? 'tel' : 'log';   // the dock's open tab
+let _wpTab = localStorage.getItem('slateWorkerDockTab') === 'log' ? 'log' : 'tel';   // the dock's open tab
 let _wpWorkers = [];              // the model's workers for this notebook, as last painted
 // A small line chart, drawn in the text colour.
 const _WP_TEL_ICON = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M1.5 13.5h13" ' +
@@ -270,8 +270,52 @@ function _wpUnwellShort(note) { const m = note && /(\d+)s/.exec(note); return m 
 
 // A worker log line pushed over the WS: the Log tab showing that side checks its file now rather than
 // at its next poll, so the log keeps up with the worker.
-function onWorkerLog(side) {
-  if (_wpSide === (side || '') && _wpTab === 'log' && _wpLogView) _wpLogView.refresh();
+function onWorkerLog(side, line) {
+  if (_wpSide !== (side || '')) return;
+  if (_wpTab === 'log' && _wpLogView) _wpLogView.refresh();
+  _wpRecent.push(line);
+  if (_wpRecent.length > _WP_RECENT_LINES) _wpRecent.splice(0, _wpRecent.length - _WP_RECENT_LINES);
+  if (!_wpMsgsT) _wpMsgsT = setTimeout(() => { _wpMsgsT = null; _wpPaintMsgs(); }, 200);
+}
+
+// ── Recent messages ──────────────────────────────────────────────────────────────────────────
+// The worker's last few log records, newest first, under its figures: what it last said, read at a
+// glance without opening the log. Seeded from the log route's tail when the dock shows a worker,
+// then kept up from the lines pushed over the WS. Only RECORDS count (a logger's `┌`/`[` head, or a
+// core WARNING/ERROR print); a bare print is left to the Log tab. A record's fields follow its message,
+// since "ran cell" says little without which cell.
+const _WP_RECENT_LINES = 300, _WP_RECENT_SHOWN = 6;
+let _wpRecent = [], _wpMsgsT = null;
+const _WP_HEAD = /(?:^|\s)([┌\[])\s+(?:(\d\d:\d\d:\d\d)\s+)?(Debug|Info|Warning|Error):\s*(.*)$/;
+const _WP_FIELD = /^[│└]\s+([\w.]+)\s*=\s*(.*)$/;
+const _WP_CORE = /^(WARNING|ERROR):\s*(.*)$/;
+function _wpRecords(lines) {
+  const recs = [];
+  let open = null;                                  // a `┌` record still taking its `│`/`└` lines
+  for (const styled of lines) {
+    const t = window.slateAnsiText(styled);
+    let m;
+    if ((m = _WP_HEAD.exec(t))) {
+      const r = { ts: m[2] || '', lvl: m[3], msg: m[4], fields: [] };
+      recs.push(r); open = m[1] === '┌' ? r : null;
+    } else if (open && (t[0] === '│' || t[0] === '└')) {
+      if ((m = _WP_FIELD.exec(t))) open.fields.push(m[1] + '=' + m[2]);
+      if (t[0] === '└') open = null;
+    } else if ((m = _WP_CORE.exec(t))) {
+      recs.push({ ts: '', lvl: m[1] === 'ERROR' ? 'Error' : 'Warning', msg: m[2], fields: [] }); open = null;
+    } else open = null;
+  }
+  return recs;
+}
+function _wpPaintMsgs() {
+  const box = document.getElementById('wdock-msgs'); if (!box) return;
+  const recs = _wpRecords(_wpRecent).slice(-_WP_RECENT_SHOWN).reverse();
+  _wpSetHtml(box, !recs.length ? '' : '<div class="wdm-h">Recent messages</div>' + recs.map(r => {
+    const f = r.fields.join(' · '), cls = r.lvl === 'Error' ? ' error' : r.lvl === 'Warning' ? ' warn' : '';
+    return '<div class="wdm-row' + cls + '" data-wdmsg title="' + _wpEsc((r.ts ? r.ts + ' ' : '') + r.lvl + ': ' + r.msg + (f ? '\n' + r.fields.join('\n') : '')) + '">' +
+      '<span class="wdm-ts">' + _wpEsc(r.ts) + '</span><span class="wdm-msg">' + _wpEsc(r.msg) +
+      (f ? '<span class="wdm-f">' + _wpEsc(f) + '</span>' : '') + '</span></div>';
+  }).join(''));
 }
 
 // ── The dock's worker list: every worker, so comparing their logs is a click ─────────────────────
@@ -400,6 +444,7 @@ function openWorkerDock(side, ev) {
   if (wasOpen && side === _wpSide) return;
   _wpSide = side;
   _wpOpenPort = _wpPortOf(side);
+  _wpRecent = []; _wpPaintMsgs();
   _wpDrawFacts();
   _wpPaintList();
   _wpPaintBringup();
@@ -454,17 +499,20 @@ function toggleWorkerDock(side, ev) {
     document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
   });
 })();
-// Where the open dock's worker came from, which only the log route says. An app REFUSES that route (a
+// Where the open dock's worker came from, which only the log route says, and the tail of its log
+// for the recent messages. An app REFUSES that route (a
 // log can carry notebook data, and an app's visitor is not its operator), and the Log tab says so.
 async function _wpRefresh() {
   const side = _wpSide;                                          // capture: the dock can switch while we await
   if (side === null) return;
-  let r; try { r = await api('GET', '/api/worker-log?side=' + encodeURIComponent(side) + '&lines=1'); }
+  let r; try { r = await api('GET', '/api/worker-log?side=' + encodeURIComponent(side) + '&lines=' + _WP_RECENT_LINES); }
   catch (_) { r = null; }
   if (_wpSide !== side) return;                                  // switched (or closed) mid-fetch → stale response, drop it
   const refused = !r || typeof r !== 'object' || r.log === undefined;
   const was = !!(_wpProv[side] || {}).refused;
   _wpProv[side] = refused ? { refused } : { origin: r.origin, spawned: r.spawned };
+  _wpRecent = (!refused && r.log) ? r.log.split('\n') : [];
+  _wpPaintMsgs();
   _wpDrawFacts();
   if (refused !== was && _wpTab === 'log') _wpShowLog();
 }
@@ -529,6 +577,7 @@ document.addEventListener('click', e => {
   if (!e.target || !e.target.closest) return;
   const drow = e.target.closest('#wdock-list [data-wdrow]');
   if (drow) { openWorkerDock(drow.getAttribute('data-wdrow')); return; }
+  if (e.target.closest('#wdock-msgs [data-wdmsg]')) { _wpTab = 'log'; _wpPaintTab(); return; }
   const dtab = e.target.closest('#workerdock [data-wdtab]');
   // The open tab again: the log keeps its place, the telemetry view (which a profiled run closes) reopens.
   if (dtab) { if (dtab.dataset.wdtab !== _wpTab || _wpTab === 'tel') { _wpTab = dtab.dataset.wdtab; _wpPaintTab(); } return; }

@@ -2556,6 +2556,18 @@ body.wdock-open.dag-open.dag-bottom .page { padding-bottom:calc(var(--wdockh, 34
 .wdock-stats { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; }
 .wdock-stats:empty { display:none; }
 .wdock-stats .wm { padding:0; }
+/* The worker's latest log records, newest first; a click opens the Log tab. */
+.wdock-msgs { display:flex; flex-direction:column; gap:1px; }
+.wdock-msgs:empty { display:none; }
+.wdm-h { font-size:.7rem; color:var(--dim); margin-bottom:2px; }
+.wdm-row { display:flex; gap:7px; align-items:baseline; padding:2px 6px; border-radius:5px; cursor:pointer;
+  border-left:2px solid transparent; font-size:.74rem; min-width:0; }
+.wdm-row:hover { background:var(--bg3); }
+.wdm-row.warn { border-left-color:var(--gold); }
+.wdm-row.error { border-left-color:var(--red); background:color-mix(in srgb, var(--red) 8%, transparent); }
+.wdm-ts { flex:0 0 auto; color:var(--dim); font-family:var(--mono,ui-monospace,monospace); font-size:.7rem; }
+.wdm-msg { flex:1 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text); }
+.wdm-f { color:var(--dim); margin-left:6px; }
 /* Identity, not health: which host, over what transport, on which ports, adopted or spawned. Muted
    against the telemetry above — you read it once to orient, then watch the numbers. */
 .wdock-ident { display:flex; flex-wrap:wrap; gap:4px 5px; align-items:center; }
