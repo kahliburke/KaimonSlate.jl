@@ -101,6 +101,13 @@ window.wpOpenTelemetry = function (side) {
   side = side === undefined ? (_wpSide || '') : side;
   (dock && dock.classList.contains('open') && side === _wpSide) ? _wpPaintTab() : openWorkerDock(side);
 };
+// The ☰ menu's Worker log: the dock on that worker, at its log.
+window.wpOpenLog = function (side) {
+  _wpTab = 'log';
+  const dock = document.getElementById('workerdock');
+  side = side === undefined ? (_wpSide || '') : side;
+  (dock && dock.classList.contains('open') && side === _wpSide) ? _wpPaintTab() : openWorkerDock(side);
+};
 function _wpPaintTab() {
   try { localStorage.setItem('slateWorkerDockTab', _wpTab); } catch (_) {}
   document.querySelectorAll('#workerdock [data-wdtab]').forEach(b => b.classList.toggle('on', b.dataset.wdtab === _wpTab));

@@ -86,7 +86,7 @@
       <button onclick="openExtensions();closeTopMenu()">🧩 Extensions</button>
       <button onclick="window.open('/#clusters','_blank');closeTopMenu()" title="clusters that job cells submit to, set up on the front page">🏭 Compute targets ↗</button>
       <button onclick="toggleAct();closeTopMenu()">📋 Activity log</button>
-      <button data-panel="logpanel" onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
+      <button onclick="wpOpenLog();closeTopMenu()">🪵 Worker log</button>
       <button data-panel="histpanel" onclick="toggleHistory();closeTopMenu()">🕘 History</button>
       <button id="scratchbtn" data-panel="scratchpanel" onclick="toggleScratch();closeTopMenu()">🧪 Scratchpad</button>
       <button onclick="enterPresent();closeTopMenu()" title="present this notebook as a slide deck (⌘⇧P)">📽 Present</button>
@@ -298,12 +298,6 @@
     <button class="hbtn" onclick="clearScratch()" title="clear the scratchpad">🧹 Clear</button>
     <button class="pclose" onclick="toggleScratch()" title="close">✕</button></div>
   <div id="scratchbody" class="scratchbody"></div>
-</aside>
-<aside id="logpanel" class="drawer logpanel">
-  <div class="aphead"><strong>🪵 Worker log</strong><span id="logstatus" class="hint"></span>
-    <button id="logtail" class="hbtn" onclick="toggleTail()" title="auto-scroll to newest">⤓ tail</button>
-    <button class="pclose" onclick="toggleLog()" title="close">✕</button></div>
-  <pre id="logbox" class="logbox"></pre>
 </aside>
 <aside id="actpanel" class="drawer logpanel">
   <div class="aphead"><strong>📋 Activity</strong><span class="hint">live run feed</span>

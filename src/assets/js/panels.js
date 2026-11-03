@@ -13,52 +13,6 @@ function _reltime(ts) {
   if (s < 86400) return Math.floor(s / 3600) + 'h ago';
   return Math.floor(s / 86400) + 'd ago';
 }
-// ── Worker log ────────────────────────────────────────────────────────────────
-// Tail the gate worker's stdout/stderr — what the kernel is doing when it evaluates.
-let _logPoll = null, _logTail = true, _logLast = null;
-const _logAtBottom = box => box.scrollHeight - box.scrollTop - box.clientHeight < 30;
-function _setTail(on) {
-  if (on === _logTail) return;
-  _logTail = on;
-  const t = document.getElementById('logtail'); if (t) t.classList.toggle('stop', !on);
-}
-function toggleLog() {
-  const p = document.getElementById('logpanel'); p.classList.toggle('open');
-  if (p.classList.contains('open')) {
-    loadLog(); _logPoll = _logPoll || setInterval(loadLog, 1500);
-    // Follow is STICKY to the bottom: scrolling up to read pauses it (so a poll can't snap you back
-    // out from underneath); scrolling back to the bottom resumes it. Wire once per box.
-    const box = document.getElementById('logbox');
-    if (box && !box._tailWired) {
-      box._tailWired = true;
-      box.addEventListener('scroll', () => _setTail(_logAtBottom(box)));
-    }
-  } else if (_logPoll) { clearInterval(_logPoll); _logPoll = null; }
-}
-function toggleTail() {
-  _setTail(!_logTail);
-  if (_logTail) { const b = document.getElementById('logbox'); b.scrollTop = b.scrollHeight; }
-}
-async function loadLog() {
-  try {
-    const r = await api('GET', '/api/worker-log'); if (!r) return;
-    const box = document.getElementById('logbox');
-    const log = r.log || '(empty)';
-    // Only rewrite when the text actually CHANGED — an unchanged poll must not clobber the user's
-    // text selection or scroll. The log is append-only, so preserving scrollTop keeps the lines the
-    // user is reading in place; only follow (jump to bottom) while pinned to the bottom.
-    if (log !== _logLast) {
-      _logLast = log;
-      const keepTop = box.scrollTop;
-      box.textContent = log;
-      box.scrollTop = _logTail ? box.scrollHeight : keepTop;
-    }
-    const w = r.worker || {};
-    document.getElementById('logstatus').textContent =
-      w.kind === 'gate' ? `worker :${w.port} · ${w.connected ? 'connected' : 'down'}` : (w.kind || '');
-  } catch (_) {}
-}
-
 // ── Packages panel ────────────────────────────────────────────────────────────
 // List + add/remove the notebook project's dependencies (the worker's active env).
 // Add/remove installs/uninstalls then re-runs cells, so a `using` lights up live.
@@ -738,7 +692,7 @@ window.clearScratch = function () {
 };
 
 // ── Open panels light up the button that opens them ──────────────────────────────────────────
-// The side panels (Files / Controls / Agent / Worker log / History) slide in from the right and
+// The side panels (Files / Controls / Agent / History) slide in from the right and
 // look alike, so with one open there was nothing to say WHICH, and nothing to say that the button
 // you pressed is also the button that closes it. Each opener carries `data-panel="<panel id>"`
 // (notebook.html) and gets `.panelon` for as long as that panel is open.

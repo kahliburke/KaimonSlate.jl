@@ -117,7 +117,7 @@
   // resolves through the global object, so replacing the property disables all of them at once.
   const AUTHORING_OPENERS = [
     // Tool panels and modals
-    'openSettings', 'togglePackages', 'openExtensions', 'toggleLog', 'toggleTail', 'toggleHistory', 'toggleConfig',
+    'openSettings', 'togglePackages', 'openExtensions', 'wpOpenLog', 'toggleHistory', 'toggleConfig',
     'toggleTopMenu', 'toggleAgent', 'toggleAgentMax', 'toggleThink', 'openDestinations',
     'openTraceModal', 'toggleDeps',
     // Command palette and the docs browser (their hotkeys are blocked below too — this covers the

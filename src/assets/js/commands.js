@@ -302,7 +302,7 @@ R({ id: 'view.searchPrev', label: 'Previous search hit', group: 'Panels', ctx: [
 R({ id: 'view.packages', label: 'Packages…', group: 'Panels', ctx: ['command'],
     available: _has('togglePackages'), run: () => _fn('togglePackages') });
 R({ id: 'view.workerLog', label: 'Worker log', group: 'Panels', ctx: ['command'],
-    available: _has('toggleLog'), run: () => _fn('toggleLog') });
+    available: _has('wpOpenLog'), run: () => _fn('wpOpenLog') });
 R({ id: 'view.history', label: 'History…', group: 'Panels', ctx: ['command'],
     available: _has('toggleHistory'), run: () => _fn('toggleHistory') });
 R({ id: 'view.extensions', label: 'Extensions…', group: 'Panels', ctx: ['command'],
