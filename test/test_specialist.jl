@@ -257,6 +257,15 @@ current_agent_id() = nothing
             NS.mark_debug!(nb, "cell:drive", 3; on = false)
         end
 
+        @testset "a condition or watch that does not parse is refused, and nothing is stored" begin
+            r = NS.mark_debug!(nb, "cell:drive", 3; cond = "i >")
+            @test r["ok"] === false && occursin("does not parse", r["error"])
+            @test isempty(get(r, "marks", []))
+            w = NS.watch_debug!(nb, "cell:drive", 3; expr = "i +")
+            @test w["ok"] === false && occursin("does not parse", w["error"])
+            @test isempty(get(w, "watches", []))
+        end
+
         @testset "a choice is answered by picking, not by typing" begin
             picked = Ref("")
             fake_agent_reset!((args, text) -> begin

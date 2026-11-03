@@ -155,6 +155,7 @@ const dropLive = (spec) => setLive(spec, false);
 async function setWatch(file, line, expr) {
   try {
     const r = await A('POST', '/api/debug/watch', { file, line, expr });
+    if (r && r.ok === false) { probes.value = [...probes.value, { expr, ok: false, error: r.error }]; return; }
     if (r && r.watches) watches.value = r.watches;
   } catch (e) {}
 }
@@ -206,7 +207,7 @@ function apply(next) {
   if (s && s.marks) paintMarks(s.marks);
   if (s && s.watches) watches.value = s.watches;
   if (s && s.live) liveW.value = s.live;
-  s && !s.finished === false && loadTraces();
+  s && loadTraces();   // each pause, and the end, brings new samples; nothing is fetched without a watch
   syncGutter();
   window._slateRefreshCells?.();   // the header's 🐞 reflects whether this cell has the session
   if (_flashTimer) clearTimeout(_flashTimer);

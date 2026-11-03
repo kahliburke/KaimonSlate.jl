@@ -664,12 +664,14 @@ predicate that never holds is the cost of that, hence the parse check at arm tim
 """
 function _mark_condition(s::_DebugSession, cond::AbstractString)
     isempty(strip(cond)) && return nothing
+    # A condition that does not parse never holds: a mark that stopped every time instead would
+    # look like a working condition that is always true.
     ex = try
         Meta.parse(strip(cond))
     catch
-        return nothing
+        return (s.ns, false)
     end
-    (ex isa Expr && ex.head === :incomplete) && return nothing
+    (ex isa Expr && ex.head === :incomplete) && return (s.ns, false)
     return (s.ns, :(try; ($ex) === true; catch; false; end))
 end
 

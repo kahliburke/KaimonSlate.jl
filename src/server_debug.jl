@@ -595,6 +595,9 @@ function watch_debug!(nb::LiveNotebook, file::AbstractString, line::Integer;
     (isempty(file) || line <= 0) && return Dict{String,Any}("ok" => false,
                                                             "error" => "a watch needs a file and a line",
                                                             "watches" => _watches_json(nb))
+    err = ReportEngine._mark_cond_error(expr)
+    isempty(err) || return Dict{String,Any}("ok" => false, "error" => "watch expression does not parse: $err",
+                                            "watches" => _watches_json(nb))
     lock(_DEBUG_LOCK) do
         d = get!(() -> Dict{Tuple{String,Int},String}(), _DEBUG_WATCHES, nb.id)
         key = (String(file), Int(line))
@@ -642,6 +645,14 @@ function mark_debug!(nb::LiveNotebook, file::AbstractString, line::Integer;
     (isempty(file) || line <= 0) && return Dict{String,Any}("ok" => false,
                                                             "error" => "a breakpoint needs a file and a line",
                                                             "marks" => _marks_json(nb))
+    # Checked here, where the answer can still reach whoever typed it: the kernel only sees the
+    # condition when it next arms the marks, and refusing it there leaves the mark stored anyway.
+    if cond !== nothing
+        err = ReportEngine._mark_cond_error(cond)
+        isempty(err) || return Dict{String,Any}("ok" => false,
+                                                "error" => "breakpoint condition does not parse: $err",
+                                                "marks" => _marks_json(nb))
+    end
     armed = lock(_DEBUG_LOCK) do
         d = get!(() -> Dict{Tuple{String,Int},DebugMarkState}(), _DEBUG_MARKS, nb.id)
         key = (String(file), Int(line))
