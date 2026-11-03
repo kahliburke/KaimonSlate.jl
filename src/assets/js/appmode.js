@@ -126,7 +126,7 @@
     // Export and publish: an app's reader gets `Slate.download` of a RESULT, not the document
     'openExport', 'openPublish', 'publishToSite', 'exportNotebook',
     // Worker lifecycle — a restart mid-session strands the reader with no way to recover
-    'restartWorker', 'restartKernel', 'openWorkerPop', 'toggleRunLoc', 'openLaunchPop',
+    'restartWorker', 'restartKernel', 'openWorkerDock', 'toggleWorkerDock', 'toggleRunLoc', 'openLaunchPop',
     'toggleLaunchPop',
     // Editing the document itself
     'addCell', 'deleteCell', 'toggleSource', 'toggleType', 'toggleCollapse', 'toggleHideCode',

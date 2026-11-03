@@ -131,11 +131,15 @@
 .rpphistrow.failed .rpphistout{color:#e07a7a;}
 .rpphistrep{margin:4px 0 0 8px;padding-left:8px;border-left:2px solid rgba(127,127,127,.3);}
 
-/* Telemetry view (telemetry.js): one worker's resource use over time. Opened from a notebook's worker
-   popup and from the home page's worker detail. */
+/* Telemetry view (telemetry.js): one worker's resource use over time. Drawn in a notebook's worker
+   dock, and over the page from the home page's worker detail. */
 .tm-bg { position:fixed; inset:0; z-index:96; background:rgba(4,6,14,.55); display:flex; align-items:center; justify-content:center; }
 .tm-card { width:min(1240px, 96vw); height:min(92vh, 1100px); display:flex; flex-direction:column; background:var(--bg, #0d1120);
            border:1px solid var(--border, #2a2e40); border-radius:12px; box-shadow:0 18px 60px rgba(0,0,0,.45); overflow:hidden; }
+/* Drawn into a place of its own: that place names the worker and closes it. */
+.tm-embed { display:flex; flex-direction:column; min-width:0; min-height:0; background:var(--bg, #0d1120); }
+.tm-embed .tm-title { display:none; }
+.tm-embed .tm-sub { margin-top:0; }
 .tm-head { display:flex; align-items:center; gap:16px; padding:10px 16px 9px; border-bottom:1px solid var(--border, #2a2e40); background:var(--bg2, #141828); }
 .tm-head > div:first-child { flex:1 1 auto; min-width:0; }
 .tm-title { font-weight:600; font-size:1.02rem; color:var(--text, #d4d8e8); }

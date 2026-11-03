@@ -69,7 +69,7 @@ Two ways to place a notebook's worker:
 - **On a live notebook** — the toolbar's **Running on** pill (`💻 local ▾`); its ▾ opens a picker
   with local, your known remotes, transport and pinned ports, a 🩺 Test & prime run, and a worker
   list with Reap. Apply it at whichever scope you want. The same picker is reachable as **change ▾**
-  in the worker panel. The worker moves and the notebook re-runs.
+  in the worker dock. The worker moves and the notebook re-runs.
 
 There is also a machine-wide default run location, set from the Remotes dialog and persisted to
 `slate.json` in your config home. It decides where a notebook with no override of its own runs; empty
@@ -147,13 +147,16 @@ holds a connection to it for that alone while it has a session to the host.
 **Inside the notebook:**
 
 - **The worker pill** (top bar) — one pill, showing whichever worker most needs attention
-  (disconnected, degraded, starting, running, idle). Click it for a dropdown of every worker plus a
-  side panel with a tab per worker that **streams that worker's log and telemetry** (cpu / rss /
-  running cell) live over the page's WebSocket — no polling.
+  (disconnected, degraded, starting, running, idle). Hover it for a list of every worker; click it,
+  or a row in that list, to open the **worker dock** along the bottom of the page. The dock lists
+  every worker on the left, with the selected one's figures and actions beside it, and two tabs:
+  **Log**, the worker's whole log, searchable and following it as it grows, and **Telemetry**, its
+  resource use over time. Drag its top edge to resize it, or ⤢ to fill the window; the notebook
+  keeps clear of it while it is open.
 
   ![The top-bar worker pill showing the most salient worker's live status, with a dropdown listing every worker](./assets/worker-pills.png)
 
-  ![A worker-log popup opened from a region pill: the header (region · gpu · gpu-box :9300) with cpu / rss / running / memo chips, above a live tail of the worker's log — attach, sync_memo, running eval, and a boundary transfer](./assets/worker-log.png)
+  ![The worker dock showing a region (region · gpu · gpu-box :9300): its cpu / rss / running / memo figures beside a live tail of the worker's log — attach, sync_memo, running eval, and a boundary transfer](./assets/worker-log.png)
 - **🪵 Worker log** (**☰ → Worker log**, or the command palette) — a full tail of the main worker's
   log, following the bottom as it grows. For a remote worker it interleaves the local orchestration
   log and the remote worker's own log.

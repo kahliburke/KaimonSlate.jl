@@ -245,13 +245,13 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && bg && bg.classList.contains('show')) { e.stopPropagation(); closeRunLoc(); }
 }, true);
 // Pill click dispatcher: a dormant (inactive) notebook opens the launch popover (2-click launch);
-// a live one opens the worker log popup.
+// a live one opens or closes the worker dock.
 function onRunLocClick(ev) {
   // Use the pill's OWN class (set by renderRunLoc) — authoritative and local, unlike the `nbState`
   // global which isn't reliably present on `window` here.
   const el = document.getElementById('runloc');
   if (el && el.classList.contains('inactive')) { toggleLaunchPop(ev); return; }
-  openWorkerPop('', ev);
+  toggleWorkerDock('', ev);
 }
 // The launch popover expands under the pill (like the worker-status panel): FIRST click on the pill
 // opens it with the precompile heads-up; the "Launch" button here is the deliberate SECOND click.

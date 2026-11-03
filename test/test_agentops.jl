@@ -929,7 +929,7 @@ end
         @info "node not found — skipping the JS assertions"
         @test true
     else
-        for script in ("agent_md.mjs", "click_background.mjs", "worker_tabs.mjs", "vim_escape.mjs",
+        for script in ("agent_md.mjs", "click_background.mjs", "worker_rank.mjs", "vim_escape.mjs",
                        "dialog_message.mjs", "editor_reconfigure.mjs", "esc_html.mjs",
                        "keymap_resolve.mjs", "bytes_fmt.mjs", "dag_spline.mjs", "sched_opts.mjs",
                        "rebaseline_all.mjs", "rebaseline_callsites.mjs", "reconcile_verdict.mjs",

@@ -509,14 +509,14 @@ async function regionShots(browser) {
       await page.evaluate(() => document.getElementById('dagxferdash')?.remove())
     } catch (e) { log('! dag-transfers skipped:', e.message.split('\n')[0]) }
 
-    // worker/region pills (topbar) + worker-log popup (pill → streamed log + telemetry)
+    // worker/region pills (topbar) + worker dock (pill → streamed log + telemetry)
     try {
       await elShot(page, '#workerpills', 'worker-pills.png')
-      await page.evaluate(() => window.openWorkerPop && window.openWorkerPop('gpu'))
-      await page.waitForSelector('#workerpop-log', { timeout: 6000 })
+      await page.evaluate(() => window.openWorkerDock && window.openWorkerDock('gpu'))
+      await page.waitForSelector('#wdock-log', { timeout: 6000 })
       await sleep(800)                                        // let the mocked log tail render
-      await elShot(page, '#workerpopbg', 'worker-log.png')
-      await page.evaluate(() => window.closeWorkerPop && window.closeWorkerPop())
+      await elShot(page, '#workerdock', 'worker-log.png')
+      await page.evaluate(() => window.closeWorkerDock && window.closeWorkerDock())
     } catch (e) { log('! worker-log skipped:', e.message.split('\n')[0]) }
 
     // mesh consent popup — injected straight through its handler (app.js loads mesh.js). The host div

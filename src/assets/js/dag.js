@@ -2269,7 +2269,7 @@ function _dagRegCardShow(zn, cx, cy) {
   card.addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.act === 'prov') { _dagRegCardHide(); _dagRegionDetail(zn.name); return; }
-    if (b.dataset.act === 'log') { _dagRegCardHide(); if (typeof openWorkerPop === 'function') openWorkerPop(zn.name, e, true); return; }
+    if (b.dataset.act === 'log') { _dagRegCardHide(); if (typeof openWorkerDock === 'function') openWorkerDock(zn.name, e); return; }
     if (b.dataset.act === 'reap') {
       const host = zn.host, port = w.port;
       if (typeof confirmDark === 'function' &&

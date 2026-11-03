@@ -1,4 +1,5 @@
-// Telemetry view: one worker's resource use over time, opened from the figures in the worker popup.
+// Telemetry view: one worker's resource use over time. A notebook shows it in its worker dock; the
+// home page opens it over the page from its worker roster.
 //
 // Everything comes from the hub's telemetry ring (GET /api/worker-stats?full=1): the full history on
 // open, then only what is new every two seconds. The charts share one time axis and a linked
@@ -33,13 +34,16 @@ const pctTick = (v) => (Math.abs(v) < 10 && v % 1 ? (+v).toFixed(1) : Math.round
 const pctAxis = { type: 'value', min: 0, max: (v) => Math.max(1, v.max), axisLabel: { formatter: pctTick },
                   splitLine: { lineStyle: { opacity: 0.25 } } };
 
-/** Open the view for a worker: `host` as the popup knows it ("" for this machine), `port` its gate.
+/** Open the view for a worker: `host` as the caller knows it ("" for this machine), `port` its gate.
  *  A caller that knows more about the worker passes `actions`, a function returning markup for a bar
- *  under the title (called on every render, so it stays current), and `onClose`. */
-export async function openTelemetry({ side, host, port, label, actions, onClose, nb }) {
+ *  under the title (called on every render, so it stays current), and `onClose`. `mount`, an element,
+ *  draws the view inside it instead of over the page: no backdrop, no close button, and Esc is left
+ *  to the page. One view is open at a time either way. */
+export async function openTelemetry({ side, host, port, label, actions, onClose, nb, mount }) {
   await chartsReady();
+  if (mount && !mounts.has(mount)) { mounts.add(mount); render(html`<${Telemetry} into=${mount}/>`, mount); }
   view.value = { side: side || '', host: host || 'local', port, label: label || (side || 'main worker'),
-                 actions, onClose, nb: nb || '' };
+                 actions, onClose, nb: nb || '', mount: mount || null };
   samples.value = []; runs.value = []; failed.value = ''; lastT = -Infinity; gen++;
   poll(gen);
   clearInterval(timer);
@@ -49,6 +53,8 @@ window.openTelemetry = openTelemetry;
 
 /** Close the view, if open. */
 export function closeTelemetry() { view.value && close(); }
+window.closeTelemetry = closeTelemetry;
+const mounts = new WeakSet();     // the elements a view has been rendered into
 // A notebook page has ECharts and its own chart theme already. The home page has neither: ECharts is
 // loaded the first time the view opens there, with a theme in the default notebook palette (the home
 // page defines no theme variables) covering what these charts use.
@@ -305,9 +311,10 @@ function Tile({ label, value, sub, frac, tone }) {
     ${sub ? html`<div class="tm-tsub" onMouseEnter=${(e) => { const t = e.currentTarget; t.title = t.scrollWidth > t.clientWidth ? sub : ''; }}>${sub}</div>` : null}</div>`;
 }
 
-function Telemetry() {
-  const v = view.value;
-  useEffect(() => { lockScroll('telemetry', !!v); }, [!!v]);
+// Rendered once over the page and once into each `mount`; each copy draws only the view meant for it.
+function Telemetry({ into = null }) {
+  const v = view.value && view.value.mount === into ? view.value : null;
+  useEffect(() => { into || lockScroll('telemetry', !!v); }, [!!v]);
   if (!v) return null;
   const s = shown(), last = s[s.length - 1];
   const head = html`<div class="tm-head">
@@ -315,10 +322,12 @@ function Telemetry() {
         <div class="tm-sub">${subWhere(v)}
           ${last ? html` · ${s.length} samples · updated ${Math.max(0, Math.round(Date.now() / 1000 - last.t))}s ago` : null}</div></div>
       <div class="tm-ranges">${RANGES.map(([r, l]) => html`<button class=${range.value === r ? 'on' : ''} onClick=${() => range.value = r}>${l}</button>`)}</div>
-      <button class="tm-x" title="Close (Esc)" onClick=${close}>✕</button></div>`;
+      ${into ? null : html`<button class="tm-x" title="Close (Esc)" onClick=${close}>✕</button>`}</div>`;
   const acts = v.actions ? html`<div class="tm-acts">${v.actions()}</div>` : null;
-  if (!last) return html`<div class="tm-bg" onMouseDown=${e => e.target.classList.contains('tm-bg') && close()}>
-      <div class="tm-card">${head}${acts}<div class="tm-body"><div class="tm-empty">${failed.value || 'waiting for telemetry…'}</div></div></div></div>`;
+  const frame = (body) => into ? html`<div class="tm-embed">${head}${acts}<div class="tm-body">${body}</div></div>`
+    : html`<div class="tm-bg" onMouseDown=${e => e.target.classList.contains('tm-bg') && close()}>
+        <div class="tm-card" role="dialog" aria-modal="true">${head}${acts}<div class="tm-body">${body}</div></div></div>`;
+  if (!last) return frame(html`<div class="tm-empty">${failed.value || 'waiting for telemetry…'}</div>`);
 
   const job = last.job || {}, host = last.host || {}, proc = last.proc || {}, gpus = last.gpus || [];
   const r = reading(last), memLimit = r.mem ? r.mem.limit : (last.sys_mem_total || 0);
@@ -574,10 +583,7 @@ function Telemetry() {
                                           onClick=${() => collectNow(v, full)}>${l}</button>`) : null;
   const gcCtl = gcSel || gcButtons ? html`<span class="tm-gcctl">${gcSel}${gcButtons}</span>` : null;
 
-  return html`<div class="tm-bg" onMouseDown=${e => e.target.classList.contains('tm-bg') && close()}>
-    <div class="tm-card" role="dialog" aria-modal="true">
-      ${head}${acts}
-      <div class="tm-body">
+  return frame(html`
         ${tiles}
         <${Section} title="Timeline" aside=${html`${spanKey}${gcCtl}`}>${running}</${Section}>
         <${Section} title="CPU" aside=${cpuLimit}><div class="tm-grid"><${Chart} option=${cpu}/>${heat ? html`<${Chart} option=${heat}/>` : null}</div></${Section}>
@@ -586,8 +592,7 @@ function Telemetry() {
         ${io || psi ? html`<${Section} title=${io && psi ? 'I/O and pressure' : io ? 'I/O' : 'Pressure'}><div class="tm-grid">
           ${io ? html`<${Chart} option=${io}/>` : null}${psi ? html`<${Chart} option=${psi}/>` : null}</div></${Section}>` : null}
         <${Section} title="Julia runtime"><div class="tm-grid"><${Chart} option=${julia}/><${Chart} option=${alloc}/>
-          ${memoStore ? html`<${Chart} option=${memoStore}/>` : null}</div></${Section}>
-      </div></div></div>`;
+          ${memoStore ? html`<${Chart} option=${memoStore}/>` : null}</div></${Section}>`);
 }
 
 const host = document.createElement('div');
@@ -595,5 +600,5 @@ document.body.appendChild(host);
 render(html`<${Telemetry} />`, host);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && view.value) poll(gen); });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && view.value) { e.stopImmediatePropagation(); close(); }
+  if (e.key === 'Escape' && view.value && !view.value.mount) { e.stopImmediatePropagation(); close(); }
 }, true);

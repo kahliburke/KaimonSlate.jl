@@ -110,20 +110,26 @@
   </div>
   </div><!-- end .topbar-actions -->
 </div>
-<div id="workerpopbg" class="workerpop workerpop-panel">
-  <div class="workerpop-head">
-    <div class="workerpop-headtop">
-      <span id="workerpop-title">Worker</span>
-      <span id="workerpop-pin" class="workerpop-pin" onclick="wpTogglePin()" title="click to pin this panel">📌</span>
-    </div>
-    <div id="workerpop-tabs" class="workerpop-tabs" style="display:none"></div>
-    <div id="workerpop-runloc" class="workerpop-runloc" style="display:none"></div>
-    <div id="workerpop-acts" class="workerpop-acts"></div>
-    <div id="workerpop-ident" class="workerpop-ident"></div>
-    <div id="workerpop-stats" class="workerpop-stats"></div>
+<div id="workerdock" class="workerdock">
+  <div id="wdock-grip" class="wdock-grip"></div>
+  <div id="wdock-list" class="wdock-list"></div>
+  <div id="wdock-info" class="wdock-info">
+    <div id="wdock-title" class="wdock-title">Worker</div>
+    <div id="wdock-acts" class="wdock-acts"></div>
+    <div id="wdock-runloc" class="wdock-runloc" style="display:none"></div>
+    <div id="wdock-stats" class="wdock-stats"></div>
+    <div id="wdock-ident" class="wdock-ident"></div>
   </div>
-  <div class="workerpop-logbar"><span>Log</span><button class="wrl-change" onclick="wpOpenLog()" title="the whole log, searchable">Open full log ›</button></div>
-  <div id="workerpop-log" class="workerpop-log">loading…</div>
+  <div class="wdock-main">
+    <div class="rptabs wdock-bar">
+      <button data-wdtab="log">Log</button><button data-wdtab="tel">Telemetry</button>
+      <span class="wdock-sp"></span>
+      <span id="wdock-full" class="wdock-btn" role="button" onclick="wpToggleFull()" title="Fill the window">⤢</span>
+      <span class="wdock-x" role="button" onclick="closeWorkerDock()" title="Close">×</span>
+    </div>
+    <div id="wdock-log" class="wdock-pane"></div>
+    <div id="wdock-tel" class="wdock-pane"></div>
+  </div>
 </div>
 <!-- Launch confirmation popover: anchored under the "Inactive — click to launch" pill. First click on
      the pill opens this (precompile heads-up); the Launch button here is the second, deliberate click. -->

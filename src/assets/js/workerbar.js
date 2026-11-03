@@ -1,13 +1,10 @@
-// A worker's facts and actions, in the bar under the telemetry view's title. The home page opens it
-// from its worker roster (activity.js) and a notebook from its worker popup (workers.js), so one
-// worker reads and acts the same from either place.
+// A worker's facts and actions, in the bar under the telemetry view's title, as the home page opens
+// it from its worker roster (activity.js). A notebook's worker dock has its own.
 //
 // The bar renders a roster entry `{ w, bound }`: `w` as a roster lists the worker, `bound` the hub's
-// own kernel record for it when an open notebook holds it. The home page passes its live roster; a
-// notebook, which has none, gets its entry from the hub's lists here (`openWorkerTelemetry`).
+// own kernel record for it when an open notebook holds it.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
-import { openTelemetry, closeTelemetry } from './telemetry.js';
 
 const { isAlive, workerState, mergeWorker } = window.slateModel;
 
@@ -125,25 +122,3 @@ export function workerLabel(mf, port) {
   const side = mf.side && mf.side !== 'local' ? mf.side : '';
   return [String(mf.notebook || '').replace(/#[^#]*$/, ''), mf.region || side].filter(Boolean).join(' · ') || ':' + port;
 }
-
-// ── from a notebook ──────────────────────────────────────────────────────────────
-// A notebook's workers are in the hub's facts (model.js), found by notebook and side, so the bar
-// follows one through a restart and shows what every other part of the page shows about it.
-
-// A worker fact as the bar reads a roster entry: the hub's own record (model.js `asRosterEntry`).
-const factEntry = (f) => { const w = window.slateModel.asRosterEntry(f); return { w, bound: w }; };
-
-/** Open the telemetry view for one of notebook `nb`'s workers (`side` "" for its main one), with its bar. */
-export function openWorkerTelemetry({ nb, side, host, port, label }) {
-  side = side || '';
-  pending.value = null;
-  const fact = () => window.slateModel.getFacts()['worker/' + nb + '/' + side];
-  openTelemetry({
-    nb, side, host: host && host !== 'local' ? host : '', port, label,
-    actions: () => {
-      const f = fact();
-      return html`<${WorkerBar} host=${f && f.host ? f.host : 'local'} port=${f ? f.port : port}
-        entry=${f ? factEntry(f) : null} openNotebook=${false}/>`;
-    } });
-}
-window.openWorkerTelemetry = openWorkerTelemetry;

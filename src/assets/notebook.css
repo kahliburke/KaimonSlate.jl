@@ -2521,49 +2521,51 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 .wpmi-face + .wpmi-tel { margin-left:6px; }
 .wpmi-tel:hover { color:var(--text); border-color:color-mix(in srgb, var(--accent) 45%, transparent);
   background:color-mix(in srgb, var(--accent) 18%, transparent); }
-/* Worker / region status + live-log popup. */
-.workerpop { width:min(760px, 92vw); max-height:80vh; display:flex; flex-direction:column; padding:0; overflow:hidden; }
-/* As a NON-covering side panel: docked top-right, below the topbar, so it coexists with the (top-left)
-   dropdown — you can keep hovering rows to switch which worker it shows. No backdrop, no dimming. */
-.workerpop-panel { position:fixed; top:calc(var(--topbar-h,49px) + 8px); right:14px; z-index:62;   /* above the DAG pane (60) so the Log popup opened from a region card isn't hidden behind a right-docked pane */
-  width:560px; max-width:calc(100vw - 28px); max-height:84vh;
-  border:1px solid var(--border); border-radius:10px; background:var(--bg2);
-  box-shadow:0 12px 40px rgba(0,0,0,.5); display:none; }
-.workerpop-panel.show { display:flex; }
-/* Pin toggle: dim while the panel is a transient hover-preview, solid once pinned (click a row or the pin). */
-.workerpop-pin { cursor:pointer; font-size:.9rem; line-height:1; flex:0 0 auto; opacity:.32; filter:grayscale(1); }
-.workerpop-pin:hover { opacity:.7; }
-.workerpop-pin.pinned { opacity:1; filter:none; }
-.workerpop-head { display:flex; flex-direction:column; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.86rem; }
-.workerpop-headtop { display:flex; align-items:center; gap:12px; }
-#workerpop-title { font-weight:600; color:var(--text); flex:1 1 auto; min-width:0; }
-/* Full telemetry breakdown as wrapping chips (no ellipsis truncation — every metric stays visible). */
-.workerpop-stats { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; }
-/* One tab per worker, so comparing them is a click rather than a re-navigation. Severity-ranked with
-   a `+N ▾` overflow (same bounding as the topbar pill), so an unwell worker always holds a tab. */
-.workerpop-tabs { display:flex; align-items:stretch; gap:3px; flex-wrap:nowrap; min-width:0; }
-.wptab { font-size:.74rem; padding:3px 9px; border-radius:6px 6px 0 0; cursor:pointer; white-space:nowrap;
-  overflow:hidden; text-overflow:ellipsis; min-width:0; max-width:22ch;
-  background:transparent; color:var(--dim); border:1px solid transparent; border-bottom:none; }
-.wptab:hover { color:var(--text); background:var(--bg3); }
-.wptab.on { color:var(--text); background:var(--bg); border-color:var(--border);
-  box-shadow:inset 0 2px 0 var(--accent); }   /* the accent edge reads as "this one" without a heavy frame */
-.wptab-more { position:relative; display:inline-flex; }
-.wptab-menu { position:absolute; top:100%; right:0; z-index:30; min-width:170px; padding:4px;
-  background:var(--bg2); border:1px solid var(--border); border-radius:0 6px 6px 6px;
-  box-shadow:0 8px 22px rgba(0,0,0,.4); }
-.wptab-menuitem { font-size:.76rem; padding:4px 8px; border-radius:5px; cursor:pointer; white-space:nowrap; color:var(--dim); }
-.wptab-menuitem:hover { background:var(--bg3); color:var(--text); }
+/* Worker / region status dock: a full-width drawer along the bottom. Logs are wide text, so the
+   panel takes height rather than width, and the notebook reserves that height while it is open.
+   Three columns: every worker, the selected one's controls and figures, and its log or telemetry.
+   Full screen fills everything under the topbar. */
+.workerdock { position:fixed; left:0; right:0; bottom:0; height:var(--wdockh, 34vh); z-index:55;
+  display:none; grid-template-columns:220px 340px minmax(0, 1fr); background:var(--bg2);
+  border-top:1px solid var(--border); box-shadow:0 -8px 24px #0007; font-size:.84rem; }
+.workerdock.open { display:grid; }
+.workerdock.solo { grid-template-columns:340px minmax(0, 1fr); }
+.workerdock.solo .wdock-list { display:none; }
+body.wdock-open .page { padding-bottom:calc(var(--wdockh, 34vh) + 40px); }
+/* Clear of the side docks, and stacked on the DAG pane when that is docked at the bottom too. */
+body.agent-open .workerdock { right:var(--agentw, 380px); }
+body.toc-open .workerdock { left:300px; }
+@media (max-width:900px) { body.agent-open .workerdock { right:0; } body.toc-open .workerdock { left:0; } }
+body.dag-open.dag-bottom .workerdock { bottom:var(--dagh, 42vh); }
+.workerdock.full { top:var(--topbar-h, 49px); height:auto; bottom:0; right:0; left:0; z-index:64; box-shadow:none; }
+.workerdock.full .wdock-grip { display:none; }
+body.wdock-open.dag-open.dag-bottom .page { padding-bottom:calc(var(--wdockh, 34vh) + var(--dagh, 42vh) + 40px); }
+.wdock-grip { position:absolute; top:-5px; left:0; right:0; height:10px; cursor:ns-resize; z-index:2; }
+.wdock-grip:hover, .wdock-grip.on { background:color-mix(in srgb, var(--accent) 35%, transparent); }
+.wdock-list { overflow:auto; padding:6px; border-right:1px solid var(--bg3); display:flex; flex-direction:column; gap:2px; }
+.wdock-row { display:flex; align-items:center; gap:6px; padding:5px 8px; border-radius:6px; cursor:pointer;
+  color:var(--dim); white-space:nowrap; border-left:2px solid transparent; }
+.wdock-row:hover { background:var(--bg3); color:var(--text); }
+.wdock-row.on { background:var(--bg3); color:var(--text); border-left-color:var(--accent); }
+.wdock-row .wdr-label { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.wdock-row .wdr-face { flex:0 0 auto; font-size:.72rem; color:var(--dim); font-variant-numeric:tabular-nums; }
+.wdock-info { overflow:auto; padding:10px 12px; border-right:1px solid var(--bg3); display:flex; flex-direction:column; gap:9px; min-width:0; }
+.wdock-title { font-weight:600; color:var(--text); }
+.wdock-acts { display:flex; gap:8px; flex-wrap:wrap; }
+.wdock-acts:empty { display:none; }
+.wdock-stats { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; }
+.wdock-stats:empty { display:none; }
+.wdock-stats .wm { padding:0; }
 /* Identity, not health: which host, over what transport, on which ports, adopted or spawned. Muted
-   against the telemetry chips below — you read it once to orient, then watch the numbers. */
-.workerpop-ident { display:flex; flex-wrap:wrap; gap:4px 5px; align-items:center; }
+   against the telemetry above — you read it once to orient, then watch the numbers. */
+.wdock-ident { display:flex; flex-wrap:wrap; gap:4px 5px; align-items:center; }
 .widchip { font-family:var(--mono,ui-monospace,monospace); font-size:.68rem; color:var(--dim);
   background:transparent; border:1px dashed var(--border); border-radius:5px; padding:1px 6px; white-space:nowrap; }
 .widchip-k { color:color-mix(in srgb, var(--dim) 70%, transparent); margin-right:5px; }
 .widchip-v { color:var(--text); }
-/* Run-location picker row (main worker only) — moved here from the old #runloc caret. */
-.workerpop-runloc { font-size:.82rem; color:var(--dim); display:flex; align-items:center; gap:8px; }
-.workerpop-runloc b { color:var(--text); font-weight:600; }
+/* Run-location picker row (main worker only). */
+.wdock-runloc { font-size:.82rem; color:var(--dim); display:flex; align-items:center; gap:8px; }
+.wdock-runloc b { color:var(--text); font-weight:600; }
 .wrl-change { font-size:.76rem; padding:2px 8px; border-radius:6px; cursor:pointer;
   background:var(--bg3); color:var(--text); border:1px solid var(--border); }
 .wrl-change:hover { border-color:color-mix(in srgb, var(--accent) 55%, var(--border)); }
@@ -2573,34 +2575,24 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 /* Reserve the value's width (min-width set inline per metric) so the chip doesn't resize as the number ticks. */
 .wchip-v { display:inline-block; text-align:left; }
 .wchip-note { color:var(--dim); background:transparent; border:none; padding:1px 0; }
-.workerpop-x { cursor:pointer; color:var(--dim); font-size:1.25rem; line-height:1; flex:0 0 auto; padding:0 4px; }
-.workerpop-x:hover { color:var(--text); }
-.workerpop-logbar { display:flex; align-items:center; justify-content:space-between; padding:5px 14px;
-  font-size:.74rem; color:var(--dim); background:var(--bg2); border-bottom:1px solid var(--border); }
+.wdock-main { display:flex; flex-direction:column; min-width:0; min-height:0; }
+/* The shared folder tabs (.rptabs), opening into the pane below; the controls sit at the strip's end. */
+.wdock-bar.rptabs { border-radius:0; padding:5px 8px 0 10px; align-items:flex-end; }
+.wdock-sp { flex:1 1 auto; }
+.wdock-btn { align-self:center; border:1px solid transparent; border-radius:5px; color:var(--dim);
+  font-size:.95rem; line-height:1; padding:3px 6px; margin-bottom:4px; cursor:pointer; }
+.wdock-btn:hover, .wdock-btn.on { color:var(--text); border-color:var(--border); }
+.wdock-x { align-self:center; margin-bottom:4px; cursor:pointer; color:var(--dim); font-size:1.25rem; line-height:1; padding:0 4px; }
+.wdock-x:hover { color:var(--text); }
+.wdock-pane { flex:1 1 auto; min-height:0; display:none; flex-direction:column; }
+.wdock-pane.on { display:flex; }
+.wdock-pane .tm-embed { flex:1 1 auto; min-height:0; }
 /* A worker being started, narrated where the worker is shown (workers.js `_wpPaintBringup`). */
-.workerpop-bringup { display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border-radius:8px;
+.wdock-bringup { display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border-radius:8px;
   background:color-mix(in srgb, var(--accent) 8%, var(--bg)); border:1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); }
-.workerpop-bringup .hydspin { margin-top:3px; }
-.workerpop-bringup .wpbody { display:flex; flex-direction:column; gap:4px; min-width:0; flex:1 1 auto; color:var(--accent); }
-.workerpop-bringup .hydmsg { color:var(--text); }
-.workerpop-log { margin:0; padding:6px 0; overflow:auto; flex:1 1 auto; min-height:220px;
-  font-family:var(--mono,ui-monospace,monospace); font-size:.76rem; line-height:1.5; color:var(--text); background:var(--bg); }
-/* One parsed log RECORD (a whole @info/@warn block); newest on top, lines within a record in natural order. */
-.wlog-rec { padding:2px 14px; border-bottom:1px solid rgba(255,255,255,.045); white-space:pre-wrap; word-break:break-word; }
-.wlog-rec:hover { background:rgba(255,255,255,.02); }
-.wlog-ts { color:var(--dim); margin-right:6px; }
-.wlog-lvl { font-weight:600; margin-right:6px; }
-.wlog-info .wlog-lvl { color:var(--accent); }
-.wlog-warn .wlog-lvl { color:#e3b341; }
-.wlog-error .wlog-lvl { color:#f85149; }
-.wlog-debug .wlog-lvl { color:var(--dim); }
-.wlog-warn { background:rgba(227,179,65,.05); }
-.wlog-error { background:rgba(248,81,73,.07); }
-.wlog-x { margin-left:6px; font-size:.68rem; font-weight:600; color:var(--dim); background:var(--bg3);
-  border:1px solid var(--border); border-radius:20px; padding:0 6px; vertical-align:middle; }
-.wlog-cont { padding-left:16px; opacity:.9; }
-.wlog-loc { padding-left:16px; color:var(--dim); font-size:.72rem; }
-.wlog-plain { color:var(--dim); }
+.wdock-bringup .hydspin { margin-top:3px; }
+.wdock-bringup .wpbody { display:flex; flex-direction:column; gap:4px; min-width:0; flex:1 1 auto; color:var(--accent); }
+.wdock-bringup .hydmsg { color:var(--text); }
 .rlbadge { font-size:.68rem; font-weight:600; color:var(--dim); background:var(--bg3);
   border:1px solid var(--border); border-radius:20px; padding:1px 8px; }
 .rlhosts { margin-bottom:4px; }
@@ -3442,8 +3434,7 @@ select.ipver:focus { outline:none; border-color:var(--accent); }
 .ipstat.build span:last-child { color:var(--gold); }
 
 .anwhere .anwall { margin-left:auto; color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.76rem; }
-/* Worker popup actions — restart / shut down / release, offered by what the worker is. */
-.workerpop-acts { display:flex; gap:8px; flex-wrap:wrap; padding:8px 12px 10px; border-top:1px solid var(--bg3); }
+/* Worker dock actions — restart / shut down / release, offered by what the worker is. */
 .wpact { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:7px;
   padding:5px 12px; cursor:pointer; font-size:.79rem; }
 .wpact:hover { border-color:var(--accent); color:var(--accent); }
@@ -3556,6 +3547,12 @@ select.ipver:focus { outline:none; border-color:var(--accent); }
 .logv-bg .logv { max-width:min(1400px, 94vw); width:94vw; height:88vh; display:flex; flex-direction:column;
   padding:0; overflow:hidden; }
 .logv-head { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--border); }
+/* A viewer drawn into a place of its own (the worker dock): that place has the title and the close. */
+.logv-host { display:none; flex:1 1 auto; min-height:0; }
+.logv-host.show { display:flex; }
+.logv-in { display:flex; flex-direction:column; flex:1 1 auto; min-width:0; min-height:0; }
+.logv-in .logv-title, .logv-in .logv-x { display:none; }
+.logv-in .logv-head:has(.logv-err:empty) { display:none; }
 .logv-head strong { font-size:.95rem; }
 .logv-sweep { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:5px;
   padding:2px 6px; font-size:.8rem; max-width:280px; }

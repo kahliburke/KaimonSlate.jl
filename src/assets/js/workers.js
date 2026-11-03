@@ -1,24 +1,22 @@
-// ── Worker / region status pills + live log popup ─────────────────────────────────────────────────
-// One pill per worker the notebook uses: the MAIN worker rides the existing #runloc pill, each ACTIVE
-// region gets a pill in #workerpills. Clicking a pill body opens a popup with that worker's LOG (polled
-// live while open) plus its diagnostics (process + host cpu/mem, from the 2s telemetry). The #runloc
-// pill's ▾ caret still opens the run-location picker (change WHERE it runs); the body opens this popup.
+// ── Worker / region status pill + bottom dock ─────────────────────────────────────────────────────
+// The topbar pill shows the most attention-worthy worker; hovering it lists them all. Clicking the pill
+// or a row opens the dock along the bottom of the page: every worker on the left, the selected one's
+// controls and figures (from the 2s telemetry) in the middle, and its live log filling the rest.
 
 // Everything shown about a worker (its identity, health, allocation and latest sample) is read from
-// the page's model (model.js), which holds the hub's facts. The panel fetches only what the facts do
+// the page's model (model.js), which holds the hub's facts. The dock fetches only what the facts do
 // not carry: the worker's log and where it came from (`_wpProv`).
 let _wpSide = null;
-const _wpProv = {};               // side → {origin, spawned} from the log route, for the open panel
-let _wpRaw = [];                  // chronological raw log lines for the OPEN popup (snapshot + streamed), re-parsed on each change
+const _wpProv = {};               // side → {origin, spawned} from the log route, for the open dock
+let _wpTab = localStorage.getItem('slateWorkerDockTab') === 'tel' ? 'tel' : 'log';   // the dock's open tab
 let _wpWorkers = [];              // the model's workers for this notebook, as last painted
 // A small line chart, drawn in the text colour.
 const _WP_TEL_ICON = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M1.5 13.5h13" ' +
   'stroke="currentColor" stroke-width="1.2" fill="none" opacity=".5"/><path d="M2 11l3.5-4 3 2.5L14 3.5" stroke="currentColor" ' +
   'stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-// The record the open panel draws: the worker's facts, and what the log route added about it.
+// The record the open dock draws: the worker's facts, and what the log route added about it.
 const _wpCurrent = () => _wpSide === null ? null
   : Object.assign({ side: _wpSide }, _wpProv[_wpSide] || {}, window.slateModel.getWorker(_wpSide) || {});
-const _WP_LOG_MAX = 2000;        // cap the client-side buffer so a chatty worker can't grow it unbounded
 const _wpEsc = s => window.slateEscHtml(s);
 // '' for absent/negative, so a chip is omitted rather than showing a meaningless zero.
 const _wpBytes = v => (v == null || v < 0) ? '' : window.slateBytes(v, { compact: true });
@@ -59,122 +57,64 @@ function _wpStatsChips(statsJson, note) {
   const rest = [proc.alloc_rate >= 0 ? 'allocating ' + _wpBytes(proc.alloc_rate) + '/s' : null,
                 memo >= 0 ? 'memo ' + _wpBytes(memo) : null, s.evals > 0 ? s.evals + ' running' : null,
                 s.load1 >= 0 ? 'load ' + s.load1 : null].filter(Boolean);
-  return warn + '<div class="wm" title="Open telemetry" onclick="wpOpenTelemetry()">' + rows.join('') +
+  return warn + '<div class="wm" title="Telemetry" onclick="wpOpenTelemetry()">' + rows.join('') +
     (rest.length ? '<div class="wm-rest">' + _wpEsc(rest.join(' · ')) + '</div>' : '') + '</div>';
 }
-// The whole log of the worker the panel is showing, in the log viewer (logview.js): paged by byte
-// range and searchable however large it is, with its colour kept.
-window.wpOpenLog = function () {
-  const side = _wpSide || '', nbid = (window.__slateState || {}).id;
-  if (!nbid || !window.slateLogs) return;
-  const w = (_wpWorkers || []).find(x => (x.side || '') === side) || {};
-  window.slateLogs.openSource({
-    key: 'worker:' + side, title: 'Worker log · ' + _wpLabel(side, w.host),
+// The Log tab: the log viewer (logview.js) on the worker the dock is showing, paged by byte range and
+// searchable however large the log is, with its colour kept. One viewer of the dock's own, so a sweep's
+// log open over the page is a different one.
+let _wpLogView = null;
+function _wpShowLog() {
+  const nbid = (window.__slateState || {}).id, box = document.getElementById('wdock-log');
+  if (!nbid || !box || !window.slateLogs) return;
+  const refusedBox = box.querySelector('.wplog-none');
+  if ((_wpProv[_wpSide] || {}).refused) {
+    _wpLogView && _wpLogView.close();
+    if (!refusedBox) box.insertAdjacentHTML('afterbegin', '<div class="wplog-none">Worker logs are an operator view, ' +
+      'not a reader one — a log can carry the notebook\'s own data, so an app does not serve them here.<br>' +
+      '<a href="/status" target="_blank" rel="noopener">/status</a> has them, one worker at a time.</div>');
+    return;
+  }
+  refusedBox && refusedBox.remove();
+  if (!_wpLogView) _wpLogView = window.slateLogs.create(box);
+  const side = _wpSide;
+  _wpLogView.openSource({
+    key: 'worker:' + side, title: 'Worker log',
     call: (action, arg, opts) => fetch('/api/' + encodeURIComponent(nbid) + '/worker-log-io', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(Object.assign({}, opts, { side, action, arg })) }).then(r => r.json()) });
+}
+
+// The Telemetry tab: the telemetry view (telemetry.js) drawn into the dock, following this notebook's
+// worker on `side` through a restart. The dock's own figures already say who it is and what it can
+// do, so the view comes without the bar it carries over the home page.
+// Host and port come from the live worker list: the log route's answer names neither for a region.
+function _wpShowTelemetry() {
+  const box = document.getElementById('wdock-tel'), open = window.openTelemetry;
+  if (!box || !open || _wpSide === null) return;
+  const side = _wpSide, r = (_wpWorkers || []).find(w => (w.side || '') === side) || {};
+  open({ nb: (window.__slateState || {}).id, side, mount: box,
+         host: r.host && r.host !== 'local' ? r.host : '', port: r.port, label: _wpLabel(side, r.host) });
+}
+// The meters, and a row's chart button in the pill's list: the dock on that worker, at its telemetry.
+window.wpOpenTelemetry = function (side) {
+  _wpTab = 'tel';
+  const dock = document.getElementById('workerdock');
+  side = side === undefined ? (_wpSide || '') : side;
+  (dock && dock.classList.contains('open') && side === _wpSide) ? _wpPaintTab() : openWorkerDock(side);
 };
-
-// The telemetry view for the worker the popup is showing.
-// Host and port come from the live worker list: the popup's snapshot is the log route's answer, which
-// for a region worker names neither.
-window.wpOpenTelemetry = function () {
-  const shown = _wpCurrent(); if (!shown) return;
-  _wpTelemetryFor(_wpSide, shown);
-};
-// The telemetry view for the worker on `side`, with its bar (facts, restart, reap), as from the home
-// page. `base` is what the caller already knows of it.
-function _wpTelemetryFor(side, base) {
-  const open = window.openWorkerTelemetry || window.openTelemetry; if (!open) return;
-  const r = Object.assign({}, base || {}, (_wpWorkers || []).find(w => (w.side || '') === side) || {});
-  open({ nb: (window.__slateState || {}).id, side,
-    host: r.host && r.host !== 'local' ? r.host : '', port: r.port, label: _wpLabel(side, r.host) });
+function _wpPaintTab() {
+  try { localStorage.setItem('slateWorkerDockTab', _wpTab); } catch (_) {}
+  document.querySelectorAll('#workerdock [data-wdtab]').forEach(b => b.classList.toggle('on', b.dataset.wdtab === _wpTab));
+  const log = document.getElementById('wdock-log'), tel = document.getElementById('wdock-tel');
+  log && log.classList.toggle('on', _wpTab === 'log');
+  tel && tel.classList.toggle('on', _wpTab === 'tel');
+  // Only the tab showing polls: the other one is closed, not hidden.
+  if (_wpTab === 'log') { window.closeTelemetry && window.closeTelemetry(); _wpShowLog(); }
+  else { _wpLogView && _wpLogView.close(); _wpShowTelemetry(); }
 }
 
-// ── Worker-log prettifier ─────────────────────────────────────────────────────────────────────────────
-// The worker's timestamp ConsoleLogger renders each record across MULTIPLE physical lines with box-drawing
-// prefixes (┌ head · │ continuation · └ last). Parse those back into logical RECORDS so a multi-line @info
-// reads top-to-bottom even though records are shown newest-first, and so we can colour by level and dim the
-// `@ Module file:line` location. Plain prints (no box char) become their own single-line records.
-// A raw Julia `WARNING:`/`ERROR:` core print (no box chars) spans several lines — a hint/`!!!`/`@ location`
-// tail. Group that whole block into ONE record so it reads as a unit AND so identical repeats collapse
-// (the world-age depwarn spam fires the same block every tick). Continuation = an indented line or a known
-// hint prefix; the next `WARNING:`/`┌`/plain line ends the block.
-const _WARN_CONT = /^(\s|To make this|Hint:|!!!|Stacktrace|caused by|@ |\[\d)/;
-function _wpParseRecords(lines) {
-  const recs = [];
-  let cur = null, mode = null;                             // mode: 'box' (┌│└) | 'warn' (WARNING/ERROR block) | null
-  for (const styled of lines) {
-    // Structure first, colour second. The worker's streams are colour-enabled, so a `@warn` box line
-    // now begins with an SGR sequence rather than `┌` — every test below has to run on the STRIPPED
-    // text or the log stops parsing into records at all. Nothing is lost inside a record: the panel
-    // already colours those by LEVEL, and Julia's own colours would only fight that. An unparsed
-    // `plain` line keeps its styling, which is where the colour actually earns its place.
-    const raw = window.slateAnsiText(styled);
-    const c0 = raw.charAt(0);
-    if (c0 === '┌') { cur = { head: raw.slice(1).trim(), cont: [] }; mode = 'box'; recs.push(cur); }
-    else if (mode === 'box' && (c0 === '│' || c0 === '└') && cur) {
-      const body = raw.slice(1).trim(); if (body) cur.cont.push(body);
-      if (c0 === '└') { cur = null; mode = null; }         // record closed
-    } else if (/^(WARNING|ERROR):/.test(raw)) {
-      const m = raw.match(/^(WARNING|ERROR):\s*([\s\S]*)$/);
-      cur = { head: (m[1] === 'ERROR' ? 'Error' : 'Warning') + ': ' + m[2], cont: [] }; mode = 'warn'; recs.push(cur);
-    } else if (mode === 'warn' && cur && _WARN_CONT.test(raw)) {
-      const body = raw.trim(); if (body) cur.cont.push(body);
-    } else { cur = null; mode = null; if (raw.length) recs.push({ plain: styled }); }
-  }
-  return recs;
-}
-// Collapse consecutive IDENTICAL records into one with a ×N count — tames repetitive spam (e.g. a world-age
-// warning firing every tick) without hiding anything. Only merges adjacent equal records, so ordering and
-// distinct messages are untouched. Re-run on every render, so the count grows live as duplicates stream in.
-// Keyed on the STRIPPED text: a plain record keeps its colour for rendering, and two repeats of the
-// same line that a library happened to style differently are still the same line to a reader.
-function _wpRecKey(r) {
-  return r.plain !== undefined ? 'P\x00' + window.slateAnsiText(r.plain)
-                               : 'R\x00' + r.head + '\x00' + r.cont.join('\x00');
-}
-function _wpCollapse(recs) {
-  const out = [];
-  for (const r of recs) {
-    const prev = out[out.length - 1];
-    if (prev && _wpRecKey(prev) === _wpRecKey(r)) prev.count = (prev.count || 1) + 1;
-    else { r.count = 1; out.push(r); }
-  }
-  return out;
-}
-const _WLVL = { Info: 'info', Warning: 'warn', Error: 'error', Debug: 'debug' };
-function _wpFmtRecord(rec) {
-  const badge = rec.count > 1 ? '<span class="wlog-x">×' + rec.count + '</span>' : '';
-  // A plain line is whatever the worker printed — Pkg output, `printstyled`, a bare println. It has no
-  // level to colour by, so render its OWN colour.
-  if (rec.plain !== undefined) return '<div class="wlog-rec wlog-plain">' + window.slateAnsiHtml(rec.plain) + badge + '</div>';
-  let h = rec.head, ts = '';
-  const mt = h.match(/^(\d{2}:\d{2}:\d{2})\s+/); if (mt) { ts = mt[1]; h = h.slice(mt[0].length); }
-  let lvl = '', msg = h;
-  const ml = h.match(/^(Info|Warning|Error|Debug):\s*([\s\S]*)$/); if (ml) { lvl = ml[1]; msg = ml[2]; }
-  const cont = rec.cont.map(c => {
-    const loc = c.match(/^@\s+([\s\S]*)$/);
-    return loc ? '<div class="wlog-loc">@ ' + _wpEsc(loc[1]) + '</div>'
-               : '<div class="wlog-cont">' + _wpEsc(c) + '</div>';
-  }).join('');
-  return '<div class="wlog-rec wlog-' + (_WLVL[lvl] || 'info') + '">' +
-    (ts ? '<span class="wlog-ts">' + ts + '</span>' : '') +
-    (lvl ? '<span class="wlog-lvl">' + lvl + '</span>' : '') +
-    '<span class="wlog-msg">' + _wpEsc(msg) + '</span>' + badge + cont + '</div>';
-}
-// Re-render the open popup's log from `_wpRaw` (chronological): parse → records → newest-first.
-function _wpRenderLog() {
-  const box = document.getElementById('workerpop-log'); if (!box) return;
-  // Only ever says something about the LOG. The `note` used to be repeated here as the placeholder,
-  // from before the warn chip existed — printing the same sentence twice, a few pixels apart.
-  if (!_wpRaw.length) { box.textContent = '(no log yet)'; return; }
-  const atTop = box.scrollTop < 30;
-  box.innerHTML = _wpCollapse(_wpParseRecords(_wpRaw)).reverse().map(_wpFmtRecord).join('');
-  if (atTop) box.scrollTop = 0;                                 // stay pinned to the newest unless scrolled down
-}
-
-// A COMPACT at-a-glance stat for the pill face (cpu% · rss) — the full breakdown is in the popup.
+// A COMPACT at-a-glance stat for the pill face (cpu% · rss) — the full breakdown is in the dock.
 function _wpPillStat(statsJson) {
   if (!statsJson) return '';
   let s; try { s = JSON.parse(statsJson); } catch (_) { return ''; }
@@ -183,7 +123,7 @@ function _wpPillStat(statsJson) {
   // "warming n/total · Pkg" during preload, then "ready · …" (which falls through to cpu·rss below).
   if (s.warm && s.warm.indexOf('warming') === 0) return '⏳ ' + s.warm;
   const p = [];
-  if (s.cpu >= 1) p.push(Math.round(s.cpu) + '%');   // hide 0% on a resting worker — it's just noise (popup still shows it)
+  if (s.cpu >= 1) p.push(Math.round(s.cpu) + '%');   // hide 0% on a resting worker — it's just noise (the dock still shows it)
   if (s.rss > 0) p.push(_wpBytes(s.rss));
   // On a GPU job the GPUs' load is usually the number that matters: their mean, when busy.
   const r = window.slateModel.reading(s);
@@ -197,7 +137,7 @@ function _wpLabel(side, host) {
   return side + (host ? ' · ' + host : '');
 }
 
-// The pill, the panel and its tabs, repainted whenever the model changes. Debounced, so a burst of
+// The pill, the dock and its list, repainted whenever the model changes. Debounced, so a burst of
 // changes paints once. Only workers that need attention (running / starting / degraded / disconnected)
 // stay inline; idle-healthy ones fold into a "+N ▾" menu, so the bar stays bounded for any number of
 // regions.
@@ -208,14 +148,14 @@ function _wpOnModel() {
   if (_wpPaintTimer) return;
   _wpPaintTimer = setTimeout(() => {
     _wpPaintTimer = null; _wpPaintStrip(_wpPendingWs);
-    if (_wpSide !== null) { _wpPaintTabs(); _wpPaintBringup(); _wpFollowRestart(); _wpDrawFacts(); }
+    if (_wpSide !== null) { _wpPaintList(); _wpPaintBringup(); _wpFollowRestart(); _wpDrawFacts(); }
     if (window._dagOnWorkers) window._dagOnWorkers(_wpWorkers);   // the DAG's region status dots
   }, 160);
 }
 window.slateModel.subscribe(_wpOnModel);
 _wpOnModel();   // the facts may have landed before this script subscribed
 
-// The open panel's worker was replaced (a restart puts the new one on another port): its log and
+// The open dock's worker was replaced (a restart puts the new one on another port): its log and
 // where it came from are the new process's, so they are fetched again.
 let _wpOpenPort = null;
 const _wpPortOf = (side) => { const w = (_wpWorkers || []).find(x => (x.side || '') === side); return w ? w.port : null; };
@@ -224,28 +164,29 @@ function _wpFollowRestart() {
   const p = _wpPortOf(_wpSide);
   if (p == null) return;
   if (_wpOpenPort == null) { _wpOpenPort = p; return; }    // opened before the list named a port
-  if (+p !== +_wpOpenPort) { _wpOpenPort = p; _wpRefresh(); }
+  if (+p !== +_wpOpenPort) { _wpOpenPort = p; _wpRefresh(); _wpPaintTab(); }
 }
 
 // ── Bring-up ─────────────────────────────────────────────────────────────────────
 // A worker being started (a cold local spawn, a remote provision, a region coming up) is narrated in
-// ITS panel: the step it is on, precompile progress, and the build log, the elements prepare.js fills.
-// The pill says which step it is on. `window.__slateBringup` (view.js) names the side being started.
+// the dock while it shows that worker: the step it is on, precompile progress, and the build log, the
+// elements prepare.js fills. The pill says which step it is on. `window.__slateBringup` (view.js)
+// names the side being started.
 const _wpBringingUp = (side) => { const b = window.__slateBringup; return !!b && (b.side || '') === side; };
 function _wpBringupShort(side) { return _wpBringingUp(side) && window.slatePrepShort ? window.slatePrepShort() : ''; }
 function _wpPaintBringup() {
-  const old = document.getElementById('workerpop-bringup');
+  const old = document.getElementById('wdock-bringup');
   const want = _wpSide !== null && _wpBringingUp(_wpSide);
   if (!want) { old && old.remove(); return; }
   if (!old) {
     const b = window.__slateBringup, el = document.createElement('div');
-    el.id = 'workerpop-bringup'; el.className = 'workerpop-bringup';
+    el.id = 'wdock-bringup'; el.className = 'wdock-bringup';
     el.innerHTML = '<span class="hydspin"></span><div class="wpbody">' +
       '<div id="hydmsg" class="hydmsg">' + (b.kind === 'remote' ? 'Starting the worker on <b>' + _wpEsc(b.host || 'the remote host') + '</b>…' : 'Starting the worker…') + '</div>' +
       '<div id="hydprep" class="hydprep"></div>' +
       '<details id="hydraw" class="hydraw" style="display:none" ontoggle="window._prepRawToggle&&window._prepRawToggle()"><summary>build log <span id="hydrawlast" class="hydrawlast"></span></summary><pre id="hydrawpre"></pre></details></div>';
-    const head = document.querySelector('#workerpopbg .workerpop-head');
-    head && head.appendChild(el);
+    const title = document.getElementById('wdock-title');
+    title && title.after(el);
   }
   window.renderPrepare && window.renderPrepare();
 }
@@ -286,8 +227,8 @@ function _wpFace(w) {
 }
 
 // The bar is ONE pill: the single most-salient worker (ranked disconnected > degraded > starting > running >
-// idle), with its health colour + live face + more info. It doubles as the dropdown trigger — click it to list
-// ALL workers ranked; lingering/hovering then reveals the detail popup (see the handlers below).
+// idle), with its health colour + live face. Hovering it lists ALL workers ranked; clicking it or a row
+// opens the dock (see the handlers below).
 function _wpPaintStrip(ws) {
   const box = document.getElementById('workerpills'); if (!box) return;
   ws = ws || [];
@@ -327,51 +268,29 @@ function _wpOverflowDot(w) { const st = window.slateModel.workerStatus(w);
 // Short reason for a degraded pill face — pull the "Ns" out of the note ("no liveness reply for 18s …").
 function _wpUnwellShort(note) { const m = note && /(\d+)s/.exec(note); return m ? m[1] + 's no reply' : 'unresponsive'; }
 
-// A worker log line pushed over the WS → prepend it to the open popup for that side (newest-first, matching
-// the snapshot render). Ignored unless that side's popup is showing; the log file keeps the full history.
-function onWorkerLog(side, line) {
-  side = side || '';
-  if (_wpSide !== side) return;                                 // only the open popup's side; the log file keeps history
-  _wpRaw.push(line);
-  if (_wpRaw.length > _WP_LOG_MAX) _wpRaw.splice(0, _wpRaw.length - _WP_LOG_MAX);
-  _wpRenderLog();
+// A worker log line pushed over the WS: the Log tab showing that side checks its file now rather than
+// at its next poll, so the log keeps up with the worker.
+function onWorkerLog(side) {
+  if (_wpSide === (side || '') && _wpTab === 'log' && _wpLogView) _wpLogView.refresh();
 }
 
-// ── Tabs: one worker per tab, so reading logs across them is a click, not a re-navigation ─────────
-// The dropdown that opens this panel is NAVIGATION; the tabs are COMPARISON — the question is almost
-// always "main is fine, so which region is stalling?". They also buy peripheral awareness the
-// dropdown can't: a red dot on a tab you are NOT reading.
-//
-// Ranked by severity and bounded the same way the topbar pill is: unwell workers always hold a
-// visible tab, calm ones fold into `+N ▾`. Live dots come from the model, which already holds every
-// worker, so only the LOG is per-tab work — fetched on switch, one buffer, so the line cap
-// stays meaningful however many workers there are.
-const _WP_TABS_MAX = 4;
-function _wpPaintTabs() {
-  const box = document.getElementById('workerpop-tabs'); if (!box) return;
+// ── The dock's worker list: every worker, so comparing their logs is a click ─────────────────────
+// The question is usually "main is fine, so which region is stalling?", and the list answers it at a
+// glance: each row carries its health dot and live face, ranked by severity. Only the LOG is
+// per-worker work, fetched on switch into one buffer, so the line cap holds however many there are.
+// A notebook with one worker has nothing to pick between, and the column is dropped.
+function _wpPaintList() {
+  const dock = document.getElementById('workerdock'), box = document.getElementById('wdock-list');
+  if (!dock || !box) return;
   const ws = _wpWorkers || [];
-  if (ws.length < 2) { box.innerHTML = ''; box.style.display = 'none'; return; }   // one worker → no tabs to pick
-  box.style.display = '';
+  dock.classList.toggle('solo', ws.length < 2);
   const ranked = ws.slice().sort((a, b) => _wpSeverity(b) - _wpSeverity(a));
-  // The open worker always holds a visible tab, whatever its severity — you are reading it.
-  const shown = ranked.slice(0, _WP_TABS_MAX);
-  if (!shown.some(w => (w.side || '') === _wpSide)) {
-    const cur = ranked.find(w => (w.side || '') === _wpSide);
-    cur && (shown[shown.length - 1] = cur);
-  }
-  const rest = ranked.filter(w => !shown.includes(w));
-  const tab = w => {
-    const side = w.side || '', lbl = _wpLabel(side, w.host);
-    // A narrow tab ellipsizes the label; only then does hovering it show the full name (see below).
-    return '<button class="wptab' + (side === _wpSide ? ' on' : '') + '" data-wptab="' + _wpEsc(side) +
-      '">' + _wpOverflowDot(w) + ' ' + _wpEsc(lbl) + '</button>';
-  };
-  const more = rest.length ? '<span class="wptab-more"><button class="wptab wptab-morebtn">+' + rest.length +
-    ' ▾</button><div class="wptab-menu" hidden>' +
-    rest.map(w => '<div class="wptab-menuitem" data-wptab="' + _wpEsc(w.side || '') + '">' +
-                  _wpOverflowDot(w) + ' ' + _wpEsc(_wpLabel(w.side || '', w.host)) + '</div>').join('') +
-    '</div></span>' : '';
-  box.innerHTML = shown.map(tab).join('') + more;
+  _wpSetHtml(box, ranked.map(w => {
+    const side = w.side || '', lbl = _wpLabel(side, w.host), f = _wpFace(w);
+    return '<div class="wdock-row' + (side === _wpSide ? ' on' : '') + '" data-wdrow="' + _wpEsc(side) +
+      '" title="' + _wpEsc(lbl) + '">' + _wpOverflowDot(w) + '<span class="wdr-label">' + _wpEsc(lbl) + '</span>' +
+      (f ? '<span class="wdr-face">' + _wpEsc(f) + '</span>' : '') + '</div>';
+  }).join(''));
 }
 
 // WHERE and WHAT this worker is. Telemetry says how it is DOING; none of it answers "which host,
@@ -454,7 +373,7 @@ const _wpWhich = side => side ? 'the “' + side + '” worker' : 'the notebook�
 window.wpRestart = async function (side) {
   if (!await _wpConfirm('Restart ' + _wpWhich(side) + '?\nIts namespace is cleared and the cells that ' +
                         'used it re-run. Any allocation it holds is kept.', 'Restart')) return;
-  try { await window.api('POST', '/api/restart', { side }); closeWorkerPop(); } catch (_) {}
+  try { await window.api('POST', '/api/restart', { side }); } catch (_) {}
 };
 window.wpStart = async function (side) {
   try { await window.api('POST', '/api/worker-action', { side, action: 'start' }); } catch (_) {}
@@ -462,76 +381,95 @@ window.wpStart = async function (side) {
 window.wpShutdown = async function (side) {
   if (!await _wpConfirm('Shut down ' + _wpWhich(side) + '?\nThe process is stopped and its results in ' +
                         'memory are lost. The next run starts a fresh one.', 'Shut down', 'danger')) return;
-  try { await window.api('POST', '/api/worker-action', { side, action: 'shutdown' }); closeWorkerPop(); } catch (_) {}
+  try { await window.api('POST', '/api/worker-action', { side, action: 'shutdown' }); } catch (_) {}
 };
 window.wpRelease = async function (side) {
   if (!await _wpConfirm('Release the node held for `' + side + '`?\nIts workers are reaped and the node goes back to ' +
                         'the scheduler. The next run queues for another.', 'Release', 'danger')) return;
-  try { await window.api('POST', '/api/worker-action', { side, action: 'release' }); closeWorkerPop(); } catch (_) {}
+  try { await window.api('POST', '/api/worker-action', { side, action: 'release' }); } catch (_) {}
 };
 
-// Switch the panel to another worker: same panel, new subject. The log buffer is dropped (one buffer,
-// re-fetched) while the tabs repaint at once so the click feels immediate.
-function _wpSwitchTab(side) {
-  if (side === _wpSide) return;
-  _wpSide = side; _wpRaw = [];
-  _wpOpenPort = _wpPortOf(side);
-  _wpPaintBringup();
-  const log = document.getElementById('workerpop-log'); if (log) log.textContent = 'loading…';
-  _wpDrawFacts();   // what the facts say is there at once; the log follows
-  _wpPaintTabs();
-  _wpRefresh();
-}
-
-function openWorkerPop(side, ev, pin) {
-  ev && ev.stopPropagation();   // opened from a click → don't let it bubble to the document close-on-outside-click handler
+// Open the dock on `side`, or switch an open dock to it: same dock, new subject. The log buffer is
+// dropped (one buffer, re-fetched) while the facts and the list repaint at once, so the click feels
+// immediate; new log lines then arrive over the page's WebSocket, everything else through the model.
+function openWorkerDock(side, ev) {
+  ev && ev.stopPropagation();
+  side = side || '';
+  const dock = document.getElementById('workerdock'); if (!dock) return;
+  const wasOpen = dock.classList.contains('open');
+  if (wasOpen && side === _wpSide) return;
   _wpSide = side;
   _wpOpenPort = _wpPortOf(side);
-  if (pin) _wpPinned = true;    // a deliberate click (e.g. a region card's Log) opens PINNED so it stays put
-  const bg = document.getElementById('workerpopbg'); if (!bg) return;
-  _wpRaw = [];
-  document.getElementById('workerpop-log').textContent = 'loading…';
-  _wpDrawFacts();   // what the facts say is there at once; the log follows
-  bg.classList.add('show');
-  _wpUpdatePin();
-  _wpPaintTabs();   // opens on the worker you clicked, with its siblings alongside
-  _wpPaintBringup();
-  _wpRefresh();   // the log; new lines then arrive over the page's WebSocket, everything else through the model
-}
-function closeWorkerPop() {
-  _wpSide = null; _wpPinned = false;
-  _wpPaintBringup();
-  const bg = document.getElementById('workerpopbg'); if (bg) bg.classList.remove('show');
-  _wpUpdatePin();
-}
-async function _wpRefresh() {
-  const side = _wpSide;                                          // capture: the popup can switch while we await
-  if (side === null) return;
-  let r; try { r = await api('GET', '/api/worker-log?side=' + encodeURIComponent(side) + '&lines=500'); }
-  catch (_) { r = null; }
-  if (_wpSide !== side) return;                                  // switched to another region (or closed) mid-fetch → stale response, drop it
-  // An app REFUSES the worker-log route (a log can carry notebook data, and an app's visitor is not
-  // its operator), so only the log is missing; everything else comes from the facts.
-  const noLog = !r || typeof r !== 'object' || r.log === undefined;
-  // What the route adds to the facts: where the process came from. The rest of its answer is the
-  // same worker entry the facts carry, and is not used: the facts are the one copy.
-  _wpProv[side] = noLog ? {} : { origin: r.origin, spawned: r.spawned };
   _wpDrawFacts();
-  // Seed the chronological buffer from the snapshot; live lines then append via onWorkerLog. Parsed + rendered
-  // newest-record-first so multi-line records stay right-way-up. Trailing blank line from the file is dropped.
-  _wpRaw = (!noLog && r.log) ? r.log.split('\n').filter((l, i, a) => l.length || i < a.length - 1) : [];
-  if (noLog) {
-    const box = document.getElementById('workerpop-log');
-    if (box) box.innerHTML = '<div class="wplog-none">Worker logs are an operator view, not a reader ' +
-      'one — a log can carry the notebook\'s own data, so an app does not serve them here.<br>' +
-      '<a href="/status" target="_blank" rel="noopener">/status</a> has them, one worker at a time.' +
-      '</div>';
-  } else {
-    _wpRenderLog();
-  }
+  _wpPaintList();
+  _wpPaintBringup();
+  if (!wasOpen) { dock.classList.add('open'); document.body.classList.add('wdock-open'); }
+  _wpPaintTab();
+  _wpRefresh();
+}
+function closeWorkerDock() {
+  _wpSide = null;
+  _wpPaintBringup();
+  _wpLogView && _wpLogView.close();
+  window.closeTelemetry && window.closeTelemetry();
+  const dock = document.getElementById('workerdock'); if (dock) dock.classList.remove('open', 'full');
+  document.body.classList.remove('wdock-open');
+  _wpPaintFull();
+}
+// Full screen: the dock covers the notebook under the topbar, for reading a log or the charts at size.
+window.wpToggleFull = function () {
+  const dock = document.getElementById('workerdock'); if (!dock) return;
+  dock.classList.toggle('full'); _wpPaintFull();
+};
+function _wpPaintFull() {
+  const dock = document.getElementById('workerdock'), b = document.getElementById('wdock-full'); if (!b) return;
+  const full = !!dock && dock.classList.contains('full');
+  b.classList.toggle('on', full); b.textContent = full ? '⤡' : '⤢';
+  b.title = full ? 'Back to the bottom of the page' : 'Fill the window';
+}
+// The pill: opens the dock on its worker, and closes the dock when it is already showing that one.
+function toggleWorkerDock(side, ev) {
+  side = side || '';
+  const dock = document.getElementById('workerdock');
+  (dock && dock.classList.contains('open') && _wpSide === side) ? closeWorkerDock() : openWorkerDock(side, ev);
 }
 
-// The open panel's title, picker, identity, actions and figures, from the model. Called when the panel
+// The top edge: drag to resize, persisted. The page's reserved height follows through --wdockh.
+(() => {
+  const grip = document.getElementById('wdock-grip'); if (!grip) return;
+  try { const h = localStorage.getItem('slateWorkerDockH'); if (h) document.body.style.setProperty('--wdockh', h); } catch (_) {}
+  const move = e => {
+    const dock = document.getElementById('workerdock');
+    const below = window.innerHeight - dock.getBoundingClientRect().bottom;   // the DAG pane, when docked beneath
+    const h = Math.max(140, Math.min(window.innerHeight * 0.8 - below, window.innerHeight - below - e.clientY));
+    document.body.style.setProperty('--wdockh', h + 'px');
+  };
+  const up = () => {
+    grip.classList.remove('on'); document.body.style.userSelect = '';
+    document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up);
+    try { localStorage.setItem('slateWorkerDockH', document.body.style.getPropertyValue('--wdockh')); } catch (_) {}
+  };
+  grip.addEventListener('pointerdown', e => {
+    e.preventDefault(); grip.classList.add('on'); document.body.style.userSelect = 'none';
+    document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
+  });
+})();
+// Where the open dock's worker came from, which only the log route says. An app REFUSES that route (a
+// log can carry notebook data, and an app's visitor is not its operator), and the Log tab says so.
+async function _wpRefresh() {
+  const side = _wpSide;                                          // capture: the dock can switch while we await
+  if (side === null) return;
+  let r; try { r = await api('GET', '/api/worker-log?side=' + encodeURIComponent(side) + '&lines=1'); }
+  catch (_) { r = null; }
+  if (_wpSide !== side) return;                                  // switched (or closed) mid-fetch → stale response, drop it
+  const refused = !r || typeof r !== 'object' || r.log === undefined;
+  const was = !!(_wpProv[side] || {}).refused;
+  _wpProv[side] = refused ? { refused } : { origin: r.origin, spawned: r.spawned };
+  _wpDrawFacts();
+  if (refused !== was && _wpTab === 'log') _wpShowLog();
+}
+
+// The dock's title, picker, identity, actions and figures, from the model. Called when the dock
 // opens, whenever the model changes, and every second while an allocation clock is showing.
 // Only touches what changed: this runs on every change to the model (each telemetry sample among
 // them), and replacing a button under the pointer would swallow a click on it.
@@ -539,31 +477,31 @@ function _wpSetHtml(el, html) { if (el && el._wpHtml !== html) { el.innerHTML = 
 function _wpDrawFacts() {
   const r = _wpCurrent(); if (!r) return;
   const dot = _wpOverflowDot(r);   // same rank as every other dot
-  _wpSetHtml(document.getElementById('workerpop-title'), dot + ' ' + (r.side ? 'region' : 'main worker') +
+  _wpSetHtml(document.getElementById('wdock-title'), dot + ' ' + (r.side ? 'region' : 'main worker') +
     ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : ''));
-  // The run-location picker (formerly the #runloc caret) lives here now — only for the MAIN worker, since a
-  // region's host is fixed by its registry def. "change ▾" opens the existing picker modal.
-  const rl = document.getElementById('workerpop-runloc');
+  // The run-location picker, only for the MAIN worker: a region's host is fixed by its registry def.
+  // "change ▾" opens the existing picker modal.
+  const rl = document.getElementById('wdock-runloc');
   if (rl) {
     rl.style.display = r.side ? 'none' : '';
     _wpSetHtml(rl, r.side ? '' : 'run location: <b>' + _wpEsc(r.host || 'local') +
-      '</b> <button class="wrl-change" onclick="closeWorkerPop(); toggleRunLoc(event)">change ▾</button>');
+      '</b> <button class="wrl-change" onclick="toggleRunLoc(event)">change ▾</button>');
   }
-  _wpSetHtml(document.getElementById('workerpop-ident'), _wpIdentChips(r));
-  _wpSetHtml(document.getElementById('workerpop-acts'), _wpActions(r));
+  _wpSetHtml(document.getElementById('wdock-ident'), _wpIdentChips(r));
+  _wpSetHtml(document.getElementById('wdock-acts'), _wpActions(r));
   // A region with no process has no figures of its own to show, whatever was last seen there.
-  _wpSetHtml(document.getElementById('workerpop-stats'), _wpStatsChips(r.state === 'none' ? null : r.stats, _wpNoteText(r)));
+  _wpSetHtml(document.getElementById('wdock-stats'), _wpStatsChips(r.state === 'none' ? null : r.stats, _wpNoteText(r)));
 }
 
-window.openWorkerPop = openWorkerPop;
-window.closeWorkerPop = closeWorkerPop;
+window.openWorkerDock = openWorkerDock;
+window.closeWorkerDock = closeWorkerDock;
+window.toggleWorkerDock = toggleWorkerDock;
 window.onWorkerLog = onWorkerLog;
 
-// The bar's single pill. HOVERING it (after the tooltip delay from Settings) opens the ranked list of ALL
-// workers; leaving the pill, the list and the panel closes it. CLICKING the pill opens its worker's panel
-// PINNED. Hovering a row PREVIEWS that worker in the side panel, which follows the mouse and hides when you
-// leave; clicking a row (or the panel's 📌) PINS it so it stays up while you work elsewhere; 📌/× to unpin.
-let _wpPinned = false, _wpShowT = null, _wpHideT = null, _wpMenuT = null;
+// The bar's single pill. HOVERING it (after the tooltip delay from Settings) opens the ranked list of
+// ALL workers, and leaving the pill and the list closes it. CLICKING the pill opens the dock on its
+// worker (again closes it); clicking a row opens the dock on that worker.
+let _wpHideT = null, _wpMenuT = null;
 let _wpMenuHeld = false;   // the pill was just clicked: no list until the pointer leaves it
 function _wpHoverDelay() {
   const n = parseInt(localStorage.getItem('slateTipDelay'), 10);
@@ -577,101 +515,53 @@ function _wpScheduleMenu(top) {
 function _wpMenuOpen() { return !!document.querySelector('#workerpills .wpill-menu:not([hidden])'); }
 function _wpCloseMenu() {
   const m = document.querySelector('#workerpills .wpill-menu:not([hidden])'); if (m) m.hidden = true;
-  if (_wpShowT) { clearTimeout(_wpShowT); _wpShowT = null; }
   if (_wpMenuT) { clearTimeout(_wpMenuT); _wpMenuT = null; }
+  if (_wpHideT) { clearTimeout(_wpHideT); _wpHideT = null; }
 }
-function _wpKeepPanel() { if (_wpHideT) { clearTimeout(_wpHideT); _wpHideT = null; } }   // over a row/panel → don't hide
-function _wpUpdatePin() { const p = document.getElementById('workerpop-pin'); if (p) { p.classList.toggle('pinned', _wpPinned); p.title = _wpPinned ? 'pinned — click to unpin' : 'click to pin this panel'; } }
-function _wpShowPanel(side, pin) {
-  if (_wpShowT) { clearTimeout(_wpShowT); _wpShowT = null; }
-  _wpKeepPanel();
-  if (pin) _wpPinned = true;
-  openWorkerPop(side);
-  _wpUpdatePin();
-}
-function _wpScheduleShow(side) {                 // hover → transient preview after a short delay
-  _wpKeepPanel();
-  if (_wpSide === side || _wpPinned) return;     // already shown / pinned elsewhere → leave it
-  if (_wpShowT) clearTimeout(_wpShowT);
-  _wpShowT = setTimeout(() => { _wpShowT = null; if (_wpMenuOpen()) _wpShowPanel(side, false); }, 320);
-}
-function _wpScheduleHide() {                      // left the whole area → close the list, hide an UNPINNED preview
+function _wpScheduleHide() {
   if (_wpMenuT) { clearTimeout(_wpMenuT); _wpMenuT = null; }
-  if (_wpMenuOpen()) {
-    if (_wpHideT) clearTimeout(_wpHideT);
-    _wpHideT = setTimeout(() => { _wpHideT = null; _wpCloseMenu(); if (!_wpPinned && _wpSide !== null) closeWorkerPop(); }, 260);
-    return;
-  }
-  if (_wpPinned || _wpSide === null) return;
-  if (_wpShowT) { clearTimeout(_wpShowT); _wpShowT = null; }
+  if (!_wpMenuOpen()) return;
   if (_wpHideT) clearTimeout(_wpHideT);
-  _wpHideT = setTimeout(() => { _wpHideT = null; if (!_wpPinned) closeWorkerPop(); }, 260);
+  _wpHideT = setTimeout(() => { _wpHideT = null; _wpCloseMenu(); }, 260);
 }
-function wpTogglePin() { _wpPinned = !_wpPinned; _wpUpdatePin(); if (!_wpPinned) _wpScheduleHide(); }
-window.wpTogglePin = wpTogglePin;
-function _wpCloseTabMenu() { const m = document.querySelector('#workerpop-tabs .wptab-menu:not([hidden])'); if (m) m.hidden = true; }
 
 document.addEventListener('click', e => {
   if (!e.target || !e.target.closest) return;
-  // A tab (or an overflow row) switches the panel's subject. Handled before the panel-is-clicked
-  // guard below, and it PINS: you came here to read, not to have it vanish on the next mouseout.
-  const tab = e.target.closest('#workerpop-tabs [data-wptab]');
-  if (tab) {
-    _wpCloseTabMenu(); _wpPinned = true; _wpUpdatePin();
-    _wpSwitchTab(tab.getAttribute('data-wptab')); e.stopPropagation(); return;
-  }
-  const tmore = e.target.closest('#workerpop-tabs .wptab-morebtn');
-  if (tmore) {
-    const m = tmore.parentElement.querySelector('.wptab-menu');
-    if (m) m.hidden ? (m.hidden = false) : (m.hidden = true);
-    e.stopPropagation(); return;
-  }
-  _wpCloseTabMenu();
+  const drow = e.target.closest('#wdock-list [data-wdrow]');
+  if (drow) { openWorkerDock(drow.getAttribute('data-wdrow')); return; }
+  const dtab = e.target.closest('#workerdock [data-wdtab]');
+  // The open tab again: the log keeps its place, the telemetry view (which a profiled run closes) reopens.
+  if (dtab) { if (dtab.dataset.wdtab !== _wpTab || _wpTab === 'tel') { _wpTab = dtab.dataset.wdtab; _wpPaintTab(); } return; }
   const tel = e.target.closest('#workerpills .wpmi-tel[data-tel-side]');
-  if (tel) {                                                    // a row's chart button → its telemetry, not its panel
-    _wpCloseMenu(); closeWorkerPop(); _wpTelemetryFor(tel.getAttribute('data-tel-side'));
+  if (tel) {                                                    // a row's chart button → the dock at its telemetry
+    _wpCloseMenu(); window.wpOpenTelemetry(tel.getAttribute('data-tel-side'));
     e.stopPropagation(); return;
   }
   const row = e.target.closest('#workerpills .wpill-menuitem[data-side]');
-  if (row) { _wpCloseMenu(); _wpShowPanel(row.getAttribute('data-side'), true); return; }   // click a row → PIN it
+  if (row) { _wpCloseMenu(); openWorkerDock(row.getAttribute('data-side')); e.stopPropagation(); return; }
   const top = e.target.closest('#workerpills .wpill-top');
-  if (top) {                                                    // the pill → its worker's panel, pinned; again closes it
-    const side = top.getAttribute('data-side') || '';
+  if (top) {
     _wpCloseMenu(); _wpMenuHeld = true;
-    (_wpPinned && _wpSide === side) ? closeWorkerPop() : _wpShowPanel(side, true);
+    toggleWorkerDock(top.getAttribute('data-side') || '');
     e.stopPropagation(); return;
   }
-  if (e.target.closest('#workerpopbg')) return;                 // clicks inside the panel don't dismiss it
-  if (_wpMenuOpen()) _wpCloseMenu();                            // click-away closes the dropdown…
-  if (!_wpPinned && _wpSide !== null) closeWorkerPop();         // …and an UNPINNED preview; a pinned panel stays
+  if (_wpMenuOpen()) _wpCloseMenu();                            // click-away closes the list
 });
-// A tab whose label is cut short shows its full name on hover; one that reads in full has no tooltip
-// repeating it.
-document.addEventListener('mouseover', e => {
-  const tab = e.target && e.target.closest && e.target.closest('#workerpop-tabs .wptab');
-  if (tab) tab.title = tab.scrollWidth > tab.clientWidth ? tab.textContent.trim() : '';
-});
-// Hover a row → preview it; being over any row/the panel keeps the panel; leaving the whole area hides a preview.
 document.addEventListener('mouseover', e => {
   if (!e.target || !e.target.closest) return;
-  const row = e.target.closest('#workerpills .wpill-menuitem[data-side]');
+  const inPills = e.target.closest('#workerpills');
+  if (inPills && _wpHideT) { clearTimeout(_wpHideT); _wpHideT = null; }
   const top = e.target.closest('#workerpills .wpill-top');
-  if (row || top || e.target.closest('#workerpopbg')) _wpKeepPanel();
-  if (top && !row) _wpScheduleMenu(top);
-  if (row && _wpMenuOpen()) _wpScheduleShow(row.getAttribute('data-side'));
+  if (top && !e.target.closest('.wpill-menu')) _wpScheduleMenu(top);
 });
 document.addEventListener('mouseout', e => {
   const to = e.relatedTarget;
   if (!(to && to.closest && to.closest('#workerpills .wpill-top'))) _wpMenuHeld = false;
-  const stillIn = to && to.closest && (to.closest('#workerpills') || to.closest('#workerpopbg'));
-  if (!stillIn) _wpScheduleHide();
+  if (!(to && to.closest && to.closest('#workerpills'))) _wpScheduleHide();
 });
-// Esc closes the panel + dropdown (no backdrop now — it's a non-covering side panel).
+// Esc closes the list. The dock stays: it is part of the layout, and Esc belongs to the editor.
 document.addEventListener('keydown', e => {
-  const bg = document.getElementById('workerpopbg');
-  if (e.key === 'Escape' && ((bg && bg.classList.contains('show')) || _wpMenuOpen())) {
-    e.stopPropagation(); _wpCloseMenu(); closeWorkerPop();
-  }
+  if (e.key === 'Escape' && _wpMenuOpen()) { e.stopPropagation(); _wpCloseMenu(); }
 }, true);
 
 // What counts from an instant (an allocation's walltime, its idle stretch, how long a worker has not
@@ -682,8 +572,8 @@ setInterval(() => {
   const r = _wpCurrent();
   if (!r) return;
   if (!window.slateModel.isHeld(r) && r.noteCode !== 'no_reply') return;   // nothing counting
-  const st = document.getElementById('workerpop-stats');
+  const st = document.getElementById('wdock-stats');
   if (r.noteCode === 'no_reply') _wpSetHtml(st, _wpStatsChips(r.stats, _wpNoteText(r)));
-  const idb = document.getElementById('workerpop-ident');
+  const idb = document.getElementById('wdock-ident');
   _wpSetHtml(idb, _wpIdentChips(r));
 }, 1000);
