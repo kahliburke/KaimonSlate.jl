@@ -1,5 +1,5 @@
-// The steps of preparing a region, as they land: shared by the notebook's Prepare dialog
-// (regionprep.js) and the Remotes region panel, so a prepare reads the same in both places.
+// The steps of a prepare as they land, its activity and its earlier runs: the parts of the prepare
+// dialog (prepdialog.js), and the tested environments the Remotes and Machines panels list.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { ago } from './workerbar.js';
@@ -47,44 +47,16 @@ export function Activity(lines, key) {
 // Whether a finished prepare left anything to look at.
 export const hasWarnings = rec => !!(rec && (rec.steps || []).some(s => s.status === 'warn' || s.status === 'fail'));
 
-// Every prepare this region has had, newest first, each opening to its steps and activity. Reports
-// are kept by the hub, never rewritten, so a run that failed or was cut off can still be read.
+// Every prepare a region or machine has had, newest first, each opening to its steps and activity.
+// Reports are kept by the hub, never rewritten, so a run that failed or was cut off can still be read.
 const hist = signal({});   // key -> { open, list, sel, report }
 const OUTCOME = { ok: '✓ ok', warnings: '⚠ warnings', failed: '✗ failed', interrupted: '⏸ interrupted', running: '… running' };
 const whenOf = id => {   // "20261001T121234" (UTC) → local date and time
   const m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)$/.exec(id || '');
   return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6])).toLocaleString() : id;
 };
-export function History(name, key) {
-  const h = hist.value[key] || {};
-  const put = p => { hist.value = { ...hist.value, [key]: { ...(hist.value[key] || {}), ...p } }; };
-  const flip = () => {
-    if (h.open) { put({ open: false }); return; }
-    put({ open: true, list: null, sel: '', report: null });
-    fetch('/api/regions/prepare/reports?name=' + encodeURIComponent(name)).then(r => r.json())
-      .then(d => put({ list: (d && d.reports) || [] })).catch(() => put({ list: [] }));
-  };
-  const pick = id => {
-    put({ sel: id, report: null });
-    fetch('/api/regions/prepare/report?name=' + encodeURIComponent(name) + '&id=' + encodeURIComponent(id))
-      .then(r => r.json()).then(d => put({ report: d && d.ok ? d.report : null })).catch(() => {});
-  };
-  return html`<div class="rpplog">
-    <button type="button" class="rpplogbtn" onClick=${flip}>${h.open ? '▾' : '▸'} History</button>
-    ${!h.open ? null : html`<div class="rpphist">
-      ${h.list === null ? html`<span class="pddim">…</span>`
-        : !h.list.length ? html`<span class="pddim">none yet</span>`
-        : h.list.map(x => html`<div class=${'rpphistrow ' + x.outcome + (h.sel === x.id ? ' sel' : '')} onClick=${() => pick(x.id)}>
-            <span>${whenOf(x.id)}</span> <span class="rpphistout">${OUTCOME[x.outcome] || x.outcome}</span>
-            ${x.failures ? html`<span class="pddim"> · ${x.failures} failed</span>` : null}
-            ${x.warnings ? html`<span class="pddim"> · ${x.warnings} warned</span>` : null}</div>`)}
-      ${h.report ? html`<div class="rpphistrep">${StepList(h.report.steps)}${Activity(h.report.log, 'rep:' + key + ':' + h.sel)}</div>` : null}
-    </div>`}
-  </div>`;
-}
-
-// The same two, always open, for a dialog that gives them a column of their own (regionprep.js):
-// the activity fills it and follows the newest line; the history lists its runs straight away.
+// The activity and the history as panes of the prepare dialog (prepdialog.js): the activity fills
+// its column and follows the newest line; the history lists its runs straight away.
 // A command's output arrives tagged on every line (`⟨sysimage on c1⟩`); the pane shows the tag once,
 // as a heading where it changes, so the lines keep their width for what they say.
 export function ActivityPane(lines) {

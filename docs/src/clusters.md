@@ -267,6 +267,10 @@ comes in layers:
   precompiles there, loads every package and checks CUDA. Until that has passed, the sweep submits
   nothing: a broken environment costs one short job rather than every task of the array.
 
+A Readiness row shows the outcome of the last prepare and the environments tested there.
+**Details** opens the prepare dialog: its steps as they land, the activity log, and every earlier
+run.
+
 A region's prepare does this:
 
 * sign in, install Julia at the hub's version, build the worker runtime;

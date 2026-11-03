@@ -11,7 +11,8 @@ import { html } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
 import { schedInfo, loadScheduler } from './stores.js';
 import { sessions, openSessions } from './sessions.js';
-import { StepList, Activity, History, Environments } from './prepsteps.js';
+import { Environments } from './prepsteps.js';
+import { openPrepare } from './prepdialog.js';
 import { OptionsTable, optionsMap, optionRows } from './optstable.js';
 import { SchedUse } from './schedusage.js';
 
@@ -197,10 +198,19 @@ function loadMachine(name) {
     if (d && d.preparing && d.preparing.running) setTimeout(() => loadMachine(name), 1500);
   }).catch(() => {});
 }
-function prepareMachine(name) {
-  fetch('/api/machines/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                   body: JSON.stringify({ name }) })
-    .then(() => setTimeout(() => loadMachine(name), 500)).catch(() => {});
+// The prepare dialog for `name`; `go` also starts one. The panel's view is read again as each run
+// starts and ends, so its status line follows the dialog.
+function machinePrep(name, go) {
+  const d = mview.value[name] || {};
+  const runningOf = x => !!(x && x.preparing && x.preparing.running);
+  openPrepare({
+    key: d.key || 'machine_' + name, title: 'Prepare ⎈ ' + name, sub: d.host || '',
+    planned: ['Sign in to ' + (d.host || name), 'Julia on ' + (d.host || name), 'Read the site', 'Depot'],
+    start: () => fetch('/api/machines/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                  body: JSON.stringify({ name }) }).then(r => r.json()),
+    onPoll: x => { if (runningOf(x) !== runningOf(mview.value[name])) loadMachine(name); },
+    onClose: () => loadMachine(name),
+  }, go);
 }
 const ago = t => { const s = Math.max(0, Date.now() / 1000 - t);
   return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + 'm ago' : s < 129600 ? Math.round(s / 3600) + 'h ago' : Math.round(s / 86400) + 'd ago'; };
@@ -209,20 +219,19 @@ function MachineReadiness(name) {
   const d = mview.value[name];
   if (!d || !d.ok) return null;
   const site = d.site || {}, p = d.preparing, running = !!(p && p.running);
-  const head = running ? html`<span class="pddim"><span class="hydspin"></span> preparing</span>`
+  const now = running ? (p.steps || []).find(x => x.status === 'running') : null;
+  const head = running ? html`<span class="pddim"><span class="hydspin"></span> preparing${now ? ' · ' + now.step : ''}</span>`
     : !site.prepared_at ? html`<span class="pddim">not prepared</span>`
     : site.stale ? html`<span class="rppsyswarn">⚠ ${site.stale}</span>`
     : html`<span class="rppsysok">✓ prepared · ${ago(site.prepared_at)}</span>`;
   const julia = (site.facts && site.facts.julia) || '';
   return html`<div class="rpprow"><label>Readiness</label><div class="rppsysbox rppprep">
       <div class="rppprephead">${head}
-        ${running ? null : html`<button class="rppsysbtn" onClick=${() => prepareMachine(name)}>${site.prepared_at ? 'Prepare again' : 'Prepare'}</button>`}</div>
-      ${running ? StepList(p.steps, p.now, p.last_output) : null}
-      ${running ? Activity(p.log, 'm:' + name) : null}
+        ${running ? null : html`<button class="rppsysbtn" onClick=${() => machinePrep(name, true)}>${site.prepared_at ? 'Prepare again' : 'Prepare'}</button>`}
+        ${running || site.prepared_at ? html`<button class="rppsysbtn" onClick=${() => machinePrep(name, false)}>Details</button>` : null}</div>
       ${site.prepared_at ? html`<div class="pddim">${[julia, 'depot ' + (d.depot || '~/.julia')].filter(Boolean).join(' · ')}</div>` : null}
       ${site.site_prologue ? html`<div class="pddim">site prologue <code>${site.site_prologue}</code></div>` : null}
       ${Environments(d.tests, 'm:' + name)}
-      ${History(d.key, 'm:' + name)}
     </div></div>`;
 }
 

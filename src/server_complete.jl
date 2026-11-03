@@ -1979,8 +1979,8 @@ function _make_router(h::Hub)
         q = HTTP.queryparams(HTTP.URI(req.target))
         name = String(get(q, "name", ""))
         r = ReportEngine.region_get(name)
-        if r === nothing && startswith(name, "batch_")
-            # A machine prepared for batch work has no region record; its latest report stands in.
+        if r === nothing && (startswith(name, "batch_") || startswith(name, "machine_"))
+            # A machine, alone or prepared for batch work, has no region record; its latest report stands in.
             st = ReportEngine.preparing(name)
             reps = ReportEngine.prepare_reports(name)
             last = isempty(reps) ? nothing : ReportEngine.prepare_report(name, String(reps[1]["id"]))

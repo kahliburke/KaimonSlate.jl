@@ -6,7 +6,8 @@ import { html } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
 import { detail, focusHost, editRegion, pendingRegion, regions, parked, loadRegions, schedInfo, loadScheduler } from './stores.js';
 import { hostTransport } from './hoststore.js';
-import { StepList, Activity, History, Environments, hasWarnings } from './prepsteps.js';
+import { Environments, hasWarnings } from './prepsteps.js';
+import { openPrepare, preparingKey } from './prepdialog.js';
 import { clusters } from './clusters.js';
 import { OptionsTable } from './optstable.js';
 // One answer to "is a node held" and "what is giving it back called", shared with the notebook's
@@ -65,60 +66,62 @@ function loadSysimage(name) { fetch('/api/sysimage?region=' + encodeURIComponent
 // ── preparing a region ──────────────────────────────────────────────────────────────
 // Polled while one runs, so each step's outcome lands as it happens; the region list reloads once
 // it ends, because the record is part of the region.
-// name -> { after, tries } while a click waits for the hub to report the run it started.
-const prepWait = signal({});
+const runningOf = d => !!(d && d.preparing && d.preparing.running);
 function prepLoad(name) {
-  fetch('/api/regions/prepare?name=' + encodeURIComponent(name)).then(r => r.json()).then(d => {
-    if (!d || !d.ok) return;
-    const w = prepWait.value[name];
-    if (w) {
-      if (!(d.preparing && (+d.preparing.started || 0) > w.after) && w.tries < 40) {
-        prepWait.value = { ...prepWait.value, [name]: { ...w, tries: w.tries + 1 } };
-        setTimeout(() => prepLoad(name), 750);
-        return;
-      }
-      const { [name]: _, ...rest } = prepWait.value; prepWait.value = rest;
-    }
-    const was = prep.value[name];
-    prep.value = { ...prep.value, [name]: d };
-    if (d.preparing && d.preparing.running) {
-      setTimeout(() => { const e = editRegion.value; if (e && e.name === name) prepLoad(name); }, 2000);
-    } else if (was && was.preparing && was.preparing.running) loadRegions();
-  }).catch(() => {});
+  fetch('/api/regions/prepare?name=' + encodeURIComponent(name)).then(r => r.json()).then(d => prepSeen(name, d)).catch(() => {});
 }
-function startPrepare(name) {
-  if (prepWait.value[name]) return;
-  const cur = prep.value[name];
-  prepWait.value = { ...prepWait.value, [name]: { after: (cur && cur.preparing && +cur.preparing.started) || 0, tries: 0 } };
-  const done = () => { const { [name]: _, ...rest } = prepWait.value; prepWait.value = rest; };
-  fetch('/api/regions/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
-    .then(r => r.json()).then(d => { if (d && d.ok) setTimeout(() => prepLoad(name), 300); else done(); })
-    .catch(done);
+// One payload for `name`, from this panel's poll or the dialog's.
+function prepSeen(name, d) {
+  if (!d || !d.ok) return;
+  const was = prep.value[name];
+  prep.value = { ...prep.value, [name]: d };
+  if (runningOf(d) && !runningOf(was))
+    setTimeout(function again() {
+      const e = editRegion.value;
+      if (!(e && e.name === name) || !runningOf(prep.value[name])) return;
+      if (preparingKey() !== name) prepLoad(name);   // the dialog polls while it is open
+      setTimeout(again, 2000);
+    }, 2000);
+  else if (!runningOf(d) && runningOf(was)) loadRegions();
+}
+// The prepare dialog for region `name`; `go` also starts one.
+function regionPrep(name, go) {
+  const r = (regions.value || []).find(x => x.name === name) || {};
+  const sched = r.scheduler && r.scheduler !== 'none';
+  openPrepare({
+    key: name, title: 'Prepare 🖧 ' + name,
+    sub: (r.host || focusHost.value || '') + (sched ? ' · ' + r.scheduler : ''),
+    planned: ['Sign in to ' + (r.host || focusHost.value || 'the host'), 'Julia and the worker runtime', 'Read the site',
+              ...(sched ? ['Get a node', 'Read the node', 'Install and precompile the packages there', 'Start a worker and load them']
+                        : ['Install and precompile the packages', 'Start a worker and load them'])],
+    start: () => fetch('/api/regions/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                 body: JSON.stringify({ name }) }).then(r => r.json()),
+    onPoll: d => prepSeen(name, d),
+    onClose: () => prepLoad(name),
+  }, go);
 }
 function ReadinessRow(name) {
   if (!name) return null;
   const d = prep.value[name];
-  const running = !!(d && d.preparing && d.preparing.running);
+  const running = runningOf(d);
   const rec = (d && d.readiness) || {};
   const site = rec.site || {};
   const has = !!rec.prepared_at;
-  const head = running ? html`<span class="pddim"><span class="hydspin"></span> preparing</span>`
+  const now = running ? (d.preparing.steps || []).find(x => x.status === 'running') : null;
+  const head = running ? html`<span class="pddim"><span class="hydspin"></span> preparing${now ? ' · ' + now.step : ''}</span>`
     : !has ? html`<span class="pddim">not prepared</span>`
     : site.stale ? html`<span class="rppsyswarn">⚠ ${site.stale}</span>`
-    : html`<span class=${rec.ok ? 'rppsysok' : 'rppsyswarn'}>${rec.ok ? '✓ prepared' : '⚠ prepared with failures'} · ${ago(rec.prepared_at)}</span>`;
+    : html`<span class=${rec.ok && !hasWarnings(rec) ? 'rppsysok' : 'rppsyswarn'}>${
+        !rec.ok ? '⚠ prepared with failures' : hasWarnings(rec) ? '⚠ prepared with warnings' : '✓ prepared'} · ${ago(rec.prepared_at)}</span>`;
   return html`<div class="rpprow"><label>Readiness</label><div class="rppsysbox rppprep">
       <div class="rppprephead">${head}
-        ${running ? null : prepWait.value[name] ? html`<button class="rppsysbtn" disabled>Starting…</button>`
-          : html`<button class="rppsysbtn" title="set up the host, read the site, and on a scheduler region try a worker on a node" onClick=${() => startPrepare(name)}>${has ? 'Prepare again' : 'Prepare'}</button>`}</div>
-      ${running ? StepList(d.preparing.steps, d.preparing.now, d.preparing.last_output) : null}
-      ${running ? Activity(d.preparing.log, 'reg:' + name) : null}
-      ${!running && hasWarnings(rec) ? StepList((rec.steps || []).filter(s => s.status === 'warn' || s.status === 'fail')) : null}
+        ${running ? null : html`<button class="rppsysbtn" title="set up the host, read the site, and on a scheduler region try a worker on a node" onClick=${() => regionPrep(name, true)}>${has ? 'Prepare again' : 'Prepare'}</button>`}
+        ${running || has ? html`<button class="rppsysbtn" onClick=${() => regionPrep(name, false)}>Details</button>` : null}</div>
       ${!running && (site.prepared_at || rec.liveness_grace_s) ? html`<div class="pddim">${[
           site.prepared_at ? 'depot ' + (site.depot || '~/.julia') : '',
           rec.liveness_grace_s ? 'liveness grace ' + rec.liveness_grace_s + 's' : ''].filter(Boolean).join(' · ')}</div>` : null}
       ${(!running && site.site_prologue) ? html`<div class="pddim">site prologue <code>${site.site_prologue}</code></div>` : null}
       ${!running && rec.envs ? Environments(Object.values(rec.envs).map(e => ({ ...e, tested_at: e.tested_at || e.prepared_at })), 'reg:' + name, name) : null}
-      ${History(name, 'reg:' + name)}
     </div></div>`;
 }
 
