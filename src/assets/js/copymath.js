@@ -34,6 +34,13 @@
   window.slateCleanTex = cleanTex;
   if (typeof document === 'undefined') return;
 
+  // KaTeX draws a phantom's glyphs in transparent ink, but they are still text a selection paints,
+  // so selecting an aligned derivation lights up invisible copies of its other rows.
+  const css = document.createElement('style');
+  css.textContent = '.katex [style*="color: transparent"], .katex [style*="color: transparent"] * '
+                  + '{ -webkit-user-select: none; user-select: none; }';
+  document.head.appendChild(css);
+
   const TEX = 'annotation[encoding="application/x-tex"]';
   const SKIP = new Set(['SCRIPT', 'STYLE', 'TEXTAREA', 'NOSCRIPT']);
   const BLOCK = new Set(['P', 'DIV', 'LI', 'UL', 'OL', 'DL', 'DT', 'DD', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
