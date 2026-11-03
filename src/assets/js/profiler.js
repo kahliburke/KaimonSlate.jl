@@ -15,8 +15,9 @@
 // Library code (Base, the stdlibs, packages that are not the notebook's own) folds into one bar per
 // package until it is clicked open, so the reader's code is what the graph is made of.
 //
-// Nothing here is remote-aware. The hub runs the profile on whichever kernel the cell runs on
-// (server_profile.jl) and pushes the result; source for a frame comes from that machine too.
+// The browser reaches no kernel itself. The hub runs the profile on whichever kernel the cell runs on
+// (server_profile.jl) and pushes the result; source for a frame comes from that machine too. The dock
+// only names the machine.
 import { html, render } from 'htm/preact';
 import { signal, computed, effect } from '@preact/signals';
 import { lockScroll } from './scrolllock.js';
@@ -138,8 +139,8 @@ const isLib = (n, M) => n.kind === K.line && !(n.pkg === 'cell' || n.pkg === 'no
 // With library code folded, the tables charge each sample to the deepest line of the reader's own
 // code on its stack: a line's share is its own time and that of the library calls it makes (and
 // the GC, compiling and BLAS under them), which is where a fix would go.
-const ownTime = computed(() => {
-  const M = model.value; if (!M) return null;
+function ownTimeOf(M) {
+  if (!M) return null;
   const lines = new Map(), fns = new Map();
   for (const n of M.nodes) {
     if (!n || !n.self || n.id === 1) continue;
@@ -157,7 +158,10 @@ const ownTime = computed(() => {
     fns.set(u.fk, (fns.get(u.fk) || 0) + n.self);
   }
   return { lines, fns };
-});
+}
+const ownTime = computed(() => ownTimeOf(model.value));
+// The compared profile, folded the same way, so its "before" figures mean what this run's do.
+const baseOwnTime = computed(() => ownTimeOf(baseModel.value));
 
 // The graph as drawn: with folding on, a run of library frames becomes one bar named after its
 // package, holding the first frames below it that are not library code.
@@ -359,11 +363,15 @@ function apply(p) {
   else if (p.kind === 'waiting') Object.assign(next, { status: 'waiting', error: null, why: p.why });
   else if (p.kind === 'error') Object.assign(next, { status: 'error', error: p.error });
   else if (p.kind === 'result') {
-    // A new profile is compared with the one shown before it, which is usually the question.
-    const was = cur.profile && cur.status === 'done' ? { id: String(Math.round(cur.profile.at * 1000)), profile: cur.profile } : null;
+    // A new profile is compared with the one shown before it, which is usually the question, when
+    // that one measured the same thing in the same place. The comparison follows each new run; one
+    // picked from "compare with…" (no `auto`) stays until it is changed there.
+    const same = cur.profile && cur.status === 'done' && cur.profile.mode === p.profile.mode &&
+                 (p.side || cur.side || '') === (cur.side || '');
+    const was = same ? { id: String(Math.round(cur.profile.at * 1000)), profile: cur.profile, auto: true } : null;
     Object.assign(next, { status: 'done', profile: p.profile, plain: p.plain || null, source: p.source || cur.source, error: null,
                           shownId: String(Math.round(p.profile.at * 1000)) });
-    if (was && !base.value) base.value = was;
+    if (!base.value || base.value.auto) base.value = was;
     resetView(cur.cell);
     loadHistory(cur.cell);
   }
@@ -371,7 +379,6 @@ function apply(p) {
 }
 window.onProfilePush = (p) => apply(p);
 window.slateProfileCell = (id, kept) => openProfile(id, kept || '');
-window.slateProfileOpen = () => !!pf.value;
 effect(() => lockScroll('profiler', !!pf.value));   // the notebook stays still under the dock
 
 // ── zooming a span ────────────────────────────────────────────────────────────────────────────────
@@ -1310,10 +1317,7 @@ function Code() {
     const v = vw.current; if (!v) return;
     v.setDoc(text, 1);
     const rows = new Map(M && M.lines.get(at.file) ? [...M.lines.get(at.file).values()].map(r => [r.line, { ...r }]) : []);
-    // With library code folded, the gutter shows the same time per line as the hot lines table.
-    const own = M && fold.value && ownTime.value;
-    if (own && [...own.lines.values()].some(o => o.file === at.file))
-      for (const r of rows.values()) { const o = own.lines.get(at.file + '\x1f' + r.line); r.self = o ? o.self : 0; }
+    // The gutter shows each line's total, the hot lines table's total column, folded or not.
     for (const s of staticRows(at.file)) rows.set(s.line, { incl: 0, self: 0, d: 0, g: 0, c: 0, ...(rows.get(s.line) || {}), ...s });
     v.setHeat([...rows.values()]);
   }, [text, at.file, M, pf.value && pf.value.prepared, fold.value]);
@@ -1376,7 +1380,11 @@ function Hot() {
   const rows = [], own = fold.value && ownTime.value;
   if (own) rows.push(...own.lines.values());
   else for (const [file, m] of M.lines) for (const r of m.values()) rows.push({ file, ...r });
-  const wasOf = (r) => { const m = B && B.lines.get(r.file); const w = m && m.get(r.line); return w ? w.self : 0; };
+  const bown = own && baseOwnTime.value;
+  const wasOf = (r) => {
+    if (bown) { const w = bown.lines.get(r.file + '\x1f' + r.line); return w ? w.self : 0; }
+    const m = B && B.lines.get(r.file); const w = m && m.get(r.line); return w ? w.self : 0;
+  };
   const where = (r) => (r.file.startsWith('cell:') ? r.file.slice(5) : shortFile(r.file)) + ':' + String(r.line).padStart(6, '0');
   rows.sort((a, b) => b.self - a.self || b.incl - a.incl);
   const top = sortRows(hotSort.value.key === 'self' ? rows.filter(r => r.self > 0) : rows, hotSort,
@@ -1479,6 +1487,7 @@ const setTabTo = (t) => { tab.value = t; lsSet('slateProfTab', t); };
 const STATIC_WHAT = {
   dispatch: 'Runtime dispatch: the method is chosen while the code runs, not when it compiles. Slow, and it allocates.',
   captured: 'Boxed capture: a closure reassigns a variable it captured, so the variable lives in an untyped box.',
+  unoptimized: 'Not optimized: the compiler gave up optimizing this call, often for recursion or code too large to infer, so it runs without inlining.',
 };
 const ABSTRACT = /::(Real|Number|AbstractFloat|Integer|Signed|Unsigned|AbstractString|Function|DataType|Abstract\w*(?:\{[^}]*\})?)(?![\w{])/g;
 function explainStatic(g) {
@@ -1808,7 +1817,6 @@ body.agent-open .pfbg { right:var(--agentw, 380px); }
 .pffig i { font-style:normal; color:var(--dim); font-size:.72rem; }
 .pffig.dim b { color:var(--dim); font-weight:500; }
 .pffacts .pfwarn { overflow:hidden; text-overflow:ellipsis; max-width:60ch; }
-.pfprep { color:var(--dim); }
 .pfmode { color:#e8933a; align-self:center; padding:1px 8px; border-radius:10px; font-size:.68rem; text-transform:uppercase; letter-spacing:.06em;
   border:1px solid color-mix(in srgb, #e8933a 50%, transparent); background:color-mix(in srgb, #e8933a 14%, transparent); }
 .pffacts .c b { color:#b9a3f5; }
@@ -1912,7 +1920,6 @@ body.pfdrag-y, body.pfdrag-y * { cursor:row-resize !important; user-select:none 
 .pffn { font-family:var(--mono,ui-monospace,monospace); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pffile { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--mono,ui-monospace,monospace); }
 .pfsandwich { border-top:1px solid var(--border); overflow:auto; display:grid; grid-template-columns:1fr auto 1fr; gap:10px; padding:6px 10px; font-size:.74rem; }
-.pfsandwich.pfempty { display:flex; }
 .pfrelhead { color:var(--dim); font-size:.68rem; text-transform:uppercase; letter-spacing:.04em; margin-bottom:3px; }
 .pfrelrow { display:grid; grid-template-columns:56px 60px minmax(0,1fr) auto; gap:6px; align-items:center; padding:2px 0; cursor:pointer; }
 .pfrelrow:hover .pffn { color:#ff6fd8; }

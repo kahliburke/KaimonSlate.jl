@@ -1509,7 +1509,7 @@ function _jet_module()
 end
 
 const _JET_KIND = Dict("RuntimeDispatchReport" => "dispatch", "CapturedVariableReport" => "captured",
-                       "OptimizationFailureReport" => "not optimized")
+                       "OptimizationFailureReport" => "unoptimized")
 
 _mi_name(mi) = try; string(mi.def.name); catch; ""; end
 
