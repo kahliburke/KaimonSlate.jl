@@ -12,6 +12,10 @@ Testbed for the presentation work: layouts, builds, reactive steps, transitions,
 recording. Each slide exercises one feature.
 """
 
+#%% code id=makie hidecode
+using CairoMakie
+use_slate_theme!()
+
 #%% md id=builds
 @md"""
 ## Builds, without copies
@@ -211,6 +215,64 @@ let t = collect(range(0, 12; length = 600)), ωd = 2.0
            legend = false, height = 380, yAxis = (min = -1, max = 1))
 end
 
+#%% md id=phase
+@md"""
+## The orbit in phase space
+
+Position against velocity: each swing loses a little, so the orbit spirals in.
+
+::: {.step step=2}
+Every orbit ends at rest.
+:::
+
+::: {.step step=3}
+Close in, the spiral keeps its shape.
+:::
+"""
+
+#%% code id=phase_fig hidecode column=2
+let γ = 0.25, ωd = 2.0
+    t = range(0, 16; length = 1200)
+    x = @. exp(-γ * t) * cos(ωd * t)
+    v = @. -γ * x - exp(-γ * t) * ωd * sin(ωd * t)
+    fig = Figure(size = (760, 700), fontsize = 26)
+    ax = Axis(fig[1, 1]; xlabel = L"x", ylabel = L"\dot{x}", limits = (-1.1, 1.1, -2.2, 2.2))
+    tr = trace!(ax, x, v; color = slate_color(:orange))
+    rest = callout!(ax, (0.0, 0.0), "rest"; offset = (70, 60))
+    slide_figure(fig; steps = [
+        (trace = tr, frames = 90),
+        (show = rest,),
+        (limits = (ax, (-0.25, 0.25, -0.5, 0.5)), frames = 45),
+    ])
+end
+
+#%% md id=helix
+@md"""
+## Time as a third axis
+
+From the side, the orbit is the decaying cosine.
+
+::: {.step step=2}
+Down the time axis, it is the spiral.
+:::
+"""
+
+#%% code id=helix_fig hidecode column=2
+let γ = 0.25, ωd = 2.0
+    t = range(0, 12; length = 900)
+    x = @. exp(-γ * t) * cos(ωd * t)
+    v = @. -γ * x - exp(-γ * t) * ωd * sin(ωd * t)
+    fig = Figure(size = (800, 700), fontsize = 26)
+    ax = Axis3(fig[1, 1]; xlabel = L"t", ylabel = L"\dot{x}", zlabel = L"x",
+               azimuth = -π / 2 + 0.02, elevation = 0.05, perspectiveness = 0.2, protrusions = (40, 90, 40, 40))
+    tr = trace!(ax, t, v, x; color = slate_color(:orange))
+    start = callout!(ax, (0.0, -0.25, 1.0), L"x_0"; offset = (40, 40))
+    slide_figure(fig; steps = [
+        (trace = tr, show = start, frames = 90),
+        (view = (ax, (-0.02, 0.05)), frames = 75),
+    ])
+end
+
 #%% md id=draws
 @md"""
 ## Two hundred and forty draws
@@ -257,7 +319,7 @@ end
 
 :::: columns
 ::: {.column width="58%"}
-![autoplay loop](slides_media/mandelbrot.mp4)
+![autoplay loop muted](data/ripple.mp4)
 :::
 ::: column
 ::: incremental
@@ -269,7 +331,23 @@ end
 ::::
 """
 
-#%% md id=bgvideo bg=slides_media/mandelbrot.mp4 bgdim=0.45 layout=center transition=zoom
+#%% code id=ripple hidecode
+# The clip the next two slides play, rendered once into the data dir.
+ripple = let path = joinpath(datadir(), "ripple.mp4")
+    isfile(path) || let fig = Figure(size = (640, 360), figure_padding = 0)
+        ax = Axis(fig[1, 1]); hidedecorations!(ax); hidespines!(ax)
+        xs = range(-8, 8; length = 320); ys = range(-4.5, 4.5; length = 180)
+        t = Observable(0.0)
+        z = lift(t -> [sin(2hypot(x - 3, y) - 6t) + sin(2hypot(x + 3, y) - 6t) for x in xs, y in ys], t)
+        heatmap!(ax, xs, ys, z; colormap = :magma)
+        record(fig, path, range(0, 4π / 3; length = 121)[1:end-1]; framerate = 30) do τ
+            t[] = τ
+        end
+    end
+    path
+end;
+
+#%% md id=bgvideo bg=data/ripple.mp4 bgdim=0.45 layout=center transition=zoom
 @md"""
 ## Full-bleed background
 
