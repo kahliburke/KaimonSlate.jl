@@ -83,6 +83,23 @@ end
         @test Meta.parseall(s) isa Expr
     end
 
+    @testset "dedicated worker threads can be turned off" begin
+        t = RE.RemoteTarget("h"; transport = :tunnel)
+        @test occursin("dedicated_threads=true", RE._remote_worker_script(t, 9100, 9101, "/p", "PUB"))
+        off = RE._remote_worker_script(t, 9100, 9101, "/p", "PUB"; dedicated_threads = false)
+        @test occursin("dedicated_threads=false", off) && Meta.parseall(off) isa Expr
+        was = RE.WORKER_DEDICATED_THREADS[]
+        try
+            RE.WORKER_DEDICATED_THREADS[] = false
+            @test RE.effective_dedicated_threads(nothing) === false
+            @test RE.effective_dedicated_threads(true) === true          # a notebook's own choice wins
+            @test RE.GateKernel("/p").dedicated_threads === nothing
+            @test RE.GateKernel("/p"; dedicated_threads = true).dedicated_threads === true
+        finally
+            RE.WORKER_DEDICATED_THREADS[] = was
+        end
+    end
+
     @testset "a worker's log records read like a sweep task's" begin
         # One vocabulary classifies both logs in the viewer, so a worker record must have the shape
         # it reads: level, then the clock.
@@ -98,32 +115,6 @@ end
         @test match(field, "└   ms = 4182.6").captures == ["ms", "4182.6"]
         @test match(field, "│   cell = \"train\"").captures[1] == "cell"
         @test match(field, "└ @ Main f.jl:1") === nothing
-    end
-
-    @testset "a remote worker picks up dedicated threads once the host has built them" begin
-        was = RE.WORKER_POOLS_SOURCE[]
-        try
-            RE.WORKER_POOLS_SOURCE[] = "off"
-            @test !occursin("pools-env", RE._remote_worker_script(RE.RemoteTarget("h"), 9100, 9101, "/p", "PUB"))
-            RE.WORKER_POOLS_SOURCE[] = ""
-            s = RE._remote_worker_script(RE.RemoteTarget("h"), 9100, 9101, "/p", "PUB")
-            # Only a built env joins LOAD_PATH, and before the worker loads anything.
-            @test occursin("pools-env/", s) && occursin(".ready", s)
-            @test findfirst("pools-env/", s)[1] < findfirst("import KaimonGate", s)[1]
-            @test Meta.parseall(s) isa Expr
-            # A local checkout is part of the key, so editing it builds a new env.
-            mktempdir() do dir
-                mkpath(joinpath(dir, "src")); write(joinpath(dir, "Project.toml"), "name = \"DedicatedThreads\"\n")
-                write(joinpath(dir, "src", "DedicatedThreads.jl"), "module DedicatedThreads end\n")
-                RE.WORKER_POOLS_SOURCE[] = dir
-                k1 = RE._remote_pools_spec()
-                @test k1.checkout == abspath(dir)
-                write(joinpath(dir, "src", "DedicatedThreads.jl"), "module DedicatedThreads\nf() = 1\nend\n")
-                @test RE._remote_pools_spec().key != k1.key
-            end
-        finally
-            RE.WORKER_POOLS_SOURCE[] = was
-        end
     end
 
     @testset "a locally spawned worker allow-lists the hub too" begin

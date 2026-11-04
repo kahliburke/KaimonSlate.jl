@@ -31,6 +31,7 @@ Machine-wide settings live in `slate.json` in your config home. Changes apply on
 | `port` | the hub port, unless a flag or environment variable overrides it |
 | `worker_threads` | default worker threads, as `"<compute>,<interactive>"` |
 | `worker_extra_flags` | default extra Julia flags for workers |
+| `dedicated_threads` | whether workers run their machinery on [threads of their own](workers.md#Dedicated-threads) (default `true`) |
 | `memo_cap_gb` | the [memoization](memoization.md) store's size cap |
 | `blob_chunk_mb` | chunk size for binary transfers |
 | `local_procs` | how many tasks a [local sweep](clusters.md) runs at once; `0` works it out from this machine |
@@ -40,7 +41,6 @@ Machine-wide settings live in `slate.json` in your config home. Changes apply on
 | `run_location` | where notebooks run by default; see [Remotes](remotes.md) |
 | `transfer_warn_mb` | pause a remote's provisioning when it would send more than this (default 100) |
 | `telemetry_log`, `telemetry_keep_days` | keep [worker telemetry](workers.md) on disk (default on, 14 days) |
-| `worker_pools_source` | where [dedicated worker threads](workers.md#Dedicated-threads) come from, or `off` |
 | `checker_on`, `debug_specialist_only`, `specialist_models` | the agent's [specialists](agent.md), set from Settings |
 
 `secrets.json` sits beside it and holds the [publishing](publishing.md) credentials the ledger
@@ -178,7 +178,6 @@ Driving a local model requires Kaimon's Ollama agent backend. Selecting a model 
 | `SLATE_BROWSER` | Open a specific browser (e.g. `"Google Chrome"`) instead of the OS default. |
 | `KAIMONSLATE_ALLOWED_HOSTS` | Extra Host/Origin names the hub will answer to (a DNS alias, a proxy). This machine's own names are admitted automatically. |
 | `KAIMONSLATE_ALLOW_OTHER_USERS` | `=1` → on Linux, also answer loopback connections from other accounts on this machine. Off by default, since a shared login node's other users can reach its loopback ports. |
-| `KAIMONSLATE_WORKER_POOLS` | Where [dedicated worker threads](workers.md#Dedicated-threads) come from, as `worker_pools_source` does. |
 | `KAIMON_GATE_OWNER_WAKE` | `=0` → a worker serves its gate with the polling loop instead of the event-driven one. |
 | `KAIMONSLATE_BLOB_CAP_GB` | Size cap for the local cache of remote results read by byte range (default a sixteenth of free disk, between 1 and 8 GB). |
 | `KAIMONSLATE_SCHED_BUDGET` | Scheduler commands per minute to one machine above which the hub warns in its log (default 2). |

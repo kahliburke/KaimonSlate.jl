@@ -122,6 +122,9 @@ It holds:
   notebook's worker command line, e.g. `--gcthreads=4,1 --heap-size-hint=4G`). Changing either
   respawns the worker.
 - **Parallel cells** — run independent cells concurrently.
+- **Dedicated worker threads**: the worker runs its own machinery on
+  [threads of its own](workers.md#Dedicated-threads). On by default; `dedicated_threads` in
+  `slate.json` sets the default for every notebook. Changing it respawns the worker.
 - **Hot-reload /src edits** — whether edits to the project's own source re-enter the running kernel.
   See [Editing project source](hot-reload.md).
 - **Macro-aware deps** — expand unknown macros in the kernel to recover their real reads and writes.

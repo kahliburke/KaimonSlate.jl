@@ -1922,35 +1922,25 @@ import ExpressionExplorer
 # ── Infrastructure threads ────────────────────────────────────────────────────────────────────
 # Cell code runs on `:default`. When it saturates that pool (CPU-bound tasks that rarely yield), any
 # worker machinery also scheduled there stalls with it. So the worker keeps two pools of its own OS
-# threads, from DedicatedThreads (an optional env on LOAD_PATH, see gate_kernel.jl `_pools_env`):
+# threads, from DedicatedThreads:
 #   • `:slate` — the control plane: status, cancel, the hub heartbeat, telemetry, blob transfers.
 #     Never runs notebook code, so it always answers.
 #   • `:slate_ui` — what keeps the page live: markdown interpolation, live re-renders, table pages,
 #     completions, and cells re-run by a reactive push. These do run notebook code (`show` methods,
 #     `{{ }}` expressions, reader cells), so they are kept off `:slate`: a slow one delays only UI work.
-# Everything else, including every cell a user runs, stays on `:default`. Without the package the
-# control plane runs on `:interactive` and UI work on `:default`.
-#
-# Loaded when the worker starts, by UUID (the hub's `_POOLS_PKG_UUID`), rather than imported here: it
-# is not a SlateWorker dependency, and an import in the module body would be resolved once, when the
-# package image is built, instead of in each worker's environment.
-const _POOLS_PKG = Base.PkgId(Base.UUID("9d6577c3-9664-4440-a53f-cec765ebc045"), "DedicatedThreads")
-const _POOLS_MOD = Ref{Union{Module,Nothing}}(nothing)
+# Everything else, including every cell a user runs, stays on `:default`. If the pools fail to start,
+# the control plane runs on `:interactive` and UI work on `:default`.
+import DedicatedThreads
 
 const _INFRA_THREADS = 2
 const _UI_THREADS = 2
-const _INFRA_POOL = Ref{Any}(nothing)
-const _UI_POOL = Ref{Any}(nothing)
+const _INFRA_POOL = Ref{Union{DedicatedThreads.DedicatedPool,Nothing}}(nothing)
+const _UI_POOL = Ref{Union{DedicatedThreads.DedicatedPool,Nothing}}(nothing)
 
 function _start_worker_pools!()
-    if Base.locate_package(_POOLS_PKG) === nothing
-        _blog("DedicatedThreads is not in this worker's environment")
-        return nothing
-    end
-    dt = _POOLS_MOD[] = Base.require(_POOLS_PKG)
-    _INFRA_POOL[] = Base.invokelatest(dt.DedicatedPool, _INFRA_THREADS; name = :slate)
-    _UI_POOL[] = Base.invokelatest(dt.DedicatedPool, _UI_THREADS; name = :slate_ui)
-    _blog("DedicatedThreads pools started")
+    _INFRA_POOL[] = DedicatedThreads.DedicatedPool(_INFRA_THREADS; name = :slate)
+    _UI_POOL[] = DedicatedThreads.DedicatedPool(_UI_THREADS; name = :slate_ui)
+    _blog("worker thread pools started")
     return nothing
 end
 
@@ -1958,16 +1948,15 @@ end
 function _spawn_infra(f)
     pool = _INFRA_POOL[]
     pool === nothing && return Threads.@spawn :interactive f()
-    return Base.invokelatest(_POOLS_MOD[].spawn, f, pool)
+    return DedicatedThreads.spawn(f, pool)
 end
 
 "Run `f()`, which may run notebook code, on the UI threads; returns its Task."
 function _spawn_ui(f)
     pool = _UI_POOL[]
     pool === nothing && return Threads.@spawn f()
-    dt = _POOLS_MOD[]
     # Outside the pool's scope, so notebook code's own `spawn(f)` still defaults to `:default`.
-    return Base.invokelatest(dt.spawn, () -> Base.invokelatest(dt.with_pool, f, nothing), pool)
+    return DedicatedThreads.spawn(() -> DedicatedThreads.with_pool(f, nothing), pool)
 end
 
 # Gate requests that never run notebook code → the control plane.
@@ -3571,7 +3560,8 @@ end
 function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                curve::Bool = false, allowed_clients::Vector{String} = String[],
                data_port::Int = 0, warm_deps::Bool = false, stats_path::String = "",
-               blob_curve::Bool = true, blob_bind::String = "", blob_free_port::Bool = false)
+               blob_curve::Bool = true, blob_bind::String = "", blob_free_port::Bool = false,
+               dedicated_threads::Bool = true)
     _check_seb_version()
     _STREAM_PORT[] = stream_port   # publish for `__slate_ports` (hub-assigned today; the hub owns only the gate)
     _start_emit_channel!()         # before the gate serves, so `__slate_ports` always reports it
@@ -3604,7 +3594,9 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # The worker's own thread pools, started before the port opens, and the gate routing requests onto
     # them (see `_route_request`). With a KaimonGate that has no `set_request_router!`, every request
     # still gets a `:default` task.
-    try; _start_worker_pools!(); catch e; @warn "slate: worker thread pools failed to start; using the built-in pools" exception = e; end
+    if dedicated_threads
+        try; _start_worker_pools!(); catch e; @warn "slate: worker thread pools failed to start; using the built-in pools" exception = e; end
+    end
     isdefined(KaimonGate, :set_request_router!) && KaimonGate.set_request_router!(_route_request)
     # DEFERRED (~5s): Revise/src-watcher setup is heavy compilation; running it now would contend for
     # the codegen lock with the hub's CURVE handshake in the first seconds after the port opens (the

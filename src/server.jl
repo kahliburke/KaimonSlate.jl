@@ -508,6 +508,8 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
         # Per-notebook extra Julia flags (e.g. "--gcthreads=4,1"), persisted via the config panel
         # (meta["juliaflags"]); "" → the kernel falls back to the global (panel/slate.json) / env.
         ef = String(get(report.meta, "juliaflags", ""))
+        dt = get(report.meta, "dedicatedthreads", nothing)
+        dt = dt isa Bool ? dt : nothing   # unset → the kernel uses the global
         lbl = basename(abspath(path))   # gate-session display label: the notebook's filename
         nbdir = dirname(abspath(path))  # local worker: the read fallback for a detached notebook
         if !env_exists && !isempty(delta)
@@ -516,21 +518,21 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             # Project.toml is written by the reconstruction itself, so a worker that never ran
             # leaves the env "absent" and reconstruction retries on the next open.
             mkpath(envdir)
-            return GateKernel(envdir; parent = parent, envdir = envdir, nbdir = nbdir, pending = delta, threads = th, extra_flags = ef, label = lbl, online = online)
+            return GateKernel(envdir; parent = parent, envdir = envdir, nbdir = nbdir, pending = delta, threads = th, extra_flags = ef, dedicated_threads = dt, label = lbl, online = online)
         elseif parent == ""
             # Detached: the notebook env IS the whole world (everything is a "notebook add").
             ReportEngine.ensure_notebook_env!(envdir; notebook = path)
-            return GateKernel(envdir; parent = "", envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, label = lbl, online = online)
+            return GateKernel(envdir; parent = "", envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, dedicated_threads = dt, label = lbl, online = online)
         elseif env_exists
             # Already has its own packages → run in the forked env (extends the parent). But first, if
             # the PARENT changed since this fork was seeded (a dep added, a re-resolve — e.g. an
             # extension package that gained a dependency), REBUILD it: a stale fork would crash the
             # worker at boot on `using` a dep the fork never received. Self-healing, before spawn.
             _refresh_fork_env!(envdir, parent, delta; online = online)
-            return GateKernel(envdir; parent = parent, envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, label = lbl, online = online)
+            return GateKernel(envdir; parent = parent, envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, dedicated_threads = dt, label = lbl, online = online)
         else
             # Base mode: no notebook-specific packages yet → run directly in the parent.
-            return GateKernel(parent; parent = parent, envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, label = lbl, online = online)
+            return GateKernel(parent; parent = parent, envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, dedicated_threads = dt, label = lbl, online = online)
         end
     end
     # Asked to run somewhere else, with no gate to do it with. Every remote path — `remoteworker`,

@@ -22,6 +22,10 @@ const WORKER_EXTRA_FLAGS = Ref{String}("")
 # the worker falls back to KAIMONSLATE_MEMO_CAP_GB from ITS env, else an adaptive default
 # (a quarter of free disk, clamped 2–20 GB — see worker.jl `_memo_cap`).
 const MEMO_CAP_GB = Ref{Float64}(0.0)
+# Whether a worker runs its control plane and UI work on thread pools of its own (DedicatedThreads,
+# worker.jl `_start_worker_pools!`). Per-notebook override → this global (slate.json) → on.
+const WORKER_DEDICATED_THREADS = Ref{Bool}(true)
+effective_dedicated_threads(k::Union{Bool,Nothing}) = something(k, WORKER_DEDICATED_THREADS[])
 
 # The machine-adaptive default thread spec: min(cores, 8) compute + 2 interactive (idle threads park;
 # the cap avoids oversubscription across several open notebooks). Two interactive threads keep the gate
@@ -234,69 +238,6 @@ function _infra_env()::String
     end
 end
 
-# ── Optional worker env: dedicated worker threads ────────────────────────────────────────────────
-# The worker runs its control plane and UI work on thread pools from DedicatedThreads (worker.jl
-# `_POOLS_OK`). That package is optional, so it gets its own env rather than a place in `worker_infra`:
-# a failed build leaves workers on Julia's built-in pools and costs nothing else. It is built in the
-# background, once per (source, Julia version), so a worker spawn never waits for it; workers spawned
-# before it is ready start without it. Source, from `worker_pools_source` (slate.json) or
-# KAIMONSLATE_WORKER_POOLS: "" installs it from the depot's registries, by name and UUID so no other
-# package of that name is ever installed; "off" disables it; anything else is a local checkout
-# (developed) or a git URL.
-const WORKER_POOLS_SOURCE = Ref{String}("")
-const _POOLS_PKG_UUID = "9d6577c3-9664-4440-a53f-cec765ebc045"
-const _POOLS_ENV_ROOT = joinpath(get(DEPOT_PATH, 1, joinpath(homedir(), ".julia")),
-                                 "scratchspaces", "kaimonslate-pools")
-const _POOLS_ENV_LOCK = ReentrantLock()
-const _POOLS_ENV_BUILDING = Set{String}()   # guarded by _POOLS_ENV_LOCK
-# A failed build is retried after this long, and at every hub start, so a package that becomes
-# installable later (a new registration) is picked up.
-const _POOLS_RETRY_S = 3600.0
-
-"""
-The optional pools env for new workers, or \"\" when it is disabled, failed, or still building.
-`retry_failed` retries a failed build now rather than after `_POOLS_RETRY_S`.
-"""
-function _pools_env(; retry_failed::Bool = false)::String
-    src = strip(WORKER_POOLS_SOURCE[])
-    src == "off" && return ""
-    dir = joinpath(_POOLS_ENV_ROOT, string(hash(("DedicatedThreads", src, string(VERSION))); base = 16))
-    isfile(joinpath(dir, ".ready")) && return dir
-    failed = joinpath(dir, ".failed")
-    !retry_failed && isfile(failed) && time() - mtime(failed) < _POOLS_RETRY_S && return ""
-    lock(_POOLS_ENV_LOCK) do
-        dir in _POOLS_ENV_BUILDING && return
-        push!(_POOLS_ENV_BUILDING, dir)
-        Threads.@spawn _build_pools_env!(dir, src)
-    end
-    return ""
-end
-
-function _build_pools_env!(dir::String, src::AbstractString)
-    buildlog = joinpath(dir, "build.log")
-    try
-        mkpath(dir)
-        rm(joinpath(dir, ".failed"); force = true)
-        path = expanduser(src)
-        spec = isempty(src) ? "Pkg.add(Pkg.PackageSpec(name = \"DedicatedThreads\", uuid = \"$(_POOLS_PKG_UUID)\"))" :
-               isdir(path)   ? "Pkg.develop(path = $(repr(abspath(path))))" :
-                               "Pkg.add(url = $(repr(String(src))))"
-        code = "using Pkg; $spec; Pkg.precompile()"
-        open(buildlog, "w") do io
-            run(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$dir -e $code`;
-                         stdout = io, stderr = io))
-        end
-        write(joinpath(dir, ".ready"), String(src))
-        @info "slate: dedicated worker threads available to new workers" dir
-    catch
-        touch(joinpath(dir, ".failed"))
-        @info "slate: dedicated worker threads unavailable; workers use Julia's built-in pools" reason = _env_build_error(buildlog) buildlog
-    finally
-        lock(_POOLS_ENV_LOCK) do; delete!(_POOLS_ENV_BUILDING, dir); end
-    end
-    return nothing
-end
-
 # Per-worker TCP ports. A counter hands out the next block, and every port in it is PROBED before it
 # is handed out — because a counter alone is not enough and the failure it produces is silent.
 #
@@ -494,6 +435,7 @@ mutable struct GateKernel <: Kernel
     lock::ReentrantLock   # serializes prepare!/respawn so concurrent callers can't double-spawn
     threads::String  # per-notebook worker thread override ("<compute>,<interactive>"); "" = use the global
     extra_flags::String  # per-notebook extra Julia flags (e.g. "--gcthreads=4,1"); "" = use the global
+    dedicated_threads::Union{Bool,Nothing}  # per-notebook dedicated worker threads; nothing = use the global
     remote::Bool     # attached to a PRE-RUNNING worker (e.g. remote, forwarded to 127.0.0.1:port over
                      # an SSH tunnel) — `prepare!` CONNECTS, never spawns/reconstructs locally.
     label::String    # gate-session display label (the notebook's filename) — names the session in `ping`/TUI
@@ -521,8 +463,9 @@ mutable struct GateKernel <: Kernel
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
                nbdir::AbstractString = "",
                pending::Vector = Any[], threads::AbstractString = "", extra_flags::AbstractString = "",
+               dedicated_threads::Union{Bool,Nothing} = nothing,
                label::AbstractString = "", target = nothing, online = nothing) =
-        new(String(project), String(parent), String(nbdir), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), String(extra_flags), false, String(label), target, nothing, 0, false, false, false, online)
+        new(String(project), String(parent), String(nbdir), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), String(extra_flags), dedicated_threads, false, String(label), target, nothing, 0, false, false, false, online)
 end
 
 """
@@ -983,7 +926,8 @@ _hub_owner_line() = "SlateWorker.HUB_OWNER[] = $(repr(worker_owner_tag()))"
 # Worker boot: put KaimonGate and the slate-owned infra env on LOAD_PATH, load the SlateWorker
 # package, and serve its tools over TCP. Pinned to the notebook's project.
 function _worker_script(port::Int, stream_port::Int, parent::AbstractString = "",
-                        nbdir::AbstractString = ""; curve_client::AbstractString = "")
+                        nbdir::AbstractString = ""; curve_client::AbstractString = "",
+                        dedicated_threads::Bool = WORKER_DEDICATED_THREADS[])
     # Put ONLY KaimonGate (the ZMQ bridge) on the worker's LOAD_PATH — from its own
     # minimal project (ZMQ/Serialization/…, no HTTP), NOT Kaimon's full env. Kaimon's
     # Manifest pins the custom HTTP 2.0 (Reseau); prepending it would shadow a notebook
@@ -992,9 +936,6 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # lib/KaimonGate dir only resolves from a dev checkout.
     kgate_dir = _kgate_env()
     infra_dir = _infra_env()   # materialised (instantiated for THIS Julia) — see `_infra_env`
-    pools_dir = _pools_env()   # optional; "" until built (see `_pools_env`)
-    pools_line = isempty(pools_dir) ? "" :
-        "insert!(LOAD_PATH, 4, $(repr(pools_dir)))   # optional dedicated worker threads — after infra"
     # No LOAD_PATH stacking: the notebook runs in a SINGLE active env (`@`, set by
     # `--project`) — either the parent directly (base mode) or a forked env that already
     # contains the parent's deps (forked mode). `PARENT_PROJECT` is recorded only so the
@@ -1003,7 +944,6 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # $(worker_owner_tag())
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
     insert!(LOAD_PATH, 3, $(repr(infra_dir)))   # slate-owned infra (SlateWorker + Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
-    $pools_line
     import KaimonGate
     # SlateWorker before Revise, which tracks only packages loaded after it: a live worker keeps the
     # code it booted with.
@@ -1014,7 +954,7 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     SlateWorker.PARENT_PROJECT[] = $(repr(String(parent)))
     SlateWorker.NOTEBOOK_DIR[] = $(repr(String(nbdir)))
     $(_hub_owner_line())
-    SlateWorker.start(; host = "127.0.0.1", port = $port, stream_port = $stream_port$(_curve_start_kwargs(curve_client)))
+    SlateWorker.start(; host = "127.0.0.1", port = $port, stream_port = $stream_port, dedicated_threads = $dedicated_threads$(_curve_start_kwargs(curve_client)))
     """
 end
 
@@ -1153,7 +1093,8 @@ function _spawn_worker!(k::GateKernel)
     extra_args = Base.shell_split(effective_worker_extra_flags(k.extra_flags))
     ck = _local_curve_keys()
     script = _worker_script(port, stream_port, k.parent, k.nbdir;
-                            curve_client = ck === nothing ? "" : ck.client)
+                            curve_client = ck === nothing ? "" : ck.client,
+                            dedicated_threads = effective_dedicated_threads(k.dedicated_threads))
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads $extra_args -e $script`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas,
                  # Never inherit the hub's load path — see `_DEFAULT_LOAD_PATH`.

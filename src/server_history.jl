@@ -303,6 +303,8 @@ const _CONFIG_UI = (
      choices = String[], global_default = () -> ReportEngine.WORKER_EXTRA_FLAGS[], restart = true),
     (key = "parallel", group = "Execution", label = "Parallel cells", type = :bool, default = true,
      choices = String[], global_default = () -> PARALLEL_DEFAULT[], restart = false),
+    (key = "dedicatedthreads", group = "Execution", label = "Dedicated worker threads", type = :bool, default = true,
+     choices = String[], global_default = () -> ReportEngine.WORKER_DEDICATED_THREADS[], restart = true),
     (key = "hotreload", group = "Execution", label = "Hot-reload /src edits", type = :bool, default = true,
      choices = String[], global_default = nothing, restart = false),
     (key = "macroexpand", group = "Execution", label = "Macro-aware deps", type = :bool, default = true,
@@ -371,6 +373,8 @@ function set_notebook_config!(nb::LiveNotebook, key::AbstractString, value; clea
             (nb.kernel.threads = get(report.meta, "threads", ""))
         it.key == "juliaflags" && nb.kernel isa ReportEngine.GateKernel &&
             (nb.kernel.extra_flags = get(report.meta, "juliaflags", ""))
+        it.key == "dedicatedthreads" && nb.kernel isa ReportEngine.GateKernel &&
+            (nb.kernel.dedicated_threads = (v = get(report.meta, "dedicatedthreads", nothing); v isa Bool ? v : nothing))
         _persist!(nb)
     end
     it.restart && restart_kernel!(nb)

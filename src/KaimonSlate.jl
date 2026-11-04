@@ -592,29 +592,20 @@ function set_worker_extra_flags!(spec::AbstractString; respawn::Bool = true)
     return s
 end
 
-"""
-Where workers get DedicatedThreads, which gives them dedicated threads for the control plane
-and UI work (see `ReportEngine._pools_env`): \"\" installs it by name from the depot's registries,
-\"off\" disables it, and anything else is a local checkout or a git URL. Falls back to the
-`KAIMONSLATE_WORKER_POOLS` environment variable when slate.json doesn't set it.
-"""
-worker_pools_source()::String =
-    String(get(_slate_config(), "worker_pools_source", get(ENV, "KAIMONSLATE_WORKER_POOLS", "")))
+"Whether workers run their machinery on dedicated thread pools by default (persisted; default true)."
+dedicated_threads_default()::Bool = get(_slate_config(), "dedicated_threads", true) === true
 
 """
-    set_worker_pools_source!(spec) -> String
+    set_dedicated_threads_default!(on::Bool) -> Bool
 
-Persist where workers get DedicatedThreads (see `worker_pools_source`). Workers spawned once
-the env for that source has built use it; running workers are left alone.
+Persist whether workers start their own thread pools for the control plane and UI work. Workers
+spawned afterwards follow it; a notebook's own setting still overrides it.
 """
-function set_worker_pools_source!(spec::AbstractString)
-    s = strip(String(spec))
-    ReportEngine.WORKER_POOLS_SOURCE[] = s
-    cfg = _slate_config(); cfg["worker_pools_source"] = s
+function set_dedicated_threads_default!(on::Bool)
+    ReportEngine.WORKER_DEDICATED_THREADS[] = on
+    cfg = _slate_config(); cfg["dedicated_threads"] = on
     _persist_slate_config!(cfg)
-    ReportEngine._pools_env(; retry_failed = true)   # start building it now, ahead of the next spawn
-    @info "slate: worker pools source set" spec = s
-    return s
+    return on
 end
 
 "Persisted hub port; 0 means unset — the `KAIMONSLATE_PORT` env var or the 8765 default applies."
@@ -819,10 +810,9 @@ set_run_location_default!(spec::AbstractString) = NotebookServer.set_runon_defau
 function _load_slate_config!()
     s = worker_threads()
     isempty(s) || (ReportEngine.WORKER_THREADS[] = s)
-    ReportEngine.WORKER_POOLS_SOURCE[] = worker_pools_source()
-    ReportEngine._pools_env(; retry_failed = true)   # build (or retry) the optional pools env in the background, ahead of spawns
     ef = worker_extra_flags()
     isempty(ef) || (ReportEngine.WORKER_EXTRA_FLAGS[] = ef)
+    ReportEngine.WORKER_DEDICATED_THREADS[] = dedicated_threads_default()
     ReportEngine.MEMO_CAP_GB[] = memo_cap_gb()
     ReportEngine.TRANSFER_WARN_MB[] = transfer_warn_mb()
     ReportEngine.Sweep.LOCAL_PROCS[] = local_procs()

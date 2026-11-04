@@ -110,11 +110,10 @@ were written when they went out. They are marked.
   heartbeat, telemetry and blob transfers, and never runs notebook code. A `:slate_ui` pool serves
   markdown `{{ }}` values, live re-renders, table pages, completions, and cells re-run by a reactive
   value push. Cells you run, and cells re-run by a control, stay on `:default`. Needs KaimonGate with
-  `set_request_router!`. The pools come from DedicatedThreads, which the hub installs in the
-  background into an optional environment of its own; `worker_pools_source` in slate.json (or
-  `KAIMONSLATE_WORKER_POOLS`) can point it at a local checkout or git URL, or turn it `off`. Without
-  it, the worker behaves as before. Remote and region workers get the pools too: the hub builds the
-  environment on each host in the background, shipping a local checkout first.
+  `set_request_router!`. The pools come from
+  [DedicatedThreads](https://github.com/kahliburke/DedicatedThreads.jl), a dependency of the worker,
+  so local, remote and region workers all have them. **Dedicated worker threads** in a notebook's
+  settings, or `dedicated_threads` in slate.json, turns them off.
 
 - A notebook's worker serves its gate with KaimonGate's event-driven request loop, so each reply
   goes out as soon as it is ready. A cell run, a control change and a completion are sequences of

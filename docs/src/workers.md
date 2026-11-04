@@ -72,6 +72,7 @@ notebook. Clicking a row opens the same telemetry view.
 A worker keeps two small pools of threads of its own for its machinery: one answers the hub
 (status, cancel, telemetry, transfers) and one serves the page (live re-renders, table pages,
 completions). A cell that keeps every `:default` thread busy then cannot stall either. They come
-from the DedicatedThreads package, which the hub installs in the background into an environment
-of its own; until it is ready, workers use Julia's own pools. `worker_pools_source` in
-`slate.json` points it at a local checkout or a git URL, or turns it `off`.
+from the [DedicatedThreads](https://github.com/kahliburke/DedicatedThreads.jl) package.
+**Dedicated worker threads** in a notebook's [settings](settings.md) turns them off for that
+notebook, and `dedicated_threads = false` in `slate.json` for every notebook. The worker then runs
+its machinery on Julia's `:interactive` and `:default` pools.
