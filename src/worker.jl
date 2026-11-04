@@ -613,14 +613,26 @@ end
 # functions of (source, environment), so replaying reproduces the real run. Returns false if any
 # replay throws (→ caller distrusts the restore and recomputes) — e.g. a `set_theme!(local_var)`
 # referencing a cell-local, or a package that stored fine but won't `using` now (a real env change).
-function _replay_scaffold!(m::Module, source::AbstractString)
-    top = try; Meta.parseall(String(source)); catch; return true; end   # unparseable → nothing to replay
+function _replay_scaffold!(m::Module, source::AbstractString; cid::AbstractString = "")
+    fname = isempty(cid) ? "none" : "cell:" * cid
+    top = try; Meta.parseall(String(source); filename = fname); catch; return true; end   # unparseable → nothing to replay
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
     for s in stmts                                   # top-level using/import — bring names into scope
         s isa LineNumberNode && continue
         (s isa Expr && s.head in (:using, :import)) || continue
         try; Base.invokelatest(Core.eval, m, s)
         catch e; @info "slate memo: import replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
+    end
+    # Top-level definitions (functions, types, macros, literal consts): the entry stores none of the
+    # names they bind (see `_eval_one`), so they are evaluated again here. Each keeps its line node so
+    # the methods carry this cell's `cell:<id>` file, the tag that later removes them.
+    isempty(cid) || _redefine_cell!(m, cid, source)
+    ln = LineNumberNode(1, Symbol(fname))
+    for s in stmts
+        s isa LineNumberNode && (ln = s; continue)
+        _is_definition_stmt(s) || continue
+        try; Base.invokelatest(Core.eval, m, Expr(:toplevel, ln, s))
+        catch e; @info "slate memo: definition replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
     end
     for s in stmts                                   # top-level `@bind name W(…)` — RE-REGISTER the widget
         s isa LineNumberNode && continue             # (assign the control global) without running the cell's
@@ -793,6 +805,11 @@ function _eval_one(source::String, filename::String, memo_key::String,
                    memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[];
                    slate_ctx = nothing)
     cid = replace(filename, r"^cell:" => "")
+    # What the cell's top-level definitions bind is re-established from source on restore
+    # (`_replay_scaffold!`), so the entry stores only the rest. A function value can't be stored
+    # faithfully, and this is what lets a cell that defines helpers beside an expensive result cache.
+    defs = _definition_names(source)
+    store_names = isempty(defs) ? memo_names : String[n for n in memo_names if !(Symbol(n) in defs)]
     # The decision record for this eval (see _MEMO_TRACE): filled in as the memo layer acts,
     # committed at every exit — `slate.memo_trace` reads it back.
     tr = Dict{String,Any}("srckey" => memo_key)
@@ -805,7 +822,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
     if !isempty(memo_key) && !memo_force
         # `memo_names` = the cell's declared writes; the restore needs them to reject an entry that
         # would define none of them (see `_memo_restore`).
-        w = _memo_restore(memo_key; unread = memo_unread, writes = memo_names, trace = tr)
+        w = _memo_restore(memo_key; unread = memo_unread, writes = store_names, trace = tr)
         # A restored cell is memoized WITHOUT running its source, so its cheap global side effects —
         # `using X` (a provider's imported names) and `set_theme!` (the ambient Makie theme) — are
         # replayed here so any downstream cell that later re-runs sees the right scope + theme. A
@@ -818,7 +835,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
         # stores its output under the key of the wrong value.
         if w !== nothing
             sink = task_local_storage(_BIND_SINK_KEY, NamedTuple[])
-            replayed = try; _replay_scaffold!(_NS[], source)
+            replayed = try; _replay_scaffold!(_NS[], source; cid = cid)
                        finally; delete!(task_local_storage(), _BIND_SINK_KEY); end
             if replayed
                 @info "slate memo: restored (no recompute)" cell = cid
@@ -854,7 +871,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # the serialize cost).
     if !isempty(memo_key) && r.exception === nothing &&
        (memo_always || (memo_threshold > 0 && r.duration_ms >= memo_threshold))
-        if _memo_store(memo_key, memo_names, r; unread = memo_unread, safe = memo_safe, trace = tr)
+        if _memo_store(memo_key, store_names, r; unread = memo_unread, safe = memo_safe, trace = tr)
             @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
             tr["action"] = "stored"; tr["ms"] = round(r.duration_ms; digits = 1)
             _trace_commit!(cid, tr)
