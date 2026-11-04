@@ -1349,7 +1349,7 @@ See also `save_asset`, `FileUpload`."""),
         ```
         Worked deck: `examples/slides_studio.jl`. See also `slides`, `SlideSteps`, `echart`."""),
     SlateApiEntry("slide_figure", "Document",
-        "A Makie (CairoMakie) figure that BUILDS on a slide: plots appear, the rest dims, the camera moves, a sweep animates.",
+        "A Makie figure that builds on a slide: plots appear, the rest dims, the camera moves, a sweep animates.",
         ["makie", "cairomakie", "figure", "build", "animation", "zoom", "camera", "callout", "annotate", "slides", "3blue1brown",
          "trace", "orbit", "axis3", "3d", "rotate", "term"],
         "slide_figure(fig; steps, fps = 30, px_per_unit = 1.5) · callout!(ax, pt, label) · trace!(ax, xs, ys[, zs]) · slate_color(:red)",
