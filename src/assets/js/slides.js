@@ -683,10 +683,19 @@
     figs.forEach(f => f.style.removeProperty('max-width'));
     over = body.scrollHeight - body.clientHeight;
     for (let pass = 0; pass < 3 && over > 1; pass++) {
+      const before = over;
+      const prev = figs.map(f => f.style.getPropertyValue('max-width'));
       const tot = figs.reduce((a, f) => a + f.clientHeight, 0);
       const k = Math.max(0.6, 1 - over / Math.max(1, tot));
       for (const f of figs) f.style.setProperty('max-width', (f.clientWidth * k) + 'px', 'important');
       over = body.scrollHeight - body.clientHeight;
+      // A figure beside a taller column of text does not set the slide's height: shrinking it gains
+      // nothing, so it keeps its size and the text gives way instead.
+      if (over > before - 1) {
+        figs.forEach((f, i) => prev[i] ? f.style.setProperty('max-width', prev[i], 'important') : f.style.removeProperty('max-width'));
+        over = body.scrollHeight - body.clientHeight;
+        break;
+      }
     }
     return over;
   }

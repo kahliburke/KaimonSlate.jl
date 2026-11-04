@@ -1148,16 +1148,19 @@ end
 
 # Compile a .typ to PDF, preferring a system `typst`, else the bundled Typst_jll. `--root`
 # is the temp dir so read()/image() of the per-cell aux files resolve (Typst sandboxes IO).
+# Every stream is given explicitly: a detached host process can have its stdin/stdout closed, and
+# a child that inherits a closed descriptor fails to spawn (EBADF).
 function _typst_compile(typ::String, pdf::String)
     root = dirname(typ)
     sys = Sys.which("typst")
     err = IOBuffer()
+    compile(exe) = run(pipeline(`$exe compile --root $root $typ $pdf`; stdin = devnull, stdout = err, stderr = err))
     try
         if sys !== nothing
-            run(pipeline(`$sys compile --root $root $typ $pdf`; stderr = err))
+            compile(sys)
         else
             Typst_jll.typst() do exe
-                run(pipeline(`$exe compile --root $root $typ $pdf`; stderr = err))
+                compile(exe)
             end
         end
     catch e
