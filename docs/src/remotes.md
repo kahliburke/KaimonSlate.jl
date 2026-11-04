@@ -17,9 +17,17 @@ workers — live in **[Regions](regions.md)**.
 
 ## Requirements
 
-A remote is any **SSH host you already reach with key auth** — a `Host` entry in `~/.ssh/config`
-(or a `user@host` you can `ssh` to without a password prompt). KaimonSlate provisions the rest:
-it checks the host, ensures a Julia + environment is present, and starts the worker for you.
+A remote is any **SSH host you already reach with key auth**: a `Host` entry in `~/.ssh/config`, or a
+`user@host` you can `ssh` to without a password prompt. KaimonSlate provisions the rest: it checks
+the host, ensures a Julia + environment is present, and starts the worker for you.
+
+The hub speaks SSH itself rather than running `ssh`. From your SSH config it takes `HostName`,
+`Port`, `User`, `IdentityFile`, `ProxyJump`, `IdentitiesOnly` and `IdentityAgent`; `ProxyCommand` is
+not supported. Keys held by your SSH agent are tried first, and an OpenSSH certificate
+(`-cert.pub`) beside a key is offered with it.
+
+Remotes and regions need the hub running under [Kaimon](agent.md), or started with `slate --ai`. A
+standalone `slate` hub runs every notebook locally, and the run-location pill says so.
 
 A host that refuses keys and wants a password plus a second factor — which is most production
 clusters — works too, by authenticating **once** through a dialog in the page; see
@@ -27,10 +35,12 @@ clusters — works too, by authenticating **once** through a dialog in the page;
 
 ## Set up a host
 
-On the hub's [front page](getting-started.md#The-front-page), click **🖧 Remotes** to add and test a
-host. Each row in **Known remotes** carries a **★ Default** button that makes it the hub-wide
-default, so a notebook with no session or notebook override opens there; **★ Unset** puts the default
-back to local.
+On the hub's [front page](getting-started.md#The-front-page), click **🖧 Remotes**. Its tabs are
+**🖧 Hosts** (this page), **⎈ Machines** ([Clusters](clusters.md)) and **⇄ Transfer** (below). On
+**Hosts**, add and test a host. Each row in the known remotes carries **☆ Set default**, which makes
+it the hub-wide default so a notebook with no session or notebook override opens there (**Unset
+default** puts it back to local), **Regions ›** for its regions and live workers, and **✕** to hide
+it (**Show hidden** lists hidden ones).
 
 ![The Remotes dialog: a host field, the transport choice (SSH tunnel / Direct · CURVE), a Test & prime button, the known-remotes list with per-host region counts, and the notebook-wide data-transfer settings](./assets/remotes-modal.png)
 
@@ -67,9 +77,10 @@ Two ways to place a notebook's worker:
 - **When you open it** — the front page's **Run on** selector (next to Open / ⬆ Upload) picks
   *local* or a configured host before the notebook opens.
 - **On a live notebook** — the toolbar's **Running on** pill (`💻 local ▾`); its ▾ opens a picker
-  with local, your known remotes, transport and pinned ports, a 🩺 Test & prime run, and a worker
-  list with Reap. Apply it at whichever scope you want. The same picker is reachable as **change ▾**
-  in the worker dock. The worker moves and the notebook re-runs.
+  with local, your known remotes, transport and pinned ports, **🩺 Test connection**, and **⚙ Manage
+  remote workers…**. Apply it with **Run here** (this session), **Save to notebook**, or **Clear**.
+  The same picker is reachable as **change ▾** in the [worker dock](workers.md), and clicking the
+  pill itself opens the dock. The worker moves and the notebook re-runs.
 
 There is also a machine-wide default run location, set from the Remotes dialog and persisted to
 `slate.json` in your config home. It decides where a notebook with no override of its own runs; empty
@@ -101,12 +112,12 @@ results there instead of recomputing them — "your session follows you."
 - **On attach**, cached results are carried over automatically **when moving them beats recomputing**
   — and never if a single entry would take longer than the **carry-time budget** to transfer (that
   cell just recomputes remotely instead).
-- **`sync_memo(notebook)`** pushes **everything** — all of the notebook's local cache blobs — to the
+- **`sync_memo(notebook)`** pushes **everything**, all of the notebook's local cache blobs, to the
   remote, deduping against what it already has. It works over either transport (`direct` dials the
   CURVE data socket; `tunnel` uses a dedicated ssh forward, so a big shipment never queues ahead of
   cell results), and it also runs automatically in the boot window on every remote (re)attach.
 
-Tune the transfer under **🖧 Remotes → Data transfer** (applies to all notebooks):
+Tune the transfer under **🖧 Remotes → ⇄ Transfer** (applies to all notebooks):
 
 | Setting | Effect |
 | --- | --- |
@@ -148,18 +159,15 @@ holds a connection to it for that alone while it has a session to the host.
 
 - **The worker pill** (top bar) — one pill, showing whichever worker most needs attention
   (disconnected, degraded, starting, running, idle). Hover it for a list of every worker; click it,
-  or a row in that list, to open the **worker dock** along the bottom of the page. The dock lists
-  every worker on the left, with the selected one's figures and actions beside it, and two tabs:
-  **Log**, the worker's whole log, searchable and following it as it grows, and **Telemetry**, its
-  resource use over time. Drag its top edge to resize it, or ⤢ to fill the window; the notebook
-  keeps clear of it while it is open.
+  or a row in that list, to open the **worker dock** along the bottom of the page: every worker, the
+  selected one's controls, details and recent log messages, and its **Log** and **Telemetry**. See
+  [Workers & Telemetry](workers.md).
 
   ![The top-bar worker pill showing the most salient worker's live status, with a dropdown listing every worker](./assets/worker-pills.png)
 
-  ![The worker dock showing a region (region · gpu · gpu-box :9300): its cpu / rss / running / memo figures beside a live tail of the worker's log — attach, sync_memo, running eval, and a boundary transfer](./assets/worker-log.png)
-- **🪵 Worker log** (**☰ → Worker log**, or the command palette) — a full tail of the main worker's
-  log, following the bottom as it grows. For a remote worker it interleaves the local orchestration
-  log and the remote worker's own log.
+  ![The worker dock on a region's worker: Restart and Shut down, its recent messages, and the Log tab with level filters and the worker's log records](./assets/worker-log.png)
+- **🪵 Worker log** (**☰ → Worker log**, or the command palette) opens the worker dock at its Log
+  tab: the worker's own log, paged and searchable however large it is.
 - The [DAG pane](dag.md)'s **🖧 region map** and per-cell provenance chips show where each cell last
   ran and how much data crossed the boundary — see [Regions → Seeing where cells run](regions.md#Seeing-where-cells-run).
 - **📋 Activity log** — a per-cell run feed (distinct from the worker pill and the front-page strip).
@@ -167,7 +175,7 @@ holds a connection to it for that alone while it has a session to the host.
 !!! note "`slate_diag` is browser diagnostics, not worker state"
     Despite the name, `slate_diag` reports the **browser tab's console** (JS errors, failed asset
     loads) — useful for a broken widget or a 404, not for where a notebook runs. For execution and
-    worker state use `worker` / `regions` and the 🪵 worker log.
+    worker state use `worker` / `regions` and the worker dock's Log.
 
 ## From the agent
 
@@ -182,7 +190,10 @@ has the full parameters (`slate_api("remote")` lists them):
 | `slate_worker(action="list", host)` | A host's live worker roster + telemetry. |
 | `slate_worker(action="restart", notebook)` | Fresh worker for a notebook, then re-run. Local or remote. |
 | `slate_worker(action="reap", host, port)` | Kill and remove one worker, leaving nothing behind. |
-| `slate_sync_memo(notebook)` | Push the notebook's full cache to its remote worker. |
+| `slate_worker(action="log", region)` | A region's bring-up log from this hub: queued, node granted, provisioning, spawn and connect. |
+| `slate_worker(action="release", region)` | Return a scheduler region's allocation, or withdraw its queued request. |
+| `slate_worker(action="keep", region)` | Restart a scheduler region's idle clock, answering the idle-release warning. |
+| `slate_sync_memo(notebook)` | Push the notebook's cache entries to its remote worker. |
 
 Defining named regions and assigning them to a notebook has its own tools — `slate_region`,
 `slate_region_on`, `slate_regions` — see [Regions → From the agent](regions.md#From-the-agent).
