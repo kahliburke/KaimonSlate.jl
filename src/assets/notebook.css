@@ -2054,10 +2054,23 @@ body.modkey .cm-content { cursor: pointer; }
 #daglinkhint { position:absolute; top:40px; left:50%; transform:translateX(-50%); z-index:5;
   background:var(--bg3); color:var(--text); border:1px dashed #7d6f9e; border-radius:6px;
   padding:3px 10px; font-size:12px; pointer-events:none; white-space:nowrap; }
-.dagpane.dock-right { top:0; right:0; bottom:0; width:var(--dagw, 44vw);
+.dagpane.dock-right { top:var(--topbar-h, 49px); right:0; bottom:0; width:var(--dagw, 44vw);
   border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; }
 .dagpane.dock-bottom { left:0; right:0; bottom:0; height:var(--dagh, 42vh);
   border-top:1px solid var(--bg3); box-shadow:0 -8px 24px #0007; }
+/* The agent panel keeps its place on the right edge: docked right, the pane sits beside it; docked at
+   the bottom, it stops at its edge. The outline drawer is cleared on the left the same way. */
+body.agent-open .dagpane.dock-right, body.agent-open .dagpane.dock-bottom { right:var(--agentw, 380px); }
+body.toc-open .dagpane.dock-bottom { left:300px; }
+@media (max-width:900px) {
+  body.agent-open .dagpane.dock-right, body.agent-open .dagpane.dock-bottom { right:0; }
+  body.toc-open .dagpane.dock-bottom { left:0; }
+}
+/* Full screen (⛶): the whole window below the menu bar, for a graph too big for the docked pane. The
+   docked size is left alone, so the notebook does not reflow on the way in or out. */
+.dagpane.full { top:var(--topbar-h, 49px); left:0; right:0; bottom:0; width:auto; height:auto; z-index:66;
+  border:none; box-shadow:none; }
+.dagpane.full .daggrip { display:none; }
 .dagpane .aphead { flex:0 0 auto; flex-wrap:wrap; row-gap:8px; }
 .dagpane .aphead .hbtn { font-size:.95rem; padding:4px 11px; }   /* match the rest of the UI's control weight */
 /* The stat line ("N cells · M edges") stays on one line and ellipsizes instead of wrapping to several,
@@ -2279,7 +2292,8 @@ body.modkey .cm-content { cursor: pointer; }
 .daghelppop .dhsw i:first-child { margin-left:0; }
 /* true split: the notebook reflows around the docked pane, nothing hides */
 body.dag-open.dag-right .page { margin-right:var(--dagw, 44vw); }
-body.dag-open.dag-right .topbar { padding-right:calc(var(--dagw, 44vw) + 20px); }   /* toolbar stays reachable */
+body.dag-open.dag-right.agent-open .page { margin-right:calc(var(--dagw, 44vw) + var(--agentw, 380px)); }
+@media (max-width:900px) { body.dag-open.dag-right.agent-open .page { margin-right:var(--dagw, 44vw); } }
 body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); }
 /* Blocking package-install overlay — the notebook is frozen while the worker resolves/precompiles. */
 .pkginstall-bg { position:fixed; inset:0; z-index:95; display:none; align-items:center; justify-content:center;
@@ -2525,6 +2539,8 @@ body.agent-open .workerdock { right:var(--agentw, 380px); }
 body.toc-open .workerdock { left:300px; }
 @media (max-width:900px) { body.agent-open .workerdock { right:0; } body.toc-open .workerdock { left:0; } }
 body.dag-open.dag-bottom .workerdock { bottom:var(--dagh, 42vh); }
+body.dag-open.dag-right .workerdock { right:var(--dagw, 44vw); }
+body.dag-open.dag-right.agent-open .workerdock { right:calc(var(--dagw, 44vw) + var(--agentw, 380px)); }
 .workerdock.full { top:var(--topbar-h, 49px); height:auto; bottom:0; right:0; left:0; z-index:64; box-shadow:none; }
 .workerdock.full .wdock-grip { display:none; }
 body.wdock-open.dag-open.dag-bottom .page { padding-bottom:calc(var(--wdockh, 34vh) + var(--dagh, 42vh) + 40px); }

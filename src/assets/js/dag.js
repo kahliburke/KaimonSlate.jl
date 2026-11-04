@@ -2017,6 +2017,7 @@ function _dagRender() {
 }
 
 function _dagJump(id) {
+  if (document.getElementById('dagpane').classList.contains('full')) dagFull(false);   // the cell is behind it
   const el = document.getElementById('cell-' + id);          // header lands at top (scroll-margin clears the topbar)
   if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
@@ -2502,10 +2503,19 @@ function toggleDag() {
   _dagReflowCharts();                                        // the notebook column changed width
   if (open) requestAnimationFrame(_dagRender);               // after the pane lays out (sizes valid)
   else {
+    dagFull(false);
     _dagCardClose(); _dagPulseSync();
     const x = document.getElementById('dagxferdash'); if (x) { _dagXferDashDispose(); x.remove(); }   // its 3 s poll
   }
   _dagRoutesPoll(open && _dagRegionsOn);                     // region-routing poll rides the pane's open state
+}
+// Full screen or back (`on` forces one). The graph is laid out again for its new size.
+function dagFull(on) {
+  const p = document.getElementById('dagpane');
+  const full = p.classList.toggle('full', on === undefined ? !p.classList.contains('full') : !!on);
+  const b = document.getElementById('dagfull');
+  if (b) { b.textContent = full ? '🗗' : '⛶'; b.title = full ? 'restore the pane' : 'full screen'; }
+  if (p.classList.contains('open')) requestAnimationFrame(dagFit);
 }
 // The pane reflows the notebook column, but only window.resize normally re-measures the
 // NOTEBOOK's chart instances — nudge them (and again post-layout) or they keep stale canvases.
@@ -2621,7 +2631,8 @@ function dagFit() {
   let raf = 0;
   const move = e => {
     if (_dagDock === 'right') {
-      const w = Math.max(340, Math.min(window.innerWidth * 0.78, window.innerWidth - e.clientX));
+      const right = pane.getBoundingClientRect().right;   // the agent panel's edge when that is open
+      const w = Math.max(340, Math.min(right * 0.78, right - e.clientX));
       document.body.style.setProperty('--dagw', w + 'px');
     } else {
       const h = Math.max(180, Math.min(window.innerHeight * 0.8, window.innerHeight - e.clientY));

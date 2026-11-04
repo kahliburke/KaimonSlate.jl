@@ -29,7 +29,9 @@ laid out automatically and updated as you edit and run.
   pane header lists the same gestures.
 - **⇅ direction** — layout orientation; *auto* follows the pane shape (a tall pane lays out
   top-down).
-- **◨ dock** and the **grip** re-side and resize the pane.
+- **◨ dock** puts the pane on the right or along the bottom, and dragging its edge resizes it.
+  The notebook column moves over to keep clear of it, and of the agent panel beside it when that is
+  open. **⛶** opens the graph full screen; going to a cell from it returns to the notebook.
 - **🔥 heat map** — color cells by accumulated compute time (hotter = more expensive), to find the
   bottleneck in a pipeline.
 - **🖧 region map** — color cells by *where they run* (see [Regions](#Regions-—-run-cells-on-another-kernel)).
