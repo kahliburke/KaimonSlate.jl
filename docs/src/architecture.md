@@ -21,16 +21,17 @@ flowchart TB
   live --> engine
   engine --> kernel
   live --> render
-  live <-->|JSON API + SSE| browser
+  live <-->|JSON API, SSE + WebSocket| browser
   agent -->|slate.* tools| live
 ```
 
 ## Source of truth: the `.jl` file
 
-A notebook is a `.jl` file with `#%%` cell headers, in four kinds: `#%% code`, `#%% md`,
+A notebook is a `.jl` file with `#%%` cell headers, in five kinds: `#%% code`, `#%% md`,
 `#%% web` (a three-pane HTML/CSS/JS cell that evaluates like code, see
-[Front-end Extensions](frontend-extensions.md)) and `#%% tool` (an agent tool call, which evaluates
-and joins the DAG like code). The
+[Front-end Extensions](frontend-extensions.md)), `#%% tool` (an agent tool call, which evaluates
+and joins the DAG like code) and `#%% job` (work that lands over time, such as a sweep; see
+[Clusters](clusters.md)). The
 server parses it into a `Report` of `Cell`s. Every in-app mutation **persists back** to the
 file, and a file-watcher pulls in **external** edits (VS Code, the agent writing directly,
 git). Because the file is canonical, the browser, your editor, and the agent never drift.
@@ -68,6 +69,16 @@ One HTTP server hosts many notebooks. Routes are notebook-scoped (`/n/<id>` for 
 `/api/<id>/…` for JSON, `/api/<id>/events` for the SSE stream). The browser holds a long-lived
 `EventSource`; structural changes bump a version and trigger a full re-render, while value-only
 updates patch outputs in place (preserving editor state and scroll).
+
+Each page also keeps one WebSocket, `/api/<id>/ws`. It carries calls from the page's JavaScript into
+Julia (`slateCall`) and every `slate_emit` value back, in order and none dropped, which SSE does not
+promise. A hub-wide stream, `/api/facts/events`, keeps every page's view of workers, regions and
+allocations current.
+
+Each notebook's code runs in a worker process of its own, and each region it uses has another. The
+hub reaches a worker over three channels: requests, a stream of output and events, and a data
+channel for large values. Requests and the data channel are encrypted with CURVE, on this machine
+as well as remote ones.
 
 ## ReportRender — output
 
