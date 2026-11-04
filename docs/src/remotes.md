@@ -31,7 +31,7 @@ standalone `slate` hub runs every notebook locally, and the run-location pill sa
 
 A host that refuses keys and wants a password plus a second factor — which is most production
 clusters — works too, by authenticating **once** through a dialog in the page; see
-[Clusters](clusters.md#authenticating-once).
+[Clusters](clusters.md#Authenticating-once).
 
 ## Set up a host
 
