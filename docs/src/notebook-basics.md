@@ -18,8 +18,23 @@ There are five kinds:
   the job where it is rather than starting it again, so reopening a notebook resumes watching work
   already in flight. See [Compute Targets](clusters.md).
 
-The cell header shows a button for each kind the cell is *not* (`{·}` code, `</>` web, `⌁` tool,
-`M↓` markdown). In command mode, `y` / `m` / `w` convert to code, markdown and web.
+The cell header has one button naming the cell's kind (`{·}` code, `M↓` markdown, `</>` web, `⌁` tool,
+`🛰` job). Click it for a picker of all five, each with what it is for. In command mode, `y` / `m` /
+`w` convert to code, markdown and web.
+
+The other buttons in a cell's header show when you hover over the cell or select it:
+
+| Button | What it does |
+| --- | --- |
+| ✨ | Scope the next [agent](agent.md) turn to this cell. |
+| 🔗 | Show only this cell's dependency chain (Esc to leave). |
+| 🔍 | Trace the cell: inspect each value it computes in a popup. |
+| 🐞 | Step through the cell line by line. See [Debugging a Cell](debugger.md). |
+| 🔥 | Profile the cell. See [Profiling a Cell](profiler.md). |
+| 👁 | Hide the code and show only the output (🙈 shows it again). |
+| 🏷 | The cell's [tags](cell-tags.md). |
+| ✎ | Edit the source of a markdown or `@bind` cell. |
+| 🗑 | Delete the cell. |
 
 A code cell shows an always-on editor with tree-based Julia highlighting (CodeMirror 6 + the
 Lezer Julia grammar), the run button, timing, and state badge:
@@ -54,7 +69,8 @@ Select several cells with shift-click (a range) or ⌘/Ctrl-click (toggle one), 
 floating chip shows how many are selected. The cell clipboard is shared across notebook tabs.
 
 You can also reorder with the mouse: drag the **⠿** grip in a cell's header and a drop line shows
-where it will land, or use the header's ↑/↓ buttons to move it one place.
+where it will land, or use the ↑/↓ arrows on the rail beside the cell, in the page margin, to move
+it one place.
 
 In edit mode:
 
@@ -91,6 +107,11 @@ Notebook-wide:
 | `⌘⇧G` | dependency graph |
 | `⌘⇧S` | scratchpad |
 | `⌘Z` / `⌘⇧Z` | undo / redo structural changes |
+| `⌘⇧←` / `⌘⇧→` | back / forward through the cells you selected |
+| `⌘⇧P` | present the notebook as [slides](slides.md) |
+
+While a [debugging](debugger.md) session runs: `F10` next line, `F11` into, `⇧F11` out, `F5`
+continue, `⇧F5` stop, and `F9` toggles a breakpoint on the editor's line.
 
 ## Keyboard shortcuts
 
@@ -197,9 +218,10 @@ It is the place for a quick check that is not part of the document. The [agent](
 
 ## Opening a cold notebook
 
-The first open of a notebook whose packages are not yet precompiled shows a banner reading
-*Precompiling k/N · <package>*, with elapsed time and a collapsible build log. This is one-time;
-later opens are fast, and you can keep editing while it runs.
+The first open of a notebook whose packages are not yet precompiled takes a while. The worker
+pill in the top bar names the step it is on, and the [worker dock](workers.md) shows the
+precompile's progress and its build log. This is one-time; later opens are fast, and you can keep
+editing while it runs.
 
 Installing a package mid-session is different: that shows a blocking overlay, because the notebook is
 paused while its environment resolves and precompiles.

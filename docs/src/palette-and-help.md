@@ -6,8 +6,8 @@ documentation.
 
 ## Command palette — ⌘K
 
-Press **⌘K** (or click the **⌘K** hint in the top bar) to open a searchable list of *every* action,
-each with its keyboard shortcut. Type to filter, **↑/↓** to move, **↵** to run. Filtering matches the
+Press **⌘K** (or click the **⌘K** hint in the top bar) to open a searchable list of the notebook's
+actions, each with its keyboard shortcut. Type to filter, **↑/↓** to move, **↵** to run. Filtering matches the
 words in a command's label, so type what the command is called rather than an abbreviation of it.
 Recently used commands come first.
 
@@ -16,9 +16,15 @@ Recently used commands come first.
 It's not just commands — entries are tagged so the palette doubles as an insert menu and a
 navigator:
 
-- **Cell actions** — add / move / delete / convert / split / merge, run stale, show a cell's
-  dependency chain.
-- **Panels** — Packages, Worker log, History (the [Timeline](history.md)), Extensions.
+- **Run** and **Navigate**: run the cell or everything stale, move between cells, back and
+  forward through the cells you selected.
+- **Cells**: add, move, delete, convert, split and merge, show a cell's dependency chain, and
+  profile or debug the selected cell.
+- **Debug**: step, continue and stop a [debugging](debugger.md) session, and toggle a breakpoint.
+- **Editor**: the commands inside a cell's editor.
+- **Panels**: Packages, the worker log (in the [worker dock](workers.md)), History (the
+  [Timeline](history.md)), Extensions, Files, the scratchpad, find and replace, keyboard
+  shortcuts, signing in to a host, a sweep's job output, zen mode, presenting, and all notebooks.
 - **Export & publish** — one *Export…* entry covering HTML, publication PDF, Markdown, a
   self-contained `.jl` and an app folder, plus *Export PDF (slides)* and Publish (see
   [Export](export.md) and [Publishing](publishing.md)).
@@ -31,6 +37,9 @@ navigator:
 
 Single-letter and ⇧-shortcuts are *command-mode* (a cell is selected and you're not editing
 it); ⌘-shortcuts work globally, including from inside the editor.
+
+In a [workbook](app-mode.md#Workbook-mode), the palette lists only what a reader may do there: run cells, the
+docs, the table of contents, the scratchpad, Settings and keyboard shortcuts.
 
 ## Help & docs search — ⌘⇧K
 
