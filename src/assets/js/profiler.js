@@ -366,7 +366,8 @@ function apply(p) {
     // A new profile is compared with the one shown before it, which is usually the question, when
     // that one measured the same thing in the same place. The comparison follows each new run; one
     // picked from "compare with…" (no `auto`) stays until it is changed there.
-    const same = cur.profile && cur.status === 'done' && cur.profile.mode === p.profile.mode &&
+    // The status is `running` by now (the run's own push), so the profile on screen is what counts.
+    const same = cur.profile && cur.profile.mode === p.profile.mode &&
                  (p.side || cur.side || '') === (cur.side || '');
     const was = same ? { id: String(Math.round(cur.profile.at * 1000)), profile: cur.profile, auto: true } : null;
     Object.assign(next, { status: 'done', profile: p.profile, plain: p.plain || null, source: p.source || cur.source, error: null,
