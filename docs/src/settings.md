@@ -1,7 +1,8 @@
 # Settings
 
-Settings live in one dialog with two **scopes**. **Global** is your own preference, kept per browser
-and applied to every notebook. **This notebook** is the per-notebook override, and the pinned ones
+Settings live in one dialog with two **scopes**. **Global** is your own preference, applied to every
+notebook. Most of it is kept per browser; the keyboard shortcuts are kept in `keymap.json` and the
+Specialists settings in `slate.json`, both in your config home, so they apply in every browser. **This notebook** is the per-notebook override, and the pinned ones
 travel *in the `.jl`* so the notebook reopens the same way anywhere.
 
 Open it from **☰ → ⚙ Settings**, or ⌘K → *Settings*. ⌘K → *Settings: this notebook* opens the
@@ -13,7 +14,7 @@ the setting even when the word is not its label.
 
 ## Global
 
-Four sections.
+Six sections: Display, Appearance, Keyboard, Editing, Agent and Specialists.
 
 **Display**
 
@@ -24,6 +25,7 @@ Four sections.
 | **Figure width** | How wide figures render, independently of the text column. |
 | **Chart scroll-zoom** | How much a wheel notch zooms a chart that has zooming enabled. |
 | **Wrap text output** | Soft-wrap long lines of cell output instead of scrolling them. |
+| **NamedTuple as plain text** | Show a NamedTuple value as Julia's one-line text instead of a grid of its fields. |
 | **Wrap code editor** | Soft-wrap long lines in the editor. |
 | **Line numbers** | Show a line-number gutter in every code cell. Off by default — a cell is usually short enough not to need one. The Files tab always numbers its lines. |
 | **Indent guides** | Draw a hairline at each indent level, so a nested block's extent is visible at a glance. |
@@ -39,6 +41,13 @@ Four sections.
 | **Chart renderer** | How interactive charts are drawn: *Auto* (each chart's own setting), *Canvas*, or *SVG*. See below. |
 | **Editor syntax** | Syntax-highlighting palette for the editor: Dark+, Monokai, Dracula, Nord, Tokyo Night, GitHub Dark, Gruvbox Dark, Solarized Dark, and the light One Light and Solarized Light. |
 
+**Keyboard**
+
+| Setting | Effect |
+| --- | --- |
+| **Keymap preset** | The set of shortcuts the notebook starts from. Any shortcut can be changed on top of it. |
+| **Keyboard shortcuts** | **Customise…** opens every shortcut, searchable, to rebind, add or remove one. See [Keyboard shortcuts](notebook-basics.md#Keyboard-shortcuts). |
+
 **Editing**
 
 | Setting | Effect |
@@ -46,6 +55,7 @@ Four sections.
 | **Editor keymap** | Default, Vim or Emacs bindings in the cell editor. See below. |
 | **Live-update debounce** | Minimum delay (ms) between live recomputes while dragging a control. Higher = fewer recomputes on a slow kernel. |
 | **Autocomplete delay** | How long to wait before the completion popup opens. |
+| **Tooltip delay** | How long the pointer rests on a control before its tooltip shows. 0 shows them at once; the far end of the slider turns them off. |
 | **Tab in autocomplete** | Whether ⇥ accepts the highlighted completion. |
 
 #### Saving under the Vim and Emacs keymaps
@@ -67,11 +77,19 @@ action). ⌘S saves a file under every keymap.
 
 | Setting | Effect |
 | --- | --- |
-| **Agent model** | Sonnet / Opus / Haiku, any model served locally by Ollama or vmlx (both listed automatically, stored as `ollama:<name>` / `vmlx:<name>`), or a custom model id typed in. |
-| **Agent permissions** | `lab` / `auto` / `default` / `bypass` preset for the agent. |
+| **Agent model (global default)** | Sonnet / Opus / Haiku, any model served locally by Ollama or vmlx (both listed automatically, stored as `ollama:<name>` / `vmlx:<name>`), an installed agent that speaks ACP such as Codex or opencode (`acp:<agent>`), or a custom model id typed in. |
+| **Agent permissions (global default)** | **Notebook** (the default: Slate's tools, no shell), **Lab** (adds files and the shell), **Auto** (the model governs itself), **Default** (edits only) or **Bypass** (no checks). |
 
 Model and permission changes [reap the agent](agent.md) so the next message respawns on the
 new setting (the transcript is kept).
+
+**Specialists**
+
+| Setting | Effect |
+| --- | --- |
+| **Only the debug specialist may step code** | The agent brings in the debugging specialist to step through code rather than stepping itself. Your own stepping is unaffected. |
+| **Background checker** | A read-only reviewer that looks at changed cells once the notebook goes quiet, and speaks only when it finds a problem it can point at. |
+| **Registered roles** | Each specialist role, what it can call, and the model it runs on. |
 
 ![The Settings dialog: a Global / This notebook scope switch, a search box, the section list down the side, and the settings rows](./assets/settings.png)
 
@@ -110,9 +128,12 @@ It holds:
   Off falls back to conservative static analysis, which is what you want for the rare macro with
   expansion-time side effects.
 - **Slides** — heading level, transition, and PDF aspect ratio for a [slide deck](slides.md).
-- **Bibliography style** — see [Documents & Citations](documents.md).
-- **Agent model** — override the global agent default for this notebook. (Agent permissions are a
-  ⚙ Settings item, remembered locally and never written to the file.)
+- **Citation style**, under Export: see [Documents & Citations](documents.md).
+- **Agent model**: override the global agent default for this notebook.
+- **Carry findings in the file**: keep what the agent's specialists concluded in the notebook's
+  `.jl`, so it travels with it. Off by default.
+- **Agent permission**, under Agent (local only): override the global preset for this notebook. It
+  is kept by this browser and never written to the file.
 - **Series** — the publishing series this notebook belongs to.
 - **Replay resolution** — read-only here, showing what the export dialog's
   [replay step](replay.md#exporting) decided. The panel is where you clear it.
