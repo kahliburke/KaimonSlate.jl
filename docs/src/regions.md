@@ -49,13 +49,20 @@ the front page, not in any one notebook. A region carries:
   precompiled on idle workers, so a notebook adopts a ready worker instead of cold-booting,
 - a **data root** — a *remote* path pinned as the workers' `datadir()` / `@sfile`,
 - a **warm** count — how many workers to keep booted and idle, ready to *adopt* (0 = cold spin on demand),
+- **liveness**, how long a worker may go without answering before its connection is dropped (blank
+  uses what a prepare measured),
+- a **base port** for the `direct` transport,
 - and an optional **sysimage**.
+
+On a cluster, a region also names its **Machine** and gets the scheduler's fields: partition,
+walltime, resources, **Release when idle**, and under **More settings** the scheduler options and a
+shell **Before start**. See [Clusters](clusters.md).
 
 Three more settings exist but are not in the manager. A **cache root** (a remote path for the
 region's own durable [cache](memoization.md), kept separate from other workers on the box), worker
 **thread counts**, and the `curve` toggle are set only from the agent tool
 `slate_region(name; cache_root = …, threads = …, curve = false)`. Saving the region from the Regions
-manager clears them.
+manager clears the thread counts; the cache root and `curve` are kept.
 
 Many regions can point at the **same host** with different config (e.g. `gpu` and `gpu_scratch` on one box
 with different data roots). Names are folded to identifiers (`slate-remote` → `slate_remote`) so they
@@ -70,6 +77,22 @@ always match a `region=` tag.
     CURVE-encrypted by default. Turning it off also drops the allow-list, so leave it on unless you
     own the whole machine: a loopback port is reachable by every account on a shared host.
 
+
+## What travels to a remote
+
+A region's worker needs the notebook's project on its host, so Slate sends it, along with the
+projects it develops from local checkouts. What it leaves out:
+
+- anything your **`.gitignore`** ignores, with no configuration needed;
+- anything a **`.slateignore`** beside `Project.toml` ignores. It uses the same syntax, works
+  without git, and adds to `.gitignore`. A `[region:<name>]` section applies only to that region,
+  and a later `!` rule can bring a file back for one region;
+- the `.git` folder, always.
+
+When a send would be larger than 100 MB (`transfer_warn_mb` in `slate.json`) and the project has no
+`.slateignore`, the region pauses before sending. The region's detail panel, from the DAG legend,
+then opens by itself: it lists the project as a tree with sizes, lets you hold files or folders
+back, and **Save** writes the `.slateignore`.
 ## Using a region in a notebook
 
 Open the **Destinations** manager (＋ Add destination… in the tag editor) and **enable** the regions this
