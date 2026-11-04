@@ -103,7 +103,7 @@ async function newContext(browser, opts = {}) {
 async function runNotebook(page, id) {
   await page.goto(`${BASE}/n/${id}`, { waitUntil: 'domcontentloaded' })   // NOT networkidle: SSE stays open
   await page.waitForSelector('.cell', { timeout: 30_000 })
-  const nbid = await page.evaluate(() => window.NB_ID)
+  const nbid = await page.evaluate(() => NB_ID)   // core.js declares it with const: a global binding, not a window property
   await page.evaluate(async (nbid) => { try { await fetch(`/api/${nbid}/rerun-all`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }) } catch (_) {} }, nbid)
   await page.waitForFunction(() => {
     const cs = (window.__slateState && window.__slateState.cells) || []
@@ -531,11 +531,16 @@ async function regionShots(browser) {
     // worker/region pills (topbar) + worker dock (pill → streamed log + telemetry)
     try {
       await elShot(page, '#workerpills', 'worker-pills.png')
+      // The DAG pane from the shots above would cover the dock's right half.
+      await page.evaluate(() => { if (document.getElementById('dagpane')?.classList.contains('open')) window.toggleDag() })
+      page.on('pageerror', (e) => log('  page error:', e.message))
       await page.evaluate(() => window.wpOpenLog && window.wpOpenLog('gpu'))
       await page.waitForSelector('#wdock-log.on', { timeout: 6000 })
+      await page.addStyleTag({ content: '#runchip{display:none!important}' })   // the mocked running cell's chip
       await sleep(1500)                                       // the viewer's first window and the recent messages
       await elShot(page, '#workerdock', 'worker-log.png')
       await page.evaluate(() => window.closeWorkerDock && window.closeWorkerDock())
+      await page.evaluate(() => { if (!document.getElementById('dagpane')?.classList.contains('open')) window.toggleDag() })
     } catch (e) { log('! worker-log skipped:', e.message.split('\n')[0]) }
 
     // mesh consent popup — injected straight through its handler (app.js loads mesh.js). The host div
