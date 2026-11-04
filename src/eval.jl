@@ -342,6 +342,23 @@ gate kernel dispatches to its worker; in-process fires directly. A no-op for a b
 run_cleanups!(::Kernel, ::Report, ids) = nothing
 
 """
+    forget!(kernel, report, cells, names)
+
+Take back what no cell defines any more, in the namespace where cells run: delete the methods the
+removed `cells` defined, and remove the global `names` no cell writes now, so a reader fails the way
+a fresh run would instead of using a leftover value. Applied before the next cell runs (see
+[`flush_forget!`](@ref)). A no-op for a base kernel.
+"""
+forget!(::Kernel, ::Report, cells, names) = nothing
+
+"Apply the report's pending [`forget!`](@ref) to `kernel`, if there is any."
+function flush_forget!(kernel::Kernel, report::Report)
+    cells, names = take_forget!(report)
+    (isempty(cells) && isempty(names)) || forget!(kernel, report, cells, names)
+    return nothing
+end
+
+"""
     InProcessKernel(projectdir = "", envdir = "") <: Kernel
 
 Evaluate cells in the report's own in-process `Module`. The namespace lives on `report.mod`,
@@ -385,6 +402,16 @@ function run_cleanups!(::InProcessKernel, report::Report, ids)
     for id in ids
         _run_cell_cleanups!(reg, String(id))
     end
+    return nothing
+end
+
+"Take back removed definitions in the report's in-process namespace (see [`forget!`](@ref))."
+function forget!(::InProcessKernel, report::Report, cells, names)
+    report.mod === nothing && return nothing
+    for id in cells
+        _forget_cell!(report.mod, String(id))
+    end
+    _unbind_globals!(report.mod, names)
     return nothing
 end
 
@@ -932,35 +959,6 @@ function _is_tracked_include(src::AbstractString)
     return walk(ex) && seen[]
 end
 
-# A top-level statement that DEFINES something rather than computing it: a function (long or short
-# form), a type, a macro, or a `const` bound to a literal. Such a statement is self-sufficient — it
-# establishes a name without consuming another cell's data — so it belongs on every side alongside the
-# imports. A `const` bound to an EXPRESSION does not qualify: `const N = size(data, 1)` reads upstream
-# data and is compute, not definition.
-#
-# A definition may still REFERENCE an upstream global in its body (`f(x) = x * SCALE`). That defines
-# cleanly on the far side (Julia resolves globals at call time) and the region presync stages the
-# cell's data reads alongside it, so the binding is normally there when it runs.
-function _is_definition_stmt(s)
-    s isa Expr || return false
-    s.head in (:function, :macro, :struct, :abstract, :primitive) && return true
-    # short form `f(x) = …` / `f(x) where {T} = …` — an `=` whose LHS is a call signature
-    if s.head === :(=) && length(s.args) >= 1
-        lhs = s.args[1]
-        while lhs isa Expr && lhs.head === :where
-            lhs = lhs.args[1]
-        end
-        return lhs isa Expr && lhs.head === :call
-    end
-    # `const X = <literal>` — a definition only when nothing is computed from upstream data
-    if s.head === :const && length(s.args) == 1 && s.args[1] isa Expr && s.args[1].head === :(=)
-        rhs = s.args[1].args[2]
-        return rhs isa Union{Number,AbstractString,Char,Bool,QuoteNode} ||
-               (rhs isa Expr && rhs.head === :call && rhs.args[1] === :(:) &&
-                all(a -> a isa Number, rhs.args[2:end]))
-    end
-    return false
-end
 
 # The SCOPE-ESTABLISHING part of a cell's source: its top-level `using`/`import` statements, its
 # DEFINITIONS (functions, types, literal consts), plus any theme-setter call (`_THEME_CALL_NAMES`).

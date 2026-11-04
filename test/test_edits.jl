@@ -34,13 +34,18 @@ function _shown(c, rid)
 end
 
 const _RUN = Ref(0)
-# The cells whose incremental result differs from a fresh run, as "id: got ≠ want" strings.
-function edit_mismatches(cells, edit::Pair...)
+# The cells whose incremental result differs from a fresh run, as "id: got ≠ want" strings. Each step
+# is an edit (`id => source`, `id => nothing` to delete) or a whole replacement cell list; steps apply
+# in order, and the fresh run is of the final notebook.
+function steps_mismatches(cells, steps...)
     _RUN[] += 1
     inc, fresh = "edinc$(_RUN[])", "edfresh$(_RUN[])"
     r = parse_report(_nbsrc(cells); id = inc); build_dependencies!(r); _drain!(r)
-    new = _edited(cells, collect(Pair{String,Union{String,Nothing}}, edit))
-    update_source!(r, _nbsrc(new)); _drain!(r)
+    new = cells
+    for st in steps
+        new = st isa AbstractVector ? st : _edited(new, Pair{String,Union{String,Nothing}}[st])
+        update_source!(r, _nbsrc(new)); _drain!(r)
+    end
     f = parse_report(_nbsrc(new); id = fresh); build_dependencies!(f); _drain!(f)
     want = Dict(c.id => _shown(c, fresh) for c in f.cells)
     return ["$(c.id): $(repr(_shown(c, inc))) ≠ $(repr(want[c.id]))"
@@ -48,8 +53,10 @@ function edit_mismatches(cells, edit::Pair...)
 end
 
 # `name => (cells, edit)`; a case passes when no cell differs from the fresh run.
-failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, edit)) in cases
-                  for m in (edit_mismatches(cells, edit),) if !isempty(m)]
+edit_mismatches(cells, edit) = steps_mismatches(cells, edit)
+failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)) in cases
+                  for m in (steps isa Tuple ? steps_mismatches(cells, steps...) : edit_mismatches(cells, steps),)
+                  if !isempty(m)]
 
 @testset "edits match a fresh run" begin
     @testset "a macro cell's edit reaches its readers" begin
@@ -111,5 +118,37 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, edit))
         @test isempty(m("a == b"))
         @test isempty(m("x <= y"))
         @test isempty(m("!x"))               # negation is not a bang call
+    end
+
+    @testset "a removed definition leaves the namespace" begin
+        # The namespace keeps a deleted cell's globals and methods unless they're taken back: the
+        # reader of a deleted definition must fail the way a fresh run does.
+        cases = [
+            "deleted definer" => (["A" => "q = 41", "B" => "z = q + 1"], "A" => nothing),
+            "renamed definer" => (["A" => "q = 41", "B" => "z = q + 1"], "A" => "q2 = 41"),
+            "deleted function" => (["F" => "gf() = 1", "C" => "y = gf()"], "F" => nothing),
+            "one method of several deleted" =>
+                (["F1" => "fm(x::Int) = 1", "F2" => "fm(x::Float64) = 2", "C" => "y = fm(1)"], "F1" => nothing),
+            "signature widened" => (["F" => "sg(x::Int) = 1", "C" => "y = sg(1)"], "F" => "sg(x::Integer) = 2"),
+            "function used inside another function" =>
+                (["F" => "inner() = 5", "G" => "outer() = inner() + 1", "C" => "y = outer()"], "F" => nothing),
+            "macro deleted" =>
+                (["M" => "macro two() 2 end", "U" => "y = @two()"], "M" => nothing),
+            "deleted, then the delete undone" =>
+                (["F" => "gf() = 1", "C" => "y = gf()"], ("F" => nothing, ["F" => "gf() = 1", "C" => "y = gf()"])),
+            "cell renamed, source unchanged" =>
+                (["F" => "gf() = 1", "C" => "y = gf()"], (["F2" => "gf() = 1", "C" => "y = gf()"],)),
+        ]
+        @test isempty(failing(cases))
+    end
+
+    @testset "what a cell defines" begin
+        names(src) = sort!(collect(RE._definition_names(src)))
+        @test names("f(x) = 1\nfunction g(); end\nstruct S; a; end\nabstract type A end") == [:A, :S, :f, :g]
+        @test names("\"doc\"\nh(x) = x\n@inline k(x) = x\nmacro m() end\nlam = x -> x + 1") == [Symbol("@m"), :h, :k, :lam]
+        @test names("const N = 3\nconst M = size(data, 1)\ny = compute(1)") == [:N]
+        @test names("Base.show(io::IO, x::S) = print(io, 1)") == Symbol[]      # extends, binds nothing
+        paths = RE._defined_function_paths("f(x) = 1\nBase.show(io::IO, x::S) = 1\nmacro m() end\nstruct T; end")
+        @test paths == Any[:f, :(Base.show), Symbol("@m")]                    # constructors left out
     end
 end

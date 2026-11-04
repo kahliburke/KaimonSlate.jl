@@ -64,6 +64,7 @@ include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_sched
 include(joinpath(@__DIR__, "macroexpand.jl")) # _expand_cell_source — macro-aware deps (engine + worker)
 include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
 include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
+include(joinpath(@__DIR__, "celldefs.jl"))  # what a cell defines, and taking it back (engine + worker)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "pkg_ops.jl"))   # _pkg_apply — package add/update/rm (shared with the engine)
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
@@ -1121,6 +1122,19 @@ function __slate_cleanup_cells(; ids::Vector = Any[])
     end
     n > 0 && @info "slate: ran cleanups for deleted cells" count = n
     return n
+end
+
+"Take back what no cell defines any more: delete the methods the removed `cells` defined, and remove the
+global `names` no cell writes now (`forget!` on the hub). Returns the names actually removed."
+function __slate_forget(; cells::Vector = Any[], names::Vector = Any[])
+    m = _NS[]
+    nm = 0
+    for id in cells
+        nm += _forget_cell!(m, String(id))
+    end
+    gone = _unbind_globals!(m, Symbol[Symbol(n) for n in names])
+    (nm > 0 || !isempty(gone)) && @info "slate: removed deleted definitions" methods = nm globals = gone
+    return String[String(g) for g in gone]
 end
 
 "Encode the namespace global `name` into this worker's content-addressed store and return its
@@ -2577,6 +2591,7 @@ function tools()
         KaimonGate.GateTool("__slate_call", __slate_call),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_cleanup_cells", __slate_cleanup_cells),
+        KaimonGate.GateTool("__slate_forget", __slate_forget),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
     KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),

@@ -1061,8 +1061,67 @@ function build_dependencies!(report::Report)
         backref[string(name)] = String[rid, wid]
     end
     report.meta["backref"] = backref
+    _track_definitions!(report)
     close_staleness!(report)
     return report
+end
+
+# What changed in the notebook's definitions since the last build, by cell: which cells are gone,
+# and which names some cell used to define and none does now. Kept on `report.meta` for the run
+# alone (none of these keys is serialized).
+#
+# A removed cell's methods and a lost name's binding are queued for the kernel (`take_forget!`,
+# applied by `flush_forget!` before the next cell runs), and everything that read or also defined
+# them is restaled. A cell whose id changed but whose source didn't is a rename, so its methods stay.
+# A cell that appears with a source the namespace has never run (an undone delete) is restaled, since
+# the definitions it brings were taken back when it went.
+#
+# Lost names are not removed while an opaque cell is in the notebook: an `include` or `eval` may be
+# what defines them now, and the analysis can't see it.
+function _track_definitions!(report::Report)
+    now = Dict{String,Tuple{UInt64,Set{Symbol}}}(c.id => (c.src_hash, copy(c.writes))
+                                                 for c in report.cells if c.kind == CODE)
+    prev = get(report.meta, "_defs_lastbuild", nothing)
+    report.meta["_defs_lastbuild"] = now
+    prev isa AbstractDict || return report
+    gone = setdiff(Set(keys(prev)), keys(now))
+    appeared = setdiff(Set(keys(now)), keys(prev))
+    for g in collect(gone)
+        r = findfirst(id -> now[id][1] == prev[g][1], collect(appeared))
+        r === nothing && continue
+        delete!(gone, g); delete!(appeared, collect(appeared)[r])
+    end
+    edited = [id for id in keys(now) if haskey(prev, id) && prev[id][1] != now[id][1]]
+    written = Set{Symbol}()
+    for (_, w) in values(now); union!(written, w); end
+    gone_names = Set{Symbol}()
+    for id in gone; union!(gone_names, prev[id][2]); end
+    lost = Set{Symbol}()
+    for id in Iterators.flatten((gone, edited)); union!(lost, prev[id][2]); end
+    setdiff!(lost, written)
+    isempty(gone) || union!(get!(Set{String}, report.meta, "_pending_forget"), gone)
+    if !isempty(lost) && !any(c -> :opaque in c.flags, report.cells)
+        union!(get!(Set{Symbol}, report.meta, "_pending_unbind"), lost)
+    end
+    touched = union(lost, gone_names)
+    for c in report.cells
+        c.kind == CODE || continue
+        (c.id in appeared || !isdisjoint(c.reads, touched) || !isdisjoint(c.writes, gone_names)) && restale!(c)
+    end
+    isempty(gone) || _do_cleanup_cells(report.id, collect(gone))
+    return report
+end
+
+"""
+    take_forget!(report) -> (cells, names)
+
+The removed cells and lost global names queued since the last call, cleared as they are returned.
+The caller hands them to [`forget!`](@ref) on every kernel the notebook runs cells in.
+"""
+function take_forget!(report::Report)
+    cells = pop!(report.meta, "_pending_forget", Set{String}())
+    names = pop!(report.meta, "_pending_unbind", Set{Symbol}())
+    return (sort!(collect(String, cells)), sort!(collect(Symbol, names)))
 end
 
 # Names a cell changes in place rather than defines: what it mutates, plus what it both reads and
@@ -1175,10 +1234,8 @@ function update_source!(report::Report, new_source::AbstractString)
                 delete!(_BIND_TICKS, id)
             end
         end
-        # Run a deleted cell's `slate_on_cleanup` callbacks so a live per-cell resource (a Bonito
-        # `Session`) it held is torn down — the callbacks live in the kernel's namespace, so the server
-        # (wired via `register_cleanup_cells!`) routes this to its worker(s). Out-of-band, like celldone.
-        _do_cleanup_cells(report.id, collect(removed))
+        # A deleted cell's `slate_on_cleanup` callbacks fire from the rebuild below
+        # (`_track_definitions!`), which sees every removal, not only this path's.
     end
 
     report.cells = newr.cells
@@ -1228,6 +1285,7 @@ function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
     nbatch = count(auto, report.cells)   # cells about to run → UI shows a stable k/N
     nbatch > 0 && _emit_run_batch(report.id, nbatch)
     prepare!(kernel, report)
+    flush_forget!(kernel, report)     # removed definitions leave the namespace before anything reads them
     prewarm_usings!(report, kernel)   # precise graph BEFORE keys are computed → stable memo keys
     prewarm_macros!(report, kernel)   # …and macro-recovered bindings (package macros expand pre-run)
     # Static markdown (no `{{ }}` interpolations ⇒ no reads) depends on nothing, so render it FIRST.

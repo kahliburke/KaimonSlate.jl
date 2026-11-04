@@ -222,6 +222,22 @@ function _cleanup_deleted_cells(nb::LiveNotebook, ids)
     return nothing
 end
 
+# Take back removed definitions (`ReportEngine.forget!`) on every kernel a cell may have run on: the
+# main kernel and each active region kernel, as for cleanups above. Called by the runner before a cell
+# evaluates, OFF nb.lock (a worker round-trip); only the queue is read under the lock.
+function _flush_forget!(nb::LiveNotebook)
+    cells, names = lock(nb.lock) do; ReportEngine.take_forget!(nb.report); end
+    (isempty(cells) && isempty(names)) && return nothing
+    ReportEngine.forget!(nb.kernel, nb.report, cells, names)
+    regionks = lock(_REGION_LOCK) do
+        Any[k for ((rid, _name), k) in _REGION_KERNELS if rid == nb.id]
+    end
+    for k in regionks
+        try; ReportEngine.forget!(k, nb.report, cells, names); catch; end
+    end
+    return nothing
+end
+
 # GateKernel when running as the Kaimon extension AND the notebook is inside a
 # Julia project (cells eval in a per-notebook worker); else in-process.
 # Instantiate an env in a subprocess (isolated; best-effort). Blocking — used by the background
@@ -2675,6 +2691,7 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
 end
 
 function _eval_one!(nb::LiveNotebook, cell::Cell)
+    _flush_forget!(nb)   # a removed definition leaves the namespace before this cell can read it
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
     #
@@ -3007,6 +3024,7 @@ end
 # path, so it renders running→done and merges version-guarded the INSTANT it finishes (true per-cell
 # streaming). Returns true if a batch (≥2 cells) ran; false for the 0/1-cell case or a non-gate kernel.
 function _run_code_batch!(nb::LiveNotebook)
+    _flush_forget!(nb)
     nb.kernel isa ReportEngine.GateKernel || return false
     # A notebook with an active region runs SERIALLY (v1): the batch hands all cells to ONE
     # worker, but region cells belong to another kernel and boundary values must cross between

@@ -921,6 +921,8 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     cid = replace(filename, r"^cell:" => "")
     task_local_storage(:slate_cell, cid)
     _ns_defined(mod, :__slate_cleanups) && _run_cell_cleanups!(_ns_read(mod, :__slate_cleanups), cid)
+    # …and take back the methods its last run defined, so an edited signature doesn't leave the old one.
+    startswith(filename, "cell:") && _redefine_cell!(mod, cid, source)
     # Clear this cell's `@replay` marks, so that this run registers the full set again (see `_do_replay`).
     _ns_defined(mod, :__slate_replay_forget) && _ns_read(mod, :__slate_replay_forget)(cid)
 

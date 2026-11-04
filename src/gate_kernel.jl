@@ -1908,6 +1908,21 @@ function run_cleanups!(k::GateKernel, ::Report, ids)
     return nothing
 end
 
+# Take back removed definitions in the WORKER namespace (see worker.jl `__slate_forget`). Synchronous,
+# unlike the cleanup above: the runner calls it before the next cell evaluates, and a reader must not
+# run before the leftover it would otherwise read is gone. No-op if the worker is down.
+function forget!(k::GateKernel, ::Report, cells, names)
+    k.conn === nothing && return nothing
+    (isempty(cells) && isempty(names)) && return nothing
+    try
+        _tool(k, "__slate_forget", Dict{String,Any}("cells" => String[String(c) for c in cells],
+                                                    "names" => String[String(n) for n in names]); timeout = 20.0)
+    catch e
+        @warn "slate: could not remove deleted definitions from the worker" cells = cells names = names exception = e
+    end
+    return nothing
+end
+
 """
 Shut the kernel down and clear gate state. A LOCAL worker is killed (clean exit request +
 SIGTERM/SIGKILL backstop). A spawned-remote worker is DETACHED by default — tunnel/sync closed,
