@@ -25,7 +25,7 @@ const PORT = Number(process.env.SLATE_DOCS_PORT || 8799)
 const BASE = `http://127.0.0.1:${PORT}`
 const SCALE = 2
 const FIRST = 'demo'                                          // serve_notebook opens this one
-const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables', 'hero', 'app', 'live', 'web'] // opened over /api/open
+const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables', 'hero', 'app', 'live', 'web', 'profile', 'debug'] // opened over /api/open
 
 mkdirSync(OUT, { recursive: true })
 const VIDTMP = mkdtempSync(join(tmpdir(), 'slate-vid-'))
@@ -300,14 +300,17 @@ function regTransferStats() {
     trace('db', 'gpu', 'weights', 'direct', 0.9, 44 * MB, 5),
   ] }
 }
-// Worker-log tail for the topbar pill popup (/api/{id}/worker-log?side=).
+// A region worker's log (/api/{id}/worker-log for the dock's recent messages, worker-log-io for its
+// Log tab), as the worker writes it: Julia log records, level then clock.
 const REG_WORKER_LOG = [
-  '[gate] worker gpu-box:9300 attached (adopted warm · 0.9s)',
-  '[boot] sync_memo: 12 blobs deduped, 3 carried (512 MB)',
-  '[eval] train ▶ running — CUDA device 0, batch 256',
-  '[xfer] ⇄ feat: 210/210 MB ← db (direct, 92 MB/s)',
-  '[telemetry] cpu 78% · rss 940 MB · 1 running',
-].join('\n')
+  '┌ Info 12:04:11: slate worker: ready', '│   port = 9300', '│   tools = 36', '└   revise = true',
+  '┌ Info 12:04:12: gate: attached', '│   origin = "adopted from the warm pool"', '└   dial_s = 0.9',
+  '[ Info 12:04:15: sync_memo: 12 blobs deduplicated, 3 carried (512 MB)',
+  '┌ Info 12:04:18: slate eval: ran cell', '│   cell = "train"', '└   ms = 4182.6',
+  '┌ Warning 12:05:02: GPU memory 92% used', '└   device = 0',
+  '┌ Info 12:05:30: transfer: feat 210 MB from db', '│   route = "direct"', '└   rate = "92 MB/s"',
+  '[ Info 12:06:41: slate eval: ran cell train in 8.2 s',
+].join('\n') + '\n'
 // Preflight SSE (/api/preflight-stream) — a canned "Test & prime" checklist. All events at once is
 // fine: the client fills the list as it parses them.
 function regPreflightSSE(host) {
@@ -412,9 +415,25 @@ async function mockRegions(page) {
   })
   await page.route('**/peer-plan*', (r) => r.fulfill(J(REG_PEERPLAN)))
   await page.route('**/transfer-stats*', (r) => r.fulfill(J(regTransferStats())))
-  await page.route('**/worker-log*', (r) => r.fulfill(J({ side: new URL(r.request().url()).searchParams.get('side') || '',
+  await page.route((u) => u.pathname.endsWith('/worker-log'), (r) => r.fulfill(J({ side: new URL(r.request().url()).searchParams.get('side') || '',
     host: 'gpu-box', port: 9300, connected: true, status: 'ok', note: '',
     stats: mkStats({ cpu: 78, rss: 940 * MB, evals: 1, memo: 512 * MB, running: ['train'] }), log: REG_WORKER_LOG })))
+  // The Log tab's reads. The file is mocked; what counts as a level or a record is the hub's own
+  // vocabulary, fetched from it, so the shot classifies lines the way the product does.
+  await page.route((u) => u.pathname.endsWith('/worker-log-io'), async (r) => {
+    const q = JSON.parse(r.request().postData() || '{}'), size = Buffer.byteLength(REG_WORKER_LOG)
+    if (q.action === 'logs') {
+      const real = await (await r.fetch()).json()
+      return r.fulfill(J({ logsev: real.logsev, loglist: [{ path: '~/.cache/kaimonslate/worker/worker-9300.log',
+        name: 'worker-9300.log', job: '', bytes: size, modified: Math.floor(Date.now() / 1000), running: true }] }))
+    }
+    if (q.action === 'log_stat') return r.fulfill(J({ bytes: size, modified: Math.floor(Date.now() / 1000) }))
+    if (q.action === 'log_slice') return r.fulfill(J({ text: REG_WORKER_LOG, from: 0, to: size, size }))
+    const lines = REG_WORKER_LOG.split('\n'), pat = String(q.pattern || '').toLowerCase()
+    let off = 0; const hits = []
+    lines.forEach((t, i) => { if (pat && t.toLowerCase().includes(pat)) hits.push({ offset: off, line: i + 1, text: t }); off += Buffer.byteLength(t) + 1 })
+    return r.fulfill(J({ total: hits.length, capped: false, hits }))
+  })
   await page.route('**/api/preflight-stream*', (r) => {
     const host = new URL(r.request().url()).searchParams.get('host') || 'gpu-box'
     r.fulfill({ contentType: 'text/event-stream', body: regPreflightSSE(host) })
@@ -512,9 +531,9 @@ async function regionShots(browser) {
     // worker/region pills (topbar) + worker dock (pill → streamed log + telemetry)
     try {
       await elShot(page, '#workerpills', 'worker-pills.png')
-      await page.evaluate(() => window.openWorkerDock && window.openWorkerDock('gpu'))
-      await page.waitForSelector('#wdock-log', { timeout: 6000 })
-      await sleep(800)                                        // let the mocked log tail render
+      await page.evaluate(() => window.wpOpenLog && window.wpOpenLog('gpu'))
+      await page.waitForSelector('#wdock-log.on', { timeout: 6000 })
+      await sleep(1500)                                       // the viewer's first window and the recent messages
       await elShot(page, '#workerdock', 'worker-log.png')
       await page.evaluate(() => window.closeWorkerDock && window.closeWorkerDock())
     } catch (e) { log('! worker-log skipped:', e.message.split('\n')[0]) }
@@ -848,10 +867,56 @@ async function webShots(browser) {
   } catch (e) { log('! web shots skipped:', e.message.split('\n')[0]) }
 }
 
+// The profiler and the debugger, on the hub's own kernel. Both run for real: the profile notebook's
+// cell is profiled slow, then fast, so the second shot is a genuine comparison; the debug notebook is
+// stopped by a conditional breakpoint partway through its loop.
+async function toolShots(browser) {
+  const page = await (await newContext(browser, { viewport: { width: 1440, height: 900 } })).newPage()
+  try {
+    await runNotebook(page, 'profile')
+    const profiled = () => page.waitForFunction(() => {
+      const d = document.querySelector('.pfdock')
+      const b = d && [...d.querySelectorAll('button')].find(x => x.textContent.includes('Run and profile'))
+      return d && d.querySelector('.pfflame:not(.pfempty)') && b && !b.disabled
+    }, null, { timeout: 120_000 })
+    const runProfile = async () => {
+      await page.evaluate(() => [...document.querySelectorAll('.pfdock button')]
+        .find(b => b.textContent.includes('Run and profile')).click())
+      await sleep(500); await profiled(); await sleep(1200)
+    }
+    await page.evaluate(() => window.slateProfileCell('hot'))
+    await page.waitForSelector('.pfdock', { timeout: 15_000 })
+    await runProfile()
+    await elShot(page, '.pfdock', 'profiler-flame.png')
+    // The fast version runs (and compiles) once before it is profiled, so the comparison is of the
+    // two loops rather than of the compiler.
+    await page.evaluate(() => window.slateSetBind('version', 'fast'))
+    await sleep(800)
+    await page.waitForFunction(() => ((window.__slateState || {}).cells || []).every(c => c.state !== 'running' && c.state !== 'stale'),
+                               null, { timeout: 120_000 }).catch(() => {})
+    await runProfile()
+    await elShot(page, '.pfdock', 'profiler-compare.png')
+  } catch (e) { log('! profiler shots skipped:', e.message.split('\n')[0]) }
+  try {
+    await page.keyboard.press('Escape')
+    await runNotebook(page, 'debug')
+    await page.evaluate(() => window.api('POST', '/api/debug/mark', { file: 'cell:run', line: 5, cond: 'k == 4200' }))
+    await page.evaluate(() => window.slateDebugCell('run'))
+    await page.waitForSelector('.dbgfocus', { timeout: 60_000 })
+    await sleep(1500)
+    await page.evaluate(() => window.slateDebugStep('continue'))
+    await page.waitForFunction(() => /4200|breakpoint/.test((document.querySelector('.dbgfocus') || {}).textContent || ''), null, { timeout: 60_000 }).catch(() => {})
+    await sleep(1500)
+    await elShot(page, '.dbgfocus', 'debugger-workspace.png')
+    await page.evaluate(() => window.slateDebugStep && window.api('POST', '/api/debug/stop', {})).catch(() => {})
+  } catch (e) { log('! debugger shot skipped:', e.message.split('\n')[0]) }
+  await page.context().close()
+}
+
 async function main() {
   const server = startServer()
   let browser
-  const cleanup = () => { try { browser?.close() } catch (_) {} ; try { server.kill('SIGTERM') } catch (_) {} }
+  const cleanup = () => { try { browser?.close() } catch (_) {} ; try { server.kill('SIGKILL') } catch (_) {} }   // the hub keeps nothing; a SIGTERM can leave it holding the port
   process.on('exit', cleanup); process.on('SIGINT', () => { cleanup(); process.exit(1) })
   try {
     await waitForServer()
@@ -872,6 +937,7 @@ async function main() {
     if (process.env.SLATE_LIVE_ONLY === '1') { await liveShots(browser); log('done (live-only)'); return }
     if (process.env.SLATE_WEB_ONLY === '1') { await webShots(browser); log('done (web-only)'); return }
     if (process.env.SLATE_SETTINGS_ONLY === '1') { await settingsShots(browser); log('done (settings-only)'); return }
+    if (process.env.SLATE_TOOLS_ONLY === '1') { await toolShots(browser); log('done (tools-only)'); return }
     // All of the above in one server boot, for iterating on the newer groups together.
     if (process.env.SLATE_NEW_ONLY === '1') {
       await appShots(browser); await filesShots(browser); await bannerShots(browser)
@@ -1123,6 +1189,7 @@ async function main() {
     await replayShots(browser)
     await liveShots(browser)
     await webShots(browser)
+    await toolShots(browser)
 
     // ── webm: drag the slider → the chart re-renders live (reactivity) ───────────────────────
     // Frame the slider AND the chart together (slider is the cell right above the chart) so the
