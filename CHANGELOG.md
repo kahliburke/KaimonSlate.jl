@@ -14,6 +14,70 @@ were written when they went out. They are marked.
 
 ### Added
 
+- **Job cells and sweeps.** A new cell kind, `#%% job`, runs its body over a parameter grid
+  (`@sweep`) on this machine, on a host Slate drives over SSH, or through SLURM or PBS. Its card
+  shows the units as a live grid, charts the results as they land, and reads every chunk's log by
+  byte range with whole-file search. The hub keeps submitting until the sweep finishes, retries
+  failed units, and holds a sweep whose environment has not been tested on the machine until a short
+  test job has passed. Results come back as one dataset, `r.dataset`, readable lazily and by part,
+  and as a table (`DataFrame(r.dataset)`) through the new Tables extension. A job cell with
+  `region=` runs its units on the node the region holds. Running sweeps are listed in the top bar.
+  See [Clusters](https://kahliburke.github.io/KaimonSlate.jl/dev/clusters).
+
+- **Machines.** A cluster is described once, on the front page under 🖧 Remotes → ⎈ Machines:
+  its login host, scheduler (SLURM or PBS, detected from the host), store, queue, scheduler options,
+  and who may read its store. Every machine with a host is also a region of the same name, and a
+  region can vary its machine's shape. A machine's **Scheduler use** shows the commands the hub
+  sends its scheduler against a budget (`KAIMONSLATE_SCHED_BUDGET`), with a dashboard by command
+  and caller.
+
+- **Regions on scheduler nodes.** A region can get its worker on a node the scheduler grants, asked
+  for only when a cell needs it. A cell waiting for its node shows as BLOCKED with what it waits
+  for and for how long. An idle node is given back after a set time, with a warning first, and an
+  allocation can be extended before its walltime runs out.
+
+- **Prepare.** Preparing a machine or a region installs Julia and the worker on the host, reads the
+  site, settles the depot and, for a region, builds and loads the notebook's packages on a node
+  (and its sysimage, if it uses one). Each step reports as it runs, in a dialog with the activity
+  log and every earlier run. A notebook that needs a prepare says why, and which packages changed.
+
+- **SSH without `ssh`.** The hub speaks SSH itself, over one connection per host: keys from the
+  agent or files, OpenSSH certificates, and password, one-time-code and keyboard-interactive
+  sign-in from the browser, so hosts behind MFA work. A sweep waits for sign-in rather than fail.
+  Transfers send only changed files, compress, and read large files over several streams, through a
+  data transfer host when the machine names one.
+
+- **Datasets.** `adopt(path)` makes an HDF5 or NetCDF file on a region readable from any notebook,
+  by part, without copying it whole. Remote results are cached locally by byte range, so a read
+  that stops keeps what arrived.
+
+- **Cell debugger.** Any code cell can be stepped line by line, on this machine or a region's
+  worker, with breakpoints and conditions, watches sampled over a run, live views, and a scratchpad
+  in the paused frame. See [Debugging a Cell](https://kahliburke.github.io/KaimonSlate.jl/dev/debugger).
+
+- **Cell profiler.** Any code cell can be profiled where it runs: CPU, wall time, allocations or
+  GPU (CUPTI kernels and copies), as a flame graph keyed by source line, a timeline, and per-function
+  and per-line tables, with library code folded onto your lines. A run is compared with the
+  previous one, and a static check (JET) explains dispatch and boxed captures on the lines they
+  affect. See [Profiling a Cell](https://kahliburke.github.io/KaimonSlate.jl/dev/profiler).
+
+- **Specialists.** The agent can bring in a debugging or profiling specialist that works in the
+  debugger or profiler beside you, asks you questions in the page, and records what it found.
+  More roles can be defined in `specialists.toml`.
+
+- **The worker dock.** The worker pill opens a dock along the bottom of the page with every worker
+  of the notebook, its controls (restart, shut down, release a node, start a region), its details,
+  its recent log messages, a paged and searchable log, and its telemetry: CPU, memory, GPUs, garbage
+  collection and every cell run on a timeline. Telemetry is also kept on disk for 14 days. See
+  [Workers & Telemetry](https://kahliburke.github.io/KaimonSlate.jl/dev/workers).
+
+- **The agent panel.** Drag its edge to resize it, open it full screen, and step through what you
+  sent before with ↑ and ↓. Repeated identical tool calls fold into one line with a count. Agents
+  that speak ACP (opencode, Codex, Gemini CLI) can be picked as the model. (#80, Guido Wolf
+  Reichert)
+
+- **Profile** and **Debug** the selected cell from the command palette.
+
 - A notebook's worker runs its own machinery on dedicated threads, so a notebook that saturates
   `:default` with CPU-bound work no longer stalls it. A `:slate` pool serves status, cancel, the hub
   heartbeat, telemetry and blob transfers, and never runs notebook code. A `:slate_ui` pool serves
@@ -22,7 +86,8 @@ were written when they went out. They are marked.
   `set_request_router!`. The pools come from DedicatedThreads, which the hub installs in the
   background into an optional environment of its own; `worker_pools_source` in slate.json (or
   `KAIMONSLATE_WORKER_POOLS`) can point it at a local checkout or git URL, or turn it `off`. Without
-  it, the worker behaves as before.
+  it, the worker behaves as before. Remote and region workers get the pools too: the hub builds the
+  environment on each host in the background, shipping a local checkout first.
 
 - A notebook's worker serves its gate with KaimonGate's event-driven request loop, so each reply
   goes out as soon as it is ready. A cell run, a control change and a completion are sequences of
@@ -37,8 +102,32 @@ were written when they went out. They are marked.
   edit it. Images resolve from the file's own folder, and a link to another project file opens it in
   the panel.
 
+### Changed
+
+- **Notebook format 2.** The lifecycle cell is a job: `#%% job` and a `Slate.job` footer. Opening an
+  older notebook asks first, keeps a copy of the file as it was (`name.format1.<time>.jl`), and
+  rewrites it. Notebooks in format 2 do not open correctly in older versions of Slate.
+- ☰ → 🪵 Worker log opens the worker dock at its Log tab. The separate log panel is gone.
+- A worker's log records read `Info 18:47:51: …`, level then clock, like a sweep task's.
+
+### Security
+
+- On Linux the hub accepts loopback connections only from its own user, so other accounts on a
+  shared login node cannot reach it (`KAIMONSLATE_ALLOW_OTHER_USERS` opts out). Locally spawned
+  workers use CURVE as remote ones do, and the hub refuses cross-site requests that carry no
+  `Origin`.
+- The hub starts on the first free port and records it, and the Kaimon it embeds runs in strict
+  mode with a persistent API key.
+
 ### Fixed
 
+- A notebook's packages are rebuilt the way each was added: a local checkout is developed again
+  from its path and a git package added from its URL, instead of being looked up by name. A
+  checkout missing on this machine is skipped and named, and the rest still install.
+- Adding a package while another is loading no longer fails with "Unknown package" or drops a
+  package added just before.
+- A precompile failure caused by a package whose compiled cache was deleted under the worker names
+  that package and offers to restart the worker.
 - Copying rendered math gives its LaTeX source, `$…$` inline and `$$…$$` for display, with a line
   break between paragraphs, in the notebook and in exported pages. A selection that ends inside a
   formula takes the whole formula.
