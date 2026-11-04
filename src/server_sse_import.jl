@@ -229,18 +229,23 @@ end
 #   failed <text>  — a handled error (named `failed`, not `error`, to avoid clashing with
 #                    EventSource's built-in transport `error` event on the client)
 # `h` is the `Hub` (untyped here only because its struct is defined later in this file).
-function _sse_import(stream::HTTP.Stream, h)
+# Start an SSE response on `stream` and return its `emit(event, data)`, which writes one `data:` line
+# per line of `data`. `emit` returns false once the client has gone, so a caller can stop.
+function _sse_open(stream::HTTP.Stream)
     HTTP.setheader(stream, "Content-Type" => "text/event-stream")
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
     HTTP.startwrite(stream)
-    # Returns false if the write failed (client disconnected / cancelled) so callers can stop.
-    function emit(ev::AbstractString, data::AbstractString)
+    return function (ev::AbstractString, data::AbstractString)
         io = IOBuffer()
         println(io, "event: ", ev)
-        for ln in split(data, '\n'); println(io, "data: ", ln); end   # SSE: one data: per line
+        for ln in split(data, '\n'); println(io, "data: ", ln); end
         println(io)
         try; write(stream, String(take!(io))); return true; catch; return false; end
     end
+end
+
+function _sse_import(stream::HTTP.Stream, h)
+    emit = _sse_open(stream)
     # Stream `Pkg.instantiate()` for `projdir`; returns :ok / :aborted / :failed.
     function instantiate!(projdir)
         emit("status", "Resolving & instantiating packages — this can take a while…")
@@ -288,15 +293,7 @@ end
 # ("run") and completes ("ok"/"fail"/"skip") so the checklist fills in live (a cold provision is
 # minutes). Browser-triggerable, no MCP tool required.
 function _sse_preflight(stream::HTTP.Stream, h)
-    HTTP.setheader(stream, "Content-Type" => "text/event-stream")
-    HTTP.setheader(stream, "Cache-Control" => "no-cache")
-    HTTP.startwrite(stream)
-    function emit(ev::AbstractString, data::AbstractString)
-        io = IOBuffer(); println(io, "event: ", ev)
-        for ln in split(data, '\n'); println(io, "data: ", ln); end
-        println(io)
-        try; write(stream, String(take!(io))); return true; catch; return false; end
-    end
+    emit = _sse_open(stream)
     q = HTTP.queryparams(HTTP.URI(stream.message.target))
     host = strip(get(q, "host", ""))
     tr = Symbol(strip(get(q, "transport", "tunnel"))); tr in (:tunnel, :direct) || (tr = :tunnel)

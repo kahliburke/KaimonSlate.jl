@@ -984,15 +984,7 @@ end
 # Shared SSE streamer: run `run_fn(on_event)` in a task feeding a channel, emit status/log/done/failed.
 # `start_verb` is the verb in the per-target `:start` status line ("Deploying to …" / "Publishing to …").
 function _sse_stream(stream::HTTP.Stream, run_fn; start_verb::AbstractString = "Deploying")
-    HTTP.setheader(stream, "Content-Type" => "text/event-stream")
-    HTTP.setheader(stream, "Cache-Control" => "no-cache")
-    HTTP.startwrite(stream)
-    emit = function (ev::AbstractString, data::AbstractString)
-        io = IOBuffer(); println(io, "event: ", ev)
-        for ln in split(data, '\n'); println(io, "data: ", ln); end
-        println(io)
-        try; write(stream, String(take!(io))); return true; catch; return false; end
-    end
+    emit = _sse_open(stream)
     ch = Channel{Tuple{String,String}}(128)
     task = @async begin
         try
