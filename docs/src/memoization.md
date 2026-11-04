@@ -153,8 +153,8 @@ large tabular/array data reopen and transfer far faster.
 
 ## Your cache follows you
 
-When a notebook runs on a [remote worker](remotes.md), `slate_sync_memo` pushes the whole store to it
-(dedup-aware) so the remote **restores** cached results instead of recomputing them. On attach, recent
+When a whole notebook runs on a [remote worker](remotes.md), `slate_sync_memo` pushes this notebook's
+entries to it (dedup-aware) so the remote **restores** cached results instead of recomputing them. On attach, recent
 entries are carried automatically when moving them beats recomputing. See
 [Remotes → Your cache follows you](remotes.md#Your-cache-follows-you).
 

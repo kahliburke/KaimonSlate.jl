@@ -81,8 +81,8 @@ reassign the cell to a different kernel in place.
 ![A DAG node's detail card for a remote cell: timing chips, a "last ran 🖧 gpu (gpu-box)" chip, a "moved ⇄ 220 MB total" chip, a region-transfers breakdown (size · direct · MB/s), the region= tag, and a "Run on" picker set to gpu · gpu-box](./assets/dag-node-card.png)
 
 Each region **zone header** carries a live status dot — hover it for the region's worker card:
-connection status, host, transport, and CPU / RSS / running-cell telemetry, with **🪵 Log** and
-**✕ Reap** actions.
+connection status, host, transport, and CPU / RSS / running-cell telemetry, with **🪵 Log** (which
+opens the [worker dock](workers.md) on that region) and **✕ Reap** actions.
 
 ![A region's worker hover card in the DAG: status OK, host gpu-box, port, transport tunnel, cpu/rss/running/memo chips, and Log / Reap buttons](./assets/region-hover-card.png)
 
