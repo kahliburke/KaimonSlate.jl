@@ -3107,7 +3107,7 @@ body.presenting { overflow: hidden; }
 .deck { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center;
   background: #000; }
 /* The deck palette, shared by the deck and the presenter's previews of it. */
-.deck, .pp-frame {
+.deck, .pp-frame, .deck-sheet {
   --deck-fg: var(--text); --deck-strong: var(--strong, var(--text)); --deck-dim: var(--dim);
   --deck-accent: var(--accent); --deck-accent2: #b392f0; --deck-surface: var(--bg);
   --deck-ink: #ff4d6d;

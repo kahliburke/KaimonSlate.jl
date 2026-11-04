@@ -1528,6 +1528,10 @@
 
   // Every slide at its last step, numbered, in a grid over the page.
   function _contactSheet(done, whenLoaded) {
+    // The sheet copies each chart as it stands, so end the charts' entry animations first.
+    document.querySelectorAll('#nb .cell').forEach(el => _cellCharts(el).forEach(inst => {
+      try { inst.setOption({ animation: false }); } catch (e) {}
+    }));
     D.slides = buildSlides();
     document.documentElement.classList.add('deck-sheet-mode');
     const [W, H] = _canvasSize();
