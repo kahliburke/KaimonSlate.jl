@@ -2037,8 +2037,8 @@ body.modkey .cm-content { cursor: pointer; }
 .histprev .dl.ctx { color:var(--dim); }
 .histprev .dl.gap { color:var(--dim); text-align:center; font-style:italic; opacity:.7; padding:2px 4px; }
 /* Worker log panel */
-/* Shared by the worker log, the activity monitor and the package panel (#logpanel, #actpanel,
-   #pkgpanel) — three drawers that differ only in content. */
+/* Shared by the activity monitor and the package panel (#actpanel, #pkgpanel), drawers that differ
+   only in content. */
 .logpanel { width:480px; }
 /* Pipeline DAG split pane — the live dataflow graph (dag.js) docked on the right, the
    notebook reflowing to the left half: click a node to navigate the code, watch the graph
