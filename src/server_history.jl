@@ -1601,7 +1601,10 @@ end
 # search it however large it is. Only that worker's own log is ever read, whatever `arg` names.
 function _worker_log_io(nb::LiveNotebook, side::AbstractString, action::AbstractString, opts)
     k = isempty(side) ? nb.kernel : _region_kernel_if_active(nb, side)
-    k isa ReportEngine.GateKernel || return Dict{String,Any}("loglist" => Any[], "logerr" => "no worker for this side")
+    # The vocabulary goes with every answer, so the viewer can classify lines even when it has none yet.
+    vocab = ReportEngine.Sweep.log_vocabulary()
+    k isa ReportEngine.GateKernel ||
+        return Dict{String,Any}("loglist" => Any[], "logerr" => "no worker for this side", "logsev" => vocab)
     remote = k.target isa ReportEngine.RemoteTarget
     # A cluster's nodes share their login node's home, so a node's log is read there. The region names
     # that host even after its allocation has ended and the node is no longer routed.
@@ -1610,13 +1613,13 @@ function _worker_log_io(nb::LiveNotebook, side::AbstractString, action::Abstract
                            ReportEngine._host_for_files(k.target.ssh_host)
     l = ReportEngine.Sweep.file_launcher(fhost)
     path = remote ? "$(ReportEngine._REMOTE_WORKER)/worker-$(k.port).log" : k.logpath
-    isempty(path) && return Dict{String,Any}("loglist" => Any[], "logerr" => "this worker has no log file")
+    isempty(path) && return Dict{String,Any}("loglist" => Any[], "logerr" => "this worker has no log file", "logsev" => vocab)
     if action == "logs"
         st = try; ReportEngine.Sweep.BatchLauncher.log_stat(l, path); catch; (bytes = -1, modified = 0); end
         return Dict{String,Any}("loglist" => [Dict{String,Any}("path" => path, "name" => basename(path), "job" => "",
                                                                "bytes" => st.bytes, "modified" => st.modified,
                                                                "running" => k.conn !== nothing)],
-                                "logsev" => ReportEngine.Sweep.log_vocabulary())
+                                "logsev" => vocab)
     end
     r = ReportEngine.Sweep.log_reads(l, path, action, opts)
     return r === nothing ? Dict{String,Any}("error" => "unknown action $action") : r

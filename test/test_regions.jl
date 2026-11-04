@@ -6,6 +6,7 @@
 # are covered in test_remote_pool.jl's registry testset.)
 using ReTest
 using KaimonSlate
+import Logging
 
 const NS = KaimonSlate.NotebookServer
 const RE = KaimonSlate.ReportEngine
@@ -80,6 +81,18 @@ end
         @test occursin("allowed_clients=String[raw\"CLIENTPUB\"]", s)
         @test !occursin("allowed_clients=String[]", s)
         @test Meta.parseall(s) isa Expr
+    end
+
+    @testset "a worker's log records read like a sweep task's" begin
+        # One vocabulary classifies both logs in the viewer, so a worker record must have the shape
+        # it reads: level, then the clock.
+        for lvl in (Logging.Info, Logging.Warn, Logging.Error)
+            _, pre, _ = Logging.default_metafmt(lvl, Main, :g, :id, "f.jl", 1)
+            head = "┌ " * RE.log_record_prefix(pre, "18:47:51") * " slate worker: ready"
+            m = match(Regex(RE.Sweep._LOG_HEAD_SRC), head)
+            @test m !== nothing && m.captures[2] == "18:47:51" && m.captures[3] == "slate worker: ready"
+            @test occursin(Regex(RE.Sweep._LOG_LEVEL_SRC), head)
+        end
     end
 
     @testset "a remote worker picks up dedicated threads once the host has built them" begin

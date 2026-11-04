@@ -3543,11 +3543,11 @@ _telemetry_task(stats_path::String) = try; _telemetry_loop!(stats_path); catch e
 end
 
 # The worker log's logger: timestamps every record (the default logger emits none), on the stream
-# `start` hands it.
+# `start` hands it. Its heads read `┌ Info 18:47:51: …` (`log_record_prefix`, capture.jl).
 _worker_logger(io::IO) = Logging.ConsoleLogger(io, Logging.Info;
     meta_formatter = (lvl, m, g, id, f, l) -> begin
         c, pre, suf = Logging.default_metafmt(lvl, m, g, id, f, l)
-        (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)
+        (c, log_record_prefix(pre, Dates.format(Dates.now(), "HH:MM:SS")), suf)
     end)
 
 # The oldest SlateExtensionsBase this code runs with: the lower bound of SlateWorker's compat entry.
@@ -3582,7 +3582,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # back to the custom IO).
     try; install_demux!(); pushdisplay(_DemuxDisplay()); catch e; @warn "slate: demux install failed" exception = e; end
     # Timestamp every worker log record (local file + remote tail) so a bring-up / eval is legible after
-    # the fact — the default logger emits none. Prepends `HH:MM:SS ` to the metadata prefix.
+    # the fact — the default logger emits none. The clock follows the level (`_worker_logger`).
     try
         # Tee the log stream so every formatted record ALSO PUBs on `slate_log` (→ hub → the worker popup,
         # live) while still writing to the worker-<port>.log file. Mirrors the pipe that `worker_log_tail`

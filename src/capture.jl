@@ -1092,6 +1092,11 @@ end
 _gc_safe_sleep(s::Real) = Sys.iswindows() ? Libc.systemsleep(s) :
     (@ccall gc_safe = true usleep(round(Cuint, 1e6 * s)::Cuint)::Cint; nothing)
 
+# The head of a log record as a worker writes it, from the logger's own prefix (`Info:`) and a clock:
+# `Info 18:47:51:`, level then clock. A sweep task's log has the same shape, so the log viewer's
+# vocabulary (Sweep `_LOG_HEAD_SRC`) reads a worker's log and a task's alike.
+log_record_prefix(pre::AbstractString, clock::AbstractString) = string(rstrip(pre, ':'), " ", clock, ":")
+
 # A package is precompiled against the copies of its dependencies this process has already loaded.
 # Julia keeps a bounded number of compiled caches per package, so when other environments recompile a
 # loaded dependency, the cache file it was loaded from can be deleted. Nothing built on it can be

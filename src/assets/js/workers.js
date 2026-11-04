@@ -290,7 +290,8 @@ function onWorkerLog(side, line) {
 // since "ran cell" says little without which cell.
 const _WP_RECENT_LINES = 300, _WP_RECENT_SHOWN = 6;
 let _wpRecent = [], _wpMsgsT = null;
-const _WP_HEAD = /(?:^|\s)([┌\[])\s+(?:(\d\d:\d\d:\d\d)\s+)?(Debug|Info|Warning|Error):\s*(.*)$/;
+// The clock follows the level (`Info 18:47:51:`); a log written before that has it in front.
+const _WP_HEAD = /(?:^|\s)([┌\[])\s+(?:(\d\d:\d\d:\d\d)\s+)?(Debug|Info|Warning|Error)(?:\s+(\d\d:\d\d:\d\d)[.\d]*)?:\s*(.*)$/;
 const _WP_FIELD = /^[│└]\s+([\w.]+)\s*=\s*(.*)$/;
 const _WP_CORE = /^(WARNING|ERROR):\s*(.*)$/;
 // `lines` are strings, or `{ t, o }` with the byte offset the line starts at, which a record keeps.
@@ -302,7 +303,7 @@ function _wpRecords(lines) {
     const t = window.slateAnsiText(styled);
     let m;
     if ((m = _WP_HEAD.exec(t))) {
-      const r = { ts: m[2] || '', lvl: m[3], msg: m[4], fields: [], o };
+      const r = { ts: m[2] || m[4] || '', lvl: m[3], msg: m[5], fields: [], o };
       recs.push(r); open = m[1] === '┌' ? r : null;
     } else if (open && (t[0] === '│' || t[0] === '└')) {
       if ((m = _WP_FIELD.exec(t))) open.fields.push(m[1] + '=' + m[2]);
