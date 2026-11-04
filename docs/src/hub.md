@@ -37,6 +37,11 @@ Machine-wide settings live in `slate.json` in your config home. Changes apply on
 | `carry_max_s`, `xfer_confirm_s` | [region](regions.md) transfer thresholds |
 | `remote` | per-host timing overrides, below |
 | `catalog` | point the [Extensions gallery](extension-gallery.md) at a fork or mirror |
+| `run_location` | where notebooks run by default; see [Remotes](remotes.md) |
+| `transfer_warn_mb` | pause a remote's provisioning when it would send more than this (default 100) |
+| `telemetry_log`, `telemetry_keep_days` | keep [worker telemetry](workers.md) on disk (default on, 14 days) |
+| `worker_pools_source` | where [dedicated worker threads](workers.md#Dedicated-threads) come from, or `off` |
+| `checker_on`, `debug_specialist_only`, `specialist_models` | the agent's [specialists](agent.md), set from Settings |
 
 `secrets.json` sits beside it and holds the [publishing](publishing.md) credentials the ledger
 refers to by name.
@@ -50,9 +55,14 @@ then the XDG location:
 | --- | --- | --- |
 | config | `slate.json`, `secrets.json` | `~/.config/kaimonslate` |
 | data | the publishing ledger's working checkout | `~/.local/share/kaimonslate` |
-| cache | local site builds, rendered figure and asset blobs | `~/.cache/kaimonslate` |
+| cache | caches, and state that is kept per notebook (below) | `~/.cache/kaimonslate` |
 
-The cache home is safe to delete. The data home is not.
+Not everything in the cache home is a cache. It also keeps each notebook's
+[Timeline](history.md) (`history`), its agent transcript (`chat`), its kept profiles (`profiles`)
+and its worker telemetry (`telemetry`), which are lost if it is deleted. Deleting the
+[memo store](memoization.md) (`memo`) costs only the time to compute the results again. Rendered
+blobs (`blobs`, `remote-blobs`), site builds (`sites`) and previews (`preview`) are safe to
+delete. The data home holds the publishing ledger and should not be deleted.
 
 Blobs under the cache home are content-addressed and written once, so a notebook mints a new one
 every time a figure changes. An open notebook's superseded blobs are dropped as it snapshots; the
@@ -167,6 +177,11 @@ Driving a local model requires Kaimon's Ollama agent backend. Selecting a model 
 | `VMLX_HOST` | vmlx (MLX) API endpoint for the model list (default `http://127.0.0.1:8000`). |
 | `SLATE_BROWSER` | Open a specific browser (e.g. `"Google Chrome"`) instead of the OS default. |
 | `KAIMONSLATE_ALLOWED_HOSTS` | Extra Host/Origin names the hub will answer to (a DNS alias, a proxy). This machine's own names are admitted automatically. |
+| `KAIMONSLATE_ALLOW_OTHER_USERS` | `=1` → on Linux, also answer loopback connections from other accounts on this machine. Off by default, since a shared login node's other users can reach its loopback ports. |
+| `KAIMONSLATE_WORKER_POOLS` | Where [dedicated worker threads](workers.md#Dedicated-threads) come from, as `worker_pools_source` does. |
+| `KAIMON_GATE_OWNER_WAKE` | `=0` → a worker serves its gate with the polling loop instead of the event-driven one. |
+| `KAIMONSLATE_BLOB_CAP_GB` | Size cap for the local cache of remote results read by byte range (default a sixteenth of free disk, between 1 and 8 GB). |
+| `KAIMONSLATE_SCHED_BUDGET` | Scheduler commands per minute to one machine above which the hub warns in its log (default 2). |
 | `KAIMONSLATE_ASSET_BASE` | **Docs build only** — points the site at the docs-assets GitHub Release for generated demo media. Unset locally → served from `public/assets/`. |
 
 The remote-worker timing knobs above each have a `KAIMONSLATE_*` equivalent too, and a number of
