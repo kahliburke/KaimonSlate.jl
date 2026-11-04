@@ -47,3 +47,6 @@ dev/*.md
 
 # dev/dupes embedding cache
 dev/dupes/.cache/
+
+# Local scratch scripts
+scratch/

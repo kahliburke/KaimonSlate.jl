@@ -267,6 +267,13 @@ _env_prune_sh(root::AbstractString, keep::AbstractString) =
 # A target says WHERE shards run and HOW the two sides see the store. Everything a notebook needs
 # to switch between a laptop and a cluster lives here, so the job cell itself never changes.
 
+"""
+    SweepTarget
+
+Where a sweep's units run and how the hub and the workers see its store: [`LocalTarget`](@ref) on
+this machine, [`ClusterTarget`](@ref) through a scheduler or on a host Slate drives itself. A job
+cell names one with `cluster=`, and `run_sweep` runs a grid on it.
+"""
 abstract type SweepTarget end
 
 """

@@ -73,6 +73,7 @@ guide is [Clusters](clusters.md).
 ```@docs
 KaimonSlate.ReportEngine.Sweep.@sweep
 KaimonSlate.ReportEngine.Sweep.paramgrid
+KaimonSlate.ReportEngine.Sweep.SweepTarget
 KaimonSlate.ReportEngine.Sweep.LocalTarget
 KaimonSlate.ReportEngine.Sweep.ClusterTarget
 KaimonSlate.ReportEngine.Sweep.SlurmTarget
