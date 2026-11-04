@@ -60,13 +60,15 @@ function _wpStatsChips(statsJson, note) {
 // searchable however large the log is, with its colour kept. One viewer of the dock's own, so a sweep's
 // log open over the page is a different one.
 let _wpLogView = null;
+// The notebook's id, before its first state has arrived as well as after.
+const _wpNb = () => (window.__slateState || {}).id || (typeof NB_ID === 'string' ? NB_ID : '');   // core.js's binding, not a window property
 // One of the log viewer's reads of the worker on `side`: `logs`, `log_stat`, `log_slice` or `log_search`.
-const _wpLogIO = (side, action, opts) => fetch('/api/' + encodeURIComponent((window.__slateState || {}).id) + '/worker-log-io', {
+const _wpLogIO = (side, action, opts) => fetch('/api/' + encodeURIComponent(_wpNb()) + '/worker-log-io', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(Object.assign({}, opts, { side, action, arg: '' })) }).then(r => r.json());
 // Settles once the viewer has the log's newest window, so a caller can then move it.
 function _wpShowLog() {
-  const nbid = (window.__slateState || {}).id, box = document.getElementById('wdock-log');
+  const nbid = _wpNb(), box = document.getElementById('wdock-log');
   if (!nbid || !box || !window.slateLogs) return Promise.resolve();
   const refusedBox = box.querySelector('.wplog-none');
   if ((_wpProv[_wpSide] || {}).refused) {
@@ -91,7 +93,7 @@ function _wpShowTelemetry() {
   const box = document.getElementById('wdock-tel'), open = window.openTelemetry;
   if (!box || !open || _wpSide === null) return;
   const side = _wpSide, r = (_wpWorkers || []).find(w => (w.side || '') === side) || {};
-  open({ nb: (window.__slateState || {}).id, side, mount: box,
+  open({ nb: _wpNb(), side, mount: box,
          host: r.host && r.host !== 'local' ? r.host : '', port: r.port, label: _wpLabel(side, r.host) });
 }
 // The dock on a worker (the one showing, by default) at one of its tabs: the meters open it at its

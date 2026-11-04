@@ -93,6 +93,11 @@ end
             @test m !== nothing && m.captures[2] == "18:47:51" && m.captures[3] == "slate worker: ready"
             @test occursin(Regex(RE.Sweep._LOG_LEVEL_SRC), head)
         end
+        # A record's last field is on its closing line, and is still a field; a location is not.
+        field = Regex(RE.Sweep._LOG_FIELD_SRC)
+        @test match(field, "└   ms = 4182.6").captures == ["ms", "4182.6"]
+        @test match(field, "│   cell = \"train\"").captures[1] == "cell"
+        @test match(field, "└ @ Main f.jl:1") === nothing
     end
 
     @testset "a remote worker picks up dedicated threads once the host has built them" begin

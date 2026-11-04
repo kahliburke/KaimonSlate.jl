@@ -4860,7 +4860,8 @@ const _LOG_DECL_BAD_SRC = "(?:" * _log_level_src("Error") * ")|(?:" * _LOG_CRASH
 # patterns above these never reach ripgrep, so they read the line with its colour already off.
 # A stock logger writes no clock and `[ ` for a record with nothing under it; both are accepted.
 const _LOG_HEAD_SRC = raw"^[┌\[] (Error|Warning|Info|Debug)(?: ([0-9:.]+))?: ?(.*)$"
-const _LOG_FIELD_SRC = raw"^│ {3}([^ =][^=]*?) = ?(.*)$"
+# A record's last field sits on its closing `└` line when the logger has no location to print.
+const _LOG_FIELD_SRC = raw"^[│└] {3}([^ =][^=]*?) = ?(.*)$"
 const _LOG_FCONT_SRC = raw"^│ {4,}(.*)$"
 const _LOG_MCONT_SRC = raw"^│ ([^ ].*)$"
 const _LOG_TAIL_SRC = raw"^└ @ (.*)$"
