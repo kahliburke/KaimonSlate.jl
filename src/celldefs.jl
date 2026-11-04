@@ -155,11 +155,48 @@ function _let_globals(s)
     return (fns, all)
 end
 
-# `name = let … end` whose value is a function (its last statement is one).
+# A value whose evaluation computes nothing: a literal, a name (a global, restored before any replay),
+# or a tuple, vector, matrix or numeric range built from those.
+function _static_value(x)
+    x isa Union{Number,AbstractString,Char,Bool,Symbol,QuoteNode,Nothing} && return true
+    x isa Expr || return false
+    x.head in (:tuple, :vect, :hcat, :vcat, :row, :nrow) && return all(_static_value, x.args)
+    x.head === :call && x.args[1] === :(:) && return all(a -> a isa Number, x.args[2:end])
+    x.head === :call && x.args[1] === :- && length(x.args) == 2 && return x.args[2] isa Number
+    return false
+end
+
+# A `let` block that only names values and defines things, so evaluating it again computes nothing:
+# every binding and every plain assignment in it is static, and everything else is a definition or a
+# `global` declaration. Only such a block is replayed; one that computes (a `rand()`, a model fit)
+# would give its function different captured values from the ones the cell's stored output used.
+function _definitional_let(s)
+    (s isa Expr && s.head === :let && length(s.args) == 2) || return false
+    binds = s.args[1]
+    bs = binds isa Expr && binds.head === :block ? binds.args : Any[binds]
+    for b in bs
+        b isa LineNumberNode && continue
+        b isa Symbol && continue
+        (b isa Expr && b.head === :(=) && b.args[1] isa Symbol && _static_value(b.args[2])) || return false
+    end
+    ok(st) = st isa LineNumberNode ||
+             (st isa Expr && st.head === :block && all(ok, st.args)) ||
+             (st isa Expr && st.head === :global && all(a -> a isa Symbol || _def_signature(a) !== nothing ||
+                  (a isa Expr && a.head === :function) ||
+                  (a isa Expr && a.head === :(=) && a.args[1] isa Symbol &&
+                   (_is_function_value(a.args[2]) || _static_value(a.args[2]))), st.args)) ||
+             _def_signature(_unwrap_definition(st)) !== nothing ||
+             _is_function_value(st) ||
+             (st isa Expr && st.head === :(=) && st.args[1] isa Symbol && _static_value(st.args[2]))
+    body = s.args[2]
+    return body isa Expr && all(ok, body.head === :block ? body.args : Any[body])
+end
+
+# `name = let … end` whose value is a function (its last statement is one), from a definitional block.
 function _let_function_assignment(s)
     (s isa Expr && s.head === :(=) && length(s.args) == 2 && s.args[1] isa Symbol) || return nothing
     rhs = s.args[2]
-    (rhs isa Expr && rhs.head === :let && length(rhs.args) == 2 && rhs.args[2] isa Expr) || return nothing
+    _definitional_let(rhs) || return nothing
     body = [a for a in rhs.args[2].args if !(a isa LineNumberNode)]
     return !isempty(body) && _is_function_value(body[end]) ? s.args[1] : nothing
 end
@@ -172,12 +209,11 @@ bind, so a memo entry stores everything else. `stmts` are the flattened top-leve
 their line nodes; `idx` indexes the ones to replay, in source order:
 
 - definition statements (`_is_definition_stmt`), including those inside a top-level `begin`;
-- a top-level `let` that defines a global function, replayed whole, since the function may close
-  over the block's locals;
-- `name = let … end` whose value is a function, for the same reason.
+- a top-level `let` that defines a global function and computes nothing (`_definitional_let`),
+  replayed whole, since the function may close over the block's locals;
+- `name = let … end` whose value is a function, under the same condition.
 
-A replayed `let` costs what running it costs; it is the only way its function can come back. The hub
-and the worker both call this, so the entry's contents and the restore agree.
+The hub and the worker both call this, so the entry's contents and the restore agree.
 """
 function _replay_plan(src::AbstractString)
     stmts = _flat_statements(src)
@@ -186,6 +222,7 @@ function _replay_plan(src::AbstractString)
         if _is_definition_stmt(s)
             push!(idx, i); _stmt_definition_names!(names, s)
         elseif s isa Expr && s.head === :let
+            _definitional_let(s) || continue
             fns, all = _let_globals(s)
             isempty(fns) && continue
             push!(idx, i); union!(names, all)
