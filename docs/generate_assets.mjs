@@ -534,9 +534,15 @@ async function regionShots(browser) {
       // The DAG pane from the shots above would cover the dock's right half.
       await page.evaluate(() => { if (document.getElementById('dagpane')?.classList.contains('open')) window.toggleDag() })
       page.on('pageerror', (e) => log('  page error:', e.message))
+      await page.addStyleTag({ content: '#runchip{display:none!important}' })   // the mocked running cell's chip
+      await page.evaluate(() => document.body.style.setProperty('--wdockh', '64vh'))   // room for the charts
+      await page.evaluate(() => window.wpOpenTelemetry && window.wpOpenTelemetry('gpu'))
+      await page.waitForSelector('#wdock-tel.on', { timeout: 6000 })
+      await sleep(2500)                                       // the telemetry view's first samples
+      await elShot(page, '#workerdock', 'worker-dock.png')
+      await page.evaluate(() => document.body.style.removeProperty('--wdockh'))
       await page.evaluate(() => window.wpOpenLog && window.wpOpenLog('gpu'))
       await page.waitForSelector('#wdock-log.on', { timeout: 6000 })
-      await page.addStyleTag({ content: '#runchip{display:none!important}' })   // the mocked running cell's chip
       await sleep(1500)                                       // the viewer's first window and the recent messages
       await elShot(page, '#workerdock', 'worker-log.png')
       await page.evaluate(() => window.closeWorkerDock && window.closeWorkerDock())
