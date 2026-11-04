@@ -27,9 +27,11 @@ That banner also offers **Add to project**, which writes the dependency into the
 `Project.toml` so every notebook in the project gets it. It appears only when there is a project to
 add to, and it is the one path that modifies the parent.
 
-If the enclosing project's `Manifest.toml` later changes, a forked notebook **auto-resyncs**
-on open: it re-seeds from the parent and re-adds your packages (preserved), keeping it one
-consistent environment.
+If the enclosing project changes later, a forked notebook **auto-resyncs** on open: it re-seeds
+from the parent and re-adds your packages, keeping it one consistent environment. Each package is
+re-added the way it was added: a local checkout is developed again from its path and a git package
+added from its URL. A checkout whose path is missing on this machine is named and skipped, and the
+rest still install.
 
 ## The panel
 
@@ -38,13 +40,19 @@ The panel shows the environment with **provenance**, in two groups:
 - **Notebook** — the packages this notebook added (removable ✕).
 - **Parent project** `‹dir›` — inherited from the enclosing project (read-only).
 
+A notebook with a [region](regions.md) that boots from a sysimage also gets a **Sysimage ·
+‹region›** group, listing what the image holds. **notebook has X** marks a package whose version in
+the notebook differs from the image's, so that region's workers start without the image; **image
+only** marks one that loads only in cells on that region.
+
 The status line reads e.g. `3 notebook · 41 from parent` (or `· detached`).
 
 ![The Packages panel: notebook packages and inherited parent-project packages, with provenance](./assets/packages-panel.png)
 
 - **Add** — `Pkg.add` in the notebook's own env (forking first if needed), then the notebook
-  re-runs so a `using` lights up live. The first add can take a while (seed + resolve +
-  precompile); the kernel dot pulses while it works.
+  re-runs so a `using` lights up live. The box completes registry names as you type. Adding asks
+  you to confirm, then the notebook pauses behind an overlay that streams the worker's log while
+  the environment resolves and precompiles; the first add can take a while.
 
   The box takes more than a registry name: a version pin (`CSV@0.10`), a git URL with an optional
   `#rev`, or a local path, which is `dev`'d so it hot-reloads and travels to a remote worker. Several

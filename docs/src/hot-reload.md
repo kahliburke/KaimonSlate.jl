@@ -88,8 +88,11 @@ to edit that source without leaving the browser, but an external editor works id
 
 ## Remote workers and regions
 
-Hot-reload works over a remote worker. Slate watches the local project's `src/`, and the `src/` of
-each developed path dependency, and rsyncs changes to the remote as you save.
+Hot-reload works over a remote worker. Slate watches the local project, and each developed path
+dependency, and sends the files that changed in their `src/` and `ext/` to every remote copy as you
+save. It also checks every few seconds, for a change no file event reports: a network filesystem
+written from another machine. Before a cell runs on a remote, any change not yet sent goes first, so
+the cell runs against what you saved.
 
 !!! note "Revise has to be in your own global environment"
     Slate installs Revise into a remote worker only if you have it in your own global `v1.x`
