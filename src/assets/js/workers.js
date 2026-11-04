@@ -94,20 +94,16 @@ function _wpShowTelemetry() {
   open({ nb: (window.__slateState || {}).id, side, mount: box,
          host: r.host && r.host !== 'local' ? r.host : '', port: r.port, label: _wpLabel(side, r.host) });
 }
-// The meters: the dock on that worker, at its telemetry.
-window.wpOpenTelemetry = function (side) {
-  _wpTab = 'tel';
+// The dock on a worker (the one showing, by default) at one of its tabs: the meters open it at its
+// telemetry, the ☰ menu's Worker log at its log.
+function _wpOpenAt(tab, side) {
+  _wpTab = tab;
   const dock = document.getElementById('workerdock');
   side = side === undefined ? (_wpSide || '') : side;
   (dock && dock.classList.contains('open') && side === _wpSide) ? _wpPaintTab() : openWorkerDock(side);
-};
-// The ☰ menu's Worker log: the dock on that worker, at its log.
-window.wpOpenLog = function (side) {
-  _wpTab = 'log';
-  const dock = document.getElementById('workerdock');
-  side = side === undefined ? (_wpSide || '') : side;
-  (dock && dock.classList.contains('open') && side === _wpSide) ? _wpPaintTab() : openWorkerDock(side);
-};
+}
+window.wpOpenTelemetry = (side) => _wpOpenAt('tel', side);
+window.wpOpenLog = (side) => _wpOpenAt('log', side);
 function _wpPaintTab() {
   try { localStorage.setItem('slateWorkerDockTab', _wpTab); } catch (_) {}
   document.querySelectorAll('#workerdock [data-wdtab]').forEach(b => b.classList.toggle('on', b.dataset.wdtab === _wpTab));
