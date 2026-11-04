@@ -124,6 +124,16 @@ function _current_limits(ax)
     o, w = r.origin, r.widths
     return Tuple(Iterators.flatten((o[i], o[i] + w[i]) for i in eachindex(o)))
 end
+# Pin each axis to the finished figure's limits. Makie fits the limits to the visible data when it
+# draws, so a hidden plot or a trace's partial path would otherwise rescale the axes between steps.
+function _pin_limits!(fig)
+    Mk = _mk()
+    for c in fig.content
+        (c isa Mk.Axis || (isdefined(Mk, :Axis3) && c isa Mk.Axis3)) || continue
+        _mkcall(Mk.reset_limits!, c)
+        _mkcall(Mk.limits!, c, _current_limits(c)...)
+    end
+end
 # `view = (ax3, (azimuth, elevation))`, or `(ax3, azimuth)` to turn about the vertical only.
 _view_target(ax, v) = v isa Number ? (Float64(v), ax.elevation[]) : (Float64(v[1]), Float64(v[2]))
 function _set_view!(ax, az_el)
@@ -158,7 +168,8 @@ NamedTuple saying what changes on that step:
 A plot is anything Makie returns from `lines!`, `scatter!`, `callout!`, `trace!`, …; pass several as a
 vector.
 The steps share the slide's step counter with its other builds (step `i` here is build step `i`).
-Rendering mutates `fig`, which ends in its final state. A figure with a transparent background
+Rendering mutates `fig`, which ends in its final state. The axes keep the limits of the finished
+figure throughout, unless a `limits` step moves them. A figure with a transparent background
 (`backgroundcolor = :transparent` on the figure and its axes, e.g. through `update_theme!`) is drawn
 on the slide's own background; its clips are WebM with an alpha channel (VP9), which Chrome and Firefox
 play.
@@ -174,6 +185,7 @@ slide_figure(fig; steps = [(show = wu,), (show = xp, focus = [wu, xp]),
 """
 function slide_figure(fig; steps = NamedTuple[], fps::Integer = 30, px_per_unit::Real = 1.5)
     Mk = _mk()
+    _pin_limits!(fig)
     shown = Any[]
     for st in steps
         haskey(st, :show) && append!(shown, _plots_of(st.show))
