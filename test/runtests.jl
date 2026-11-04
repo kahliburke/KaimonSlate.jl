@@ -101,7 +101,7 @@ const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memos
                    Blobchannel, RemotePool, Regions, Machines, SlateDiagT, Parallel, Animation, Echarts, SlateLook,
                    Engine, Eval, Deps, Envprep, Gateauth, PeerOwnerT, SshTransportT, Tools, Registry, Toolcell, Web,
                    Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, RunRecord, History, SlateApi,
-                   Agentops, Repro, Slides, Debugger, Profiler, Specialist, Findings, ToolDocs, AppRender,
+                   Agentops, Repro, Slides, Recording, Debugger, Profiler, Specialist, Findings, ToolDocs, AppRender,
                    Frontmatter, Export, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, FramePoolT, EmitChannelT, WsOrder, BindObs, RecordDisplay, MatrixDisplay, Confine)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
