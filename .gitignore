@@ -44,3 +44,6 @@ dev/package-lock.json
 # Working notes: design drafts, audits, handoffs. Kept on disk, never committed.
 docs/_*
 dev/*.md
+
+# dev/dupes embedding cache
+dev/dupes/.cache/
