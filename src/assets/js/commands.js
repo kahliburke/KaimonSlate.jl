@@ -408,7 +408,7 @@ R({ id: 'debug.next', label: 'Debugger: step to the next line', group: 'Debug', 
     keys: ['F10'], inst: true, soft: true, available: _hasDbg, run: _dbg('slateDebugStep', 'next') });
 R({ id: 'debug.into', label: 'Debugger: step into a call on this line', group: 'Debug', ctx: ['global'],
     keys: ['F11'], inst: true, soft: true, available: _hasDbg, run: _dbg('slateDebugInto') });
-R({ id: 'debug.out', label: 'Debugger: finish this frame and stop at the caller', group: 'Debug',
+R({ id: 'debug.out', label: 'Debugger: finish this call and stop at the caller (at the cell\'s top level, finish the statement)', group: 'Debug',
     ctx: ['global'], keys: ['Shift-F11'], inst: true, soft: true, available: _hasDbg,
     run: _dbg('slateDebugStep', 'out') });
 R({ id: 'debug.continue', label: 'Debugger: continue to the next breakpoint', group: 'Debug',
