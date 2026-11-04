@@ -623,15 +623,14 @@ function _replay_scaffold!(m::Module, source::AbstractString; cid::AbstractStrin
         try; Base.invokelatest(Core.eval, m, s)
         catch e; @info "slate memo: import replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
     end
-    # Top-level definitions (functions, types, macros, literal consts): the entry stores none of the
-    # names they bind (see `_eval_one`), so they are evaluated again here. Each keeps its line node so
-    # the methods carry this cell's `cell:<id>` file, the tag that later removes them.
+    # The statements that re-establish the cell's definitions (`_replay_plan`): the entry stores none of
+    # the names they bind (see `_eval_one`), so they run again here, in source order. Each carries a line
+    # node naming this cell's `cell:<id>` file, the tag that later removes the methods it defines.
     isempty(cid) || _redefine_cell!(m, cid, source)
-    ln = LineNumberNode(1, Symbol(fname))
-    for s in stmts
-        s isa LineNumberNode && (ln = s; continue)
-        _is_definition_stmt(s) || continue
-        try; Base.invokelatest(Core.eval, m, Expr(:toplevel, ln, s))
+    plan = _replay_plan(source)
+    for i in plan.idx
+        ln, s = plan.stmts[i]
+        try; Base.invokelatest(Core.eval, m, Expr(:toplevel, LineNumberNode(ln.line, Symbol(fname)), s))
         catch e; @info "slate memo: definition replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
     end
     for s in stmts                                   # top-level `@bind name W(…)` — RE-REGISTER the widget

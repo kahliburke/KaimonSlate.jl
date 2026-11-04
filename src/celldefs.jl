@@ -65,53 +65,153 @@ function _is_definition_stmt(s)
     return false
 end
 
-_toplevel_stmts(src::AbstractString) = begin
-    top = try; Meta.parseall(String(src)); catch; return Any[]; end
-    top isa Expr && top.head === :toplevel ? Any[a for a in top.args if !(a isa LineNumberNode)] : Any[]
+# A cell's top-level statements, each with the line node before it, `begin` blocks flattened: a
+# `begin` opens no scope, so a definition inside one is a top-level definition.
+function _flat_statements(src::AbstractString)
+    out = Tuple{LineNumberNode,Any}[]
+    top = try; Meta.parseall(String(src)); catch; return out; end
+    (top isa Expr && top.head === :toplevel) || return out
+    ln = Ref(LineNumberNode(1, :none))
+    walk(args) = for a in args
+        if a isa LineNumberNode
+            ln[] = a
+        elseif a isa Expr && a.head === :block
+            walk(a.args)
+        else
+            push!(out, (ln[], a))
+        end
+    end
+    walk(top.args)
+    return out
+end
+_toplevel_stmts(src::AbstractString) = Any[s for (_, s) in _flat_statements(src)]
+
+function _type_name(n)
+    n isa Expr && n.head === :(<:) && (n = n.args[1])
+    n isa Expr && n.head === :curly && (n = n.args[1])
+    return n isa Symbol ? n : nothing
 end
 
-# The global names a cell's definition statements bind: function and macro names, type names,
-# anonymous-function globals, literal consts. Qualified extensions (`Base.show`) bind nothing here.
-function _definition_names(src::AbstractString)
-    out = Set{Symbol}()
-    for s in _toplevel_stmts(src)
-        _is_definition_stmt(s) || continue
-        d = _unwrap_definition(s)
-        if d.head === :macro
-            sig = _def_signature(d); sig === nothing || (sig.args[1] isa Symbol && push!(out, Symbol("@", sig.args[1])))
-        elseif d.head in (:function, :(=))
-            sig = _def_signature(d)
-            if sig !== nothing
-                sig.args[1] isa Symbol && push!(out, sig.args[1])
-            elseif d.args[1] isa Symbol
-                push!(out, d.args[1])
-            end
-        elseif d.head === :struct
-            n = d.args[2]
-            n isa Expr && n.head === :(<:) && (n = n.args[1])
-            n isa Expr && n.head === :curly && (n = n.args[1])
-            n isa Symbol && push!(out, n)
-        elseif d.head in (:abstract, :primitive)
-            n = d.args[1]
-            n isa Expr && n.head === :(<:) && (n = n.args[1])
-            n isa Expr && n.head === :curly && (n = n.args[1])
-            n isa Symbol && push!(out, n)
-        elseif d.head === :const
-            a = d.args[1].args[1]
-            a isa Symbol && push!(out, a)
+_is_function_value(x) = x isa Expr && x.head in (:(->), :function)
+
+# The global names one definition statement binds: a function or macro name, a type name, an
+# anonymous-function global, a literal const. A qualified extension (`Base.show`) binds nothing.
+function _stmt_definition_names!(out::Set{Symbol}, s)
+    d = _unwrap_definition(s)
+    d isa Expr || return out
+    if d.head === :macro
+        sig = _def_signature(d); sig === nothing || (sig.args[1] isa Symbol && push!(out, Symbol("@", sig.args[1])))
+    elseif d.head in (:function, :(=))
+        sig = _def_signature(d)
+        if sig !== nothing
+            sig.args[1] isa Symbol && push!(out, sig.args[1])
+        elseif d.args[1] isa Symbol
+            push!(out, d.args[1])
         end
+    elseif d.head === :struct
+        n = _type_name(d.args[2]); n === nothing || push!(out, n)
+    elseif d.head in (:abstract, :primitive)
+        n = _type_name(d.args[1]); n === nothing || push!(out, n)
+    elseif d.head === :const
+        a = d.args[1].args[1]
+        a isa Symbol && push!(out, a)
     end
     return out
 end
 
-# The functions a cell adds methods to, as evaluable paths: `f`, `var"@m"`'s `Symbol("@m")`, or a
-# qualified `Base.show`. Type constructors are left out: deleting a struct's default constructors
-# breaks the type when its unchanged definition re-evaluates as a no-op.
+# What a top-level `let` makes global: `(functions, all)`. `functions` are the globals it defines as
+# functions (`global f(x) = …`, `global function f … end`, `global g = x -> …`, or a `function f` the
+# block declared `global f` for); `all` adds the plain globals it assigns. Function bodies inside the
+# block are not entered: a `global` there binds when the function is called.
+function _let_globals(s)
+    fns = Set{Symbol}(); all = Set{Symbol}(); declared = Set{Symbol}(); localdefs = Set{Symbol}()
+    function decl!(a)
+        if a isa Symbol
+            push!(declared, a); push!(all, a)
+        elseif a isa Expr && a.head === :function
+            sig = _def_signature(a); sig !== nothing && sig.args[1] isa Symbol && (push!(fns, sig.args[1]); push!(all, sig.args[1]))
+        elseif a isa Expr && a.head === :(=)
+            sig = _def_signature(a)
+            if sig !== nothing
+                sig.args[1] isa Symbol && (push!(fns, sig.args[1]); push!(all, sig.args[1]))
+            elseif a.args[1] isa Symbol
+                push!(all, a.args[1])
+                _is_function_value(a.args[2]) && push!(fns, a.args[1])
+            end
+        end
+    end
+    function walk(ex)
+        ex isa Expr || return
+        if ex.head === :global
+            foreach(decl!, ex.args)
+        elseif (sig = _def_signature(ex)) !== nothing
+            sig.args[1] isa Symbol && push!(localdefs, sig.args[1])
+        else
+            foreach(walk, ex.args)
+        end
+    end
+    foreach(walk, s.args)
+    union!(fns, intersect(localdefs, declared))
+    return (fns, all)
+end
+
+# `name = let … end` whose value is a function (its last statement is one).
+function _let_function_assignment(s)
+    (s isa Expr && s.head === :(=) && length(s.args) == 2 && s.args[1] isa Symbol) || return nothing
+    rhs = s.args[2]
+    (rhs isa Expr && rhs.head === :let && length(rhs.args) == 2 && rhs.args[2] isa Expr) || return nothing
+    body = [a for a in rhs.args[2].args if !(a isa LineNumberNode)]
+    return !isempty(body) && _is_function_value(body[end]) ? s.args[1] : nothing
+end
+
+"""
+    _replay_plan(src) -> (; stmts, idx, names)
+
+Which of a cell's statements re-establish its definitions on a cache restore, and the globals they
+bind, so a memo entry stores everything else. `stmts` are the flattened top-level statements with
+their line nodes; `idx` indexes the ones to replay, in source order:
+
+- definition statements (`_is_definition_stmt`), including those inside a top-level `begin`;
+- a top-level `let` that defines a global function, replayed whole, since the function may close
+  over the block's locals;
+- `name = let … end` whose value is a function, for the same reason.
+
+A replayed `let` costs what running it costs; it is the only way its function can come back. The hub
+and the worker both call this, so the entry's contents and the restore agree.
+"""
+function _replay_plan(src::AbstractString)
+    stmts = _flat_statements(src)
+    idx = Int[]; names = Set{Symbol}()
+    for (i, (_, s)) in enumerate(stmts)
+        if _is_definition_stmt(s)
+            push!(idx, i); _stmt_definition_names!(names, s)
+        elseif s isa Expr && s.head === :let
+            fns, all = _let_globals(s)
+            isempty(fns) && continue
+            push!(idx, i); union!(names, all)
+        elseif (n = _let_function_assignment(s)) !== nothing
+            push!(idx, i); push!(names, n)
+        end
+    end
+    return (; stmts, idx, names)
+end
+
+# The global names a cell's replayed statements bind (see `_replay_plan`).
+_definition_names(src::AbstractString) = _replay_plan(src).names
+
+# The functions a cell adds methods to, as evaluable paths: `f`, `var"@m"`'s `Symbol("@m")`, a
+# qualified `Base.show`, or a function a `let` block defines globally. Type constructors are left out:
+# deleting a struct's default constructors breaks the type when its unchanged definition re-evaluates
+# as a no-op.
 function _defined_function_paths(src::AbstractString)
     out = Any[]
-    for s in _toplevel_stmts(src)
+    for (_, s) in _flat_statements(src)
         d = _unwrap_definition(s)
         d isa Expr || continue
+        if d.head === :let
+            for f in _let_globals(d)[1]; f in out || push!(out, f); end
+            continue
+        end
         sig = _def_signature(d)
         sig === nothing && continue
         f = sig.args[1]

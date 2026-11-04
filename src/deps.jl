@@ -1073,11 +1073,8 @@ end
 # A removed cell's methods and a lost name's binding are queued for the kernel (`take_forget!`,
 # applied by `flush_forget!` before the next cell runs), and everything that read or also defined
 # them is restaled. A cell whose id changed but whose source didn't is a rename, so its methods stay.
-# A cell that appears with a source the namespace has never run (an undone delete) is restaled, since
-# the definitions it brings were taken back when it went.
-#
-# Lost names are not removed while an opaque cell is in the notebook: an `include` or `eval` may be
-# what defines them now, and the analysis can't see it.
+# A cell that appears (an undone delete) runs again, since the definitions it brings were taken back
+# when it went.
 function _track_definitions!(report::Report)
     now = Dict{String,Tuple{UInt64,Set{Symbol}}}(c.id => (c.src_hash, copy(c.writes))
                                                  for c in report.cells if c.kind == CODE)
@@ -1100,13 +1097,17 @@ function _track_definitions!(report::Report)
     for id in Iterators.flatten((gone, edited)); union!(lost, prev[id][2]); end
     setdiff!(lost, written)
     isempty(gone) || union!(get!(Set{String}, report.meta, "_pending_forget"), gone)
-    if !isempty(lost) && !any(c -> :opaque in c.flags, report.cells)
-        union!(get!(Set{Symbol}, report.meta, "_pending_unbind"), lost)
-    end
+    pending = get!(Set{Symbol}, report.meta, "_pending_unbind")
+    union!(pending, lost); setdiff!(pending, written)
     touched = union(lost, gone_names)
     for c in report.cells
         c.kind == CODE || continue
-        (c.id in appeared || !isdisjoint(c.reads, touched) || !isdisjoint(c.writes, gone_names)) && restale!(c)
+        if c.id in appeared
+            # Its definitions were taken back when it went, so it runs again even if `locked`.
+            c.state = STALE; bump_rev!(c)
+        elseif !isdisjoint(c.reads, touched) || !isdisjoint(c.writes, gone_names)
+            restale!(c)
+        end
     end
     isempty(gone) || _do_cleanup_cells(report.id, collect(gone))
     return report
@@ -1120,8 +1121,20 @@ The caller hands them to [`forget!`](@ref) on every kernel the notebook runs cel
 """
 function take_forget!(report::Report)
     cells = pop!(report.meta, "_pending_forget", Set{String}())
-    names = pop!(report.meta, "_pending_unbind", Set{Symbol}())
-    return (sort!(collect(String, cells)), sort!(collect(Symbol, names)))
+    names = Symbol[]
+    pending = get(report.meta, "_pending_unbind", nothing)
+    if pending isa AbstractSet && !isempty(pending)
+        # A name some cell writes again is no longer lost.
+        for c in report.cells
+            c.kind == CODE && setdiff!(pending, c.writes)
+        end
+        # While an `include`/`eval` barrier or a macro not yet expanded is in the notebook, it may be
+        # what defines a name now; keep the name queued until the analysis can see.
+        if !any(c -> :opaque in c.flags, report.cells) && isempty(pending_macro_cells(report))
+            names = sort!(collect(Symbol, pending)); empty!(pending)
+        end
+    end
+    return (sort!(collect(String, cells)), names)
 end
 
 # Names a cell changes in place rather than defines: what it mutates, plus what it both reads and

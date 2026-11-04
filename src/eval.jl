@@ -1157,6 +1157,9 @@ function _memo_key(report::Report, cell::Cell)
     core = (cell.source, (:trace in cell.flags), depsrc, svals)
     isempty(frozen) || (core = (core..., frozen))   # locked-upstream freeze stamps (cells with none keep their old key)
     isempty(assets) || (core = (core..., assets))   # @asset file content (asset-free cells keep their old key)
+    # A cell whose entry leaves its definitions to be replayed (`_replay_plan`) gets a key of its own,
+    # so a Slate that would restore the entry without replaying them never finds it.
+    isempty(_replay_plan(cell.source).idx) || (core = (core..., :replays_definitions))
     return string(hash(core); base = 16)
 end
 

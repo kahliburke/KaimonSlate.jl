@@ -138,6 +138,16 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
                 (["F" => "gf() = 1", "C" => "y = gf()"], ("F" => nothing, ["F" => "gf() = 1", "C" => "y = gf()"])),
             "cell renamed, source unchanged" =>
                 (["F" => "gf() = 1", "C" => "y = gf()"], (["F2" => "gf() = 1", "C" => "y = gf()"],)),
+            "locked cell deleted, then the delete undone" =>
+                (["F locked" => "gf() = 1", "C" => "y = gf()"],
+                 ("F locked" => nothing, ["F locked" => "gf() = 1", "C" => "y = gf()"])),
+            "let-defined function widened" =>
+                (["F" => "let k = 1\n    global lk(x::Int) = k\nend", "C" => "y = lk(1)"],
+                 "F" => "let k = 2\n    global lk(x::Integer) = k\nend"),
+            "function in a begin block deleted" =>
+                (["F" => "begin\n    bf() = 1\nend", "C" => "y = bf()"], "F" => nothing),
+            "definer edited away and back before anything runs" =>
+                (["A" => "q = 41", "B" => "z = q + 1"], ("A" => "q2 = 41", "A" => "q = 41")),
         ]
         @test isempty(failing(cases))
     end
@@ -150,5 +160,20 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
         @test names("Base.show(io::IO, x::S) = print(io, 1)") == Symbol[]      # extends, binds nothing
         paths = RE._defined_function_paths("f(x) = 1\nBase.show(io::IO, x::S) = 1\nmacro m() end\nstruct T; end")
         @test paths == Any[:f, :(Base.show), Symbol("@m")]                    # constructors left out
+    end
+
+    @testset "what a restore replays" begin
+        plan(src) = (p = RE._replay_plan(src); (p.idx, sort!(collect(p.names))))
+        # a `begin` opens no scope: its definitions are top-level definitions, its compute is not
+        @test plan("begin\n  f(x) = 1\n  y = f(2)\nend") == ([1], [:f])
+        # a `let` that defines a global function replays whole, with the globals it assigns
+        @test plan("let k = 3\n global scaled(x) = k * x\n global kk = k\nend\nt = scaled(2)") == ([1], [:kk, :scaled])
+        @test plan("let c = 1\n global h\n function h(x) x + c end\nend") == ([1], [:h])
+        @test plan("g = let s = 2; x -> x * s; end") == ([1], [:g])
+        # a `let` that only computes is not a definition
+        @test plan("let; global a = sum(1:10); end") == (Int[], Symbol[])
+        @test plan("y = compute(1)\nz = y + 1") == (Int[], Symbol[])
+        # a global function a `let` defines has its methods taken back on re-run
+        @test RE._defined_function_paths("let k = 1\n global lk(x) = k\nend") == Any[:lk]
     end
 end
