@@ -23,6 +23,7 @@ module SlateLook; include("test_slate_look.jl"); end
 module Engine;    include("test_engine.jl");    end
 module Eval;      include("test_eval.jl");      end
 module Deps;      include("test_deps.jl");      end
+module Edits;     include("test_edits.jl");     end
 module Envprep;   include("test_envprep.jl");   end
 module Tools;     include("test_tools.jl");     end
 module Registry;  include("test_registry.jl");  end

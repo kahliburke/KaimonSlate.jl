@@ -251,17 +251,33 @@ end
 
 const _BROADCAST_ASSIGN = Symbol(".=")
 
-# Walk the AST collecting in-place mutation as writes (also reads — you read the
-# object to mutate it). Covers `f!(x, …)`, `x[i] = …`, `x.f = …`, `x .= …`.
+# Updating assignment heads: `+=`, `.*=`, `|=`, … — every `op=` the parser produces, minus the
+# comparisons that merely end in `=`.
+function _is_update_head(h::Symbol)
+    s = string(h)
+    length(s) >= 2 && endswith(s, "=") || return false
+    return !(s in ("==", "===", "!=", "!==", "<=", ">=", ".==", ".!=", ".<=", ".>=", ".===", ".!==", ":="))
+end
+
+# A bang callee, bare (`push!`) or qualified (`Base.setindex!`).
+_bang_callee(f::Symbol) = _is_bang_name(f)
+_bang_callee(f::Expr) = f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode &&
+                        f.args[2].value isa Symbol && _is_bang_name(f.args[2].value)
+_bang_callee(::Any) = false
+
+# Walk the AST collecting in-place mutation as writes (also reads — you read the object to mutate
+# it). Covers `f!(x, …)` and `Mod.f!(x, …)`, `x[i] = …`, `x.f = …`, `x .= …`, and the updating forms
+# of each: `x[i] += 1`, `c[] -= 1`, `x.f *= 2`, `v .*= 2`. A plain `s += 1` rebinds `s` rather than
+# mutating it, which the dataflow pass already records as a read and a write.
 function _collect_mutations!(writes::Set{Symbol}, reads::Set{Symbol}, ex)
     if ex isa Expr
-        if ex.head === :call && length(ex.args) >= 2 &&
-           ex.args[1] isa Symbol && _is_bang_name(ex.args[1])
+        if ex.head === :call && length(ex.args) >= 2 && _bang_callee(ex.args[1])
             b = _base_symbol(ex.args[2])
             b === nothing || (push!(writes, b); push!(reads, b))
-        elseif (ex.head === :(=) || ex.head === _BROADCAST_ASSIGN) && !isempty(ex.args)
+        elseif (ex.head === :(=) || ex.head === _BROADCAST_ASSIGN || _is_update_head(ex.head)) && !isempty(ex.args)
             lhs = ex.args[1]
-            if ex.head === _BROADCAST_ASSIGN || (lhs isa Expr && (lhs.head === :ref || lhs.head === :.))
+            dotted = startswith(string(ex.head), ".")
+            if dotted || (lhs isa Expr && (lhs.head === :ref || lhs.head === :.))
                 b = _base_symbol(lhs)
                 b === nothing || (push!(writes, b); push!(reads, b))
             end
@@ -1045,6 +1061,58 @@ function build_dependencies!(report::Report)
         backref[string(name)] = String[rid, wid]
     end
     report.meta["backref"] = backref
+    close_staleness!(report)
+    return report
+end
+
+# Names a cell changes in place rather than defines: what it mutates, plus what it both reads and
+# rebinds (`acc += 1`, `df = clean(df)`). Running such a cell a second time applies its change to its
+# own previous result.
+_in_place_updates(c::Cell) = union(c.mutates, intersect(c.reads, setdiff(c.writes, c.provides)))
+
+# The cell an in-place update's value comes from: the nearest earlier code cell that assigns `n`
+# without reading or mutating it.
+function _value_origin(report::Report, idx::Int, n::Symbol)
+    for j in idx-1:-1:1
+        o = report.cells[j]
+        (o.kind == CODE && n in o.writes) || continue
+        (n in o.mutates || n in o.reads || n in o.provides) && continue
+        return o
+    end
+    return nothing
+end
+
+"""
+    close_staleness!(report)
+
+Bring the stale set to the closure the current graph implies, after any rebuild: everything
+downstream of a stale cell is stale, and a stale cell that updates a value in place has that value's
+origin cell restaled too, so the update applies to a fresh value instead of stacking on the result of
+its last run (`push!(v, 2)` edited to `push!(v, 2, 3)` must not leave four elements).
+
+The rebuild that recovers a macro's writes runs after the edit has already restaled through the old
+graph; without this pass the new edges reach no one, and a reader keeps its old value.
+"""
+function close_staleness!(report::Report)
+    changed = true
+    while changed
+        changed = false
+        stale = Set{String}(c.id for c in report.cells if c.kind == CODE && c.state == STALE)
+        isempty(stale) && return report
+        for id in dependents_of(report, stale)
+            c = get(report.byid, id, nothing)
+            (c === nothing || c.state == STALE || c.state == RUNNING) && continue
+            restale!(c) && (changed = true)
+        end
+        for (i, c) in enumerate(report.cells)
+            (c.kind == CODE && c.state == STALE) || continue
+            for n in _in_place_updates(c)
+                o = _value_origin(report, i, n)
+                (o === nothing || o.state == STALE || o.state == RUNNING) && continue
+                restale!(o) && (changed = true)
+            end
+        end
+    end
     return report
 end
 
