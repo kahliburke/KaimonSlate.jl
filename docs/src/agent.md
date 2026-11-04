@@ -16,8 +16,9 @@ notebook's SSE so the chat pane updates live (streaming text, tool calls, and fi
 
 ### The tool surface
 
-A selection of the surface. The full set runs to more than forty tools, with the worker, region,
-publishing and export ones documented on their own pages.
+A selection of the surface. The full set runs to about seventy tools, with the worker, region,
+publishing and export ones documented on their own pages, and the debugger's `dbg_*` and profiler's
+`prof_*` tools on [Debugging a Cell](debugger.md) and [Profiling a Cell](profiler.md).
 
 | Tool | Purpose |
 | --- | --- |
@@ -44,7 +45,10 @@ region's cells keep their bindings and packages. Scratch output is read-only tex
 empties it.
 
 Tool calls are shown in the chat with friendly labels (e.g. `➕ add cell`, `🖼 view
-figure`) rather than raw `mcp__kaimon__…` names.
+figure`) rather than raw `mcp__kaimon__…` names. Consecutive calls by the same agent are one block,
+headed by how many actions it took, and the same call made again and again (a cell run until it
+passes) is one line with a count, **×7**. Click a call for its arguments and result; a counted line
+lists every call. A **→ id** chip goes to the cell the call touched.
 
 !!! tip "The agent can see your plots"
     `slate_view` returns the cell's figure as an image — CairoMakie rasters and ECharts canvas
@@ -104,6 +108,46 @@ agent process; the existing Codex login and global configuration are preserved.
 Codex's native file and shell tools still follow its own approval and sandbox settings.
 Kaimon's `notebook` and `specialist` presets do not fully restrict those native tools;
 Kaimon reports that limitation when the agent starts.
+
+## The panel
+
+Drag the panel's left edge to make it wider or narrower; the notebook's cells move over to stay
+clear of it, and the width is remembered. Double-click the edge to go back to the default. **⛶**
+opens the panel full screen for reading long replies, and **🗗** puts it back. Clicking a **→ id**
+chip in full screen returns to the notebook at that cell.
+
+In the message box, **↑** on the first line recalls what you sent before, newest first, and **↓** on
+the last line moves back towards what you were typing. **💭** shows or hides the agent's thinking,
+and **⚙** opens the agent's settings.
+
+## Asking for more access
+
+A tool outside the agent's [permission preset](#Models-and-permissions) does not simply fail: the
+agent's request appears in the page with **Allow once**, **Always allow** and **Deny**. Silence
+refuses it after two minutes. The agent can also ask, with `request_file_access`, to read and write
+files; granted, it gets the `lab` preset from the next message.
+
+## Specialists
+
+The agent can bring in a **specialist**: another agent given one job, the tools for that job and
+nothing else. A debugging specialist steps through a cell in the [debugger](debugger.md); a
+profiling one works in the [profiler](profiler.md). The workspace shows it working beside you. More
+roles can be defined in `specialists.toml` in your config home, and **Settings → Specialists** sets
+the model each role runs on.
+
+A specialist that needs to know something it cannot find out asks, and the question reaches both
+you and the agent that brought it in. It appears as a card above the page with the answer's choices
+and room for a comment; either of you can answer.
+
+When it is done, a specialist reports **findings**: the cell it holds responsible, the claim in a
+sentence, and the evidence. Each finding says which upstream cells the investigation never looked
+at, and a checker reads the claim on its own and marks it confirmed or disputed. The agent proposes
+a plan from the findings for you to approve or change. **Settings → This notebook → Carry findings
+in the file** keeps them in the notebook's `.jl`.
+
+The **background checker** (Settings → Specialists) is a specialist nobody summons. Once the
+notebook goes quiet after a turn, it reads the cells that changed, read-only, and says something only
+when it can name a cell and a problem.
 
 ## Stopping
 
