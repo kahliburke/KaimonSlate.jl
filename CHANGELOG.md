@@ -37,6 +37,25 @@ were written when they went out. They are marked.
   edit it. Images resolve from the file's own folder, and a link to another project file opens it in
   the panel.
 
+- A cell that defines functions, structs or macros next to an expensive computation is cached. Its
+  entry stores the computed values, and on restore the definitions run again from the cell's source,
+  so cells below can call them. This covers definitions inside a top-level `begin`, and a `let` that
+  only names values and defines functions. Values of a type the notebook defines restore too.
+
+- Editing project source marks the cells that reach the edited code through other functions, not only
+  the cells that name it. Slate uses the code the compiler invalidates and the package's own call
+  graph, so a cell restored from the cache is found too. An edited `show` method marks the cells that
+  build or hold a value of its type. The rule that marked every cell using a package when one of its
+  exports changed is gone.
+
+### Changed
+
+- A cached result is keyed on every package the notebook loads, directly or through another package,
+  and on the Julia version. Cached cells recompute once after upgrading.
+- A cell that runs `eval` or `include` stops being a barrier for the cells below it once it has run:
+  they depend on it only through the names it bound, and they can be cached. Before it has run, or
+  after an edit, everything below it still waits on it.
+
 ### Fixed
 
 - Copying rendered math gives its LaTeX source, `$…$` inline and `$$…$$` for display, with a line
@@ -58,6 +77,19 @@ were written when they went out. They are marked.
 - An agent in the notebook's panel that closes its notebook during a turn carries on with the turn.
   When the notebook opens again, the agent and its transcript are back in the panel, and a tab
   showing the notebook as closed returns to it by itself. (#78)
+- Deleting or renaming a cell that defined a function or a global removes it from the namespace, so a
+  cell still using it fails as it would in a fresh run. Re-running a cell first removes the methods its
+  previous run defined, so a changed signature doesn't leave the old method winning dispatch. (#33)
+- Editing a cell that defines something through a macro (`Base.@kwdef`, `@enum`, a notebook macro)
+  restales the cells that read it.
+- Re-running a cell that changes a value in place (`push!(v, …)`, `acc += 1`, `v .*= 2`, `c[] += 1`)
+  re-runs the cell that defines the value first, so the change applies once.
+- A cell that calls a notebook function depends on what the function's body reads, and is the writer
+  of what it assigns or mutates, including an argument a helper mutates. A loop at the top of a cell
+  that updates an existing global is an update of it.
+- A global a cell binds in a way the analysis can't see, such as through a helper that `eval`s into
+  the notebook, gets its dependency edges once the cell has run.
+- Deleting a cell from the notebook runs its `slate_on_cleanup` callbacks.
 
 ## [1.12.1] - 2026-10-26
 
