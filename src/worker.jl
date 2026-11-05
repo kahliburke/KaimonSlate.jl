@@ -2282,11 +2282,26 @@ end
 # The tracked definitions that reach a changed name through the package source, transitively. The
 # compiler's invalidations only cover code that has been compiled in this worker; a cell restored
 # from the cache never ran its calls, and this is what still finds it.
-function _src_reaching(changed)
+function _src_reaching(changed, queue)
+    # Only the packages this pass revised: names are matched bare, and across every tracked package
+    # an edit's names would run into unrelated code that happens to share them.
+    paths = Set{String}()
+    for item in queue
+        try
+            pd = item[1]
+            for rpath in pd.info.files
+                push!(paths, _file_path(pd, rpath))
+            end
+        catch
+        end
+    end
     refs = Dict{String,Set{String}}()
     lock(_SRC_DEFS_LOCK) do
-        for d in values(_SRC_REFS), (k, v) in d
-            union!(get!(Set{String}, refs, k), v)
+        for path in paths
+            d = get(_SRC_REFS, path, nothing); d === nothing && continue
+            for (k, v) in d
+                union!(get!(Set{String}, refs, k), v)
+            end
         end
     end
     return collect(_reaching_defs(refs, changed))
@@ -2544,7 +2559,7 @@ function _start_src_watcher()
                 _LAST_SRC_ERR[] = ""
                 names = _changed_names(queue)
                 _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
-                append!(names, _src_reaching(names)); append!(names, _invalidated_names(invs, queue)); unique!(names)
+                append!(names, _src_reaching(names, queue)); append!(names, _invalidated_names(invs, queue)); unique!(names)
                 @info "slate hot-reload: revised" files = length(queue) changed = names
                 isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
                 _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
@@ -2564,7 +2579,7 @@ function __slate_revise()
     invs, _ = _logged_revise(Main.Revise)
     names = _changed_names(queue)
     _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
-    append!(names, _src_reaching(names)); append!(names, _invalidated_names(invs, queue))
+    append!(names, _src_reaching(names, queue)); append!(names, _invalidated_names(invs, queue))
     return unique!(names)
 end
 
