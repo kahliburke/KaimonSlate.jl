@@ -84,3 +84,18 @@ end
     @test marker !== nothing
     @test ws.got[marker + 1] == "after"  # …immediately before the frame that carried it
 end
+
+# See #73
+@testset "a closed page leaves the registry" begin
+    RE = NS.ReportEngine
+    nb = NS.LiveNotebook("wsreg", "/tmp/wsreg.jl", RE.parse_report("x = 1"; title = "wsreg"),
+        RE.InProcessKernel(), 1, String[], String[], ReentrantLock(), Channel{String}[],
+        ReentrantLock(), "", false, Dict{String,String}())
+    a = _wsconn(4); b = _wsconn(4)
+    NS._ws_register!(nb, a); NS._ws_register!(nb, b)
+    NS._ws_unregister!(nb, a)
+    @test NS._WS_CONNS["wsreg"] == [b]
+    NS._ws_unregister!(nb, b)
+    @test isempty(NS._WS_CONNS["wsreg"])
+    delete!(NS._WS_CONNS, "wsreg")
+end

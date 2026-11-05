@@ -736,12 +736,21 @@ function openExport(preset) {
   const ss = document.getElementById('sitesource'); if (ss) ss.checked = localStorage.getItem('slate_sitesource') !== '0';
   const srn = document.getElementById('siterunnable'); if (srn) srn.checked = localStorage.getItem('slate_siterunnable') === '1';
   const sh = document.getElementById('sitehistory'); if (sh) sh.checked = localStorage.getItem('slate_sitehistory') === '1';
-  ['htmltheme', 'htmlcode', 'htmlrenderer', 'exoutputs', 'mdimg', 'sitetheme'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
+  // A stored value the select has no option for (an older or renamed choice) leaves the default in place.
+  ['htmltheme', 'htmlcode', 'htmlrenderer', 'exoutputs', 'mdimg', 'sitetheme'].forEach(id => {
+    const el = document.getElementById(id), v = localStorage.getItem('slate_' + id);
+    if (el && v != null && (el.tagName !== 'SELECT' || [...el.options].some(o => o.value === v))) el.value = v;
+  });
   const hw = document.getElementById('htmlwidth'); if (hw) hw.value = localStorage.getItem('slate_htmlwidth') || '900'; _htmlWidthSync();
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
+  // The app theme picker lists the palettes the Settings dropdown does (`SLATE_UI_THEMES`); "" = Midnight.
+  const aet = document.getElementById('appexptheme');
+  if (aet && !aet.options.length && typeof SLATE_UI_THEMES !== 'undefined')
+    aet.innerHTML = SLATE_UI_THEMES.map(t =>
+      `<option value="${t.name === 'midnight' ? '' : t.name}">${window.slateEscHtml(t.label)}</option>`).join('');
   ['appdir', 'apptitle', 'appexptheme', 'apppagewidth', 'appport', 'appinclude'].forEach(id => {
     const el = document.getElementById(id), v = localStorage.getItem('slate_' + id);
-    if (el && v != null) el.value = v;
+    if (el && v != null && (el.tagName !== 'SELECT' || [...el.options].some(o => o.value === v))) el.value = v;
   });
   // Seed the destination with `dist/<notebook>` — the conventional place for build output, and a
   // per-notebook subfolder so exporting a second notebook doesn't write over the first. FILLED IN

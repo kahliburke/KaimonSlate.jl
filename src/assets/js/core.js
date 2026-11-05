@@ -10,6 +10,10 @@ const _apipath = p => p.replace(/^\/api\//, '/api/' + NB_ID + '/');
 // can reach it too — a classic script's lexical `const` is invisible to them.
 window.slateEscHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g,
   c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// A value as a JS string argument inside an inline handler attribute: `onclick="f(' + slateJsArg(v) + ')"`.
+// HTML-escaping alone is not enough there: the attribute is decoded before the handler is compiled,
+// so an escaped `'` comes back as a quote that ends the string.
+window.slateJsArg = v => window.slateEscHtml(JSON.stringify(v == null ? '' : String(v)));
 
 // Is this page an APP (server_app.jl)? Read from the bootstrap object the server injects into
 // <head>, so it is true from the very first script — `body.app` is only added on DOMContentLoaded
@@ -342,7 +346,15 @@ window.Slate.asset = function (path) {
     const b = atob(a.data), n = b.length, u = new Uint8Array(n);
     for (let i = 0; i < n; i++) u[i] = b.charCodeAt(i);
     get = Promise.resolve(u.buffer);
-  } else { get = fetch(a.url).then(r => r.arrayBuffer()); }   // served blob (live / published)
+  } else {                                          // served blob (live / published)
+    // Check the status. A blob the preview sweep has pruned answers 404 with a short text body, and
+    // `arrayBuffer()` hands that body back as data: a `dtype` asset then reinterprets the error text
+    // as a typed array and the caller plots it.
+    get = fetch(a.url).then(r => {
+      if (!r.ok) throw new Error('Slate.asset: ' + a.url + ' — ' + r.status + ' ' + r.statusText);
+      return r.arrayBuffer();
+    });
+  }
   return get.then(buf => {
     if (a.dtype) return _slateNdarray(a, buf);      // packed numeric array → ndarray-lite
     const m = a.mime || '';
@@ -613,51 +625,85 @@ window.Slate.replay = {
     }
     return Array.from(flat);        // rank ≥ 3 has no direct chart field; hand back the flat run
   },
-  // `marks` each carry at least `{id, control}`; `apply(slice, mark)` is the renderer's one step.
+  // Two domains naming the same positions in the same order.
+  sameDomain: function (a, b) {
+    const R = window.Slate.replay;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!R.same(a[i], b[i])) return false;
+    return true;
+  },
+  // `marks` are ONE figure's, each carrying at least `{id, control}`; `apply(slice, mark)` is the
+  // renderer's one step.
+  //
+  // A figure's marks on one control move together or not at all. They are wired as a group, and only
+  // when every one of them has a sweep over the same domain and every sweep's data has loaded; then
+  // each move applies one index to all of them. Wired one by one, a mark whose sweep failed, or one
+  // exported at a coarser stride, stayed behind while the others moved, and the figure showed data
+  // from different positions with nothing to say so. A group that cannot be wired leaves the figure
+  // as exported for that control, and says why in the console.
   wire: function (marks, apply) {
     if (window.Slate.isLive()) return;
-    const R = window.Slate.replay;
+    const R = window.Slate.replay, table = window.__slateReplays || {};
+    const groups = new Map();
     (marks || []).forEach(function (m) {
-      // A mark names a SWEEP, not an asset: what shipped — and at what resolution — is the export's
-      // decision, published in this table. A mark with no entry simply never wires, so a figure whose
-      // sweep was skipped leaves its control visibly disabled instead of failing at the first drag.
-      const sweep = (window.__slateReplays || {})[m.id];
-      if (!sweep) return;
-      const hosts = R.hosts(m.control);
+      if (!groups.has(m.control)) groups.set(m.control, []);
+      groups.get(m.control).push(m);
+    });
+    groups.forEach(function (ms, control) {
+      const hosts = R.hosts(control);
       if (!hosts.length) return;
-      // A sweep whose payload rode INLINE rather than in a binary asset. Prose is the case: a position
-      // is a few short strings, and the fetch/decode/narrow path exists to move megabytes of floats.
-      // Nothing to await, so the control enables immediately.
-      const inline = Array.isArray(sweep.values) ? sweep.values : null;
-      const loaded = inline ? null : window.Slate.asset(sweep.asset);
-      const run = function (src) {
-        const key = R.read(src);
-        const i = R.index(sweep.domain || [], key);
-        if (i < 0) return;
-        // A control surfaced beside several figures renders once per cell. Push the mover's state onto
-        // its copies, or the reader drags one strip and the others sit there stating something false.
-        hosts.forEach(function (h) {
-          if (h !== src) R.mirror(h, key);
-          R.paint(h);
-          R.relabel(h, key);
-        });
-        if (inline) { apply(inline[i], m, i); return; }
-        loaded.then(function (packed) { apply(R.slice(packed, sweep, i), m, i); })
-              .catch(function (e) { console.error('replay failed', e); });
-      };
-      // Inputs fire continuously while a thumb is dragged; the data is already in memory, so redrawing
-      // per event is cheap and gives the same feel as the live kernel path at its best.
-      hosts.forEach(function (h) { R.listen(h, function () { run(h); }); });
-      // Apply the export-time position ONCE on load. A figure is already drawn at it, so this repaints
-      // the same numbers — but a replayed TABLE is written with the UNION of every position (which is
-      // what the order and the mask index into), so until this ran the reader saw every row and every
-      // column any position can show, and only touching the control brought it back.
-      if (inline) { hosts.forEach(function (h) { R.enable(h, true); }); run(hosts[0]); return; }
-      // The export renders every control DISABLED, because one that moves without changing anything
-      // reads as a broken page. Enabling here — and only here — means a control is live exactly when
-      // data for it actually rode along, with no coordination between the two sides.
-      loaded.then(function () { hosts.forEach(function (h) { R.enable(h, true); }); run(hosts[0]); })
-            .catch(function () { /* data missing → the control stays inert, which is the truth */ });
+      // A mark names a SWEEP, not an asset: what shipped, and at what resolution, is the export's
+      // decision, published in this table.
+      const sweeps = ms.map(function (m) { return table[m.id]; });
+      const ids = ms.map(function (m) { return m.id; });
+      const missing = ids.filter(function (_, j) { return !sweeps[j]; });
+      if (missing.length) {
+        console.warn('@replay: `' + control + '` does not move this figure: no data shipped for ' + missing.join(', '));
+        return;
+      }
+      const domain = sweeps[0].domain || [];
+      if (!sweeps.every(function (s) { return R.sameDomain(s.domain || [], domain); })) {
+        console.warn('@replay: `' + control + '` does not move this figure: its marks were exported at different positions (' + ids.join(', ') + ')');
+        return;
+      }
+      // A sweep whose payload rode INLINE rather than in a binary asset is ready at once. Prose is the
+      // case: a position is a few short strings, and the fetch/decode/narrow path exists to move
+      // megabytes of floats.
+      Promise.all(sweeps.map(function (s) {
+        return Array.isArray(s.values) ? s.values : window.Slate.asset(s.asset);
+      })).then(function (data) {
+        const run = function (src) {
+          const key = R.read(src);
+          const i = R.index(domain, key);
+          if (i < 0) return;
+          // A control surfaced beside several figures renders once per cell. Push the mover's state
+          // onto its copies, or the reader drags one strip and the others sit there stating something
+          // false.
+          hosts.forEach(function (h) {
+            if (h !== src) R.mirror(h, key);
+            R.paint(h);
+            R.relabel(h, key);
+          });
+          ms.forEach(function (m, j) {
+            const s = sweeps[j];
+            apply(Array.isArray(s.values) ? s.values[i] : R.slice(data[j], s, i), m, i);
+          });
+        };
+        // Inputs fire continuously while a thumb is dragged; the data is already in memory, so
+        // redrawing per event is cheap and gives the same feel as the live kernel path at its best.
+        hosts.forEach(function (h) { R.listen(h, function () { run(h); }); });
+        // The export renders every control DISABLED, because one that moves without changing anything
+        // reads as a broken page. Enabling here, and only here, means a control is live exactly when
+        // the data for every mark it drives has arrived.
+        hosts.forEach(function (h) { R.enable(h, true); });
+        // Apply the export-time position ONCE. A figure is already drawn at it, so this repaints the
+        // same numbers, but a replayed TABLE is written with the UNION of every position (which is
+        // what the order and the mask index into), so until this ran the reader saw every row and
+        // every column any position can show.
+        run(hosts[0]);
+      }).catch(function (e) {
+        console.warn('@replay: `' + control + '` does not move this figure: its data did not load (' + ids.join(', ') + ')', e);
+      });
     });
   }
 };
@@ -741,12 +787,30 @@ function _slateNum(v) {
 // A datum is a scalar on a value axis, or a tuple: `[x, y]` for a line, `[x, y, v]` for a heatmap.
 const _slateValueFormatter = v => Array.isArray(v) ? v.map(_slateNum).join(', ') : _slateNum(v);
 
+// Whether a CSS colour (`#rgb`, `#rrggbb[aa]`, `rgb()`/`rgba()`) is dark; null when unparseable.
+// Mirrored in server_export.jl `_EXPORT_ECHARTS_THEME_JS`.
+function _slateIsDark(css) {
+  const s = String(css || '').trim();
+  let m = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s), rgb;
+  if (m) {
+    const h = m[1].length === 3 ? m[1].replace(/./g, c => c + c) : m[1];
+    rgb = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16));
+  } else if ((m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(s))) {
+    rgb = m.slice(1, 4).map(Number);
+  } else return null;
+  return (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255 < 0.5;
+}
+
 // Build the Slate ECharts theme from a var-getter `V(name, default)` — decoupled from WHERE the
 // palette comes from, so the live theme (computed styles) and an export render in an arbitrary
 // named palette (its stylesheet rule) share one builder.
 function _slateEchartsThemeFrom(V, fam) {
   const text = V('--text', '#d4d8e8'), dim = V('--dim', '#6a7090'),
         border = V('--border', '#2a2e40'), bg2 = V('--bg2', '#141828');
+  // ECharts colours any label without an explicit colour (graph/scatter/pie labels, among others)
+  // for contrast against the background it infers from `backgroundColor`, falling back to light when
+  // that is 'transparent'. Tell it which the palette actually is.
+  const dark = _slateIsDark(V('--bg', ''));
   const cycle = [['--accent', '#569cd6'], ['--green', '#56d364'], ['--orange', '#ce9178'],
     ['--purple', '#c586c0'], ['--teal', '#4ec9b0'], ['--gold', '#ffd700'], ['--red', '#e57575']]
     .map(([n, d]) => V(n, d));
@@ -755,7 +819,9 @@ function _slateEchartsThemeFrom(V, fam) {
   // NOT a valid canvas font-family, so the whole assignment is rejected and EVERY fontSize silently
   // reverts to the canvas default (color still applies — it's set via fillStyle, not the font string).
   // Resolve to a real stack so per-chart fontSize overrides actually take effect.
-  const family = fam || 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+  // Quote family names with single quotes: the SVG renderer writes the stack into a double-quoted
+  // style="…" attribute without escaping, and computed styles serialise names with double quotes.
+  const family = (fam || "system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif").replace(/"/g, "'");
   return {
     color: cycle, backgroundColor: 'transparent',
     textStyle: { color: text, fontFamily: family, fontSize: 14 },
@@ -768,6 +834,7 @@ function _slateEchartsThemeFrom(V, fam) {
     visualMap: { textStyle: { color: dim }, inRange: { color: _SLATE_VIRIDIS } },
     timeline: { lineStyle: { color: dim }, label: { color: dim } },
     calendar: { splitLine: { lineStyle: { color: border } }, itemStyle: { borderColor: border } },
+    ...(dark === null ? {} : { darkMode: dark }),
   };
 }
 // The live-theme ECharts theme (registered as 'slate') — reads the currently-applied CSS vars.
@@ -943,11 +1010,8 @@ function renderCharts(c) {
     // The GL-lib deferral that applied to the whole cell now applies per placeholder — same rule,
     // narrower scope: init only after `requireScripts` has loaded.
     window.chartRuntime.scripts(spec).then(() => {
-      if (!el._inst) el._inst = _initChart(el, spec);
-      _applySize(el, el._inst, spec);
-      return _ensurePrereqs(spec)
-        .then(() => _geoSafeSetOption(el._inst, spec))
-        .then(() => _wireEchartReplay(el._inst, spec));
+      const rt = window.chartRuntime;
+      return rt.apply(el, el.__inst || rt.init(el, spec), spec);   // the same init/apply a code cell's chart gets
     });
   });
 }
@@ -1046,9 +1110,16 @@ function _bindOwner(name) {
 // chrome and the persisted value all stay in agreement. Writing to the worker directly would move
 // the value without the host ever learning, and the two copies would drift silently.
 //
+// The caller names the bound VARIABLE, not a cell. This function finds the cell that declares the
+// control, so a custom visualisation does not have to know which cell that is.
+//
 // Coalesced per control, like the native widget path: a dragged control fires far faster than a
 // round trip completes, and without this the queue grows for as long as the drag lasts and the
-// figure keeps animating after the reader lets go. Only the LAST value of a burst matters.
+// figure keeps animating after the reader lets go. Only the LAST value of a burst matters: the server
+// replaces a control's value with the one it receives, so a held value is replaced the same way.
+//
+// Returns a promise. It resolves to the ack of the POST, or to `null` when no control has this
+// name, when the value is held for the next POST, or when the POST fails.
 const _extBindQueue = new Map();   // name → { inflight, pending }
 
 function slateSetBind(name, value) {
@@ -1456,8 +1527,8 @@ function _fillTable(wrap, spec, st, pageRows, total, baseCount, pageIdx) {
 
 // Typeset any LaTeX ($…$ / $$…$$ / \(…\) / \[…\]) inside `el` with KaTeX. Safe to
 // call before KaTeX has loaded (no-op) and re-call (auto-render skips done spans).
-// CodeMirror source lives in <pre>/<textarea>, both in KaTeX's default ignore list,
-// so editor `$` is never touched.
+// A code cell's unmounted placeholder is a <pre> (in KaTeX's default ignore list); a mounted
+// CodeMirror editor is skipped by class below, so editor `$` is never touched.
 function typeset(el) {
   if (!el) return;
   // Output `text/latex` blocks render in DISPLAY mode so they match markdown
@@ -1485,6 +1556,11 @@ function typeset(el) {
         { left: '$', right: '$', display: false },
         { left: '\\(', right: '\\)', display: false },
       ],
+      // `text/latex` blocks are typeset whole above, and already-typeset math keeps its TeX source
+      // in a hidden MathML <annotation>. A `$…$` inside either (math within \text{}) is part of
+      // the surrounding formula, not a formula of its own. A mounted CodeMirror editor is
+      // contenteditable DOM: typesetting inside it is read by the editor as an edit to the source.
+      ignoredClasses: ['katex', 'latex', 'cm-editor'],
       throwOnError: false,
     });
   } catch (e) {}
@@ -1514,14 +1590,39 @@ window.hydrateSoon = (key, fn) => { _hydQ.set(key, fn); if (!_hydPumping) { _hyd
 window.hydrateNow = key => { const fn = _hydQ.get(key); if (fn) { _hydQ.delete(key); try { fn(); } catch (_) {} return true; } return false; };
 // Typeset KaTeX off the critical path (text paints first; math fills in a tick later).
 window.typesetSoon = (el, key) => { if (el) window.hydrateSoon('ts:' + (key || ''), () => typeset(el)); };
-// Typeset NOW when the element is in/near the viewport — so the math's height settles BEFORE paint
-// and the cell doesn't jump (layout shift) when KaTeX renders. Off-screen elements defer to idle:
-// their later typeset can't cause a *visible* shift, and they're done by the time you scroll there.
+// Work after an output swap — typesetting its math, clamping a tall text block — runs in one
+// pass per frame for every output swapped in that frame, in phases: read which outputs are near the
+// viewport (one layout), typeset those (the rest when idle), then clamp, measuring every block
+// together. Done per output as each swap lands, it forced a layout of the whole page per output,
+// and a run of many cells (a worker restart re-runs the notebook) blocked the page for seconds.
+// The pass runs before the next paint, so math near the viewport settles before it is seen.
+const _afterSwap = new Map();     // element → { typeset: key | undefined, clamp: bool }
+let _afterSwapPending = false;
+function _scheduleAfterSwap() {
+  if (_afterSwapPending) return;
+  _afterSwapPending = true;
+  if (document.hidden) setTimeout(_runAfterSwap, 50);   // a hidden tab gets no animation frames
+  else requestAnimationFrame(_runAfterSwap);
+}
+function _runAfterSwap() {
+  _afterSwapPending = false;
+  const items = [..._afterSwap].filter(([el]) => el.isConnected);
+  _afterSwap.clear();
+  items.forEach(([el]) => observeHeight(el));
+  const h = window.innerHeight || 800;
+  const near = items.map(([el]) => { const r = el.getBoundingClientRect(); return r.top < h + 300 && r.bottom > -300; });
+  items.forEach(([el, w], i) => {
+    if (w.typeset === undefined) return;
+    if (near[i]) { try { typeset(el); } catch (_) {} } else window.typesetSoon(el, w.typeset);
+  });
+  const roots = items.filter(([, w]) => w.clamp).map(([el]) => el);
+  if (roots.length) _clampNow(roots);
+}
+// Typeset `el` in the next pass: now if it is in or near the viewport, else when idle.
 window.typesetVisible = (el, key) => {
   if (!el) return;
-  const r = el.getBoundingClientRect();
-  if (r.top < (window.innerHeight || 800) + 300 && r.bottom > -300) typeset(el);
-  else window.typesetSoon(el, key);
+  _afterSwap.set(el, { ...(_afterSwap.get(el) || {}), typeset: key || '' });
+  _scheduleAfterSwap();
 };
 // Jupyter-style scrolled output: a tall TEXT block (stdout / value repr / warnings) is clamped to a
 // max height with an in-place scroll + an Expand/Collapse toggle, so a big-but-not-massive result
@@ -1529,13 +1630,18 @@ window.typesetVisible = (el, key) => {
 // per render — measures at natural height, (re)adds or removes the toggle as the content changes.
 window._clampOutputs = (root) => {
   if (!root) return;
+  _afterSwap.set(root, { ...(_afterSwap.get(root) || {}), clamp: true });
+  _scheduleAfterSwap();
+};
+function _clampNow(roots) {
   const MAX = 480;   // px — ~30em; matches the .clamped CSS
-  root.querySelectorAll('.out, .val, .warn').forEach(b => {
-    b.classList.remove('clamped');                       // measure at natural height
-    const over = b.scrollHeight > MAX + 16;
+  const blocks = roots.flatMap(root => [...root.querySelectorAll('.out, .val, .warn')]);
+  blocks.forEach(b => b.classList.remove('clamped'));            // measure at natural height…
+  const over = blocks.map(b => b.scrollHeight > MAX + 16);        // …all in one layout
+  blocks.forEach((b, i) => {
     let btn = b.nextElementSibling;
     const hasBtn = btn && btn.classList && btn.classList.contains('outexpand');
-    if (over) {
+    if (over[i]) {
       if (!b.classList.contains('expanded')) b.classList.add('clamped');
       if (!hasBtn) {
         btn = document.createElement('button');
@@ -1556,7 +1662,16 @@ window._clampOutputs = (root) => {
       }
     } else if (hasBtn) { btn.remove(); b.classList.remove('expanded'); }
   });
-};
+}
+// The last laid-out height of each output, recorded as layout happens anyway, so a swap can hold
+// the old height without forcing a layout to read it.
+window._heightObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(entries => {
+  for (const e of entries) e.target.__slateHeight = e.borderBoxSize && e.borderBoxSize[0] ? e.borderBoxSize[0].blockSize : e.contentRect.height;
+});
+// Record `el`'s height from its next layout on (once per element).
+function observeHeight(el) {
+  if (window._heightObserver && !el.__slateObserved) { window._heightObserver.observe(el); el.__slateObserved = true; }
+}
 // Synchronously typeset every cell currently in/near the viewport — call right AFTER a programmatic
 // scroll (e.g. position restore), before paint, so deferred math doesn't render late and shift.
 window.typesetInView = () => {
@@ -1569,7 +1684,14 @@ window.typesetInView = () => {
 
 // KaTeX may finish loading after the first render; typeset everything once it's in (off the
 // critical path — a big notebook's math would otherwise be one long task on the load event).
-window.addEventListener('load', () => window.typesetSoon(document.getElementById('nb'), '__all__'));
+// Each cell is its own idle task, so a big notebook's math never becomes one long task; its outputs
+// are observed for their heights (`_heightObserver`) from the start.
+window.addEventListener('load', () => {
+  document.querySelectorAll('#nb .cell .md, #nb .cell .output').forEach((el, i) => {
+    window.typesetSoon(el, 'load:' + i);
+    observeHeight(el);
+  });
+});
 // Align the agent drawer's top with the first content cell (as positioned when scrolled
 // to the top), so the drawer never covers the menu bar and lines up with the notebook.
 // Measured off the real first cell — robust to topbar height, page padding, cell margins,
@@ -1588,6 +1710,14 @@ function syncAgentTop() {
 window.addEventListener('load', syncAgentTop);
 window.addEventListener('resize', syncAgentTop);
 syncAgentTop();
+// Every render of the notebook asks for this, and reading the layout right after a render forces the
+// browser to lay out the whole page; requests within a frame are answered once, in the frame.
+let _agentTopPending = false;
+window.syncAgentTopSoon = () => {
+  if (_agentTopPending) return;
+  _agentTopPending = true;
+  requestAnimationFrame(() => { _agentTopPending = false; syncAgentTop(); });
+};
 
 // Julia indexes source by UTF-8 *byte* offset (REPLCompletions), but CodeMirror
 // works in UTF-16 char positions. Convert both ways so completion stays correct
@@ -1639,6 +1769,173 @@ document.addEventListener('click', e => {
   api('POST', '/api/recordspan', { cell: cellId, field: f.dataset.field })
     .then(r => { if (r && r.found && window.flashRange) window.flashRange(cellId, r.from, r.to); })
     .catch(() => {});
+});
+
+// ── A record's rows field, fanned out ──────────────────────────────────────────────────────────
+// A vector of same-shaped NamedTuples renders as a stack of cards (record_display.jl). Clicking deals
+// them into a strip you can swipe through, or into a table — the two answer different questions, so
+// the choice is the reader's and is remembered. Escape or a click on the backdrop gathers them.
+//
+// The strip is on a FIXED layer, not in the field. A field is a cell in a record grid: laid out there
+// the cards are clipped by it and bounded by its width, and anything growing in flow makes every
+// sibling card in the row grow too. Lifting them off also makes the strip scrollable.
+//
+// The table is built HERE, from the cards, rather than shipped beside them: every value is already in
+// the markup, and sending it twice would double what crosses the websocket and lands in the memo on
+// every render for a view that may never be opened.
+//
+// Delegated from the document so it survives Preact re-renders; no round-trip.
+const _SREC_VIEW_KEY = 'slate.recRowsView';
+function _srecRowsTable(cards) {
+  const keys = [...cards[0].querySelectorAll('.srec-ck')].map(k => k.textContent);
+  const t = document.createElement('table');
+  t.className = 'srec-tbl';
+  t.innerHTML = '<thead><tr><th class="srec-tbl-i"></th>' +
+    keys.map(k => '<th></th>').join('') + '</tr></thead><tbody></tbody>';
+  [...t.querySelectorAll('thead th')].slice(1).forEach((th, i) => { th.textContent = keys[i]; });
+  const body = t.querySelector('tbody');
+  cards.forEach(c => {
+    const tr = document.createElement('tr');
+    const idx = document.createElement('td');
+    idx.className = 'srec-tbl-i';
+    idx.textContent = (c.querySelector('.srec-ci') || {}).textContent || '';
+    tr.appendChild(idx);
+    c.querySelectorAll('.srec-cv').forEach(v => {
+      const td = document.createElement('td'); td.textContent = v.textContent; tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  return t;
+}
+document.addEventListener('click', e => {
+  const host = e.target.closest && e.target.closest('.srec-rows-open');
+  if (!host || host.classList.contains('fan')) return;
+  const cards = [...host.querySelectorAll('.srec-card')];
+  if (cards.length < 2) return;
+  e.preventDefault(); e.stopPropagation();
+
+  // One fan at a time, and a hard sweep rather than a check: this also clears a panel left behind by
+  // a page whose output was replaced while it was open, which otherwise sits over the notebook with
+  // its own backdrop swallowing every click.
+  document.querySelectorAll('.srec-fanovl, .srec-fanpanel').forEach(n => n.remove());
+  document.querySelectorAll('.srec-rows-open.fan').forEach(n => n.classList.remove('fan'));
+
+  const from = cards.map(c => c.getBoundingClientRect());
+  const ovl = document.createElement('div');
+  ovl.className = 'srec-fanovl';
+  const panel = document.createElement('div');
+  panel.className = 'srec-fanpanel';
+  // Anchored where the pile is, not full-bleed: the expansion belongs to the field you clicked, and a
+  // table that opens at the left edge of the window makes you re-find which field it came from. Left
+  // edge at the pile, right edge at the window, so the strip still has room to scroll — and pulled
+  // back only if the pile sits too near the right to leave any.
+  // DOCUMENT coordinates, not viewport: the panel is absolutely positioned so it scrolls with the
+  // page. Fixed, it stayed pinned while the notebook moved underneath — the table drifted away from
+  // the field it belongs to, and anything taller than the window could not be scrolled into view.
+  const _MIN_W = 340;
+  const vw = document.documentElement.clientWidth;
+  const left = Math.max(8, Math.min(from[0].left - 14, vw - _MIN_W));
+  panel.style.top = (from[0].top + window.scrollY - 34) + 'px';
+  panel.style.left = (left + window.scrollX) + 'px';
+  panel.style.width = (vw - left - 8) + 'px';
+
+  const bar = document.createElement('div');
+  bar.className = 'srec-fanbar';
+  const name = document.createElement('span');
+  name.className = 'srec-fanname';
+  const fcard = host.closest('.srec-f');
+  name.textContent = (host.getAttribute('data-rowsfield') || '') +
+    (fcard && fcard.querySelector('.srec-n') ? '  ' + fcard.querySelector('.srec-n').textContent : '');
+  const toggle = document.createElement('button');
+  toggle.className = 'srec-fantoggle';
+  bar.appendChild(name); bar.appendChild(toggle);
+  panel.appendChild(bar);
+
+  const strip = document.createElement('div');
+  strip.className = 'srec-fanstrip';
+  cards.forEach(c => {
+    const d = c.cloneNode(true);
+    d.className = 'srec-card srec-fancard';
+    d.style.position = 'static';
+    strip.appendChild(d);
+  });
+  panel.appendChild(strip);
+  // SIBLINGS, not nested: an absolutely positioned child of a fixed element is placed against that
+  // element, so a panel inside the backdrop would still hang in the viewport. On `body` it is placed
+  // against the document and travels with the page.
+  document.body.appendChild(ovl);
+  document.body.appendChild(panel);
+  host.classList.add('fan');
+
+  const clones = [...strip.children];
+  let table = null;
+  const setView = v => {
+    localStorage.setItem(_SREC_VIEW_KEY, v);
+    toggle.textContent = v === 'table' ? '▤ table' : '▦ cards';
+    if (v === 'table') {
+      if (!table) { table = _srecRowsTable(clones); panel.appendChild(table); }
+      table.style.display = ''; strip.style.display = 'none';
+    } else {
+      if (table) table.style.display = 'none';
+      strip.style.display = '';
+    }
+  };
+  const start = localStorage.getItem(_SREC_VIEW_KEY) === 'table' ? 'table' : 'cards';
+  toggle.addEventListener('click', ev => {
+    ev.stopPropagation();
+    setView(localStorage.getItem(_SREC_VIEW_KEY) === 'table' ? 'cards' : 'table');
+  });
+
+  // FLIP, cards view only: put them where flex does, measure, invert onto the pile, release. The
+  // layout stays the real one — which is what lets it scroll — while the flight starts at the pile.
+  if (start === 'cards') {
+    const to = clones.map(d => d.getBoundingClientRect());
+    clones.forEach((d, i) => {
+      const f = from[Math.min(i, from.length - 1)];
+      d.style.transition = 'none';
+      d.style.transform = 'translate(' + (f.left - to[i].left) + 'px, ' + (f.top - to[i].top) + 'px)';
+    });
+    requestAnimationFrame(() => {
+      ovl.classList.add('on');
+      clones.forEach((d, i) => { d.style.transition = ''; d.style.transitionDelay = (i * 35) + 'ms'; d.style.transform = ''; });
+    });
+  } else {
+    requestAnimationFrame(() => ovl.classList.add('on'));
+  }
+  setView(start);
+
+  const drop = () => { ovl.remove(); panel.remove(); host.classList.remove('fan'); };
+  const unbind = () => { document.removeEventListener('keydown', onKey); gone.disconnect(); };
+  const closeNow = () => { unbind(); drop(); };
+  const close = () => {
+    unbind();
+    ovl.classList.remove('on');
+    if (strip.style.display !== 'none') {
+      const now = clones.map(d => d.getBoundingClientRect());
+      clones.forEach((d, i) => {
+        const f = from[Math.min(i, from.length - 1)];
+        d.style.transitionDelay = ((clones.length - 1 - i) * 25) + 'ms';
+        d.style.transform = 'translate(' + (f.left - now[i].left) + 'px, ' + (f.top - now[i].top) + 'px)';
+      });
+    }
+    setTimeout(drop, 440);
+  };
+  // A re-run replaces the output, so the pile these cards flew out of stops existing. Take the panel
+  // down with it, and without the return flight: there is no longer a rectangle to fly back to.
+  // Watched on `.cellslot` rather than `.cell`, because a re-render swaps the whole `.cell` out and an
+  // observer attached to it would be watching a detached node.
+  const gone = new MutationObserver(() => { if (!host.isConnected) closeNow(); });
+  gone.observe(host.closest('.cellslot') || document.body, { childList: true, subtree: true });
+
+  const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } };
+  // Anything that is not the content itself dismisses — the backdrop, and the panel's own empty space
+  // beside and below the table, which reaches to the window edge so the strip has room to scroll.
+  const maybeClose = ev => {
+    if (!ev.target.closest('.srec-tbl, .srec-fancard, .srec-fanbar')) close();
+  };
+  ovl.addEventListener('click', maybeClose);
+  panel.addEventListener('click', maybeClose);
+  document.addEventListener('keydown', onKey);
 });
 
 // ── A record's matrix field, expanded ──────────────────────────────────────────────────────────

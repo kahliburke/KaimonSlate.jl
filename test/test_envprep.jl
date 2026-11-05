@@ -73,14 +73,41 @@ end
                                   "uuid" => "872c559c-99b0-510c-b3b7-b6c96a88d5cd")]
         code = ReportEngine.env_add_code(delta)
         @test occursin("Pkg.add(", code)
-        @test occursin("name=raw\"FFTW\"", code)
-        @test occursin("uuid=raw\"7a1cc6ca-52ef-59f5-83cd-3a7055c09341\"", code)
-        @test occursin("name=raw\"NNlib\"", code)
+        @test occursin("name=\"FFTW\"", code)
+        @test occursin("uuid=\"7a1cc6ca-52ef-59f5-83cd-3a7055c09341\"", code)
+        @test occursin("name=\"NNlib\"", code)
         # The recorded VERSION is deliberately not pinned — it would fight the parent's fresh resolve.
         @test !occursin("1.10.0", code)
         # A notebook that added nothing rebuilds exactly as before.
         @test ReportEngine.env_add_code(Dict{String,Any}[]) == ""
         @test ReportEngine.env_add_code(nothing) == ""
+    end
+
+    @testset "a rebuild re-creates each package the way it was added" begin
+        # A developed checkout is not in any registry: re-adding it by name fails the whole add, and
+        # every package the notebook added goes with it.
+        dev = mktempdir()
+        delta = [Dict{String,Any}("name" => "Dev", "version" => "0.3.0", "uuid" => "e4421f97-9838-4fd0-9fa5-94f11373bf78",
+                                  "source" => "path", "origin" => dev),
+                 Dict{String,Any}("name" => "Gone", "version" => "0.1.0", "uuid" => "f4c9f34b-fa6a-4506-9309-e8c0bac809fa",
+                                  "source" => "path", "origin" => joinpath(dev, "missing")),
+                 Dict{String,Any}("name" => "Git", "source" => "git", "origin" => "https://example.com/Git.jl#v1.2"),
+                 Dict{String,Any}("name" => "Reg", "version" => "2.1.0", "uuid" => "2edaba10-b0f1-5616-af89-8c11ac63239a")]
+        s = ReportEngine.readd_specs(delta)
+        @test s.devs == [(; path = abspath(dev))]
+        @test s.skipped == ["Gone"]
+        @test (; url = "https://example.com/Git.jl", rev = "v1.2") in s.adds
+        @test (; name = "Reg", uuid = "2edaba10-b0f1-5616-af89-8c11ac63239a") in s.adds
+        @test (; name = "Reg", uuid = "2edaba10-b0f1-5616-af89-8c11ac63239a", version = "2.1.0") in
+              ReportEngine.readd_specs(delta; pinned = true).adds
+        # Symbol keys (a delta that crossed the gate) read the same.
+        @test ReportEngine.readd_specs([Dict(:name => "Reg")]).adds == [(; name = "Reg")]
+        code = ReportEngine.env_add_code(delta)
+        # Checkouts first, so a package that depends on one resolves against it.
+        @test occursin("; Pkg.develop([Pkg.PackageSpec(path=$(repr(abspath(dev))))]); Pkg.add([", code)
+        @test occursin("Pkg.PackageSpec(url=\"https://example.com/Git.jl\", rev=\"v1.2\")", code)
+        @test !occursin("Gone", code)
+        @test Meta.parse("begin" * replace(code, r"^; " => "\n") * "\nend") isa Expr
     end
 
     @testset "a named parent is reported, and the fork is not itself a package" begin
@@ -258,6 +285,52 @@ end
         io = IOBuffer()
         for f in ("Project.toml", "Manifest.toml"); write(io, read(joinpath(plain, f))); end
         @test ReportEngine.env_parent_fingerprint(plain) == string(hash(take!(io)); base = 16)
+    end
+
+    @testset "the memo deps digest follows a version bump in the root's manifest" begin
+        # The memo key folds in this digest. For a member it must read the shared manifest at the
+        # workspace root; a lookup beside the member's Project.toml finds none, and the digest then
+        # stays constant however the deps move, so a restored entry can be from an old version.
+        root = workspace_fixture()
+        pf = joinpath(root, "papers", "Project.toml")
+        man = joinpath(root, _manifest_vname())
+        d0 = ReportEngine.deps_digest(pf)
+        write(man, replace(read(man, String), "version = \"0.1.0\"" => "version = \"0.2.0\""))
+        @test ReportEngine.deps_digest(pf) != d0
+    end
+
+    @testset "the memo deps digest follows the whole closure, not Slate's own packages" begin
+        d = mktempdir()
+        write(joinpath(d, "Project.toml"), """
+            [deps]
+            A = "11111111-1111-1111-1111-111111111111"
+            KaimonGate = "22222222-2222-2222-2222-222222222222"
+            """)
+        man(bver, gver) = write(joinpath(d, "Manifest.toml"), """
+            manifest_format = "2.0"
+            [[deps.A]]
+            uuid = "11111111-1111-1111-1111-111111111111"
+            version = "1.0.0"
+            deps = ["B"]
+            [[deps.B]]
+            uuid = "33333333-3333-3333-3333-333333333333"
+            version = "$bver"
+            [[deps.KaimonGate]]
+            uuid = "22222222-2222-2222-2222-222222222222"
+            version = "1.0.0"
+            deps = ["G"]
+            [[deps.G]]
+            uuid = "44444444-4444-4444-4444-444444444444"
+            version = "$gver"
+            """)
+        pf = joinpath(d, "Project.toml")
+        man("2.0.0", "1.0.0"); d0 = ReportEngine.deps_digest(pf, ("KaimonGate",))
+        @test d0 != 0
+        man("2.1.0", "1.0.0")                      # a dependency of a dependency moved
+        @test ReportEngine.deps_digest(pf, ("KaimonGate",)) != d0
+        d1 = ReportEngine.deps_digest(pf, ("KaimonGate",))
+        man("2.1.0", "9.9.9")                      # only Slate's worker package's dependency moved
+        @test ReportEngine.deps_digest(pf, ("KaimonGate",)) == d1
     end
 
 end

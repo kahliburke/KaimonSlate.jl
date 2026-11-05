@@ -645,11 +645,11 @@ progress has nowhere to stream to — the poll is where it can still reach them.
 poll can only say how long it's been, which doesn't distinguish "70% through" from "wedged".
 """
 function _userprog_note(nbid::AbstractString)
-    up = lock(_USERPROG_LOCK) do; get(_LAST_USERPROG, String(nbid), nothing); end
+    up = _live_latest(nbid)
     up === nothing && return ""
-    # Ignore a done/stale reading: reporting a finished bar (or a leftover from an earlier cell)
-    # as this job's live state would be worse than saying nothing.
-    (up[4] || time() - up[5] > 120.0) && return ""
+    # Finished bars and finished cells are already gone; a reading that has stopped moving is
+    # dropped too, rather than reported as this job's live state.
+    time() - up[3] > 120.0 && return ""
     frac, msg = up[1], up[2]
     pct = (isfinite(frac) && 0.0 <= frac <= 1.0) ? "$(round(Int, 100 * frac))%" : ""
     detail = strip(join(filter(!isempty, [pct, strip(msg)]), " · "))

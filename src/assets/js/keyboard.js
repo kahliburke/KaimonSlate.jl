@@ -93,11 +93,14 @@ function _srcOpen(id) {
   return !!(sed && sed.style.display !== 'none');
 }
 window.slateSrcOpen = _srcOpen;
-function enterEdit(id) {
+async function enterEdit(id) {
   const c = _cellById(id); if (!c) return;
   // A web cell has an inline editor too (its first pane, registered in editors[id]), so Enter focuses it
   // like a code cell — not the markdown/source overlay.
   if ((c.kind === 'code' || c.kind === 'web' || c.kind === 'tool') && !hasBinds(c)) {
+    // A hidden or collapsed editor is not rendered and cannot take focus: show it first.
+    if (c.codeHidden) await toggleHideCode(id);
+    if (c.collapsed) await toggleCollapse(id);
     const ed = window.ensureEditor ? window.ensureEditor(id) : editors[id];
     if (ed) ed.focus();
     // Enter means "edit this", so vim starts in insert (no-op when vim is off).

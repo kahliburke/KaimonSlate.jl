@@ -7,7 +7,7 @@
 // review. Backups self-clear as cells are saved (mine === server) and on explicit discard.
 
 const _BK_KEY = () => 'slate:backup:' + NB_ID;
-// Is this text the same EDIT as that one? Trailing whitespace is never an edit (`srcEq`, store.js —
+// Is this text the same EDIT as that one? Blank lines around a cell are never an edit (`srcEq`, store.js —
 // the one definition, since private copies of it drifted before). For a WEB cell there's a second,
 // sharper way for two texts to mean the same thing: the page holds three panes and reassembles them
 // with `_webSkin`, so an equivalent-but-non-canonical stored skin (`js"""x"""` vs `js"""\nx\n"""`)
@@ -16,7 +16,8 @@ const _BK_KEY = () => 'slate:backup:' + NB_ID;
 // cells report a phantom edit on every load, forever, for a difference the page invented itself.
 function _sameEdit(a, b) {
   const store = window.slateStore || {};
-  const eq = store.srcEq || ((x, y) => (x || '').replace(/\s+$/, '') === (y || '').replace(/\s+$/, ''));
+  const core = x => (x || '').replace(/^(?:[ \t]*\r?\n)+/, '').replace(/\s+$/, '');
+  const eq = store.srcEq || ((x, y) => core(x) === core(y));
   if (eq(a, b)) return true;
   if (!window._webSkin || !window._webSections) return false;
   const canon = s => { try { return window._webSkin(window._webSections(s || '')); } catch (_) { return s || ''; } };
@@ -54,9 +55,8 @@ function backupEdits() {
     if (!window.editors[id]) continue;
     const mine = window.edText(id), base = window.srcMap[id] || '';
     if (!_sameEdit(mine, base)) {
-      // `ts` = when THIS text was captured (browser-snapshot time), in MILLISECONDS — the unit
-      // `Date.now()` and every consumer use. It was seconds, so anything ageing these records out
-      // measured the gap in units 1000× too small and computed decades, expiring nothing, ever.
+      // `ts` = when THIS text was captured (browser-snapshot time), in MILLISECONDS, as `Date.now()`
+      // gives it. `_reltime` takes seconds, so the reconcile modal divides.
       // Keep it stable while the text is unchanged so the backup dedup still short-circuits (a fresh
       // ts every sweep would rewrite it).
       const p = prev[id], ts = (p && p.mine === mine && p.ts) ? p.ts : Date.now();
@@ -224,7 +224,7 @@ function _rcRender() {
       : `<div class="rc-note">The saved version matches what you started from — your unsaved edit here just isn't on disk yet.</div>`}
     <div class="rc-legend"><span class="dl del">− ${c.live ? 'incoming change' : 'saved version'}</span><span class="dl add">+ your unsaved edit</span></div>
     ${!c.live && c.ts && typeof _reltime === 'function'
-      ? `<div class="rc-times">${c.conflict && c.serverTs ? `saved on disk ${_reltime(c.serverTs)} · ` : ''}your edit ${_reltime(c.ts)}</div>` : ''}
+      ? `<div class="rc-times">${c.conflict && c.serverTs ? `saved on disk ${_reltime(c.serverTs)} · ` : ''}your edit ${_reltime(c.ts / 1000)}</div>` : ''}
     <div class="rc-diff">${diff || '<span class="hint">(no line differences)</span>'}</div>
     <div class="rc-acts">
       <button class="rc-server">${c.live ? 'Use the incoming change' : 'Use saved'}</button>

@@ -89,7 +89,7 @@ async function loadPackages() {
     : '';
   const row = (p, removable) =>
     `<div class="pkgrow"><span class="pkgname">${_esc(p.name)}</span>${srcBadge(p)}<span class="pkgver">${_esc(p.version || '')}</span>` +
-    (removable ? `<button class="cdel" onclick="pkgRm('${_esc(p.name)}')" title="remove">✕</button>` : '') + '</div>';
+    (removable ? `<button class="cdel" onclick="pkgRm(${window.slateJsArg(p.name)})" title="remove">✕</button>` : '') + '</div>';
   let html = '';
   html += `<div class="pkggrouphdr">Notebook${r.detached ? ' (detached — all deps)' : ' adds'}</div>`;
   html += nb.length ? nb.map(p => row(p, _pkgManageable)).join('') : '<div class="phint">No notebook-specific packages yet.</div>';
@@ -272,7 +272,28 @@ async function histReplay() {
 // Persistent, top-left. The change detector is best-effort (~file-granular), so rather than
 // silently trust it we keep this up until the user acts: run our guess (the stale cells), or
 // re-run the whole notebook (safe). Parse errors show a red, button-less variant.
-function hideSrcBanner() { const b = document.getElementById('srcbanner'); b.style.display = 'none'; b.innerHTML = ''; }
+function hideSrcBanner() { const b = document.getElementById('srcbanner'); b.style.display = 'none'; b.innerHTML = ''; _srcWatch = null; }
+// The banner asks for a run, so a run answers it, whoever makes it: once the cells it marked stale
+// have all run (an agent running them, ⇧⏎ on each), it closes. With no cells named, it closes after
+// the first run that starts while it is up. `ids` is the stale set when it appeared.
+let _srcWatch = null;   // { ids: Set, began: bool } while the reload banner is up
+function _watchSrcBanner(n) {
+  const cells = (typeof nbState !== 'undefined' && nbState && nbState.cells) || [];
+  const ids = n > 0 ? cells.filter(c => c.state === 'stale' || c.state === 'edited').map(c => c.id) : [];
+  _srcWatch = { ids: new Set(ids), began: false };
+}
+window.checkSrcBanner = function (state) {
+  const w = _srcWatch;
+  if (!w) return;
+  const running = typeof window._runActive === 'function' && window._runActive();
+  if (w.ids.size) {
+    const pending = ((state && state.cells) || []).some(c => w.ids.has(c.id) && (c.state === 'stale' || c.state === 'edited'));
+    if (!pending && !running) hideSrcBanner();
+  } else {
+    if (running) w.began = true;
+    else if (w.began) hideSrcBanner();
+  }
+};
 function showSrcReload(n) {
   const b = document.getElementById('srcbanner'); b.className = 'srcbanner';
   // n>0: we mapped the edit to cells (Run affected, or Re-run all to be safe). n===0: a source def
@@ -313,6 +334,7 @@ function showSrcError(msg) {
 // refreshes badges/outputs/controls; the user's unsaved source stays put, ready to re-run.
 const _GRACE_MS = 1200, _PROBE_MS = 1500;
 let _es = null, _connDown = false, _modalShown = false, _graceTimer = null, _probeTimer = null;
+const _REOPEN_WATCH_MS = 3000;   // while closed, how often to check whether it is open again
 let _closedByHub = false;   // a deliberate close (SSE "closed:") — no reconnect, no auto-reopen
 // A deliberate close from the hub (slate.close / the TUI's [c]): back up in-flight edits,
 // stand down ALL recovery (the auto-reopen would respawn the notebook), and show the
@@ -326,6 +348,11 @@ function _notebookClosed() {
   _connDown = false;
   const dm = document.getElementById('disconnmodal'); if (dm) dm.style.display = 'none';
   const m = document.getElementById('closedmodal'); if (m) m.style.display = 'flex';
+  // Someone else (an agent, another tab) may open it again: come back when they do. Only watch,
+  // never reopen, so a deliberate close stays closed.
+  const watch = setInterval(async () => {
+    try { if ((await fetch(_apipath('/api/state'))).ok) { clearInterval(watch); location.reload(); } } catch (_) {}
+  }, _REOPEN_WATCH_MS);
 }
 // The overlay's button: ask the server to re-open the file we remember, then reload —
 // the boot path re-syncs and reconcileBackup() restores any backed-up unsaved edits.
@@ -506,6 +533,32 @@ window.onWorkerReset = function (gen) {
   fns.forEach(fn => { try { fn(); } catch (e) { console.error('slateOnWorkerReset handler failed:', e); } });
 };
 
+// Cell patches from the server are applied once per frame. A run of many cells (a worker restart
+// re-runs the notebook) streams one `celldone:` per cell, and each patch re-renders the page and
+// forces a layout of the whole document; applied one by one they block the page for seconds.
+// Queued, a burst costs one render. The latest payload for a cell wins (`patchCells` also drops
+// stale revisions), and each `celldone:` still reports its cell's status, after the patch lands.
+const _patchQueue = new Map();
+const _doneQueue = [];
+let _patchPending = false;
+function _queuePatch(cells, done) {
+  (cells || []).forEach(c => _patchQueue.set(c.id, c));
+  if (done) _doneQueue.push(done);
+  if (_patchPending) return;
+  _patchPending = true;
+  // a hidden tab gets no animation frames
+  if (document.hidden) setTimeout(_flushPatches, 50);
+  else requestAnimationFrame(_flushPatches);
+}
+function _flushPatches() {
+  _patchPending = false;
+  const cells = [..._patchQueue.values()];
+  _patchQueue.clear();
+  const done = _doneQueue.splice(0);
+  try { patchCells(cells); } catch (_) {}
+  done.forEach(c => { try { window.onCellDone && window.onCellDone(c); } catch (_) {} });
+}
+
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
 function connectLive() {
@@ -516,12 +569,12 @@ function connectLive() {
   es.onmessage = async (e) => {
     if (e.data.startsWith('closed:')) { _notebookClosed(); return; }   // deliberate close — overlay, no auto-reopen
     if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
-    if (e.data.startsWith('refresh:')) { try { patchCells(JSON.parse(e.data.slice(8)).cells); } catch (_) {} return; }   // targeted: only the changed cells, inline
+    if (e.data.startsWith('refresh:')) { try { _queuePatch(JSON.parse(e.data.slice(8)).cells); } catch (_) {} return; }   // targeted: only the changed cells, inline
     if (e.data.startsWith('runbatch:')) { const _rb = e.data.slice(9).split(':'); window.onRunBatch && window.onRunBatch(parseInt(_rb[0], 10) || 0, _rb[1] === '1'); return; }   // N cells about to run (+ whether it STARTS a run) → stable k/N
     if (e.data.startsWith('cellpre:')) { try { const r = JSON.parse(e.data.slice(8)); window.onCellPre && window.onCellPre(r.index, r.cell); } catch (_) {} return; }   // agent add/edit: show the (stale) cell BEFORE its eval finishes
-    if (e.data.startsWith('cellrun:')) { window.onCellRun && window.onCellRun(e.data.slice(8)); return; }   // a cell started running (live status)
-    if (e.data.startsWith('celldone:')) { try { const c = JSON.parse(e.data.slice(9)); patchCells([c]); window.onCellDone && window.onCellDone(c); } catch (_) {} return; }   // a cell finished — patch + status
-    if (e.data.startsWith('cellprog:')) { try { const p = JSON.parse(e.data.slice(9)); window.onCellProgress && window.onCellProgress(p); } catch (_) {} return; }   // {frac,msg,id,done} — one bar per id
+    if (e.data.startsWith('cellrun:')) { try { const r = JSON.parse(e.data.slice(8)); window.onCellRun && window.onCellRun(r); } catch (_) {} return; }   // {id,rev} — a cell started running (live status)
+    if (e.data.startsWith('celldone:')) { try { const c = JSON.parse(e.data.slice(9)); _queuePatch([c], c); } catch (_) {} return; }   // a cell finished — patch + status
+    if (e.data.startsWith('cellprog:')) { try { const p = JSON.parse(e.data.slice(9)); window.onCellProgress && window.onCellProgress(p); } catch (_) {} return; }   // {cid,frac,msg,id,done} — one bar per (cell, id)
     if (e.data.startsWith('cellout:')) { try { const p = JSON.parse(e.data.slice(8)); window.onCellOutput && window.onCellOutput(p); } catch (_) {} return; }   // {cid,out,err} — a RUNNING cell's output so far (cooked text)
     if (e.data.startsWith('cellstream:')) { try { const p = JSON.parse(e.data.slice(11)); window.onCellStream && window.onCellStream(p.channel, p.data); } catch (_) {} return; }   // slate_emit(channel,data) → a cell's custom JS renderer
     if (e.data.startsWith('inspect:')) { try { const r = JSON.parse(e.data.slice(8)); window._slateInspect && window._slateInspect(r.reqid, r.cell); } catch (_) {} return; }   // slate.inspect: capture this cell for the agent
@@ -542,6 +595,7 @@ function connectLive() {
       const n = parseInt(e.data.slice(10), 10) || 0;
       updateStates(await api('GET', '/api/state'));   // reflect our guessed stale marks
       showSrcReload(n);
+      _watchSrcBanner(n);
       return;
     }
     if (e.data.startsWith('srcerror:')) {    // a /src save didn't parse — Revise couldn't apply it
@@ -580,7 +634,7 @@ function _scAgo(ms) {
 }
 function _scCellHtml(c) {
   const st = c.state || 'fresh';
-  const dur = c.duration != null ? (c.duration + ' ms') : '';
+  const dur = c.duration != null ? window.slateDuration(c.duration) : '';
   const ago = c.ranAt ? '<span class="scago" data-ranat="' + c.ranAt + '">' + _esc(_scAgo(c.ranAt)) + '</span>' : '';
   const rich = ((c.echarts && c.echarts.length) || (c.tables && c.tables.length))
     ? '<div class="scnote">interactive output — run it in a real cell to see the chart/table</div>' : '';
@@ -631,25 +685,13 @@ function _scUpdateChrome() {
   const btn = document.getElementById('scratchbtn');
   if (btn) btn.dataset.count = _scUnread ? String(_scUnread) : '';   // NEW since last viewed, not the total
 }
-// Scratch output images render as thumbnails; click → a full-size lightbox (Esc / click to close).
-function _scZoom(src) {
-  let m = document.getElementById('scratchimgmodal');
-  if (!m) {
-    m = document.createElement('div'); m.id = 'scratchimgmodal'; m.className = 'scimgmodal';
-    m.innerHTML = '<img alt="scratch output"/>';
-    m.addEventListener('click', () => m.classList.remove('show'));
-    document.addEventListener('keydown', e => { if (e.key === 'Escape' && m.classList.contains('show')) m.classList.remove('show'); });
-    document.body.appendChild(m);
-  }
-  m.querySelector('img').src = src;
-  m.classList.add('show');
-}
+// Scratch output images render as thumbnails; click → the full-window image view (imgzoom.js).
 function _scWireImages(b) {
   b.querySelectorAll('.scout img').forEach(img => {
     if (img._scwired) return; img._scwired = true;
     img.classList.add('scthumb');
     img.title = 'click to enlarge';
-    img.addEventListener('click', () => _scZoom(img.currentSrc || img.src));
+    img.addEventListener('click', () => window.slateImageView(img.currentSrc || img.src, 'scratch output'));
   });
 }
 window.onScratchCell = function (cell) {

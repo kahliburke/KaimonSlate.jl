@@ -10,6 +10,9 @@
 # the widget kind whose default export Slate wraps + registers (`""` for a self-registering script).
 # Process-global; a re-register by the same id REPLACES (a reload doesn't stack duplicates).
 const _FRONTEND = Dict{String,@NamedTuple{js::String, esm::Bool, kind::String}}()
+# id => (; path, mtime) for entries registered from a file ([`PkgAsset`](@ref)): the registry re-reads
+# `path` when its mtime moves, so readers always see the file as it is on disk.
+const _FRONTEND_FILES = Dict{String,@NamedTuple{path::String, mtime::Float64}}()
 # Guarded: a widget's front-end can be registered from the CONCURRENT `@bind`/display path (via
 # `ensure_widget_assets!`), while the run drain reads the registry — writes and the reader iteration
 # must not race (`Multiple concurrent writes to Dict detected!`).
@@ -31,8 +34,30 @@ function provide_frontend!(js::AbstractString; id::AbstractString = "", esm::Boo
     key = isempty(id) ? "fe:" * string(hash(js); base = 16) : String(id)
     lock(_FRONTEND_LOCK) do
         _FRONTEND[key] = (js = String(js), esm = esm, kind = String(kind))
+        if js isa PkgAsset
+            _FRONTEND_FILES[key] = (path = js.path, mtime = mtime(js.path))
+        else
+            delete!(_FRONTEND_FILES, key)
+        end
     end
     return nothing
+end
+
+# Re-read every file-backed entry whose file changed since it was read. Call under `_FRONTEND_LOCK`.
+# A file that has gone missing keeps its last text: a half-saved or moved asset must not blank the page.
+function _refresh_frontend_files!()
+    for (key, f) in _FRONTEND_FILES
+        haskey(_FRONTEND, key) || continue
+        t = mtime(f.path)
+        (t == 0 || t == f.mtime) && continue
+        js = try
+            read(f.path, String)
+        catch
+            continue
+        end
+        _FRONTEND[key] = merge(_FRONTEND[key], (; js))
+        _FRONTEND_FILES[key] = (path = f.path, mtime = t)
+    end
 end
 
 """
@@ -287,14 +312,38 @@ on_worker_reset(f) = (f in _WORKER_RESETS || push!(_WORKER_RESETS, f); nothing)
 run_worker_resets() = _run_hooks(_WORKER_RESETS, "on_worker_reset")
 
 """
-    @pkg_asset(path) -> String
+    PkgAsset <: AbstractString
 
-Read a file bundled in the CALLING package, resolved relative to its package root (`pkgdir`), as a
-`String`. For shipping a front-end asset from `__init__` without embedding it in a Julia string:
-`register_component!("stars", @pkg_asset("assets/stars.js"))`.
+A package file's text that remembers where it came from — what [`@pkg_asset`](@ref) returns. It is a
+string (interpolate it, concatenate it, pass it anywhere a `String` goes), holding the contents read when
+it was made. The front-end registry ([`provide_frontend!`](@ref) and the widget forms) keeps the `path`
+and re-reads the file when its mtime changes, so an edit to a registered `.js` reaches the page on the
+next manifest pull without restarting the worker.
+"""
+struct PkgAsset <: AbstractString
+    path::String
+    text::String
+end
+PkgAsset(path::AbstractString) = PkgAsset(String(path), read(path, String))
+
+Base.String(a::PkgAsset) = a.text
+Base.ncodeunits(a::PkgAsset) = ncodeunits(a.text)
+Base.codeunit(a::PkgAsset) = codeunit(a.text)
+Base.codeunit(a::PkgAsset, i::Integer) = codeunit(a.text, i)
+Base.isvalid(a::PkgAsset, i::Integer) = isvalid(a.text, i)
+Base.iterate(a::PkgAsset, i::Integer = 1) = iterate(a.text, i)
+Base.pointer(a::PkgAsset) = pointer(a.text)
+Base.hash(a::PkgAsset, h::UInt) = hash(a.text, h)
+
+"""
+    @pkg_asset(path) -> PkgAsset
+
+Read a file bundled in the CALLING package, resolved relative to its package root (`pkgdir`). The result
+is a string ([`PkgAsset`](@ref)) that also carries the file's path, so a front-end registered from it
+follows edits to the file: `register_component!(Stars, @pkg_asset("assets/stars.js"))`.
 """
 macro pkg_asset(path)
-    :(read(joinpath(pkgdir($(__module__)), $(esc(path))), String))
+    :(PkgAsset(joinpath(pkgdir($(__module__)), $(esc(path)))))
 end
 
 # ── Package-vendored asset DIRECTORIES (served from disk, not inlined) ─────────
@@ -550,6 +599,7 @@ Every front-end script declared by the loaded packages (`id => js`) — a copy, 
 the registry. See [`extension_manifest`](@ref) for the full record (incl. module-ness) that Slate pulls.
 """
 frontend_scripts() = lock(_FRONTEND_LOCK) do
+    _refresh_frontend_files!()
     Dict{String,String}(k => v.js for (k, v) in _FRONTEND)
 end
 
@@ -576,6 +626,7 @@ query — no new transport per feature.
 """
 extension_manifest() =
     (; frontend = lock(_FRONTEND_LOCK) do
+           _refresh_frontend_files!()
            [(; id = k, js = v.js, esm = v.esm, kind = v.kind) for (k, v) in _FRONTEND]
        end,
        assets = [(; pkg = k, dir = v) for (k, v) in _ASSETS],

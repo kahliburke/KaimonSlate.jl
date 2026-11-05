@@ -197,7 +197,7 @@ function _agentMsgHtml(m) {
       (argsStr ? `<div class="tdlabel">args</div><pre class="toolargs">${_esca(argsStr)}</pre>` : '') +
       (resStr ? `<div class="tdlabel">result</div><pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(resStr)}</pre>` : '') +
       `</div>` : '';
-    return `<div class="apmsg tool${lane}${m.external ? ' ext' : ''}${hasDetail ? ' expandable' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}` +
+    return `<div class="apmsg tool${lane}${m.external ? ' ext' : ''}${m.resultErr ? ' failed' : ''}${hasDetail ? ' expandable' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}` +
       `${hasDetail ? '<span class="toolcaret">▸</span>' : ''}${_esca(m.text)}${cidChip}${codePre}${detail}</div>`;
   }
   return (
@@ -394,7 +394,7 @@ function agentEvent(env) {
     // above). So finalize the call and surface any image blocks.
     const u = d.update || {};
     const tm = agentMsgs.find(m => m.role === 'tool' && m.id === u.toolCallId && !m.done);
-    if (tm) { tm.done = true; if (env.external) tm.external = true; if (u.status === 'failed') tm.role = 'err'; }
+    if (tm) { tm.done = true; if (env.external) tm.external = true; if (u.status === 'failed') tm.resultErr = true; }
     for (const b of (u.content || [])) {
       const inner = b && b.content;
       if (inner && inner.type === 'image' && inner.data)

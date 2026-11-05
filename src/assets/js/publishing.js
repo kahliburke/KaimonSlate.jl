@@ -120,13 +120,13 @@
       const starTitle = otherHome ? ('Make this the front page — replaces “' + otherHome + '”') : 'Make this notebook the site’s front page (home)';
       return '<div class="pubsite' + (s.member ? ' is-member' : '') + '">'
         + '<label class="pubpick" style="flex:1" title="Add/remove this notebook to the site">'
-        + '<input type="checkbox" ' + (s.member ? 'checked' : '') + ' onchange="pubToggleMember(\'' + nm + '\', this.checked)"/>'
+        + '<input type="checkbox" ' + (s.member ? 'checked' : '') + ' onchange="pubToggleMember(' + window.slateJsArg(s.name) + ', this.checked)"/>'
         + '<span class="publ">' + esc(s.title || s.name) + '</span> <span class="pubdim">' + tgts + '</span></label>'
         + '<label class="pubpick" title="' + esc(starTitle) + '" style="opacity:' + (s.member ? '1' : '.4') + '">'
         + '<input type="checkbox" ' + (s.isHome ? 'checked' : '') + (s.member ? '' : ' disabled')
-        + ' onchange="pubToggleHome(\'' + nm + '\', this.checked)"/> ★ front page</label>'
+        + ' onchange="pubToggleHome(' + window.slateJsArg(s.name) + ', this.checked)"/> ★ front page</label>'
         + (otherHome ? '<span class="pubdim" style="font-size:.72rem" title="Current front page">↩ ' + esc(otherHome) + '</span>' : '')
-        + (s.member ? '<button class="pubmini" title="Build this notebook into the site\'s local copy. Deploying is Sync, in the Publishing manager." onclick="pubPublishSite(\'' + nm + '\')">⇪ Stage</button>' : '')
+        + (s.member ? '<button class="pubmini" title="Build this notebook into the site\'s local copy. Deploying is Sync, in the Publishing manager." onclick="pubPublishSite(' + window.slateJsArg(s.name) + ')">⇪ Stage</button>' : '')
         + (s.url ? ' <a class="publink" href="' + esc(s.url) + '" target="_blank" rel="noopener">open ↗</a>' : '')
         + '</div>';
     }).join('');

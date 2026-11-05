@@ -47,13 +47,26 @@ if(a<1e-4||a>=1e15)return v.toExponential(3);
 return String(parseFloat(v.toPrecision(6)));}
 /* A datum is a scalar on a value axis, or a tuple: [x,y] for a line, [x,y,v] for a heatmap. */
 function _slateValueFormatter(v){return Array.isArray(v)?v.map(_slateNum).join(', '):_slateNum(v);}
+/* Mirror of core.js `_slateIsDark`: whether a CSS colour is dark, null when unparseable. */
+function _slateIsDark(css){var s=String(css||'').trim(),rgb,m=/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s);
+if(m){var h=m[1].length===3?m[1].replace(/./g,function(c){return c+c;}):m[1];rgb=[0,2,4].map(function(i){return parseInt(h.slice(i,i+2),16);});}
+else if((m=/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(s))){rgb=m.slice(1,4).map(Number);}
+else return null;
+return (0.299*rgb[0]+0.587*rgb[1]+0.114*rgb[2])/255<0.5;}
 function _slateExportTheme(el){var cs=getComputedStyle(el||document.documentElement);
 var V=function(n,d){var v=cs.getPropertyValue(n).trim();return v||d;};
 var text=V('--text','#d4d8e8'),dim=V('--dim','#6a7090'),border=V('--border','#2a2e40'),bg2=V('--bg2','#141828');
 var cycle=[['--accent','#569cd6'],['--green','#56d364'],['--orange','#ce9178'],['--purple','#c586c0'],['--teal','#4ec9b0'],['--gold','#ffd700'],['--red','#e57575']].map(function(p){return V(p[0],p[1]);});
 var vir=['#440154','#472d7b','#3b528b','#2c728e','#21918c','#28ae80','#5ec962','#addc30','#fde725'];
 var ax={axisLine:{lineStyle:{color:border}},axisTick:{lineStyle:{color:border}},axisLabel:{color:dim,fontSize:14},nameTextStyle:{color:text,fontSize:15},splitLine:{lineStyle:{color:border,opacity:0.4}},splitArea:{areaStyle:{color:['transparent','transparent']}}};
-return {color:cycle,backgroundColor:'transparent',textStyle:{color:text,fontFamily:'inherit',fontSize:14},title:{left:'center',textStyle:{color:text,fontSize:19,fontWeight:'bold'},subtextStyle:{color:dim,fontSize:12}},legend:{textStyle:{color:dim,fontSize:14}},categoryAxis:ax,valueAxis:ax,logAxis:ax,timeAxis:ax,line:{symbolSize:5},graph:{color:cycle},tooltip:{backgroundColor:bg2,borderColor:border,textStyle:{color:text},valueFormatter:_slateValueFormatter},visualMap:{textStyle:{color:dim},inRange:{color:vir}},timeline:{lineStyle:{color:dim},label:{color:dim}},calendar:{splitLine:{lineStyle:{color:border}},itemStyle:{borderColor:border}}};}
+var dark=_slateIsDark(V('--bg',''));
+/* A real font stack, as core.js resolves it: canvas rejects 'inherit', and with it every fontSize. */
+var fam=(getComputedStyle(el||document.body||document.documentElement).fontFamily||'').trim()||"system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+fam=fam.replace(/"/g,"'");
+var t={color:cycle,backgroundColor:'transparent',textStyle:{color:text,fontFamily:fam,fontSize:14},title:{left:'center',textStyle:{color:text,fontSize:19,fontWeight:'bold'},subtextStyle:{color:dim,fontSize:12}},legend:{textStyle:{color:dim,fontSize:14}},categoryAxis:ax,valueAxis:ax,logAxis:ax,timeAxis:ax,line:{symbolSize:5},graph:{color:cycle},tooltip:{backgroundColor:bg2,borderColor:border,textStyle:{color:text},valueFormatter:_slateValueFormatter},visualMap:{textStyle:{color:dim},inRange:{color:vir}},timeline:{lineStyle:{color:dim},label:{color:dim}},calendar:{splitLine:{lineStyle:{color:border}},itemStyle:{borderColor:border}}};
+/* ECharts picks auto label contrast from `darkMode`, inferred from a 'transparent' background as light. */
+if(dark!==null)t.darkMode=dark;
+return t;}
 """
 
 # ── Page assets in a static export ────────────────────────────────────────────────────────────
@@ -110,7 +123,7 @@ end
 function _ext_asset_file(nb::LiveNotebook, url::AbstractString)
     m = match(r"^/ext-assets/([^/]+)/(.*)$", String(url))
     m === nothing && return nothing
-    dir = get(nb.assets, HTTP.URIs.unescapeuri(String(m.captures[1])), nothing)
+    dir = lock(() -> get(nb.assets, HTTP.URIs.unescapeuri(String(m.captures[1])), nothing), nb.lock)
     dir === nothing && return nothing
     p = _confined_path(dir, HTTP.URIs.unescapeuri(String(m.captures[2])))
     (p !== nothing && isfile(p)) ? p : nothing
@@ -178,7 +191,9 @@ end
 # widget holding a dead relative link is a better failure than a page whose script lost its dependency
 # silently. `_site_ctype` carries `; charset=…` for text types, and that space is invalid unencoded in a
 # data url — strip it, so `.js` spells as `text/javascript;charset=utf-8`.
-const _EXT_ASSET_URL_RE = r"/ext-assets/[^\"'`\s\\)]+"
+# The lookbehind skips a url that only CONTAINS the route: a `./ext-assets/…` sibling already rewritten,
+# or `https://host/ext-assets/…` on some other server.
+const _EXT_ASSET_URL_RE = r"(?<![\w.])/ext-assets/[^\"'`\s\\)]+"
 
 _inline_ext_asset_urls(nb::LiveNotebook, js::AbstractString; compress::Bool = false) =
     replace(String(js), _EXT_ASSET_URL_RE => function (u)
@@ -190,7 +205,11 @@ _inline_ext_asset_urls(nb::LiveNotebook, js::AbstractString; compress::Bool = fa
         # than any saving available on the data side. The consumer must know to inflate, so the mime says
         # so; a loader that does not understand `application/gzip` will fail loudly rather than execute
         # compressed bytes as source.
-        if compress && length(bytes) >= _ASSET_GZIP_MIN
+        #
+        # NEVER a module, though. `import()`, `<script src>` and the import map all hand the url to the
+        # browser's own loader, which has no inflate step and no hook to add one — `Slate.asset` is the
+        # only consumer that inflates, and a module never travels that way.
+        if compress && !_is_js(u) && length(bytes) >= _ASSET_GZIP_MIN
             z = try; transcode(CodecZlib.GzipCompressor, bytes); catch; nothing; end
             if z !== nothing && length(z) < length(bytes)
                 return string("data:application/gzip;base64,", Base64.base64encode(z))
@@ -199,6 +218,59 @@ _inline_ext_asset_urls(nb::LiveNotebook, js::AbstractString; compress::Bool = fa
         return string("data:", replace(_site_ctype(f), " " => ""), ";base64,",
                       Base64.base64encode(bytes))
     end)
+
+# The `/ext-assets/…` urls in the HTML a cell shows: a code cell's display (a package's `slate_render`
+# builds them with `ext_asset_url`) and the `{{ }}` values of a markdown cell. Read before the page is
+# written, because the import map that serves the JS ones goes in <head>. Only the HTML chunks: a
+# component descriptor's module loads from inside a `data:` module, where an absolute url has no base
+# to resolve against, so its urls are inlined in place.
+function _html_ext_asset_urls(nb::LiveNotebook)
+    urls = Set{String}()
+    function scan(o)
+        o === nothing && return
+        for ch in o.display
+            ch.mime in ("text/html", "application/vnd.kaimonslate.html+html") || continue
+            for m in eachmatch(_EXT_ASSET_URL_RE, String(copy(ch.data)))
+                push!(urls, m.match)
+            end
+        end
+    end
+    for c in nb.report.cells
+        scan(c.output)
+        foreach(scan, c.interp)
+    end
+    return urls
+end
+
+# A standalone page carries each vendored JS module that cell HTML names ONCE, as an import-map entry
+# from its live url to a `data:` url. The browser resolves a url-like import-map key against the page,
+# so `import("/ext-assets/…")` in every cell lands on that one entry, from `file://` and from any
+# origin. A `data:` url at each call site would carry the module once per cell: 6.4 MB per plotly plot.
+# An import-map entry with a `data:` target is safe for memory. A direct `import("data:…")` of a large
+# module is not: Chrome uses gigabytes of renderer memory for it (about 10 GB for the 5 MB plotly
+# bundle). Thus do not inline a JS module at the call site.
+# Limits: an import map applies to module loads only, so a `.js` that a cell loads with `<script src>`
+# does not resolve; and a relative import inside a `data:` module has no base url to resolve against.
+function _ext_asset_importmap(nb::LiveNotebook, urls)
+    out = Dict{String,String}()
+    for u in urls
+        (_is_js(u) && _ext_asset_file(nb, u) !== nothing) || continue
+        out[u] = _inline_ext_asset_urls(nb, u)
+    end
+    return out
+end
+
+# Repoint the `/ext-assets/…` urls in cell HTML. A site points them at the page-local
+# `./ext-assets/…` siblings. A standalone page keeps the urls that its import map carries and the JS
+# urls that it does not carry (see `_ext_asset_importmap`), and inlines all others as `data:` urls.
+function _export_ext_asset_html(nb::LiveNotebook, html::AbstractString; inline::Bool, mapped)
+    s = String(html)
+    occursin("/ext-assets/", s) || return s
+    return replace(s, _EXT_ASSET_URL_RE => function (u)
+        inline || return "." * u
+        return haskey(mapped, u) || _is_js(u) ? u : _inline_ext_asset_urls(nb, u)
+    end)
+end
 
 # ── A table a hop or more from its control: the chain sweep ──────────────────────────────────────────
 # `@replay` marks ONE EXPRESSION that reads a control, and re-evaluates that closure per position. A
@@ -590,8 +662,8 @@ end
 # The sweep ids still backed by a cell that EXISTS, or `nothing` when the whole registry is live (the
 # common case, and `nothing` means "no filter" downstream, so it costs nothing).
 #
-# The registry is keyed by cell id and only grows: a mark is written when its cell RUNS, and nothing
-# retires it when that cell is later renamed or deleted. Renaming through the UI could be made to evict,
+# The registry is keyed by cell id. A cell that runs again replaces its own marks, but nothing retires
+# the marks of a cell that is later renamed or deleted. Renaming through the UI could be made to evict,
 # but the notebook is a file — edit the `.jl` outside Slate and no rename event exists to hook. So the
 # export reconciles instead, which catches every route in. Left alone, a stale mark is swept, packed and
 # shipped for a cell that is not in the document: bytes the reader downloads and nothing can ever use,
@@ -905,6 +977,38 @@ function _asset_abspath(assetbase::AbstractString, rel::AbstractString)
     (p !== nothing && isfile(p)) ? p : nothing
 end
 
+# A markdown image, or the `src` of an <img>/<video>/<audio>/<source> tag in markdown, that names a file
+# in the notebook's project by a relative path, pointed at the notebook's asset route. Relative paths
+# resolve against the project dir, as `@asset`'s do. Every reader of markdown knows that route: the live
+# page loads it, and the exports inline it, copy it beside a page or stage it for Typst. The author's
+# source keeps the relative path, and a target that names no file in the project is left as written.
+const _LOCAL_MD_IMG_RE  = r"(!\[[^\]]*\]\(\s*)([^)\s]+)"
+const _LOCAL_TAG_SRC_RE = r"(<(?:img|video|audio|source)\b[^>]*?\bsrc=)([\"'])([^\"']+)\2"i
+_is_relative_ref(u::AbstractString) =
+    !isempty(u) && !startswith(u, "/") && !startswith(u, "#") && !occursin(r"^[A-Za-z][A-Za-z0-9+.-]*:", u)
+# `dir`: the project folder relative paths are written from ("" = the project root, as for a notebook's
+# markdown); a markdown FILE's links are relative to the folder it sits in.
+function _local_media(src::AbstractString, nbid::AbstractString, assetbase::AbstractString; dir::AbstractString = "")
+    s = String(src)
+    (isempty(nbid) || isempty(assetbase)) && return s
+    (occursin("![", s) || occursin(r"<(?:img|video|audio|source)\b"i, s)) || return s
+    route(u) = begin
+        _is_relative_ref(u) || return nothing
+        rel = HTTP.URIs.unescapeuri(startswith(u, "./") ? u[3:end] : u)
+        isempty(dir) || (rel = replace(normpath(joinpath(dir, rel)), '\\' => '/'))
+        _asset_abspath(assetbase, rel) === nothing && return nothing
+        "/n/" * nbid * "/asset/" * join((HTTP.URIs.escapeuri(x) for x in split(rel, '/')), "/")
+    end
+    s = replace(s, _LOCAL_MD_IMG_RE => function (m)
+        mm = match(_LOCAL_MD_IMG_RE, m); r = route(String(mm.captures[2]))
+        r === nothing ? m : string(mm.captures[1], r)
+    end)
+    return replace(s, _LOCAL_TAG_SRC_RE => function (m)
+        mm = match(_LOCAL_TAG_SRC_RE, m); r = route(String(mm.captures[3]))
+        r === nothing ? m : string(mm.captures[1], mm.captures[2], r, mm.captures[2])
+    end)
+end
+
 # Decode ONE embedded-media URL to (bytes, mime, ext), or `nothing` if it isn't a `data:`/asset ref or
 # the file is unreadable / escapes the project. `assetbase` is the notebook's asset root (`_proj_root`).
 function _embedded_media(assetbase::AbstractString, url::AbstractString)
@@ -1000,7 +1104,7 @@ function _embedded_asset_files(cells, assetbase::AbstractString)
     end
     scan(s) = (for re in (_EMBED_MD_RE, _EMBED_SRC_RE), mt in eachmatch(re, String(s)); add(mt.captures[2]); end)
     for c in cells
-        scan(c.source)
+        scan(_local_media(c.source, "_", base))       # a relative path names a project file too
         c.output === nothing && continue
         for ch in c.output.display                              # code/web cell HTML output (e.g. a WebPage)
             ch.mime == "text/html" && scan(String(copy(ch.data)))
@@ -1015,7 +1119,7 @@ end
 # and unresolvable refs collapse to their alt text — so an embedded image never aborts the compile.
 function _stage_typst_md_media(md::AbstractString, dir::AbstractString, base::AbstractString,
                                assetbase::AbstractString; sizes = nothing)
-    s = String(md)
+    s = _local_media(md, "_", assetbase)
     if occursin("data:", s) || occursin("/asset/", s)
         # Which images stand alone on their line (a figure, centred) vs sit in a run of prose (inline
         # where the author put them) — the markdown equivalent of the HTML's `p > img:only-child`.
@@ -1114,7 +1218,11 @@ function _js_rel_imports(src::AbstractString)
 end
 
 _js_module_path(rel, spec) = replace(normpath(joinpath(dirname(rel), spec)), '\\' => '/')
-_is_js(rel) = (e = lowercase(splitext(rel)[2]); e == ".js" || e == ".mjs")
+# Takes a url as readily as a relative path, so the query and fragment come off first: `lib.mjs?v=2`
+# is a module, and `splitext` alone reads its extension as `.mjs?v=2`. Both decisions about a MODULE
+# run through this — the export's import map, and whether cell HTML may inline a url at the call site
+# — so misreading a cache-busted module url puts a multi-megabyte `import("data:…")` back in the page.
+_is_js(rel) = (e = lowercase(splitext(first(split(String(rel), ('?', '#'))))[2]); e == ".js" || e == ".mjs")
 
 # The `@asset` JS MODULES a web cell imports — `Slate.assetUrl("…")` (preferred) or the legacy
 # `location.pathname + "/asset/…"` — as `relative-path => file bytes`, read from the notebook's asset
@@ -1216,7 +1324,7 @@ end
 # `_frontend_export_head`). A missing dir contributes nothing.
 function _package_asset_files(nb::LiveNotebook)
     out = Pair{String,String}[]
-    for (pkg, dir) in nb.assets
+    for (pkg, dir) in lock(() -> copy(nb.assets), nb.lock)   # an `/ext-assets/` route pull can merge at any time
         isdir(dir) || continue
         for (root, _, fnames) in walkdir(dir), f in fnames
             src = joinpath(root, f)
@@ -1451,7 +1559,10 @@ Slate.asset=function(path){var a=window.__slateAssets[path];
 if(!a)return Promise.reject(new Error("Slate.asset: unknown asset "+path));
 var get;if(a.data!==undefined){var b=atob(a.data),n=b.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=b.charCodeAt(i);
 get=a.enc==="gzip"?_slateInflate(u):Promise.resolve(u.buffer);}
-else{get=fetch(a.url).then(function(r){return r.arrayBuffer();});}
+/* Status-checked for the same reason as core.js: a 404 body would otherwise decode as data. */
+else{get=fetch(a.url).then(function(r){
+if(!r.ok)throw new Error("Slate.asset: "+a.url+" — "+r.status+" "+r.statusText);
+return r.arrayBuffer();});}
 return get.then(function(buf){if(a.dtype)return _slateNdarray(a,buf);var m=a.mime||"";
 if(m.indexOf("json")>=0)return JSON.parse(new TextDecoder().decode(buf));
 if(m.indexOf("text/")===0)return new TextDecoder().decode(buf);return buf;});};
@@ -1589,41 +1700,51 @@ for(var y=0;y<rows;y++){var row=new Array(cols);
 for(var x=0;x<cols;x++)row[x]=flat[x*rows+y];out[y]=row;}
 return out;}
 return Array.from(flat);},
-/* `marks` each carry at least {id, control}; `apply(slice, mark)` is the renderer's one step. `scope`
-   narrows it to one notebook on a page that embeds several: `{roots, replays}`, defaulting to the page. */
+/* Two domains naming the same positions in the same order. */
+sameDomain:function(a,b){var R=Slate.replay;if(a.length!==b.length)return false;
+for(var i=0;i<a.length;i++)if(!R.same(a[i],b[i]))return false;return true;},
+/* `marks` are ONE figure's, each carrying at least {id, control}; `apply(slice, mark)` is the renderer's
+   one step. A figure's marks on one control move together or not at all: they are wired as a group,
+   only when every one has a sweep over the same domain and all their data has loaded, and each move
+   applies one index to all of them. A group that cannot be wired leaves the figure as exported for that
+   control, and says why in the console. `scope` narrows it to one notebook on a page that embeds
+   several: `{roots, replays, live}`, defaulting to the page. */
 wire:function(marks,apply,scope){if(Slate.isLive())return;
-var reps=(scope&&scope.replays)||window.__slateReplays||{},roots=scope&&scope.roots;
-(marks||[]).forEach(function(m){
-/* A mark names a SWEEP, not an asset: what shipped — and at what resolution — is the export's
-   decision, published in this table. A mark with no entry never wires, so a figure whose sweep was
-   skipped leaves its control visibly disabled instead of failing at the first drag. */
-var R=Slate.replay;
-var sweep=reps[m.id];if(!sweep)return;
-var hosts=R.hosts(m.control,roots);if(!hosts.length)return;
-/* A sweep whose payload rode INLINE rather than in a binary asset. Prose is the case: a position is a
-   few short strings, and a fetch + decode + narrowing step exists to move megabytes of floats. There is
-   nothing to await, so the control enables immediately. */
-var inline=Array.isArray(sweep.values)?sweep.values:null;
-var loaded=inline?null:Slate.asset(sweep.asset);
+var R=Slate.replay,table=(scope&&scope.replays)||window.__slateReplays||{},roots=scope&&scope.roots,groups=new Map();
+(marks||[]).forEach(function(m){if(!groups.has(m.control))groups.set(m.control,[]);groups.get(m.control).push(m);});
+groups.forEach(function(ms,control){
+var hosts=R.hosts(control,roots);if(!hosts.length)return;
+/* A mark names a SWEEP, not an asset: what shipped, and at what resolution, is the export's decision,
+   published in this table. */
+var sweeps=ms.map(function(m){return table[m.id];});
+var ids=ms.map(function(m){return m.id;});
+var missing=ids.filter(function(_,j){return !sweeps[j];});
+if(missing.length){console.warn("@replay: `"+control+"` does not move this figure: no data shipped for "+missing.join(", "));return;}
+var domain=sweeps[0].domain||[];
+if(!sweeps.every(function(s){return R.sameDomain(s.domain||[],domain);})){
+console.warn("@replay: `"+control+"` does not move this figure: its marks were exported at different positions ("+ids.join(", ")+")");return;}
+/* A sweep whose payload rode INLINE rather than in a binary asset is ready at once. Prose is the case:
+   a position is a few short strings, and a fetch + decode + narrowing step exists to move megabytes. */
+Promise.all(sweeps.map(function(s){return Array.isArray(s.values)?s.values:Slate.asset(s.asset);}))
+.then(function(data){
 /* `scope.live()` false ⇒ a docs page has since rewired this notebook over a new set of cells; the
    listeners from before stay attached but do nothing. */
-var run=function(src){if(scope&&scope.live&&!scope.live())return;var key=R.read(src);var i=R.index(sweep.domain||[],key);if(i<0)return;
+var run=function(src){if(scope&&scope.live&&!scope.live())return;var key=R.read(src);var i=R.index(domain,key);if(i<0)return;
 /* A control surfaced beside several figures renders once per cell. Push the mover's state onto its
    copies, or the reader drags one strip and the others sit there stating something false. */
 hosts.forEach(function(h){if(h!==src)R.mirror(h,key);R.paint(h);R.relabel(h,key);});
-if(inline){apply(inline[i],m,i);return;}
-loaded.then(function(packed){apply(R.slice(packed,sweep,i),m,i);})
-.catch(function(e){console.error("replay failed",e);});};
+ms.forEach(function(m,j){var s=sweeps[j];apply(Array.isArray(s.values)?s.values[i]:R.slice(data[j],s,i),m,i);});};
 hosts.forEach(function(h){R.listen(h,function(){run(h);});});
-/* Apply the export-time position ONCE on load. A figure is already drawn at it, so this repaints the
-   same numbers — but a replayed TABLE is written with the UNION of every position (that is what the
-   order and the mask index into), so until this ran the reader saw every row and every column any
-   position can show, and only touching the control brought it back to what was exported. */
-if(inline){hosts.forEach(function(h){R.enable(h,true);});run(hosts[0]);return;}
 /* Every exported control renders DISABLED, because one that moves without changing anything reads as
-   a broken page. Enabling here — and only here — means a control is live exactly when data for it
-   actually rode along, with no coordination between the two sides. */
-loaded.then(function(){hosts.forEach(function(h){R.enable(h,true);});run(hosts[0]);}).catch(function(){});});}
+   a broken page. Enabling here, and only here, means a control is live exactly when the data for every
+   mark it drives has arrived. */
+hosts.forEach(function(h){R.enable(h,true);});
+/* Apply the export-time position ONCE. A figure is already drawn at it, so this repaints the same
+   numbers, but a replayed TABLE is written with the UNION of every position (that is what the order and
+   the mask index into), so until this ran the reader saw every row and every column any position can
+   show. */
+run(hosts[0]);})
+.catch(function(e){console.warn("@replay: `"+control+"` does not move this figure: its data did not load ("+ids.join(", ")+")",e);});});}
 };
 Slate.assetUrl=function(path){var a=window.__slateAssets[path];if(!a)return path;
 if(a.data!==undefined)return "data:"+(a.mime||"application/octet-stream")+";base64,"+a.data;return a.url||path;};
@@ -1726,8 +1847,14 @@ end
 _has_esm_frontend(nb) = any(e -> e.esm, _frontend_scripts(nb))
 
 # Light-family Slate palettes — page chrome + code-highlight theme flip on these; all others are dark.
-const _LIGHT_PALETTES = Set(["daylight", "solarized-light"])
-_export_is_light(name::AbstractString) = String(name) in _LIGHT_PALETTES
+# A palette is light when its page background is (`SLATE_PALETTES`, slate_look.jl), so a new palette needs no entry here.
+function _export_is_light(name::AbstractString)
+    p = get(ReportEngine.SLATE_PALETTES, String(name), nothing)
+    p === nothing && return false
+    h = lstrip(p.bg, '#')
+    r, g, b = (parse(Int, h[i:i+1]; base = 16) for i in (1, 3, 5))
+    return (0.299r + 0.587g + 0.114b) / 255 >= 0.5
+end
 # Resolve an export `theme` arg to a Slate palette NAME: back-compat "dark"/"light" → the canonical
 # midnight/daylight, and any real palette name (charttheme: "nord", "daylight", …) passes through.
 function _resolve_export_theme(theme::AbstractString)
@@ -2083,6 +2210,11 @@ end
 # into a sortable / filterable / client-paged table with a CSV download. All rows are already in the
 # DOM; numeric columns carry their raw value in `data-v` so sorting is numeric, not lexical. Emitted
 # ONCE into the page's `<script>` and run immediately (tables precede the script in the body).
+# The live page's image zoom (assets/js/imgzoom.js), carried as is: it brings its own styles.
+_imgzoom_js() = read(joinpath(@__DIR__, "assets", "js", "imgzoom.js"), String)
+# Copying typeset math as its LaTeX (assets/js/copymath.js), as on the live page.
+_copymath_js() = read(joinpath(@__DIR__, "assets", "js", "copymath.js"), String)
+
 const _EXPORT_TABLE_JS = raw"""(function(){
 function esc(s){s=String(s);return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;}
 function enh(table){
@@ -2474,7 +2606,14 @@ function _lib_script(pkg, sub, offline::Bool; defer::Bool = false)
         js === nothing || return string("<script>", replace(js, r"</script"i => "<\\/script"), "</script>")
     end
     url === nothing && return ""
-    return string("<script", defer ? " defer" : "", " src=\"", url, "\"></script>")
+    return string("<script", defer ? " defer" : "", " src=\"", url, "\"", _integrity_attrs(pkg, sub), "></script>")
+end
+
+# `integrity` (the hash vendor.lock.json records) and `crossorigin` for a CDN tag, so a browser loading an
+# exported page refuses a file that isn't the one this version of Slate was built against.
+function _integrity_attrs(pkg, sub)
+    sri = _vendor_locked_sri(pkg, sub)
+    sri === nothing ? "" : string(" integrity=\"", sri, "\" crossorigin=\"anonymous\"")
 end
 
 # KaTeX's stylesheet points at its fonts with relative `url(fonts/…)`, which is dead in a standalone file.
@@ -2558,7 +2697,7 @@ function _katex_css_tag(offline::Bool)
         css === nothing || return string("<style>", css, "</style>")
     end
     url = _vendor_url("katex", "katex.min.css")
-    url === nothing ? "" : string("<link rel=\"stylesheet\" href=\"", url, "\"/>")
+    url === nothing ? "" : string("<link rel=\"stylesheet\" href=\"", url, "\"", _integrity_attrs("katex", "katex.min.css"), "/>")
 end
 
 # The full third-party `<head>` block for an export, in whichever mode.
@@ -2773,7 +2912,7 @@ function _localize_imports(imports::AbstractDict, mode::Symbol = :inline,
     for (spec, url) in imports
         s, u = String(spec), String(url)
         if mode === :cdn || !_is_remote_url(u)
-            out[s] = u; continue                      # already a data:/relative/ext-assets target
+            out[s] = u; continue                      # data:/relative target; `/ext-assets/` is repointed in `_export_importmap_for`
         end
         got = _localize_module(u, mode, mods, done, Set{String}())
         got === nothing && error("slate: this export cannot be made self-contained — module `$s` " *
@@ -2814,14 +2953,22 @@ function _import_page_files(nb::LiveNotebook, mode::Symbol)
     return files
 end
 
-function _export_importmap_for(nb::LiveNotebook, offline::Bool = false, mode::Symbol = :auto)
+# `inline` is the standalone flag (`inline_assets`), which the import mode alone does not carry: an
+# online standalone page and an online site both resolve `:cdn`. `ext` is extra entries for vendored
+# modules that cell HTML names (`_ext_asset_importmap`).
+function _export_importmap_for(nb::LiveNotebook, offline::Bool = false, mode::Symbol = :auto;
+                               inline::Bool = true, ext::AbstractDict = Dict{String,String}())
     usemap = _effective_imports(nb)                       # package `provide_import!`s under the notebook's `@use`
     m = mode === :auto ? (offline ? :inline : :cdn) : mode
     m === :cdn || (usemap = _localize_imports(usemap, m))
+    # A `provide_import!` target on the live `/ext-assets/` route has no server behind it in an export.
+    usemap = Dict{String,String}(String(k) => (v = String(u); !startswith(v, "/ext-assets/") ? v :
+                                               inline ? _inline_ext_asset_urls(nb, v) : "." * v)
+                                 for (k, u) in usemap)
     esm = _has_esm_frontend(nb)
     uimap = (esm || any(c -> c.kind == ReportEngine.WEB, nb.report.cells)) ? _slate_ui_imports(offline) : Dict{String,String}()
     sdk = esm ? _slate_widget_sdk_import() : Dict{String,String}()
-    merged = merge(uimap, sdk, usemap)
+    merged = merge(uimap, sdk, ext, usemap)
     return _export_importmap(isempty(merged) ? nothing : merged)
 end
 
@@ -2855,13 +3002,15 @@ mutable struct _ExportCtx
     geomaps::Dict{String,String}          # map name => local GeoJSON file (inline mode only)
     bind_by_name::Any
     surfaced_names::Any
+    ext_mapped::Dict{String,String}       # `/ext-assets/` JS urls the page's import map carries (standalone)
     idprefix::String                      # prefix for generated DOM ids; "" on a single page
 end
 
 # Must be called with `nb.lock` held: it reads the report and evaluates the `@replay` sweeps.
 function _export_ctx(nb::LiveNotebook; inline::Bool, show_source::Bool = true, outputs::String = "all",
                      override::Bool = false, palette::AbstractString = "midnight",
-                     replay_stride::Integer = 1, replay_strides = nothing, idprefix::AbstractString = "")
+                     replay_stride::Integer = 1, replay_strides = nothing, idprefix::AbstractString = "",
+                     ext_mapped::AbstractDict = Dict{String,String}())
     fm = report_frontmatter(nb.report)
     figidx = figure_index(nb.report)
     citectx = _md_cite_ctx(nb)
@@ -2891,8 +3040,8 @@ function _export_ctx(nb::LiveNotebook; inline::Bool, show_source::Bool = true, o
         sw = get(replay_table, String(get(pm, "id", "")), nothing)
         sw isa AbstractDict || continue
         sl = try
-            _prose_attr_slots(markdown_html(c.source, c.interp), get(sw, "values", nothing),
-                              _proj_root(nb); inline = inline, media = media)
+            _prose_attr_slots(markdown_html(_local_media(c.source, nb.id, _proj_root(nb)), c.interp),
+                              get(sw, "values", nothing), _proj_root(nb); inline = inline, media = media)
         catch e
             @warn "@replay: could not resolve an interpolated attribute" cell = c.id exception = e
             Any[]
@@ -2905,7 +3054,7 @@ function _export_ctx(nb::LiveNotebook; inline::Bool, show_source::Bool = true, o
                       citectx, citekeys, figidx, rw, chain_marks, replay_assets, replay_table,
                       replay_rows, replay_frozen, mediareg, media, Dict{String,Any}[], Tuple{String,String}[],
                       Dict{String,String}(), _bind_index(nb.report.cells),
-                      _surfaced_names(nb.report.cells), String(idprefix))
+                      _surfaced_names(nb.report.cells), Dict{String,String}(ext_mapped), String(idprefix))
 end
 
 # The page's data assets (`save_asset` blobs, `@replay` sweeps, web-cell modules) as registry entries
@@ -2972,13 +3121,16 @@ end
 function _export_cell_html!(io::IO, ctx::_ExportCtx, c::Cell)
     nb = ctx.nb
     root = _proj_root(nb)
-    embed(html) = _export_embed_html(html, root; inline = ctx.inline, media = ctx.media)
+    # Author-embedded media inlined or pointed at siblings, then `/ext-assets/` urls in the cell's HTML
+    # repointed: page-local siblings, or the standalone page's import map and `data:` urls.
+    embed(html) = _export_ext_asset_html(nb, _export_embed_html(html, root; inline = ctx.inline, media = ctx.media);
+                                         inline = ctx.inline, mapped = ctx.ext_mapped)
     if c.kind == MARKDOWN
         # citations/refs + hoisted H1. Dropping the H1 drops whatever interpolations sat in it, and
         # `markdown_html` pairs the remaining ones positionally, so `c.interp` has to be advanced by
         # the same amount or the body renders the title's values.
         mdbody, mdbase = c.id == ctx.titlecell ? _body_after_hoisted_h1(c) : (c.source, 0)
-        mdsrc = ctx.rw(mdbody)
+        mdsrc = _local_media(ctx.rw(mdbody), nb.id, root)
         mdinterp = mdbase == 0 ? c.interp : c.interp[min(mdbase + 1, length(c.interp) + 1):end]
         if haskey(ctx.figidx.numbers, c.id)     # caption cell → numbered "Figure N." block
             print(io, "<figcaption class=\"exp-figcap\" id=\"fig-", _esc(c.id), "\"><b>Figure ",
@@ -3134,12 +3286,24 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
     # a blocking call is the teardown-deadlock hazard the protocol note in server.jl warns about — it
     # would stall the runner, the UI and every other reader of this notebook for the whole download.
     # Reads `report.meta`/`cells` off-lock exactly as `_warm_makie_figs!` does.
-    importmap_html = _export_importmap_for(nb, offline, _import_mode(offline, inline_assets, imports))
+    # A cell that re-runs between this read and the body below can name a JS module the map lacks.
+    # The body keeps that url as it is, so the import fails in the page; the next export carries it.
+    #
+    # `nb.assets` is filled at the end of a drain, so an export taken before the first one finishes sees
+    # none of the vendored directories, and then NOTHING resolves: the import map is empty, so every JS
+    # url is left live by the rule above and the page imports a route that does not exist. Pull the
+    # manifest first. A kernel round-trip, so it belongs here with the Makie warm rather than under
+    # `nb.lock`; `force` skips the route's throttle, and a kernel that cannot answer leaves the
+    # directories as they are.
+    _pull_ext_assets!(nb; force = true)
+    extmap = inline_assets ? _ext_asset_importmap(nb, _html_ext_asset_urls(nb)) : Dict{String,String}()
+    importmap_html = _export_importmap_for(nb, offline, _import_mode(offline, inline_assets, imports);
+                                           inline = inline_assets, ext = extmap)
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
         title = _esc(fm0.title)
         ctx = _export_ctx(nb; inline = inline_assets, show_source = show_source, outputs = String(outputs),
-                          override = override, palette = palette,
+                          override = override, palette = palette, ext_mapped = extmap,
                           replay_stride = replay_stride, replay_strides = replay_strides)
         # The BODY rewriter (`ctx.rw`) emits HTML citations that LINK to the References section; this
         # plain-text one is for places that can't take HTML — the OG/meta description below — so neither
@@ -3186,7 +3350,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         isempty(strip(fm.byline)) || print(io, "<div class=\"exp-byline\">", _esc(fm.byline), "</div>")
         if !isempty(strip(fm.abstract))
             print(io, "<div class=\"exp-abstract\"><span class=\"exp-abslabel\">Abstract</span>",
-                  _export_embed_html(markdown_html(ctx.rw(fm.abstract), CellOutput[]), _proj_root(nb);
+                  _export_embed_html(markdown_html(_local_media(ctx.rw(fm.abstract), nb.id, _proj_root(nb)), CellOutput[]), _proj_root(nb);
                                      inline = inline_assets, media = ctx.media), "</div>")
         end
         runnable && print(io, "<div class=\"exp-run\"><button id=\"exp-run-btn\">▶ Run this notebook live</button></div>")
@@ -3194,7 +3358,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # Side-by-side rows (`column=N`): wrap a multi-cell run in a flex `.exp-row`. The visibility
         # predicate mirrors the per-cell skips below so the grouping matches what's actually emitted.
         rowopen, rowclose, _ = _column_row_brackets(nb.report.cells,
-            c -> !(:collapsed in c.flags) && !(:docindex in c.flags) && !(c.id in fm.skip) && !(:bibliography in c.flags))
+            c -> !(:collapsed in c.flags) && !(:docindex in c.flags) && !(c.id in fm.skip) &&
+                 !(:bibliography in c.flags) && !(:notes in c.flags))
         for c in nb.report.cells
             # A collapsed (folded ▸) cell is tucked away entirely in the notebook — omit it from
             # the export too (both code and output), for markdown and code alike.
@@ -3207,6 +3372,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             end
             c.id in fm.skip && continue              # hoisted into the title block above
             (:bibliography in c.flags) && continue   # raw BibTeX isn't shown (HTML has no CSL engine yet)
+            # Speaker notes are addressed to the presenter, not the reader. The deck skips them and the
+            # PDF gives them their own appendix; an HTML page had no such split and published them as
+            # ordinary prose. Omitted rather than hidden in CSS — `display:none` still ships the text.
+            (:notes in c.flags) && continue
             haskey(rowopen, c.id) && print(io, "<div class=\"exp-row\">")   # open a side-by-side row
             _export_cell_html!(io, ctx, c)
             c.id in rowclose && print(io, "</div>")   # close a side-by-side row
@@ -3237,7 +3406,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             print(io, "<div id=\"exp-run-bg\"><div class=\"exp-run-modal\">",
                   "<h2>Run this notebook live</h2>",
                   "<p>Get the full interactive notebook (with the AI agent) on your machine. Needs ",
-                  "<a href=\"https://julialang.org/downloads/\" target=\"_blank\" rel=\"noopener\">Julia 1.10+</a>. ",
+                  "<a href=\"https://julialang.org/downloads/\" target=\"_blank\" rel=\"noopener\">Julia $(_min_julia_str())+</a>. ",
                   "The launch script installs Kaimon + KaimonSlate and starts the notebook (its exact environment is reconstructed from the bundle).</p>")
             if embed_bundle
                 print(io, "<p><b>macOS / Linux</b> — download <b>run.jl</b> + the <b>bundle</b> into one folder, then <code>julia run.jl</code>:</p>",
@@ -3268,6 +3437,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # ride here at the end (they run against the finished DOM).
         print(io, "<script>")
         print(io, _EXPORT_TABLE_JS)   # hydrate every `.exp-table` → sortable/filterable/paged + CSV (no server)
+        print(io, _imgzoom_js())      # zoom/pan + full-window view for figure images, as on the live page
+        print(io, _copymath_js())     # a copied formula gives its LaTeX source
         # …then let a `@replay`-marked table follow its control, using the hook each enhancer just
         # registered. Nothing is emitted for a notebook with no replayed table.
         isempty(tablemarks) || print(io, "var _slateTableMarks=", JSON.json(tablemarks), ";",
@@ -3483,6 +3654,11 @@ function _dev_checkout_path(srcdir::AbstractString)
     return root
 end
 
+# The oldest Julia an exported notebook or app can run on: KaimonSlate's own `[compat] julia` floor,
+# which the launcher installs. Every launcher, guard and README states this one value.
+const _MIN_JULIA = v"1.12"
+_min_julia_str() = "$(_MIN_JULIA.major).$(_MIN_JULIA.minor)"
+
 # The `run.jl` bootstrap. Installs Kaimon + KaimonSlate into a DEDICATED environment (never the user's
 # default — avoids clobbering their setup), fetches the notebook's reproducible bundle, and serves it —
 # the notebook's exact env reconstructs in a gate worker on open. Kaimon is REQUIRED, not optional: it
@@ -3513,7 +3689,7 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     # ── Run this Kaimon Slate notebook live on your machine ──────────────────────────────────────
     # Auto-generated. Installs Kaimon + KaimonSlate into a dedicated environment, gets this notebook's
     # reproducible bundle, and serves it — the notebook's exact environment reconstructs on open.
-    # Re-runnable (idempotent). Prerequisite: Julia 1.10+ (juliaup / https://julialang.org/downloads).
+    # Re-runnable (idempotent). Prerequisite: Julia $(_min_julia_str())+ (juliaup / https://julialang.org/downloads).
     #
     # Steps are separate functions so this is easy to extend or audit.
 
@@ -3542,7 +3718,7 @@ $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
         s = Sockets.listen(Sockets.localhost, 0); p = Int(Sockets.getsockname(s)[2]); close(s); return p
     end
     function ensure_julia()
-        VERSION >= v"1.10" || error("Julia 1.10+ required (found \$VERSION). See https://julialang.org/downloads")
+        VERSION >= v"$(_min_julia_str())" || error("Julia $(_min_julia_str())+ required (found \$VERSION). See https://julialang.org/downloads")
     end
 
     # LibGit2 (Pkg's git transport) warns about credential attributes newer git sends that its parser
@@ -3817,13 +3993,13 @@ function _run_app_bind(port::Int)
     # statement of intent, so admit this machine's own names automatically; SLATE_ALLOWED_HOSTS
     # adds any others (a DNS alias, a reverse proxy's name).
     if host != "127.0.0.1" && host != "localhost"
-        names = String[gethostname(), host]
+        allowed_hosts = String[gethostname(), host]
         for ip in try; Sockets.getipaddrs(); catch; []; end
-            push!(names, string(ip))
+            push!(allowed_hosts, string(ip))
         end
         extra = strip(get(ENV, "SLATE_ALLOWED_HOSTS", ""))
-        isempty(extra) || push!(names, String(extra))
-        ENV["KAIMONSLATE_ALLOWED_HOSTS"] = join(unique(filter(!isempty, names)), ",")
+        isempty(extra) || push!(allowed_hosts, String(extra))
+        ENV["KAIMONSLATE_ALLOWED_HOSTS"] = join(unique(filter(!isempty, allowed_hosts)), ",")
     end"""
 end
 
@@ -3872,7 +4048,7 @@ function _run_ps1()
     # ── Run this Kaimon Slate notebook live (Windows / PowerShell) ───────────────────────────────
     # Auto-generated. Runs the sibling $(_SITE_RUNJL), which installs Kaimon + KaimonSlate into a
     # dedicated environment, fetches this notebook's reproducible bundle, and serves it — the
-    # notebook's exact environment reconstructs on open. Prerequisite: Julia 1.10+ (juliaup /
+    # notebook's exact environment reconstructs on open. Prerequisite: Julia $(_min_julia_str())+ (juliaup /
     # https://julialang.org/downloads). Double-click $(_SITE_BAT), or right-click this file →
     # "Run with PowerShell".
     \$ErrorActionPreference = "Stop"
@@ -3939,7 +4115,7 @@ function _run_sh(title::AbstractString = "")
     # ── Run this Kaimon Slate app ────────────────────────────────────────────────────────────────
     # Auto-generated. Runs the sibling $(_SITE_RUNJL), which installs Kaimon + KaimonSlate into a
     # dedicated environment, reconstructs this notebook's exact packages, and serves it.
-    # Prerequisite: Julia 1.10+ (https://julialang.org/downloads or juliaup).
+    # Prerequisite: Julia $(_min_julia_str())+ (https://julialang.org/downloads or juliaup).
     #
     #   ./$(_SITE_SH)                              # run it (binds 0.0.0.0 — the whole network)
     #   ./$(_SITE_SH) --port 9000                  # a specific port
@@ -4113,7 +4289,7 @@ end
 Write a self-contained **application** for `nb` into `dir` (created if absent), and return `dir`.
 
 The folder holds the notebook's reproducible bundle plus launchers. Running `julia run.jl` inside
-it — here, or on any machine you copy it to, needing only Julia 1.10+ — installs the environment,
+it — here, or on any machine you copy it to, needing only Julia 1.12+ — installs the environment,
 reconstructs the notebook's exact packages, and serves it as an app: prose, results, figures and
 live controls, with the authoring API refused server-side. Windows users double-click `run.bat`.
 
@@ -4150,8 +4326,9 @@ function export_app(nb::LiveNotebook, dir::AbstractString; appdefaults::Abstract
     # A workbook saves the student's answers over the notebook it ships, so the exercises as the
     # author wrote them have to survive somewhere else — this copy is what the Reset button reads
     # (`_workbook_stub_path`). Dotfile-named so it doesn't read as a second notebook to open.
-    workbook && write(joinpath(d, "." * bname * ".original"),
-                      export_standalone(nb; history = false, include = String[]))
+    # Reset reads only cell sources from it, so it is the plain notebook text, without the bundle,
+    # memo results or preview the shipped copy carries.
+    workbook && write(joinpath(d, "." * bname * ".original"), serialize_report(nb.report))
     write(joinpath(d, _SITE_RUNJL), _run_script(""; agent = agent, bundle_name = bname,
                                                 app = true, workbook = workbook,
                                                 appdefaults = appdefaults, port = Int(port),
@@ -4286,7 +4463,7 @@ function _app_readme(nb::LiveNotebook, bundle_name::AbstractString, port::Int)
 
     ## Running it
 
-    Install Julia 1.10 or newer (<https://julialang.org/downloads>), then from this folder:
+    Install Julia $(_min_julia_str()) or newer (<https://julialang.org/downloads>), then from this folder:
 
     | | |
     |---|---|
@@ -4897,41 +5074,8 @@ end
 # Existing local sites (slugified names), newest-content first isn't meaningful here → sorted.
 list_local_sites() = (d = _sites_dir(); isdir(d) ? sort(filter(n -> isdir(joinpath(d, n)), readdir(d))) : String[])
 
-_site_ctype(p) = (e = lowercase(splitext(p)[2]);
-    e == ".html" ? "text/html; charset=utf-8" :
-    e in (".js", ".mjs") ? "application/javascript; charset=utf-8" :
-    e == ".css" ? "text/css; charset=utf-8" :
-    e == ".json" ? "application/json; charset=utf-8" :
-    e == ".png" ? "image/png" :
-    e in (".jpg", ".jpeg") ? "image/jpeg" :
-    e == ".svg" ? "image/svg+xml" :
-    e == ".gif" ? "image/gif" :
-    e == ".webp" ? "image/webp" :
-    e == ".avif" ? "image/avif" :
-    e == ".bmp" ? "image/bmp" :
-    e == ".ico" ? "image/x-icon" :
-    # Media a cell can embed by drag/drop. A media element dispatches its decoder on the declared type,
-    # so `application/octet-stream` here is not a harmless default — it makes the clip unplayable
-    # anywhere the bytes aren't content-sniffed (an inlined `data:` URL, a `nosniff` route).
-    e == ".mp4" ? "video/mp4" :
-    e == ".m4v" ? "video/x-m4v" :
-    e == ".webm" ? "video/webm" :
-    e == ".mov" ? "video/quicktime" :
-    e == ".ogv" ? "video/ogg" :
-    e == ".mp3" ? "audio/mpeg" :
-    e == ".wav" ? "audio/wav" :
-    e in (".ogg", ".oga", ".opus") ? "audio/ogg" :
-    e == ".flac" ? "audio/flac" :
-    e in (".m4a", ".aac") ? "audio/mp4" :
-    e == ".pdf" ? "application/pdf" :
-    e == ".woff2" ? "font/woff2" :
-    e == ".woff" ? "font/woff" :
-    e == ".ttf" ? "font/ttf" :
-    e == ".wasm" ? "application/wasm" :             # WebAssembly.instantiateStreaming requires this exact MIME
-    e == ".glb" ? "model/gltf-binary" :
-    e == ".gltf" ? "model/gltf+json" :
-    e in (".txt", ".jl", ".map") ? "text/plain; charset=utf-8" :
-    "application/octet-stream")
+include(joinpath(@__DIR__, "serve", "mime_types.jl"))   # SITE_MIME_TYPES, shared with slate_serve.jl
+_site_ctype(p) = site_content_type(String(p))
 
 # Resolve `<name>/<sub>` to a servable file under the site dir, with a `..`-traversal guard: the
 # resolved path must stay inside the site. A directory (or empty `sub`) serves its `index.html`.
@@ -5422,7 +5566,7 @@ const _TEX_MACRO = Dict(
     "neq"=>"≠","approx"=>"≈","sim"=>"∼","simeq"=>"≃","equiv"=>"≡","propto"=>"∝","infty"=>"∞","partial"=>"∂",
     "nabla"=>"∇","int"=>"∫","sum"=>"∑","prod"=>"∏","sqrt"=>"√","angle"=>"∠","rightarrow"=>"→","to"=>"→",
     "leftarrow"=>"←","Rightarrow"=>"⇒","mapsto"=>"↦","langle"=>"⟨","rangle"=>"⟩","ldots"=>"…","cdots"=>"⋯",
-    "in"=>"∈","notin"=>"∉","forall"=>"∀","exists"=>"∃","hbar"=>"ℏ","ell"=>"ℓ","circ"=>"∘","cap"=>"∩",
+    "in"=>"∈","notin"=>"∉","div"=>"÷","dots"=>"…","subset"=>"⊂","forall"=>"∀","exists"=>"∃","hbar"=>"ℏ","ell"=>"ℓ","circ"=>"∘","cap"=>"∩",
     "cup"=>"∪",  # function names keep their letters (drop only the backslash); unknown macros are dropped
     "cos"=>"cos","sin"=>"sin","tan"=>"tan","sec"=>"sec","csc"=>"csc","cot"=>"cot","sinh"=>"sinh",
     "cosh"=>"cosh","tanh"=>"tanh","log"=>"log","ln"=>"ln","exp"=>"exp","lim"=>"lim","min"=>"min",
@@ -5431,7 +5575,7 @@ const _TEX_SUP = Dict{Char,Char}(zip("0123456789+-=()ni", "⁰¹²³⁴⁵⁶⁷
 const _TEX_SUB = Dict{Char,Char}(zip("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎"))
 # `^{…}`/`^x` (or `_…`) → Unicode only when EVERY char maps, else the bare body (e.g. `x^{2θ}` → `x2θ`).
 _tex_script(m, sub) = (b = replace(m, r"^[\^_]\{?" => "", "}" => "");
-                       (!isempty(b) && all(c -> haskey(sub, c), b)) ? String([sub[c] for c in b]) : b)
+                       isempty(b) ? b : something(_tex_mapscript(b, sub), b))   # export_typst.jl
 function _demath(s::AbstractString)
     t = String(s)
     ('$' in t || occursin("\\(", t) || occursin("\\[", t)) || return t   # no inline maths → untouched
@@ -5590,6 +5734,7 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
         for c in nb.report.cells
             (:collapsed in c.flags) && continue
             c.id in fm.skip && continue
+            (:notes in c.flags) && continue    # speaker notes — presenter-only, same as the HTML export
             if :bibliography in c.flags        # rendered as the References section below, not raw BibTeX
                 continue
             end
@@ -5730,6 +5875,7 @@ function _agent_system_prompt(nb::LiveNotebook)
 
     Change the notebook's CELLS through the slate tools (slate_add_cell / slate_edit_cell / slate_run /
     slate_delete_cell / slate_rename_cell), not by hand-editing the .jl — that fights the running engine.
+    The hub picks up changes to the .jl on its own, so there is no need to close and reopen the notebook.
 
     DEPENDENCIES the notebook needs (a package a cell will `using`): add them with
     `slate_pkg(notebook="$(nb.id)", op="add", name="…")` — this installs into the NOTEBOOK's own env and
@@ -5871,7 +6017,60 @@ function _reap_agents!(nb::LiveNotebook; keep_log::Bool = false)
     end
     return nothing
 end
-_close_agent!(nb::LiveNotebook) = _reap_agents!(nb; keep_log = false)   # on notebook close
+
+# Notebook file → the crew agents (label → agent id) that were mid-turn when it closed. The
+# agent may be the one that closed it, so it lives on: its events go to the transcript on disk,
+# a reopen of the same file takes it back, and it is closed when its turn ends if none does.
+const _DETACHED_AGENTS = Dict{String,Dict{String,String}}()
+
+_agent_working(aid::AbstractString) =
+    try
+        String(get(_agent_call(:agent_status, Dict{String,Any}("agent_id" => String(aid))), "status", "")) == "working"
+    catch
+        false
+    end
+
+# On notebook close: detach the agents with a turn in flight, reap the rest.
+function _close_agent!(nb::LiveNotebook)
+    busy = _agent_available() ?
+        Dict(l => a for (l, a) in lock(() -> copy(nb.agents), _AGENT_LOCK) if _agent_working(a)) :
+        Dict{String,String}()
+    if !isempty(busy)
+        lock(_AGENT_LOCK) do
+            _DETACHED_AGENTS[abspath(nb.path)] = busy
+            for l in keys(busy); delete!(nb.agents, l); end
+        end
+    end
+    _reap_agents!(nb; keep_log = false)
+    return nothing
+end
+
+# On open: take back the agents detached when this file last closed. The transcript is reloaded
+# under the same lock the relay holds while it writes for a detached agent, so nothing it wrote
+# in between is missed.
+function _reattach_agents!(nb::LiveNotebook)
+    lock(_AGENT_LOCK) do
+        d = pop!(_DETACHED_AGENTS, abspath(nb.path), nothing)
+        d === nothing && return
+        _load_chat_log!(nb)
+        for (label, aid) in d
+            _AGENT_ROUTES[aid] = nb
+            nb.agents[label] = aid
+        end
+        nb.agent_id = get(nb.agents, "", "")
+        _AGENT_TURN[nb.id] = time()
+        nb.agent_busy = true
+    end
+    return nothing
+end
+
+# The detached entry holding `aid`, as `path => label`, or `nothing`.
+function _detached_slot(aid::AbstractString)
+    for (path, d) in _DETACHED_AGENTS, (label, a) in d
+        a == aid && return path => label
+    end
+    return nothing
+end
 
 # Last turn-start time per notebook id — so a `result`'s delayed busy-clear can't clobber the
 # busy flag of a NEWER turn that started inside its window (which would mislabel that turn's edits).
@@ -5887,19 +6086,35 @@ handler routes it to the chat pane. `data` already rides the bus as a JSON strin
 function relay_agent_event(channel::AbstractString, data)
     startswith(channel, "agent:") || return
     aid = String(channel)[length("agent:")+1:end]
-    nb, crew = lock(_AGENT_LOCK) do
-        get(_AGENT_ROUTES, aid, nothing), get(_AGENT_CREW, aid, "")
-    end
-    nb === nothing && return
     s = data isa AbstractString ? String(data) : String(JSON.json(data))
     env = try; JSON.parse(s); catch; nothing; end
     kind = env === nothing ? "" : get(env, "kind", "")
-    # Tag the envelope with the speaking crew member so the SPA can lane multiple
-    # agents (and replay stays attributed). Re-serialize only when we parsed cleanly.
-    if env !== nothing
-        env["crew"] = crew
-        s = JSON.json(env)
+    is_delta = kind == "tool_input_delta" ||
+        (env !== nothing && (d = get(env, "data", nothing); d isa AbstractDict && get(d, "delta", false) === true))
+    nb, crew, ended = lock(_AGENT_LOCK) do
+        n = get(_AGENT_ROUTES, aid, nothing)
+        n === nothing && return (nothing, "", false)
+        c = get(_AGENT_CREW, aid, "")
+        # Tag the envelope with the speaking crew member so the SPA can lane multiple
+        # agents (and replay stays attributed). Re-serialize only when we parsed cleanly.
+        if env !== nothing
+            env["crew"] = c
+            s = JSON.json(env)
+        end
+        slot = _detached_slot(aid)
+        slot === nothing && return (n, c, false)
+        # Its notebook is closed: the transcript on disk keeps the turn for a reopen, and the
+        # agent is closed when the turn ends with no reopen to take it back.
+        is_delta || _append_chat_log(n, s)
+        kind == "result" || return (nothing, c, false)
+        d = _DETACHED_AGENTS[slot.first]
+        delete!(d, slot.second)
+        isempty(d) && delete!(_DETACHED_AGENTS, slot.first)
+        delete!(_AGENT_ROUTES, aid); delete!(_AGENT_CREW, aid)
+        return (nothing, c, true)
     end
+    ended && Threads.@spawn try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => aid)); catch; end
+    nb === nothing && return
     # Mark the agent busy across a turn so the file-watcher attributes the edits it
     # makes to "agent" (not "external"). Clear shortly AFTER the turn ends, so the
     # watcher tick that picks up the agent's final save is still inside the window.
@@ -5918,8 +6133,6 @@ function relay_agent_event(channel::AbstractString, data)
     # `tool_input_delta`) — the authoritative copies (the `delta:false` block, the
     # `tool_result`) are buffered, so replay stays clean and the cap isn't burned.
     _broadcast(nb, "agent:" * s)
-    is_delta = kind == "tool_input_delta" ||
-        (env !== nothing && (d = get(env, "data", nothing); d isa AbstractDict && get(d, "delta", false) === true))
     is_delta || _buffer_agent_log!(nb, s)   # persist non-delta envelopes for reload-replay
     return nothing
 end

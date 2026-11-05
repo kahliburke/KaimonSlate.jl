@@ -97,15 +97,24 @@ to_widget(x) = throw(ArgumentError(
 
 # ── Choice / Selection — labeled-option value semantics ───────────────────────
 # What a labeled option widget (Radio/Select/MultiSelect built from `value => label` pairs)
-# binds to: it carries BOTH the selected value and its display label, but behaves like the value
-# for comparison, display, hashing and interpolation — so `pick == "a"`, `Dict(opts)[pick]` and
-# `"$(pick)"` all use the value, while `pick.label` gives the rendered text.
+# binds to: it carries BOTH the selected value and its display label, and for a NUMBER, STRING or
+# CHARACTER value it behaves like the value for comparison, display, hashing and interpolation — so
+# `pick == "a"`, `Dict(opts)[pick]` and `"$(pick)"` all use the value, while `pick.label` gives the
+# rendered text. For any other value type, `Symbol` included, read `pick.value`; the signatures that
+# would cover it are the ones that invalidate half the session (see below).
 
 """
     Choice(value, label, index = 0)
 
 A labeled option's bound value: `.value`/`.v` is the real value, `.label`/`.l` the display
-text, `.index`/`.i` its 1-based position. Compares, hashes, prints and converts as its value.
+text, `.index`/`.i` its 1-based position.
+
+Prints as its value, and compares and converts as its value **when that value is a number, a string
+or a character** — so `pick == "a"`, `Dict(opts)[pick]` and `"\$(pick)"` all read as you'd expect.
+
+For any other value type, `Symbol` included, compare `pick.value` rather than `pick`. `pick == :a` is
+false, and `x::Symbol = pick` throws. (`pick === :a` and `isequal(pick, :a)` were always false, for
+every value type — `.value` is the only spelling that has ever been reliable.)
 """
 struct Choice{V}
     value::V
@@ -120,20 +129,36 @@ Base.show(io::IO, c::Choice) = show(io, getfield(c, :value))
 Base.print(io::IO, c::Choice) = print(io, getfield(c, :value))
 Base.string(c::Choice) = string(getfield(c, :value))
 Base.:(==)(a::Choice, b::Choice) = getfield(a, :value) == getfield(b, :value)
-Base.:(==)(a::Choice, b) = getfield(a, :value) == b
-Base.:(==)(a, b::Choice) = a == getfield(b, :value)
-# Both hash forms defer to the value, so a Choice is transparent as a dict KEY — including a
-# Symbol value, whose one-arg `hash(::Symbol)` differs from `hash(sym, 0x0)` and is the form Dict
-# indexes with (the two-arg method alone would mis-slot a Symbol-keyed lookup).
-Base.hash(c::Choice) = hash(getfield(c, :value))
+# ── Why these signatures are NARROW ──────────────────────────────────────────
+# Every method here is a method on a Base function, so its signature decides how much already-compiled
+# code Julia has to throw away when this package loads. Two shapes are expensive:
+#
+#   • a ONE-ARGUMENT `hash`. Base has only three of them, so compiled code holds a backedge to
+#     `hash(::Any)`, and a fourth invalidates all of it.
+#   • an UNTYPED mixed `==`. `==(::Choice, ::Any)` intersects call sites Base and loaded packages have
+#     already compiled (`==(::Any, ::Nothing)`, `==(::Any, ::Symbol)`, …) and invalidates those too.
+#
+# Between them those two shapes accounted for most of the invalidation this package caused, and the
+# extension's first `slate_render` then had to compile again — seconds, not milliseconds, on a
+# notebook's first render. With the signatures below, `Choice` invalidates nothing: measure it by
+# commenting these methods out and comparing, which is what fixing them amounted to.
+#
+# The price is that a Symbol-valued `Choice` is NOT transparent: `pick == :a` is false and `x::Symbol
+# = pick` throws. Write `pick.value`. That is the honest spelling anyway — transparency was never
+# complete, since `===` and `isequal` against a bare Symbol were always false, so `pick === :a` read
+# correctly and silently chose the wrong branch.
+Base.:(==)(a::Choice, b::Union{Number,AbstractString,AbstractChar}) = getfield(a, :value) == b
+Base.:(==)(a::Union{Number,AbstractString,AbstractChar}, b::Choice) = a == getfield(b, :value)
 Base.hash(c::Choice, h::UInt) = hash(getfield(c, :value), h)
 Base.isequal(a::Choice, b::Choice) = isequal(getfield(a, :value), getfield(b, :value))
-# Transparent in CONVERT/INDEX contexts too — typed struct fields, typed local assignment,
-# typed collections, indexing, and explicit numeric construction — so a labeled option's Choice
-# flows wherever its bare value would through a `convert`. Restricted to SCALAR targets so it
-# can't shadow the Choice→Choice conversion that `Choice[…]` collections depend on.
-Base.convert(::Type{T}, c::Choice) where {T<:Union{Number,AbstractString,AbstractChar,Symbol}} =
-    convert(T, getfield(c, :value))
+# Transparent in CONVERT/INDEX contexts too — typed struct fields, typed local assignment, typed
+# collections, indexing, and explicit numeric construction — so a labeled option's Choice flows
+# wherever its bare value would through a `convert`. Scalar targets only, so it can't shadow the
+# Choice→Choice conversion that `Choice[…]` collections depend on; and `Number`/`String` only, because
+# a `T<:AbstractString` target matches compiled `SubString` conversions and a
+# `Union{Number,AbstractString}` one matches `convert(::Type{Union{Bool,Int,String}}, ::Any)`.
+Base.convert(::Type{T}, c::Choice) where {T<:Number} = convert(T, getfield(c, :value))
+Base.convert(::Type{String}, c::Choice) = convert(String, getfield(c, :value))
 (::Type{T})(c::Choice) where {T<:Number} = T(getfield(c, :value))
 Base.to_index(c::Choice) = Base.to_index(getfield(c, :value))
 

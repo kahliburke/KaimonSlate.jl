@@ -875,12 +875,15 @@
   // cell has no local edits, so its text IS its source. Keeps save/run/backup correct pre-hydration.
   window.edText = id => {
     const w = window.webEditors && window.webEditors[id];
-    if (w) return w.assemble();
+    if (w) return w.text ? w.text() : w.assemble();
     const v = editors[id]; return v ? v.state.doc.toString() : ((window.srcMap && window.srcMap[id]) || '');
   };
   window.edSetText = (id, s) => {
     const w = window.webEditors && window.webEditors[id];
     if (w) {                                              // external/agent edit → split back into the panes
+      // The server's own source becomes the panes' baseline before they change, so they read as
+      // unedited; any other text set here (a restore, a replace) is an edit.
+      if (w.rebase && s === (window.srcMap || {})[id]) w.rebase(s);
       const p = window._webSections(s);
       for (const k of ['html', 'css', 'js']) {
         const val = p[k] || '';

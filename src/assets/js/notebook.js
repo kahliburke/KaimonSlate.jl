@@ -9,7 +9,7 @@
 // diffs the keyed <Cell>/<Editor> children so editors are preserved across re-renders.
 import { html, render } from 'htm/preact';
 import { Component } from 'preact';
-import { useRef, useEffect } from 'preact/hooks';
+import { useRef, useEffect, useState } from 'preact/hooks';
 import { effect, signal } from '@preact/signals';
 import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal, editing as editingSignal, localDirty as dirtySignal, isDirty, srcEq, clearEdited } from './store.js';
 
@@ -222,9 +222,18 @@ function WebEditor({ cell }) {
       css:  panes.css  ? panes.css.state.doc.toString()  : '',
       js:   panes.js   ? panes.js.state.doc.toString()   : '',
     });
+    // What the panes were last loaded from: the server's source and its sections. A pane that differs
+    // from its section is an edit; while none does, the editor's text is that source as written.
+    // `assemble` writes one layout, and a source laid out another way (`""", css"""` on one line, say)
+    // compared after a round trip through it read as an edit nobody made.
+    const base = { src: cell.source || '', secs: { html: secs.html || '', css: secs.css || '', js: secs.js || '' } };
+    const changed = () => readerOwnsIt &&
+      _WEB_LANGS.some(([l]) => (panes[l] ? panes[l].state.doc.toString() : '') !== base.secs[l]);
+    const text = () => changed() ? assemble() : base.src;
+    const rebase = src => { base.src = src || ''; base.secs = window._webSections(base.src); };
     const onAnyDoc = () => {
       if (!primed) return;
-      if (!srcEq(assemble(), window.srcMap[cell.id] || '')) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); }
+      if (changed()) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); }
       else clearEdited(cell.id);
     };
     const setPrimary = () => {                            // a real view for edited-state/measure
@@ -287,7 +296,7 @@ function WebEditor({ cell }) {
     if (!activeLangs.length) activeLangs.push('js');
     if (readerOwnsIt) for (const [l] of _WEB_LANGS) if (activeLangs.includes(l)) addPane(l, secs[l] || '');
 
-    (window.webEditors || (window.webEditors = {}))[cell.id] = { panes, assemble, addPane };
+    (window.webEditors || (window.webEditors = {}))[cell.id] = { panes, assemble, addPane, text, rebase };
     setTimeout(() => { primed = true; }, 0);
     return () => {
       if (window.editors[cell.id] && Object.values(panes).includes(window.editors[cell.id])) delete window.editors[cell.id];
@@ -401,6 +410,31 @@ function _keepFocus(host, rebuild) {
   } catch (_) {}
 }
 
+// A fresh cell that leaves `fresh` only briefly keeps reading as fresh: `stale` or `running` shows
+// once it has lasted SETTLE_MS. A reactive push restales its reader cells and they re-run in tens of
+// milliseconds, so without this a cell refreshing at ~10 Hz flashed stale/running on every push. A
+// cell that was never shown fresh (stale on load, after an upstream edit) shows its state at once.
+// Same delay as runstatus.js REVEAL_MS, before a fast run shows as running.
+const SETTLE_MS = 140;
+function useSettledState(state) {
+  const s = useRef({ shown: state, left: 0, timer: null }).current;   // left: when it left `fresh`
+  const [, bump] = useState(0);
+  useEffect(() => () => clearTimeout(s.timer), []);
+  if ((state === 'stale' || state === 'running') && (s.shown === 'fresh' || s.left)) {
+    const t = performance.now();
+    if (!s.left) s.left = t;
+    const wait = SETTLE_MS - (t - s.left);
+    if (wait > 0) {
+      if (!s.timer) s.timer = setTimeout(() => { s.timer = null; bump(n => n + 1); }, wait + 1);
+      return 'fresh';
+    }
+  }
+  s.left = 0;
+  if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+  s.shown = state;
+  return state;
+}
+
 function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed }) {
   const c = cell;
   const ref = useRef(null);
@@ -413,6 +447,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
   if (state !== 'running') {
     if (isDirty(c.id, c.source)) state = 'edited';
   }
+  state = useSettledState(state);
 
   // Dep-focus: cells outside the focused cone collapse out of the flow (and expand back) rather
   // than unmounting, so the transition is smooth and editors/figures survive. Animate only on a
@@ -431,6 +466,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     if (el) el.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} } });
     // A player owns a WebGL texture array, so an undisposed one holds GPU memory for the page's life.
     window.disposeAnimations && window.disposeAnimations(c.id);
+    // Same for a PACKAGE output holding a resource. A deleted cell is the removal path no re-run swap
+    // ever sees, so without this a returned figure's `destroy` is never called at all.
+    if (el) window.slateTeardownOutput && window.slateTeardownOutput(el);
     // Cancel any pending debounced snapshot (core.js _snapCell) — its closure holds a reference
     // to the now-disposed chart instances and would otherwise fire against a removed cell.
     if (window._cancelSnap) window._cancelSnap(c.id);
@@ -460,9 +498,11 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // it can be unit-tested — see test/js/reconcile_verdict.mjs.
     const _hasEd = !!window.editors[c.id];
     const _mine = _hasEd ? window.edText(c.id) : null;
+    const _sent = (window._sentSrc || {})[c.id];
+    if (_sent != null && _eq(c.source, _sent)) delete window._sentSrc[c.id];   // answered
     switch (window.slateReconcileVerdict({ prevSrc: _prevSrc, prevHash: _prevHash,
                                            source: c.source, hash: c.hash,
-                                           mine: _mine, hasEditor: _hasEd, eq: _eq })) {
+                                           mine: _mine, hasEditor: _hasEd, eq: _eq, sent: _sent })) {
       case 'forward':  window.edSetText(c.id, c.source); break;                          // no local edits → adopt it
       case 'conflict': window.slateLiveConflict && window.slateLiveConflict(c.id, _mine, c.source); break;
       case 'placeholder': {
@@ -501,19 +541,20 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // picker, which mutates `controls` (not `binds`), actually re-renders the strip.
     const bindKey = JSON.stringify((c.binds || []).map(b => [b.name, b.widget, b.params, b.hosted, b.hostedby]));
     const ctrlKey = JSON.stringify((c.controls || []).map(col => col.map(s => [s.name, s.widget, s.params])));
-    let rebuilt = false;
+    const rebuilt = [];
     if (bindKey !== last.current.bindKey) {
       last.current.bindKey = bindKey;
       const host = el.querySelector('.binds');
       // Let any custom widgets clean up before the swap orphans their nodes (mirrors the .ichart dispose above).
-      if (host) { _keepFocus(host, () => { window.teardownCustomWidgets(host); host.innerHTML = window.bindsInner(c); }); rebuilt = true; }
+      if (host) { _keepFocus(host, () => { window.teardownCustomWidgets(host); host.innerHTML = window.bindsInner(c); }); rebuilt.push(host); }
     }
     if (ctrlKey !== last.current.ctrlKey) {
       last.current.ctrlKey = ctrlKey;
       const host = el.querySelector('.controls');
-      if (host) { _keepFocus(host, () => { window.teardownCustomWidgets(host); host.innerHTML = window.controlStripInner(c); }); rebuilt = true; }
+      if (host) { _keepFocus(host, () => { window.teardownCustomWidgets(host); host.innerHTML = window.controlStripInner(c); }); rebuilt.push(host); }
     }
-    if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
+    // Wire only the hosts just rebuilt: wiring is not idempotent, and the other host's controls are live.
+    if (rebuilt.length) window.mountControls(c, rebuilt);
 
     // Markdown renders its prose and nothing else — but the strip above is built first, because
     // `{{ }}` interpolation puts prose in the reactive graph, so a markdown cell can host a
@@ -545,6 +586,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     if (!_conflicted && !_stale && out && c.output !== last.current.out) { window.slateRevMark && window.slateRevMark(c); last.current.out = c.output; window._swapOutput(out, c.output, c.live, () => { window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); window.mountPicks && window.mountPicks(c, el); }); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     window._applyMissingPkg && window._applyMissingPkg(c);   // "Package X not found" → one-click install banner
+    window._applyStaleCache && window._applyStaleCache(c);   // deleted compiled cache → restart banner
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell
     // objects). Without this, every such re-render re-ran setOption on EVERY chart in the notebook
@@ -595,6 +637,11 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // A workbook cell is the reader's to write. The class is emitted in every posture so the author
     // can see which cells they've marked; only `body.app` gives it the reading-view treatment.
     + (c.workbook ? ' workbook' : '')
+    // Presentation tags, as classes so the stylesheet can reach them — `notes` is the one that
+    // MATTERS: speaker notes are presenter-only (docs/src/slides.md), and without a class the
+    // reading view had no way to keep them off a reader's screen. `slide` rides along so an
+    // explicit slide break is visible while authoring.
+    + (c.notes ? ' cell-notes' : '') + (c.slide ? ' slide-start' : '')
     + roleCls + selCls + edCls + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
@@ -674,13 +721,19 @@ class MemoCell extends Component {
     if ((p.live || {})[id] !== (next.live || {})[id]) return true;
     return false;
   }
-  render() { return html`<${Cell} ...${this.props} />`; }
+  // The `.cellslot` (`display: contents`) is the node that preact keeps in order under #nb. The live
+  // deck moves only the `.cell` inside it onto a slide, so a render that moves the slot does not
+  // take the cell off the slide (slides.js).
+  render() { return html`<div class="cellslot"><${Cell} ...${this.props} /></div>`; }
+  // A slide cell whose slot goes away (the cell was deleted, or preact mounted it again in a new
+  // slot) stays on the slide until slides.js settles it.
+  componentWillUnmount() { window._deckSettle && window._deckSettle(); }
 }
 
 function Notebook({ cells, selectedId, selSet, live, focusId, editingId, cone }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
-    window.syncAgentTop && window.syncAgentTop();
+    window.syncAgentTopSoon && window.syncAgentTopSoon();
     window._tocOpen && window.renderTOC && window.renderTOC();   // keep the open TOC in sync with edits
   });
   const coneCount = cone ? cone.size : (cells || []).length;

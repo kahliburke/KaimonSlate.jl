@@ -413,6 +413,24 @@ function _doc_entry_is(nb::LiveNotebook, d)
     return !isempty(eid) && eid == strip(String(get(nb.report.meta, "docid", "")))
 end
 
+# The slug `nb` is built under in `site`: its docid's entry, else (`by_title`) an entry with the same
+# title, as one built before docids were recorded is. "" when the site has neither.
+function _site_slug_for(site::AbstractString, nb::LiveNotebook; by_title::Bool = true)
+    dir = _site_dir(String(site))
+    (dir === nothing || !isdir(dir)) && return ""
+    docs = get(_read_site_manifest(dir), "docs", Any[])
+    for d in docs
+        _doc_entry_is(nb, d) && return String(get(d, "slug", ""))
+    end
+    by_title || return ""
+    want = lowercase(strip(report_frontmatter(nb.report).title))
+    isempty(want) && return ""
+    for d in docs
+        (d isa AbstractDict && lowercase(strip(String(get(d, "title", "")))) == want) && return String(get(d, "slug", ""))
+    end
+    return ""
+end
+
 "For THIS notebook: every site with `{member, isHome, targets, url}`, plus the known targets — the read
 model the notebook's Publish panel paints. Membership is matched on the notebook's stable `docid` alone
 (see `_doc_entry_is`); front page is the site's built home (`site_frontpage`)."
@@ -479,9 +497,12 @@ settings edited in the publishing manager.
 function publish_set_membership!(nb::LiveNotebook, site::AbstractString, member::Bool; build = nothing)
     if member
         b = something(_recorded_build(site, nb), build, Dict{String,Any}())
-        export_to_site(nb, String(site); _build_kwargs(b)...)   # build into the site → membership
+        # build into the site → membership, re-linking an entry the doc already has
+        export_to_site(nb, String(site); slug = _site_slug_for(site, nb), _build_kwargs(b)...)
     else
-        unexport_from_site(String(site), doc_slug(nb))     # drop its subdir + manifest entry
+        # Only the entry with this notebook's docid is its own; a title match could be another doc.
+        slg = _site_slug_for(site, nb; by_title = false)
+        isempty(slg) || unexport_from_site(String(site), slg)   # drop its subdir + manifest entry
     end
     return publish_sites_info(nb)
 end
@@ -812,20 +833,9 @@ function publish_to_site!(nb::LiveNotebook, siteName::AbstractString;
     # stale "portfolio" title leaked into other sites' manifests).
     stitle = site === nothing ? String(siteName) :
              (isempty(strip(site.title)) ? site.name : site.title)
-    # Re-link in place: if the site already has a member with this notebook's TITLE (e.g. a legacy entry
-    # built before source-tracking, under a custom slug), reuse ITS slug so we UPDATE that entry — stamping
-    # the now-recorded source/id — instead of adding a duplicate under a fresh title-derived slug.
-    slg = String(slug)
-    if isempty(slg)
-        d0 = _site_dir(String(siteName))
-        if d0 !== nothing && isdir(d0)
-            want = lowercase(strip(report_frontmatter(nb.report).title))
-            isempty(want) || for d in get(_read_site_manifest(d0), "docs", Any[])
-                (d isa AbstractDict && lowercase(strip(String(get(d, "title", "")))) == want) || continue
-                slg = String(get(d, "slug", "")); break
-            end
-        end
-    end
+    # Re-link in place: reuse the slug of the entry this doc already has, so the build UPDATES it instead
+    # of adding a duplicate under a fresh title-derived slug (see `_site_slug_for`).
+    slg = isempty(slug) ? _site_slug_for(siteName, nb) : String(slug)
     built = export_to_site(nb, String(siteName); slug = slg, kwargs..., site_title = stitle)   # stage this doc into the copy
     # Stage-only, or a site with no live destinations (a local staging area): built, nothing to deploy.
     tnames = _live_target_names(led, site)

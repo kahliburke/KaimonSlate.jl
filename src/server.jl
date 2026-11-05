@@ -14,6 +14,7 @@ include(joinpath(@__DIR__, "expanduser_fix.jl"))
 
 using HTTP, JSON, FileWatching, CodecZlib, CodecZstd
 import Base64
+import SHA                                    # vendored assets: the hashes their lock records
 import SlateExtensionsBase                    # the dtype table the page's decoders are generated from
 import Dates                                  # publish dates for the multi-doc site manifest
 import Logging                                # standalone serve: route hub log detail to a file
@@ -63,8 +64,10 @@ mutable struct LiveNotebook
                                          # declaration order. `esm` ⇒ ES module; non-empty `kind` ⇒ a component whose
                                          # default export Slate wraps + registers. See `_frontend_scripts`.
     assets::Dict{String,String}          # package-vendored asset DIRECTORIES (pkg → absolute dir on disk), from the
-                                         # same manifest (`provide_assets!`). Served at `/ext-assets/<pkg>/…` while the
-                                         # package is loaded, and copied into a static export. See `_register_assets!`.
+                                         # same manifest (`provide_assets!`), refreshed at the end of each drain and
+                                         # on an `/ext-assets/` miss (`_pull_ext_assets!`). Served at
+                                         # `/ext-assets/<pkg>/…` while the package is loaded, and copied into a static
+                                         # export. Not in the page state. See `_register_assets!`.
     pkgimports::Dict{String,String}      # package-declared ES module imports (specifier → url), from the same manifest
                                          # (`provide_import!`) — an extension's own `@use`. Merged UNDER the notebook's
                                          # `@use` map wherever an import map is emitted. See `_register_import!`.
@@ -100,7 +103,7 @@ end
 # Kernel round-trip / blocking-boundary calls that must NEVER run while `nb.lock` is held.
 const _KERNEL_BOUNDARY = Set{Symbol}((:prepare!, :eval_cell!, :eval_stale!, :_eval!, :_eval_one!,
     :_run_code_batch!, :refine_usings!, :refine_macros!, :resolve_usings!, :resolve_macros!,
-    :_module_exports, :_dep_versions, :cancel_eval, :shutdown!))
+    :_module_exports, :_dep_versions, :cancel_eval, :shutdown!, :_refresh_extensions!, :_pull_ext_assets!))
 
 # Scan an expression for a synchronous call to a boundary symbol (`f(…)` or `Mod.f(…)`). Skips
 # `@async`/`@spawn` and `quote` subtrees — work scheduled there runs LATER, not under the held lock —
@@ -154,15 +157,14 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_srcchange!(nb.report.id, (names, err) -> server_src_changed(nb, names, err))  # parent /src reloaded (Revise)
     register_progress!(nb.report.id, c -> _broadcast_progress(nb, c))                      # stream per-cell run status to the UI
     register_runbatch!(nb.report.id, (n, fresh) -> (try; _broadcast(nb, "runbatch:$n:$(fresh ? 1 : 0)"); catch; end))   # run size + is-this-a-new-run → stable k/N
-    register_userprog!(nb.report.id, (frac, msg, id, done) -> begin
-        # Record before broadcasting: an agent BLOCKED on this run samples the latest reading
-        # from its own task (see `_note_run_progress`) rather than being pushed every frame,
-        # so a cell calling slate_progress at 10 Hz can't flood the agent's context. The
-        # browser keeps the unthrottled stream below — it drives a live progress bar.
-        lock(_USERPROG_LOCK) do
-            _LAST_USERPROG[nb.id] = (Float64(frac), String(msg), String(id), done === true, time())
-        end
-        try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end
+    register_userprog!(nb.report.id, (cid, id, frac, msg, done) -> begin
+        # Record before broadcasting. A page that loads mid-run reads the bars from /api/state, and
+        # an agent BLOCKED on this run samples the latest reading from its own task (see
+        # `_note_run_progress`) rather than being pushed every frame, so a cell calling
+        # slate_progress at 10 Hz can't flood the agent's context. The browser keeps the
+        # unthrottled stream below.
+        _live_progress!(nb, cid, id, frac, msg, done)
+        try; _broadcast(nb, "cellprog:" * JSON.json(Dict("cid" => cid, "frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end
     end)
     # A running cell's output so far (already cooked worker-side). Sent as TEXT, not HTML: the page
     # renders it with the same `slateAnsiHtml` it uses for the build log and the worker log, and a
@@ -185,9 +187,9 @@ function _wire_callbacks!(nb::LiveNotebook)
     return nb
 end
 function _unwire_callbacks!(nb::LiveNotebook)
-    # A notebook id is REUSED the instant the same file is reopened, so a leftover reading here
+    # A notebook id is REUSED the instant the same file is reopened, so a leftover record here
     # would be reported against the new notebook's first run as if it described it.
-    lock(_USERPROG_LOCK) do; delete!(_LAST_USERPROG, nb.id); end
+    _live_clear!(nb)
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
     unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
@@ -217,6 +219,22 @@ function _cleanup_deleted_cells(nb::LiveNotebook, ids)
         end
     catch e
         @debug "slate: deleted-cell cleanup failed" exception = e
+    end
+    return nothing
+end
+
+# Take back removed definitions (`ReportEngine.forget!`) on every kernel a cell may have run on: the
+# main kernel and each active region kernel, as for cleanups above. Called by the runner before a cell
+# evaluates, OFF nb.lock (a worker round-trip); only the queue is read under the lock.
+function _flush_forget!(nb::LiveNotebook)
+    cells, names = lock(nb.lock) do; ReportEngine.take_forget!(nb.report); end
+    (isempty(cells) && isempty(names)) && return nothing
+    ReportEngine.forget!(nb.kernel, nb.report, cells, names)
+    regionks = lock(_REGION_LOCK) do
+        Any[k for ((rid, _name), k) in _REGION_KERNELS if rid == nb.id]
+    end
+    for k in regionks
+        try; ReportEngine.forget!(k, nb.report, cells, names); catch; end
     end
     return nothing
 end
@@ -262,6 +280,12 @@ end
 # when the worker can't run yet (a stale env would crash it at boot). Streams into the boot banner.
 function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; online = nothing,
                                 delta = Dict{String,Any}[])
+    skipped = ReportEngine.readd_specs(delta).skipped
+    if !isempty(skipped)
+        msg = "local checkouts not found on this machine, so not added: " * join(skipped, ", ")
+        @warn "KaimonSlate: $msg" envdir
+        online === nothing || (try; online(msg); catch; end)
+    end
     build = function ()
         pname = ReportEngine.seed_env_project!(envdir, parent)
         dev = isempty(pname) ? "" :
@@ -436,8 +460,8 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # override, so _select_kernel boots the worker on that host directly (no wasteful local-then-remote).
     # Only overrides the FOOTER value when explicitly given; an empty runon leaves the file's own choice.
     isempty(strip(String(runon))) || (r.meta["runon"] = String(strip(String(runon))))
+    _reestablish_effects!(r)   # durable declared-effects (EVERYWHERE marks, observed writes) before the graph and any run
     build_dependencies!(r)
-    _reestablish_effects!(r)   # durable declared-effects: re-mark EVERYWHERE cells before any run (cold-start safe)
     _note_server_write!(rid, hash(serialize_report(r)))   # the as-opened state is OURS — a watcher
                                                           # tick reading it must not "revert" to it
     # Any self-contained `.jl`: open INSTANTLY and reconstruct + run the env in the BACKGROUND
@@ -667,8 +691,9 @@ end
 # The shared body of a reactive push (a `@bind`/data/asset change): restale every cell the
 # `seed_predicate` selects (the direct triggers), then their dependents, recompute, and broadcast a
 # lightweight `refresh:` patch of ONLY the cells that recomputed — the browser patches just those
-# (charts `setOption`, output swap) instead of pulling the whole state.
-function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
+# (charts `setOption`, output swap) instead of pulling the whole state. `lane = "ui"` marks the
+# restaled cells to re-run on the worker's UI threads (see `_UI_LANE_CELLS`).
+function _reactive_refresh!(nb::LiveNotebook, seed_predicate; lane::AbstractString = "")
     msg = ""
     lock(nb.lock) do
         seed = String[]
@@ -686,6 +711,7 @@ function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
             i === nothing && continue
             ReportEngine.restale!(nb.report.cells[i]) && push!(changed, id)
         end
+        lane == "ui" && union!(get!(Set{String}, _UI_LANE_CELLS, nb.id), changed)
         # A reactive push CONTINUES whatever is running rather than starting a run: a dashboard that
         # pushes every few steps produces a long train of these, and treating each as a new run would
         # reset the pill constantly (as treating none of them as one makes it count forever).
@@ -721,7 +747,7 @@ function server_refresh(nb::LiveNotebook, vars)
             ReportEngine.note_state_write!(nb.report.id, name, s[nextind(s, i):end])
         end
     end
-    return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms))
+    return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms); lane = "ui")
 end
 
 # Reactive push triggered by the asset watcher (`_start_asset_watcher!`): one or more `@asset` or
@@ -741,15 +767,18 @@ function server_asset_changed(nb::LiveNotebook, changed::Vector{String})
 end
 
 # Live per-cell run status (registered via `register_progress!` per notebook): `eval_cell!` calls
-# this as each cell STARTS and FINISHES running. A start pushes a lightweight `cellrun:<id>` so the
-# UI marks that cell live (spinner + ticking timer + the topbar run pill); a finish pushes the single
+# this as each cell STARTS and FINISHES running. A start pushes a lightweight `cellrun:{id,rev}` so the
+# UI marks that cell live (spinner + ticking timer + the topbar run pill); the rev lets the page tell a
+# full state taken before this start from one taken after it finished. A finish pushes the single
 # cell's fresh `celldone:<cell_json>` so its result/error lights up the INSTANT it lands, mid-run,
 # instead of only when the whole run ends. Best-effort — a push must never disturb evaluation.
 function _broadcast_progress(nb::LiveNotebook, cell)
     try
         if cell.state == RUNNING
-            _broadcast(nb, "cellrun:" * cell.id)
+            _live_start!(nb, cell.id)
+            _broadcast(nb, "cellrun:" * JSON.json(Dict("id" => cell.id, "rev" => cell.rev)))
         else
+            _live_finish!(nb, cell.id)
             bindref, hostednames = _bind_index(nb.report)
             bibctx = _bib_link_ctx(nb)
             figidx = figure_index(nb.report)
@@ -805,6 +834,13 @@ const _RUNNER_STALE_HITS = Dict{String,Int}()         # nb.id → consecutive st
 # write — so the symptom is a progress bar that never clears while every value behind it is correct.
 # Guarded by `nb.lock`: every reader and writer here already holds it.
 const _DIRTY_WHILE_RUNNING = Dict{String,Set{String}}()
+
+# nb.id → ids of cells restaled by a reactive value push, whose next run goes to the worker's UI
+# threads (`lane = "ui"`, worker.jl `_route_request`) rather than `:default`. Such re-runs are
+# machine-driven, frequent and usually display work, and on the UI threads they keep updating while
+# cell code saturates `:default`. A run the user starts clears them (`_eval!` with `fresh`), so
+# anything started by hand runs on `:default`. Guarded by `nb.lock`.
+const _UI_LANE_CELLS = Dict{String,Set{String}}()
 const _RUNNER_STALE_AFTER = 600.0                     # 10 min with pending work + no progress ⇒ suspect
 const _RUNNER_STALE_CONFIRMATIONS = 3                 # consecutive 5s sweeps before self-healing (~15s)
 
@@ -999,7 +1035,7 @@ end
 # cells stay local, cross-boundary MUTATION is undefined (same as the release-plan validity rule).
 const _REGION_KERNELS = Dict{Tuple{String,String},Any}()   # (nb id, region name) → GateKernel
 const _REGION_SYNCED = Dict{String,Dict{String,String}}()  # nb id → "side:name" → freshness token
-const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel objectid) → signature of primed `using` cells
+const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, `_worker_key`) → signature of primed `using` cells
 # Keys currently being primed. `_prime_namespace!` stages each EVERYWHERE cell's data reads through
 # `_region_presync!`, which primes both sides before its first transfer — so the two call each other.
 # A nested prime for a key already in flight is a no-op: the outer call is establishing that kernel.
@@ -1203,7 +1239,8 @@ function _apply_pick_effect!(nb::LiveNotebook, c::Cell, r, e)
 end
 
 function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
-    (out === nothing || isempty(out.effects)) && return nothing
+    out === nothing && return nothing
+    seen = ReportEngine.take_defines!(out)          # graph bookkeeping, not a declared effect
     recs = [_effect_record(e) for e in out.effects]
     for (r, e) in zip(recs, out.effects)
         if r.kind === :everywhere
@@ -1214,6 +1251,24 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
             ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
         end
     end
+    # Globals the run bound (`:defines`). Only the ones the analysis didn't predict are kept: they join the
+    # cell's observed writes (and its edges), and the durable record for this source. That record is a
+    # union, since a run that rebinds a name to an identical value doesn't report it.
+    was_complete = c.observed_complete
+    learned = ReportEngine.note_run!(nb.report, c, (; effects = Any[(; kind = :defines, names = seen)],
+                                                    exception = out.exception, memo = out.memo))
+    if learned && !isempty(seen)
+        prior = try; EffectStore.load(SlateHome.effects_dir(), string(c.src_hash)); catch; nothing; end
+        prior === nothing || for r in prior; r.kind === :defines && ReportEngine.note_defines!(nb.report, c, r.names); end
+    end
+    learned && ReportEngine.rebuild_precise!(nb.report)
+    # An `eval` cell's first observed run is worth keeping even when it bound nothing new: the record says
+    # its run has been seen, which is what lets it stop being a barrier at the next open, before it runs.
+    # Any other run that learned nothing and declared nothing leaves the store alone (nearly every run).
+    first_eval_run = !was_complete && c.observed_complete && :eval_barrier in c.flags
+    (isempty(recs) && !learned && !first_eval_run) && return nothing
+    (isempty(c.observed) && !(:eval_barrier in c.flags && c.observed_complete)) ||
+        push!(recs, (; kind = :defines, names = sort!(collect(c.observed)), stmt_src = ""))
     # Persist DURABLY, keyed by the cell's own source digest — so the classification + statement-scoped
     # records survive a reload / fresh region worker WITHOUT this cell running on main again (see
     # `_reestablish_effects!`). Best-effort; off the hot path but cheap (one small TOML).
@@ -1235,6 +1290,11 @@ function _reestablish_effects!(report)
         recs === nothing && continue
         any(r -> r.kind === :everywhere, recs) &&
             (:everywhere_declared in c.flags || push!(c.flags, :everywhere_declared))
+        for r in recs
+            r.kind === :defines || continue
+            ReportEngine.note_defines!(report, c, r.names)
+            c.observed_complete = true                 # a run of this source was seen, so what it binds is known
+        end
     end
     return nothing
 end
@@ -1328,62 +1388,187 @@ function _effective_imports(nb::LiveNotebook)
     return merge(nb.pkgimports, usemap)
 end
 
-# Refresh the notebook's front-end registry from the worker's SlateExtensionsBase extension manifest
-# (`{frontend: [{id, js}]}`) — the packages loaded this session declare their front-end from `__init__`,
-# which may run during namespace priming (no harvestable eval), so the process-global registry is the
-# authoritative source. Pulled ONCE per drain (see `_run_loop!`) — the gate worker is queried, the
-# in-process kernel read directly. Merges each script (sticky, id-deduped); returns true if anything
-# changed, so the caller pushes a fresh state for the browser to inject. Best-effort: a query failure
-# leaves the registry as-is. Runs under `nb.lock`.
-function _refresh_extensions!(nb::LiveNotebook)
-    manifest = try
+# One manifest pull of a notebook at a time, from the fetch to the end of the merge. The drain and the
+# `/ext-assets/` route can both pull, and an older manifest merged after a newer one would undo it (a
+# fence released that was just claimed). Gate kernels use one lock for each notebook, so a slow worker
+# delays only the pulls of its own notebook. In-process kernels share one lock: their pulls run the module
+# hooks in the hub process, and that registry (`SlateExtensionsBase._MODULE_FRONTEND_DONE`) has no lock.
+# Lock order: pull lock, then `nb.lock`.
+const _PULL_LOCKS = Dict{String,ReentrantLock}()      # nb.id → pull lock (gate kernels)
+const _ROUTE_PULLED_AT = Dict{String,Float64}()       # nb.id → time of the last `/ext-assets/` route pull
+const _PULL_LOCKS_LOCK = ReentrantLock()              # guards the two dicts above
+const _INPROCESS_PULL_LOCK = ReentrantLock()
+_manifest_pull_lock(nb::LiveNotebook) = nb.kernel isa ReportEngine.GateKernel ?
+    lock(() -> get!(ReentrantLock, _PULL_LOCKS, nb.id), _PULL_LOCKS_LOCK) : _INPROCESS_PULL_LOCK
+
+# The worker's SlateExtensionsBase extension manifest, or `nothing` when the kernel cannot answer. The gate
+# worker is queried, the in-process kernel read directly. A kernel round trip: call it off `nb.lock`.
+function _fetch_manifest(nb::LiveNotebook)
+    try
         nb.kernel isa ReportEngine.GateKernel ?
             ReportEngine.extension_manifest(nb.kernel) :
             ReportEngine.inprocess_extension_manifest(ReportEngine.report_module(nb.report))
     catch e
         ReportEngine._rlog("slate: extension manifest refresh failed: $(first(sprint(showerror, e), 120))")
-        return false
+        nothing
     end
-    manifest === nothing && return false
-    changed = false
-    # The manifest was pulled OFF nb.lock (a round-trip); take the lock only for each registry mutation,
-    # so this stays protocol-safe when the runner calls `_refresh_extensions!` off-lock.
-    fe = _manifest_field(manifest, :frontend)
-    if fe !== nothing
-        for e in fe
-            js = _manifest_field(e, :js); js === nothing && continue
-            esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
-            kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
-            lock(nb.lock) do
-                _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind)
-            end && (changed = true)
-        end
-    end
+end
+
+# Merge the asset directories of `manifest` into `nb.assets`. Returns true if anything changed.
+function _merge_assets!(nb::LiveNotebook, manifest)
     as = _manifest_field(manifest, :assets)
-    if as !== nothing
-        for e in as
-            pkg = _manifest_field(e, :pkg); dir = _manifest_field(e, :dir)
-            (pkg === nothing || dir === nothing) && continue
-            lock(nb.lock) do
-                _register_assets!(nb, String(pkg), String(dir))
-            end && (changed = true)
-        end
+    as === nothing && return false
+    changed = false
+    for e in as
+        pkg = _manifest_field(e, :pkg); dir = _manifest_field(e, :dir)
+        (pkg === nothing || dir === nothing) && continue
+        lock(nb.lock) do
+            _register_assets!(nb, String(pkg), String(dir))
+        end && (changed = true)
     end
-    im = _manifest_field(manifest, :imports)
-    if im !== nothing
-        for e in im
-            spec = _manifest_field(e, :spec); url = _manifest_field(e, :url)
-            (spec === nothing || url === nothing) && continue
-            lock(nb.lock) do
-                _register_import!(nb, String(spec), String(url))
-            end && (changed = true)
-        end
-    end
-    fl = _manifest_field(manifest, :fences)
-    fl === nothing || (lock(nb.lock) do
-        _refresh_fences!(nb, Set{String}(String(f) for f in fl))
-    end && (changed = true))
     return changed
+end
+
+# Refresh the notebook's front-end registry from the worker's SlateExtensionsBase extension manifest
+# (`{frontend: [{id, js}]}`) — the packages loaded this session declare their front-end from `__init__`,
+# which may run during namespace priming (no harvestable eval), so the process-global registry is the
+# authoritative source. Pulled at the end of each drain (see `_run_loop!`). Merges each script (sticky,
+# id-deduped); returns true if anything changed, so the caller pushes a fresh state for the browser to
+# inject. Best-effort: a query failure leaves the registry as-is. Call it off `nb.lock`: it takes the
+# pull lock, then `nb.lock` for each registry mutation.
+function _refresh_extensions!(nb::LiveNotebook)
+    lock(_manifest_pull_lock(nb)) do
+        manifest = _fetch_manifest(nb)
+        manifest === nothing && return false
+        changed = false
+        fe = _manifest_field(manifest, :frontend)
+        if fe !== nothing
+            for e in fe
+                js = _manifest_field(e, :js); js === nothing && continue
+                esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
+                kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
+                lock(nb.lock) do
+                    _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind)
+                end && (changed = true)
+            end
+        end
+        _merge_assets!(nb, manifest) && (changed = true)
+        im = _manifest_field(manifest, :imports)
+        if im !== nothing
+            for e in im
+                spec = _manifest_field(e, :spec); url = _manifest_field(e, :url)
+                (spec === nothing || url === nothing) && continue
+                lock(nb.lock) do
+                    _register_import!(nb, String(spec), String(url))
+                end && (changed = true)
+            end
+        end
+        fl = _manifest_field(manifest, :fences)
+        fl === nothing || (lock(nb.lock) do
+            _refresh_fences!(nb, Set{String}(String(f) for f in fl))
+        end && (changed = true))
+        return changed
+    end
+end
+
+# Pull the manifest before serving a page its full state, so a page load sees the front-end as the worker
+# has it now. A file-backed script (`@pkg_asset`) is re-read by the worker when its file changes, so an
+# edited extension `.js` reaches the page on a reload with no run and no worker restart. Pushes no version:
+# the state being served already carries the result. Skipped while the notebook opens, for the reason
+# `_pull_ext_assets!` gives, and when the kernel has no namespace to ask. Best-effort. Call it off `nb.lock`.
+function _refresh_extensions_for_page!(nb::LiveNotebook)
+    k = nb.kernel
+    (k isa ReportEngine.GateKernel || (k isa ReportEngine.InProcessKernel && nb.report.mod !== nothing)) ||
+        return nothing
+    _ext_assets_opening(nb) && return nothing
+    try
+        _refresh_extensions!(nb)
+    catch e
+        @debug "slate: page-load manifest pull failed" notebook = nb.id exception = e
+    end
+    return nothing
+end
+
+# The longest time that the `/ext-assets/` route holds a request for a package that is not declared yet:
+# while a watched notebook opens (a cold worker start or a precompile can take minutes), and while it
+# only drains.
+const _EXT_ASSET_OPEN_WAIT_S = 600.0
+const _EXT_ASSET_WAIT_S = 120.0
+# The interval between two route pulls of one notebook, whatever the number of held requests.
+const _EXT_ASSET_POLL_S = 0.5
+
+# A notebook opens from the boot to the end of its first run, and drains while its runner is active. A
+# notebook that opens or drains can still load the package that declares an asset directory.
+_ext_assets_opening(nb::LiveNotebook) = lock(() -> get(nb.report.meta, "hydrating", false) === true, nb.lock)
+_ext_assets_draining(nb::LiveNotebook) = lock(() -> get(_RUNNERS, nb.id, false), _RUNNER_LOCK)
+
+# Pull the manifest for the `/ext-assets/` route and merge only its asset directories. Only this route
+# and the export read `nb.assets`, and the page state does not include them, so this pull pushes no
+# version. A version push while the notebook opens makes the page fetch the state, and that state has the
+# stored preview cells, which the page would apply over cells that are already live. The drain-end pull
+# (`_refresh_extensions!`) merges the other fields and pushes. The pull is skipped if the route pulled this
+# notebook less than `_EXT_ASSET_POLL_S` ago, unless `force`. Best-effort: a failure leaves `nb.assets`
+# as it is. Call it off `nb.lock`.
+function _pull_ext_assets!(nb::LiveNotebook; force::Bool = false)
+    # A gate kernel without a live worker answers `nothing`. An in-process kernel answers after the run
+    # makes its namespace; a pull before that would make the namespace out of order.
+    k = nb.kernel
+    (k isa ReportEngine.GateKernel || (k isa ReportEngine.InProcessKernel && nb.report.mod !== nothing)) ||
+        return nothing
+    due = lock(_PULL_LOCKS_LOCK) do
+        t = time()
+        (force || t - get(_ROUTE_PULLED_AT, nb.id, -Inf) >= _EXT_ASSET_POLL_S) || return false
+        _ROUTE_PULLED_AT[nb.id] = t
+        return true
+    end
+    due || return nothing
+    try
+        lock(_manifest_pull_lock(nb)) do
+            m = _fetch_manifest(nb)
+            m === nothing || _merge_assets!(nb, m)
+        end
+    catch e
+        @debug "slate: /ext-assets/ manifest pull failed" notebook = nb.id exception = e
+    end
+    return nothing
+end
+
+# The asset directory of `pkg` for an `/ext-assets/` request that found no notebook that declares it.
+# A page imports these urls before the manifest declares them in two cases: a stored preview runs its
+# scripts before the worker is up, and a figure cell shows its result before the drain-end pull. The
+# browser keeps a failed module import for the life of the page, so a 404 here is permanent for that
+# page. Thus hold the request: pull the manifest now and again while the notebook opens or drains, and
+# answer when a manifest declares `pkg`. Answer `nothing` when no watched notebook opens or drains after
+# a pull, or after `_EXT_ASSET_OPEN_WAIT_S` (while one opens) or `_EXT_ASSET_WAIT_S` (while one only
+# drains). The page's notebook (from the `Referer`) is the one to watch. Watch all open notebooks only
+# when the `Referer` has no `/n/<id>`.
+function _await_ext_asset_dir(h, req, pkg::AbstractString)
+    # Only a module script keeps its failure. Answer other misses now, so that held `<img>`, CSS or
+    # `fetch` requests do not use up the few connections that the browser opens to the hub.
+    dest = HTTP.header(req, "Sec-Fetch-Dest", "")
+    (isempty(dest) || dest == "script") || return nothing
+    m = match(r"/n/([^/?#]+)", HTTP.header(req, "Referer", ""))
+    id = m === nothing ? nothing : HTTP.URIs.unescapeuri(String(m.captures[1]))
+    t0 = time()
+    while true
+        nbs = lock(h.lock) do
+            id === nothing && return collect(values(h.notebooks))
+            nb = get(h.notebooks, id, nothing)
+            return nb === nothing ? LiveNotebook[] : [nb]     # the page's notebook is closed
+        end
+        # Read the state before the pulls: a pull after idle is final. Force the pulls only when no watched
+        # notebook is busy, because only then can this pass end the request with a 404. While one is busy,
+        # the throttle also applies to the idle ones, so held requests do not multiply their pulls.
+        opening = any(_ext_assets_opening, nbs)
+        busy = opening || any(_ext_assets_draining, nbs)
+        for nb in nbs
+            _pull_ext_assets!(nb; force = !busy)
+            d = lock(() -> get(nb.assets, pkg, nothing), nb.lock)
+            d === nothing || return d
+        end
+        (busy && time() - t0 < (opening ? _EXT_ASSET_OPEN_WAIT_S : _EXT_ASSET_WAIT_S)) || return nothing
+        sleep(_EXT_ASSET_POLL_S)
+    end
 end
 
 # The notebook's package-declared front-end scripts, as `(; id, js, esm)` entries in declaration order.
@@ -1593,7 +1778,7 @@ function restart_region!(nb::LiveNotebook, side::AbstractString)
     isempty(side) && return restart_kernel!(nb)
     k = lock(_REGION_LOCK) do
         kk = pop!(_REGION_KERNELS, (nb.id, String(side)), nothing)
-        kk === nothing || delete!(_REGION_PRIMED, (nb.id, objectid(kk)))   # fresh kernel re-primes itself
+        kk === nothing || delete!(_REGION_PRIMED, (nb.id, _worker_key(kk)))   # fresh kernel re-primes itself
         delete!(_REGION_SYNCED, nb.id)   # coarse (keyed per-nb): re-ships boundary values to the fresh kernel
         kk
     end
@@ -1773,7 +1958,7 @@ function _liveness_sweep!(nb::LiveNotebook)
             end
         end
     end
-    _LAST_RUNNING[nb.id] = (ids, anyok)
+    lock(_WD_LOCK) do; _LAST_RUNNING[nb.id] = (ids, anyok); end
     return nothing
 end
 
@@ -1800,7 +1985,7 @@ end
 # `nothing` if NO kernel could be queried (all unreachable) — in which case we must not judge anything
 # orphaned. Reads the sweep's cache (populated just before the reconciler runs) to avoid double-pinging.
 function _worker_running_ids(nb::LiveNotebook)
-    cached = get(_LAST_RUNNING, nb.id, nothing)
+    cached = lock(_WD_LOCK) do; get(_LAST_RUNNING, nb.id, nothing); end
     cached === nothing && return nothing
     ids, anyok = cached
     return anyok ? ids : nothing
@@ -2447,9 +2632,9 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
             f = done / total
             (f - lastfrac[] >= 0.02 || done >= total) || return nothing
             lastfrac[] = f
-            ReportEngine._do_userprog(nb.report.id, f,
+            ReportEngine._do_userprog(nb.report.id, cell.id, "xfer-" * cell.id, f,
                 "⇄ $(r): $(round(Int, done / 2^20))/$(round(Int, total / 2^20)) MB $arrow $whost",
-                "xfer-" * cell.id, done >= total)
+                done >= total)
             return nothing
         end
         t0 = time()
@@ -2531,6 +2716,7 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
 end
 
 function _eval_one!(nb::LiveNotebook, cell::Cell)
+    _flush_forget!(nb)   # a removed definition leaves the namespace before this cell can read it
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
     #
@@ -2628,12 +2814,16 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
              unread = unread, safe = safe)
         (s, cell.src_hash, m, locked)
     end
+    # A reactive push's re-run goes to the worker's UI threads (see `_UI_LANE_CELLS`).
+    lane = lock(nb.lock) do
+        pop!(get!(Set{String}, _UI_LANE_CELLS, nb.id), cell.id, nothing) === nothing ? "" : "ui"
+    end
     out = try
         # `region`/`regions` seed the cell's task-local Slate execution context (`slate_context()`): the
         # effective side it runs on ("" = main) + the notebook's declared regions. Generic — a region-aware
         # package reads it to default its own args; no package-specific knowledge lives here.
         ReportEngine.eval_capture(kernel, nb.report, src, "cell:" * cell.id, memo;
-                                  region = side, regions = _nb_region_names(nb))
+                                  region = side, regions = _nb_region_names(nb), lane = lane)
     catch e
         ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[],
                                 "", sprint(showerror, e), nothing, 0.0)
@@ -2859,6 +3049,7 @@ end
 # path, so it renders running→done and merges version-guarded the INSTANT it finishes (true per-cell
 # streaming). Returns true if a batch (≥2 cells) ran; false for the 0/1-cell case or a non-gate kernel.
 function _run_code_batch!(nb::LiveNotebook)
+    _flush_forget!(nb)
     nb.kernel isa ReportEngine.GateKernel || return false
     # A notebook with an active region runs SERIALLY (v1): the batch hands all cells to ONE
     # worker, but region cells belong to another kernel and boundary values must cross between
@@ -3057,25 +3248,32 @@ end
 
 function _run_loop!(nb::LiveNotebook)
     try
-        _reestablish_fresh_namespace!(nb)   # a swapped/fresh worker → seed binds from host + re-stale (before draining)
-        # Resolve bare-`using` exports BEFORE the first eval of a session, so the dependency graph —
-        # and every memo key derived from it — is precise from the FIRST run. Otherwise the post-drain
-        # barrier→precise flip (refine_usings!) changed downstream cells' memo keys between the first
-        # and second run of each session, and the durable cache missed exactly on cold opens. Phased:
-        # the import round-trip (a possible worker spawn + package load, seconds) runs OUTSIDE nb.lock
-        # so UI state requests stay live; only the graph rebuild takes the lock. No-op after the first
-        # drain that sees each module.
-        paths = lock(nb.lock) do; ReportEngine.unresolved_using_paths(nb.report); end
-        if !isempty(paths) && ReportEngine.resolve_usings!(nb.report, nb.kernel, paths)
-            lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
-        end
-        # Same pre-run phasing for macro-recovered bindings: package macros (`@kwdef`, `@enum`,
-        # `@chain`, …) are expandable as soon as their modules are imported (just above), so the
-        # graph + memo keys see macro-hidden writes from the FIRST eval. Notebook-defined macros
-        # resolve post-drain (refine_macros! below). Round-trip outside nb.lock, like the usings.
-        pending = lock(nb.lock) do; ReportEngine.pending_macro_cells(nb.report); end
-        if !isempty(pending) && ReportEngine.resolve_macros!(nb.report, nb.kernel, pending)
-            lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+        # The prelude loads packages in the worker (priming re-runs `using` cells, resolving exports
+        # imports modules), so it holds the eval mutex like a cell eval does. A package operation takes
+        # the same mutex: Pkg run while a `require` is in flight reads the project through Base's
+        # loading cache as it was before the load began, then fails to find what it just added or
+        # writes back a project missing an earlier add.
+        lock(_eval_mutex(nb)) do
+            _reestablish_fresh_namespace!(nb)   # a swapped/fresh worker → seed binds from host + re-stale (before draining)
+            # Resolve bare-`using` exports BEFORE the first eval of a session, so the dependency graph —
+            # and every memo key derived from it — is precise from the FIRST run. Otherwise the post-drain
+            # barrier→precise flip (refine_usings!) changed downstream cells' memo keys between the first
+            # and second run of each session, and the durable cache missed exactly on cold opens. Phased:
+            # the import round-trip (a possible worker spawn + package load, seconds) runs OUTSIDE nb.lock
+            # so UI state requests stay live; only the graph rebuild takes the lock. No-op after the first
+            # drain that sees each module.
+            paths = lock(nb.lock) do; ReportEngine.unresolved_using_paths(nb.report); end
+            if !isempty(paths) && ReportEngine.resolve_usings!(nb.report, nb.kernel, paths)
+                lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+            end
+            # Same pre-run phasing for macro-recovered bindings: package macros (`@kwdef`, `@enum`,
+            # `@chain`, …) are expandable as soon as their modules are imported (just above), so the
+            # graph + memo keys see macro-hidden writes from the FIRST eval. Notebook-defined macros
+            # resolve post-drain (refine_macros! below). Round-trip outside nb.lock, like the usings.
+            pending = lock(nb.lock) do; ReportEngine.pending_macro_cells(nb.report); end
+            if !isempty(pending) && ReportEngine.resolve_macros!(nb.report, nb.kernel, pending)
+                lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+            end
         end
         cancelled = false
         while true
@@ -3111,9 +3309,12 @@ function _run_loop!(nb::LiveNotebook)
         # bump (report mutations). Holding nb.lock across these was the teardown-deadlock hazard. (`again`
         # re-arm below re-drains any cell left stale — covering the racer-restale refine_macros! skips.)
         resolved_u = ReportEngine.refine_usings!(nb.report, nb.kernel; rebuild = false)
-        # `rebuild=false` returns before the racer-restale (it needs the rebuilt graph) — a parallel drain's
-        # raced readers are re-drained by the `again` re-arm below instead.
-        resolved_m = ReportEngine.refine_macros!(nb.report, nb.kernel; rebuild = false)
+        # `rebuild=false` returns before the racer-restale (it needs the rebuilt graph): the cells a
+        # parallel drain ran ahead of a newly-recovered producer are restaled after the rebuild below,
+        # and the `again` re-arm re-drains them. They may have run without error, so nothing else
+        # would mark them stale.
+        racers = Set{String}()
+        resolved_m = ReportEngine.refine_macros!(nb.report, nb.kernel; rebuild = false, recovered = racers)
         # A package loaded this drain may have declared front-end scripts (widget renderers, editor
         # extensions) from `__init__` — pull the worker's extension manifest into the notebook registry so
         # the browser injects them. Once-per-drain; no-ops unless a NEW package registered something.
@@ -3121,6 +3322,7 @@ function _run_loop!(nb::LiveNotebook)
         if resolved_u || resolved_m || resolved_x
             with_report(nb) do report
                 (resolved_u || resolved_m) && ReportEngine.rebuild_precise!(report)   # rebuild only if the graph changed
+                _parallel_enabled(nb) && ReportEngine.restale_macro_racers!(report, racers)
                 nb.version += 1
             end
             _broadcast(nb, string(nb.version))   # version token → browser re-pulls the precise-graph state
@@ -3185,7 +3387,10 @@ function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool 
     # edit, an agent's add/edit, a restart. The exception is a reactive cascade, which continues the
     # run in progress and says so; making that the explicit case rather than the default means a new
     # call site is counted as a run rather than silently folded into the previous one.
-    p = lock(nb.lock) do; count(c -> c.state in (STALE, RUNNING), nb.report.cells); end
+    p = lock(nb.lock) do
+        fresh && delete!(_UI_LANE_CELLS, nb.id)   # a user-started run: everything on `:default`
+        count(c -> c.state in (STALE, RUNNING), nb.report.cells)
+    end
     p > 0 && _emit_pending(nb, p; fresh = fresh)
     _ensure_runner!(nb)
     (isempty(wait_for) && !wait_all) && return nb
@@ -3221,9 +3426,79 @@ end
 # the caller's deadline and say what's happening, NOT to mirror the browser's progress bar. The
 # reading is latest-value-wins, so a burst of slate_progress frames collapses into one line.
 const _AGENT_PROGRESS_EVERY = 15.0
-# nb.id → the most recent slate_progress reading (frac, msg, bar id, done, when).
-const _LAST_USERPROG = Dict{String,Tuple{Float64,String,String,Bool,Float64}}()
-const _USERPROG_LOCK = ReentrantLock()
+
+# What a page loading mid-run can't learn from the event stream: when each running cell started and
+# the progress bars it shows now. Kept per cell, so `state_json` gives it to every page load and
+# resync, and cells running in parallel keep separate bars. Also what the agent progress line reads.
+mutable struct _CellLive
+    started::Float64                                    # epoch seconds
+    bars::Vector{Tuple{String,Float64,String,Float64}}  # (bar id, frac, msg, when), in order of appearance
+end
+const _CELL_LIVE = Dict{String,Dict{String,_CellLive}}()   # nb.id → cell id → live state
+const _CELL_LIVE_LOCK = ReentrantLock()
+
+# A cell started running. A region cell is marked RUNNING twice (while its worker comes up, then to
+# run), and the first is when the reader saw it start, so an existing record is kept.
+function _live_start!(nb::LiveNotebook, cid::AbstractString)
+    lock(_CELL_LIVE_LOCK) do
+        get!(() -> _CellLive(time(), Tuple{String,Float64,String,Float64}[]),
+             get!(Dict{String,_CellLive}, _CELL_LIVE, nb.id), String(cid))
+    end
+    return nothing
+end
+
+function _live_finish!(nb::LiveNotebook, cid::AbstractString)
+    lock(_CELL_LIVE_LOCK) do
+        d = get(_CELL_LIVE, nb.id, nothing)
+        d === nothing || delete!(d, String(cid))
+    end
+    return nothing
+end
+
+_live_clear!(nb::LiveNotebook) = (lock(_CELL_LIVE_LOCK) do; delete!(_CELL_LIVE, nb.id); end; nothing)
+
+# One bar reading. Only a cell with a live record takes it: a task that outlives its cell can go on
+# reporting, and there is no run left to attach that to.
+function _live_progress!(nb::LiveNotebook, cid::AbstractString, bid::AbstractString, frac::Float64,
+                         msg::AbstractString, done::Bool)
+    lock(_CELL_LIVE_LOCK) do
+        live = get(get(_CELL_LIVE, nb.id, Dict{String,_CellLive}()), String(cid), nothing)
+        live === nothing && return
+        i = findfirst(b -> b[1] == bid, live.bars)
+        if done
+            i === nothing || deleteat!(live.bars, i)
+        elseif i === nothing
+            push!(live.bars, (String(bid), frac, String(msg), time()))
+        else
+            live.bars[i] = (String(bid), frac, String(msg), time())
+        end
+    end
+    return nothing
+end
+
+# The running cells' live records, for `state_json`. A record whose cell is no longer RUNNING is
+# dropped here: most runs end through `_broadcast_progress`, but a reset (restart, worker loss) can
+# move a cell on without one.
+function _live_snapshot!(nb::LiveNotebook)
+    running = Set(c.id for c in nb.report.cells if c.state == RUNNING)
+    lock(_CELL_LIVE_LOCK) do
+        d = get(_CELL_LIVE, nb.id, nothing)
+        d === nothing && return Dict{String,_CellLive}()
+        filter!(kv -> kv.first in running, d)
+        return Dict(k => _CellLive(v.started, copy(v.bars)) for (k, v) in d)
+    end
+end
+
+# The most recent bar reading across the notebook's running cells (frac, msg, when), or nothing.
+function _live_latest(nbid::AbstractString)
+    lock(_CELL_LIVE_LOCK) do
+        best = nothing
+        for live in values(get(_CELL_LIVE, String(nbid), Dict{String,_CellLive}())), b in live.bars
+            (best === nothing || b[4] > best[3]) && (best = (b[2], b[3], b[4]))
+        end
+        best
+    end
+end
 
 # One agent-visible status line for a run we're blocked on: which cell, how far in, how much is
 # left, and whatever the cell last reported through `slate_progress`.
@@ -3236,10 +3511,9 @@ function _note_run_progress(nb::LiveNotebook, wait_for::AbstractString, t0::Floa
                    (isempty(wait_for) ? "draining" : "waiting on $wait_for") :
                    "running " * join(running, ", ")]
     pending > 1 && push!(parts, "$pending pending")
-    up = lock(_USERPROG_LOCK) do; get(_LAST_USERPROG, nb.id, nothing); end
-    # Ignore a stale reading: a leftover from an earlier cell would otherwise be reported as if
-    # it described the one running now.
-    if up !== nothing && !up[4] && time() - up[5] <= 2 * _AGENT_PROGRESS_EVERY
+    up = _live_latest(nb.id)
+    # Ignore a reading that has stopped moving: it no longer says how far along the run is.
+    if up !== nothing && time() - up[3] <= 2 * _AGENT_PROGRESS_EVERY
         frac, msg = up[1], up[2]
         pct = (isfinite(frac) && 0.0 <= frac <= 1.0) ? "$(round(Int, 100 * frac))%" : ""
         detail = strip(join(filter(!isempty, [pct, strip(msg)]), " "))
@@ -3264,19 +3538,12 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
         return
     end
     isempty(names) && return
-    syms = Set{Symbol}(Symbol(n) for n in names)
-    # A cell rarely reads the EXACT edited def — it calls a higher-level function that uses it (a cell
-    # calls `f`, which internally calls the edited `g`). But editing any def in a package
-    # changes the whole project's src digest, so every cell USING that package is affected — and would
-    # recompute on rerun anyway (the memo key folds the src digest). So expand the changed set with all
-    # names PROVIDED by a cell that provides one of the changed names — i.e. the `using <Pkg>` cell's
-    # in-scope exports — turning "one exported name changed" into "everything using that package is stale".
-    lock(nb.lock) do
-        for c in nb.report.cells
-            (isempty(c.provides) || !any(p -> p in syms, c.provides)) && continue
-            union!(syms, c.provides)
-        end
-    end
+    # The worker reports the changed definitions plus every function whose compiled code the edit
+    # invalidated (the callers of a changed method, transitively), so a cell calling `f`, which calls
+    # the edited `g`, matches on `f`. A `=name` entry is a global whose value's display a changed show
+    # method alters: the cells that define or read it re-run.
+    syms = Set{Symbol}(Symbol(n) for n in names if !startswith(n, "="))
+    shown = Set{Symbol}(Symbol(chopprefix(n, "=")) for n in names if startswith(n, "="))
     # A cell reads a CHANGED def if a read matches a changed name directly, OR the read is a
     # QUALIFIED path (`SlateTest.Sub.greet`) whose leaf (`greet`) changed — reads record the
     # whole dotted path, while the worker reports the leaf def-name.
@@ -3291,7 +3558,7 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
         for c in nb.report.cells
             # Both code AND markdown join the reactive graph via `reads` (md from its {{ }}
             # free vars), and eval_stale! re-renders stale md — so include both.
-            _reads_changed(c) || continue
+            (_reads_changed(c) || !isdisjoint(c.writes, shown) || !isdisjoint(c.reads, shown)) || continue
             ReportEngine.restale!(c) && (push!(seed, c.id); push!(staled, c.id))
         end
         isempty(seed) && return
@@ -3388,6 +3655,7 @@ include("server_export.jl")
 include("server_docbundle.jl")   # doc bundles: a rendered notebook for a Documenter site + the <slate-cell> runtime
 include("publish_targets.jl")  # PublishTarget adapters (github-pages, generic-upload) + multi-target fan-out
 include("publish_zenodo.jl")   # Zenodo archival target — versioned citable DOI
+include("server_vendor.jl")    # third-party front-end assets: pinned, hash-checked, cached
 include("server_hub.jl")
 # After server_hub.jl: its signatures dispatch on `Hub`, which is defined there.
 include("server_app.jl")       # app mode (served-as-an-application posture) + the /status page
@@ -3589,6 +3857,8 @@ the banner shows the path; only errors still print.
 function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, quiet::Bool = true,
                         inactive::Bool = false, app::Bool = false, workbook::Bool = false,
                         appdefaults::AbstractDict = Dict{String,Any}())
+    # A running cell redirects the process stdout into a capture that it closes when the cell ends.
+    out = stdout
     # Swap the logger BEFORE anything spawns so worker-spawn infos land in the file.
     logdir = ReportEngine._slate_logdir()
     logpath = isempty(logdir) ? "" : joinpath(logdir, "hub-$port.log")
@@ -3629,7 +3899,7 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
         nb1 === nothing ? "" : strip(report_frontmatter(nb1.report).title)
     catch; ""; end
     _print_ready_banner(url; logpath = logio === nothing ? "" : logpath, keys = showkeys,
-                        inactive = inactive, app = app, apptitle = apptitle)
+                        inactive = inactive, app = app, apptitle = apptitle, io = out)
     _open_in_browser(url)                    # best-effort auto-open (a no-op under KAIMONSLATE_NO_OPEN, which run.jl sets so its b/p keys drive opening instead)
     # Block until stopped — and make Ctrl-C actually stop it. Signals are a dead end
     # here (verified against a live hub): once the threaded HTTP listener runs, a

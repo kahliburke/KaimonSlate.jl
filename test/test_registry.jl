@@ -15,7 +15,7 @@ const RE_R = ReportEngine
         n = 400
         ids = ["nb-$i" for i in 1:n]
         @sync for id in ids
-            Threads.@spawn RE_R.register_userprog!(id, (f, m, i, d) -> nothing)
+            Threads.@spawn RE_R.register_userprog!(id, (c, i, f, m, d) -> nothing)
         end
         @test all(id -> RE_R._reg_get(RE_R._USERPROG_REGISTRY, id) !== nothing, ids)
         @sync for id in ids

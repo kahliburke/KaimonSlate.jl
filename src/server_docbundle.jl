@@ -424,6 +424,7 @@ function _write_doc_bundle!(out::AbstractString, nb::LiveNotebook; light, dark, 
         entries = _export_asset_entries(ctx; asset_sink = sink)
         for c in nb.report.cells
             :docindex in c.flags && continue
+            :notes in c.flags && continue        # speaker notes are for the presenter, not a reader
             if :bibliography in c.flags
                 # The reference list, as plain markdown (or nothing, when nothing is cited).
                 refs = _doc_references(ctx)

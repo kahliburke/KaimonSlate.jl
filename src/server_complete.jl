@@ -141,6 +141,15 @@ function _interrupt_inflight!(nb::LiveNotebook)
     return n < 0 ? 0 : n
 end
 
+# Let a boot in progress finish before replacing or resetting the kernel. The boot installs its kernel
+# under `nb.lock`, so a kernel op on the placeholder made while holding that lock would wait on it for
+# good; and a kernel swapped in meanwhile would be overwritten when the boot lands. Off the lock.
+function _settle_boot!(nb::LiveNotebook)
+    k = nb.kernel
+    k isa ReportEngine.PendingKernel && try; ReportEngine._await_real(k); catch; end   # a failed boot is fine too
+    return nothing
+end
+
 function restart_kernel!(nb::LiveNotebook)
     # Tear down + reset synchronously (fast), mark a background re-run underway, and RETURN — the
     # full re-eval (which respawns the worker on prepare! and streams cells back) runs async, so the
@@ -151,13 +160,16 @@ function restart_kernel!(nb::LiveNotebook)
     # a BLOCKING round-trip, so it runs OFF `nb.lock` (protocol: never hold nb.lock across a kernel call).
     # Interrupt any in-flight eval first so `shutdown!` doesn't block behind it (the deadlock this fixes:
     # holding nb.lock across `shutdown!` while the runner needs nb.lock to finish → hub wedges).
+    _settle_boot!(nb)
     _interrupt_inflight!(nb)
     try; ReportEngine.shutdown!(nb.kernel; kill_remote = true); catch; end
     _teardown_region!(nb; kill = true)       # region kernels restart fresh too (+ sync state reset)
     with_report(nb) do report                # lock only for the report reset/mutate (no round-trip)
+        _live_clear!(nb)                     # the reset ends every run without a finish broadcast
         ReportEngine.reset!(nb.kernel, report)
         build_dependencies!(report)
         report.meta["hydrating"] = true
+        delete!(report.meta, "hydrate_error")   # a new bring-up owns the failure state
         nb.version += 1
     end
     _broadcast(nb, "restart")
@@ -192,6 +204,7 @@ end
 # Tears down the current kernel, RE-PICKS the kernel type (remote attach vs local) via _select_kernel,
 # and re-runs — async, same "instant" pattern as restart_kernel!. Runtime-only (not written to the .jl).
 function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
+    _settle_boot!(nb)
     _interrupt_inflight!(nb)   # switching workers stops the current evaluation immediately (don't drain)
     try; ReportEngine.shutdown!(nb.kernel); catch; end         # blocking teardown — OFF nb.lock (local killed; remote detached, idles warm)
     with_report(nb) do report
@@ -203,6 +216,7 @@ function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
         # left FRESH would give the runner nothing to do and the worker would never be reached. See reset!.
         ReportEngine.reset_all!(report)
         report.meta["hydrating"] = true
+        delete!(report.meta, "hydrate_error")
         nb.version += 1
     end
     _broadcast(nb, "restart")
@@ -660,7 +674,7 @@ function _sync_datadir_to!(nb::LiveNotebook, dst_k; cell_id::AbstractString = ""
     # multi-minute stall with no indication of what's happening. Off (cell_id empty) ⇒ no reporting.
     pid = "datadir-" * String(cell_id)
     prog(frac, msg, done) = isempty(cell_id) ? nothing :
-        (try; ReportEngine._do_userprog(nb.report.id, Float64(frac), msg, pid, done); catch; end; nothing)
+        (try; ReportEngine._do_userprog(nb.report.id, cell_id, pid, Float64(frac), msg, done); catch; end; nothing)
     files = Any[]; fbytes = Int[]
     for (dir, _, names) in walkdir(ddir), name in names
         p = joinpath(dir, name)
@@ -790,16 +804,14 @@ function _make_router(h::Hub)
                           side = get(q, "side", "")))
     end)
     HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
-    # Vendored third-party assets (offline cache, pinned in vendor.json). Greedy `**` so
-    # nested paths work (CodeMirror modes/addons, KaTeX fonts). First hit fetches+caches.
+    # Vendored third-party assets (server_vendor.jl). Greedy `**` so nested paths work (KaTeX fonts).
     HTTP.register!(router, "GET", "/assets/vendor/**", req -> begin
         rel = replace(HTTP.URI(req.target).path, r"^/assets/vendor/" => "")
         parts = split(rel, '/'; limit = 2)
         (length(parts) == 2 && !isempty(parts[2])) || return HTTP.Response(404)
-        f = _vendor_file(String(parts[1]), String(parts[2]))
-        f === nothing && return HTTP.Response(404, "vendor asset unavailable (offline & uncached?)")
-        HTTP.Response(200, ["Content-Type" => _vendor_ctype(parts[2]),
-                            "Cache-Control" => "public, max-age=31536000, immutable"], read(f))
+        # `<pkg>@<version>` (see `_vendor_versioned`) or a bare `<pkg>`; either serves the pinned version
+        pkg, ver = occursin('@', parts[1]) ? split(parts[1], '@'; limit = 2) : (parts[1], "")
+        _vendor_response(req, String(pkg), String(ver), String(parts[2]))
     end)
     HTTP.register!(router, "GET", "/assets/js/{file}", req -> begin
         f = HTTP.getparam(req, "file")
@@ -824,12 +836,13 @@ function _make_router(h::Hub)
         m === nothing && return HTTP.Response(404)
         pkg = HTTP.URIs.unescapeuri(String(m.captures[1]))
         sub = HTTP.URIs.unescapeuri(String(m.captures[2]))
-        root = lock(h.lock) do
-            for nb in values(h.notebooks)
-                d = get(nb.assets, pkg, nothing); d === nothing || return d
-            end
-            return nothing
+        # `nb.assets` under `nb.lock`: an `/ext-assets/` route pull can merge into it at any time.
+        root = nothing
+        for nb in lock(() -> collect(values(h.notebooks)), h.lock)
+            root = lock(() -> get(nb.assets, pkg, nothing), nb.lock)
+            root === nothing || break
         end
+        root === nothing && (root = _await_ext_asset_dir(h, req, pkg))
         root === nothing && return HTTP.Response(404, "no such package asset dir (package loaded?)")
         p = _confined_path(root, sub)             # stay inside the vendored dir
         p === nothing && return HTTP.Response(404)
@@ -1310,7 +1323,7 @@ function _make_router(h::Hub)
         _html(_inject_app(_inject_imports(read(_ASSET, String), _effective_imports(nb)), h, nb;
                           preview = _app_preview(req.target)))
     end)
-    HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
+    HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _refresh_extensions_for_page!(nb); _json(state_json(nb)))))
     # A worker's log tail + status for the topbar worker/region status popup. `?side=` selects the
     # worker (""=main, else a region); local reads the log file, remote ssh-tails it. Polled while open.
     HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb -> begin
@@ -1862,9 +1875,11 @@ function _make_router(h::Hub)
                              bundle = get(b, "bundle", false) === true, history = get(b, "history", false) === true)
             # Remember WHERE this notebook publishes so the dialog pre-fills next time (and a CI
             # action can read the target). Authored intent → travels in the Slate.config footer.
-            nb.report.meta["publishrepo"] = String(repo)
-            nb.report.meta["publishslug"] = r.home ? "" : String(r.slug)
-            _persist!(nb)
+            with_report(nb) do report
+                report.meta["publishrepo"] = String(repo)
+                report.meta["publishslug"] = r.home ? "" : String(r.slug)
+                _persist!(nb)
+            end
             record_publish_site!(nb, String(repo), r)   # keep the publish ledger (history + doc↔target) in sync
             return _json(Dict("url" => r.url, "docUrl" => r.docUrl, "slug" => r.slug, "repo" => r.repo,
                               "created" => r.created, "docCount" => r.docCount, "home" => r.home,
@@ -1973,6 +1988,13 @@ function _make_router(h::Hub)
         # that would clobber an edit made elsewhere (an external editor, a `git checkout`) meanwhile.
         _json(Dict("path" => rel, "kind" => "text", "content" => String(bytes), "bytes" => sz,
                    "mtime" => mtime(ap)))
+    end))
+    # A markdown file rendered the way a markdown cell is, for the Files tab's preview. Its relative image
+    # and media paths resolve against the folder the file sits in, as they do wherever else it is read.
+    HTTP.register!(router, "GET", "/api/{id}/file-md", req -> _withnb(h, req, nb -> begin
+        code, body = _md_file_html(nb, String(get(HTTP.queryparams(HTTP.URI(req.target)), "path", "")))
+        code == 200 || return HTTP.Response(code, body)
+        HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8", "Cache-Control" => "no-store"], body)
     end))
     HTTP.register!(router, "POST", "/api/{id}/file", req -> _withnb(h, req, nb -> begin
         body = try; JSON.parse(String(req.body)); catch; Dict{String,Any}(); end
@@ -2401,49 +2423,25 @@ function _make_router(h::Hub)
         get(res, "ok", false) === true || return _json(res)
         j = state_json(nb); j["config"] = notebook_config_payload(nb); _json(j)
     end))
-    # Per-notebook toggle for parent /src hot-reload (Revise). Stored in report meta.
-    HTTP.register!(router, "POST", "/api/{id}/hotreload", req -> _withnb(h, req, nb -> begin
-        nb.report.meta["hotreload"] = get(_body(req), "enabled", true) === true
-        _persist!(nb)                                    # write the Slate.config footer so it sticks
-        _json(state_json(nb))                            # return the full state so the client stays in sync
-    end))
-    # Per-notebook toggle for parallel (inter-cell) execution. Stored in report meta; the runner reads
-    # it each iteration, so it takes effect on the next run with no worker restart.
-    HTTP.register!(router, "POST", "/api/{id}/parallel", req -> _withnb(h, req, nb -> begin
-        nb.report.meta["parallel"] = get(_body(req), "enabled", false) === true
-        _persist!(nb)                                    # write the Slate.config footer so it sticks
-        _json(state_json(nb))                            # return the full state so the client stays in sync
-    end))
     # Per-notebook slide-deck presentation prefs (heading level / transition / theme / PDF ratio).
     # Stored in report meta; persisted to the Slate.config footer. No worker restart — purely
     # presentation. Body keys: level (int), transition, theme, ratio (any subset).
     HTTP.register!(router, "POST", "/api/{id}/slideconfig", req -> _withnb(h, req, nb -> begin
         b = _body(req)
-        haskey(b, "level") && (nb.report.meta["slidelevel"] = something(tryparse(Int, string(b["level"])), 2))
-        haskey(b, "transition") && (nb.report.meta["slidetransition"] = String(b["transition"]))
-        haskey(b, "theme") && (nb.report.meta["slidetheme"] = String(b["theme"]))
-        haskey(b, "ratio") && (nb.report.meta["slideratio"] = String(b["ratio"]))
-        haskey(b, "bibstyle") && (nb.report.meta["bibstyle"] = String(b["bibstyle"]))
-        _persist!(nb)
-        _json(state_json(nb))
-    end))
-    # Per-notebook worker-thread override. "" clears it (back to the global). Applies by respawning this
-    # notebook's worker — so changing it kills + restarts the process (lose the warm namespace), unlike
-    # the parallel toggle. Stored in meta so it survives reloads; the .jl footer carries it across restarts.
-    HTTP.register!(router, "POST", "/api/{id}/threads", req -> _withnb(h, req, nb -> begin
-        spec = strip(String(get(_body(req), "threads", "")))
-        if isempty(spec)
-            delete!(nb.report.meta, "threads")
-        else
-            nb.report.meta["threads"] = spec
+        with_report(nb) do report
+            haskey(b, "level") && (report.meta["slidelevel"] = something(tryparse(Int, string(b["level"])), 2))
+            haskey(b, "transition") && (report.meta["slidetransition"] = String(b["transition"]))
+            haskey(b, "theme") && (report.meta["slidetheme"] = String(b["theme"]))
+            haskey(b, "ratio") && (report.meta["slideratio"] = String(b["ratio"]))
+            haskey(b, "bibstyle") && (report.meta["bibstyle"] = String(b["bibstyle"]))
+            _persist!(nb)
         end
-        nb.kernel isa ReportEngine.GateKernel && (nb.kernel.threads = spec)   # update the live kernel's override
-        _persist!(nb)                                                          # write the Slate.config footer
-        restart_kernel!(nb)                                                    # respawn the worker with it
         _json(state_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
-        ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); _eval!(nb); _json(state_json(nb))
+        _settle_boot!(nb)
+        with_report(nb) do report; ReportEngine.reset!(nb.kernel, report); build_dependencies!(report); end
+        _eval!(nb); _json(state_json(nb))
     end))
     # Split this notebook off from a copy it shares a document (and therefore history, chat and
     # preview) with. Copies the stores rather than resetting them, so neither side loses anything.
@@ -2698,7 +2696,7 @@ const _WS_CONNS = Dict{String,Vector{_WSConn}}()   # nb id → live page sockets
 const _WS_LOCK = ReentrantLock()
 _ws_register!(nb::LiveNotebook, c::_WSConn) = lock(_WS_LOCK) do; push!(get!(_WS_CONNS, nb.id, _WSConn[]), c); end
 _ws_unregister!(nb::LiveNotebook, c::_WSConn) = lock(_WS_LOCK) do
-    v = get(_WS_CONNS, nb.id, nothing); v === nothing || filter!(!==(c), v)
+    v = get(_WS_CONNS, nb.id, nothing); v === nothing || filter!(d -> d !== c, v)
 end
 
 # Enqueue one frame to a connection, NON-blocking. Full queue ⇒ drop + count; the next successful
@@ -3003,6 +3001,8 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     # hydrating banner, not just remote.log — the provisioner narrates each line through this sink hook.
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
     _install_worker_push!(h)   # worker telemetry + log → per-page WebSocket push (no browser polling)
+    # Every vendored file of the pinned versions, fetched and checked in the background (server_vendor.jl)
+    Threads.@spawn try; _vendor_warm!(); catch e; @debug "vendor warm failed" exception = e; end
     handle = HTTP.streamhandler(_make_router(h))
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
         # Reject cross-origin / rebinding requests before ANY handler (router or SSE) runs.
@@ -3046,7 +3046,9 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
             t0 = time()
             handle(stream)
             dt = time() - t0      # includes the body WRITE — surfaces slow transfers, not just slow compute
-            dt > 1.0 && @warn "Kaimon Slate: slow request" target round_ms = round(Int, dt * 1000)
+            # An `/ext-assets/` miss is held on purpose while the notebook can still declare the package.
+            dt > 1.0 && !startswith(target, "/ext-assets/") &&
+                @warn "Kaimon Slate: slow request" target round_ms = round(Int, dt * 1000)
         end
     end
     h.server = server
@@ -3074,6 +3076,7 @@ function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = 
         id = _unique_id(h, file)
         nb = load_notebook(file; id = id, threads = threads, runon = runon, autorun = autorun, inactive = inactive)
         h.notebooks[id] = nb
+        _reattach_agents!(nb)
         _start_watcher!(nb)
         return id
     end
@@ -3081,6 +3084,37 @@ function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = 
     nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
     nb === nothing || _ensure_docid!(nb)     # silent lazy upgrade: stamp the stable `docid` if the file has none
     return id
+end
+
+# Per-notebook state that lives in module globals keyed by the notebook's id. An id is REUSED when the
+# same file (or another with the same name) opens again, so all of it goes with the notebook:
+#   - a leftover re-run marker would restale a cell once for no reason (`_DIRTY_WHILE_RUNNING`);
+#   - session-state digests describe reactive values the reopened notebook no longer has (`_STATE_DIGESTS`);
+#   - undo/redo labels would name actions the new, empty undo stack does not hold;
+#   - cell timings, health and the liveness cache describe the closed notebook's runs.
+# The generation counters (`_MAIN_GEN`, `_WORKER_GEN`) stay: they only grow, so a task left over from
+# the closed notebook can never match the reopened one's generation.
+function _forget_notebook_state!(id::AbstractString)
+    delete!(_DIRTY_WHILE_RUNNING, id)
+    ReportEngine.forget_state_writes!(id)
+    lock(_LBL_LOCK) do; delete!(_UNDO_LBL, id); delete!(_REDO_LBL, id); end
+    lock(_CELL_STATS_LOCK) do; delete!(_CELL_STATS, id); end
+    lock(_WD_LOCK) do; delete!(_NB_HEALTH, id); delete!(_LAST_RUNNING, id); end
+    delete!(_AGENT_TURN, id)
+    return nothing
+end
+
+# A project markdown file as HTML, `(status, body)`. Rendered like a markdown cell, with relative image and
+# media paths resolved against the folder the file sits in.
+function _md_file_html(nb::LiveNotebook, rel::AbstractString)
+    ap = _safe_proj_path(_proj_root(nb), rel)
+    isempty(ap) && return (400, "bad or out-of-project path")
+    isfile(ap) || return (404, "no such file")
+    filesize(ap) > _TREE_TEXT_MAX && return (413, "file too large to preview")
+    bytes = read(ap)
+    isvalid(String, bytes) || return (415, "not a text file (invalid UTF-8)")
+    dir = dirname(replace(String(rel), '\\' => '/'))
+    return (200, markdown_html(_local_media(String(bytes), nb.id, _proj_root(nb); dir = dir)))
 end
 
 "Remove a notebook from the hub: drain its SSE connections and drop it."
@@ -3112,17 +3146,12 @@ function close_notebook!(h::Hub, id::AbstractString)
         ReportEngine._rlog("slate: closing $(id) with its runner still draining — signalling it to stop")
         lock(_RUNNER_LOCK) do; _RUNNER_CANCEL[id] = true; end
     end
-    # An id is REUSED when the same file is reopened, so a leftover re-run marker would make the
-    # reopened notebook restale a cell once for no reason (see `_DIRTY_WHILE_RUNNING`).
-    delete!(_DIRTY_WHILE_RUNNING, id)
-    # …and the session-state digests, for the same reason: the reopened notebook's reactives are back
-    # at their declared initial values, so last session's identities describe values that no longer
-    # exist (see `_STATE_DIGESTS`).
-    ReportEngine.forget_state_writes!(id)
+    _forget_notebook_state!(id)
     _interrupt_inflight!(nb)               # stop an in-flight eval so `shutdown!` doesn't block behind it
     try; shutdown!(nb.kernel); catch; end
     _teardown_region!(nb)                  # detach — a remote region idles warm like the main kernel
     lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end
+    lock(_PULL_LOCKS_LOCK) do; delete!(_PULL_LOCKS, id); delete!(_ROUTE_PULLED_AT, id); end
     _persist_registry!(h)                  # forget an explicitly-closed nb so a restart won't re-open it
     return true
 end

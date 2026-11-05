@@ -255,6 +255,85 @@ end
     end
 end
 
+# A cell that declares a control but does not read it gets a memo key without the control's
+# value. So a new worker restores that cell for every value of the control. The `@bind` replay
+# keeps the value that the hub sends to the new worker. The hub then copies the controls that the
+# restore reports. If the restore reports the value from the time of the store, the hub shows
+# that value while the namespace holds the live one.
+@testset "a memo restore reports the live value of the controls it declares" begin
+    if !KaimonSlate.ReportEngine.gate_available()
+        @info "bind/memo: no gate available — skipping (in-process kernel has no memo layer)"
+        return
+    end
+    NS.SlateHistory._ROOT[] = mktempdir()
+    ENV["KAIMONSLATE_CACHE_HOME"] = mktempdir()
+    hub = NS.start_hub(; port = 8872)
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, """
+              #%% code id=ctl cache
+              @bind n Slider(1:10)
+              a = 1
+              #%% code id=reader
+              n * 10
+              """)
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        cell(id) = nb.report.cells[findfirst(c -> c.id == id, nb.report.cells)]
+        trace() = string(try; RE.memo_trace(nb.kernel, "ctl"); catch; ""; end)
+
+        @test timedwait(() -> occursin("10", NS._result_of(nb, "reader")), 120.0; pollint = 0.05) === :ok
+        # The test means nothing unless the worker stored `ctl` with the value 1.
+        @test occursin("stored", trace())
+
+        NS.set_bind!(nb, "ctl", "n", 4)
+        @test timedwait(() -> occursin("40", NS._result_of(nb, "reader")), 30.0; pollint = 0.05) === :ok
+
+        NS.restart_kernel!(nb)
+        @test timedwait(120.0; pollint = 0.05) do
+            occursin("restored", trace()) && cell("reader").state == RE.FRESH
+        end === :ok
+        @test only(cell("ctl").binds).value == 4
+        @test occursin("40", NS._result_of(nb, "reader"))
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
+# A control can send the value it already holds (a select fires `input` and then `change` for one
+# choice). That changes nothing, so its readers must not run again.
+@testset "a control set to the value it holds runs nothing" begin
+    hub = NS.start_hub(; port = 8873)
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, """
+              #%% code id=ctl
+              @bind pick Select(["a", "b"])
+              @bind go Button("Run")
+              #%% code id=reader
+              runs = (isdefined(@__MODULE__, :runs) ? runs : 0) + 1
+              string(pick, go, "|", runs)
+              """)
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        reader() = nb.report.cells[findfirst(c -> c.id == "reader", nb.report.cells)]
+        settled(s) = timedwait(() -> occursin(s, NS._result_of(nb, "reader")) && reader().state == RE.FRESH,
+                               60.0; pollint = 0.05) === :ok
+
+        @test settled("a0|1")
+        NS.set_bind!(nb, "ctl", "pick", "b")
+        @test settled("b0|2")
+        # The same value again: the reader is not made stale, so it does not run.
+        NS.set_bind!(nb, "ctl", "pick", "b")
+        @test reader().state == RE.FRESH && occursin("b0|2", NS._result_of(nb, "reader"))
+        # A button counts every press, so a second press is a change like the first.
+        NS.set_bind!(nb, "ctl", "go", nothing)
+        @test settled("b1|3")
+        NS.set_bind!(nb, "ctl", "go", nothing)
+        @test settled("b2|4")
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
 # The receipt a control change now gets instead of the notebook. Its whole reason for existing is
 # that its size tracks the number of CELLS, not the size of their outputs — the old reply was
 # measured at 278KB on a real notebook, 198KB of it two chart specs, shipped on every slider nudge.

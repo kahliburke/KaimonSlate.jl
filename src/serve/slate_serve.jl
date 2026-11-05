@@ -15,18 +15,8 @@ const ROOT = abspath(get(ENV, "SLATE_SERVE_ROOT", "site"))
 const HOST = get(ENV, "SLATE_SERVE_HOST", "127.0.0.1")
 const PORT = parse(Int, get(ENV, "SLATE_SERVE_PORT", "8080"))
 
-const MIME_BY_EXT = Dict(
-    ".html" => "text/html; charset=utf-8", ".htm" => "text/html; charset=utf-8",
-    ".js" => "text/javascript; charset=utf-8", ".mjs" => "text/javascript; charset=utf-8",
-    ".css" => "text/css; charset=utf-8", ".json" => "application/json; charset=utf-8",
-    ".map" => "application/json", ".svg" => "image/svg+xml", ".png" => "image/png",
-    ".jpg" => "image/jpeg", ".jpeg" => "image/jpeg", ".gif" => "image/gif",
-    ".webp" => "image/webp", ".ico" => "image/x-icon", ".wasm" => "application/wasm",
-    ".woff" => "font/woff", ".woff2" => "font/woff2", ".ttf" => "font/ttf",
-    ".pdf" => "application/pdf", ".txt" => "text/plain; charset=utf-8",
-    ".toml" => "text/plain; charset=utf-8", ".wgsl" => "text/plain; charset=utf-8",
-)
-content_type(p) = get(MIME_BY_EXT, lowercase(splitext(p)[2]), "application/octet-stream")
+include(joinpath(@__DIR__, "mime_types.jl"))   # copied here by the deploy, beside this script
+content_type(p) = site_content_type(p)
 
 # Resolve a request target to a real file under ROOT (index.html for directories),
 # rejecting path traversal. Returns the absolute file path or nothing.

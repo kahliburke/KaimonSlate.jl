@@ -221,6 +221,69 @@ function _infra_env()::String
     end
 end
 
+# ── Optional worker env: dedicated worker threads ────────────────────────────────────────────────
+# The worker runs its control plane and UI work on thread pools from DedicatedThreads (worker.jl
+# `_POOLS_OK`). That package is optional, so it gets its own env rather than a place in `worker_infra`:
+# a failed build leaves workers on Julia's built-in pools and costs nothing else. It is built in the
+# background, once per (source, Julia version), so a worker spawn never waits for it; workers spawned
+# before it is ready start without it. Source, from `worker_pools_source` (slate.json) or
+# KAIMONSLATE_WORKER_POOLS: "" installs it from the depot's registries, by name and UUID so no other
+# package of that name is ever installed; "off" disables it; anything else is a local checkout
+# (developed) or a git URL.
+const WORKER_POOLS_SOURCE = Ref{String}("")
+const _POOLS_PKG_UUID = "9d6577c3-9664-4440-a53f-cec765ebc045"
+const _POOLS_ENV_ROOT = joinpath(get(DEPOT_PATH, 1, joinpath(homedir(), ".julia")),
+                                 "scratchspaces", "kaimonslate-pools")
+const _POOLS_ENV_LOCK = ReentrantLock()
+const _POOLS_ENV_BUILDING = Set{String}()   # guarded by _POOLS_ENV_LOCK
+# A failed build is retried after this long, and at every hub start, so a package that becomes
+# installable later (a new registration) is picked up.
+const _POOLS_RETRY_S = 3600.0
+
+"""
+The optional pools env for new workers, or \"\" when it is disabled, failed, or still building.
+`retry_failed` retries a failed build now rather than after `_POOLS_RETRY_S`.
+"""
+function _pools_env(; retry_failed::Bool = false)::String
+    src = strip(WORKER_POOLS_SOURCE[])
+    src == "off" && return ""
+    dir = joinpath(_POOLS_ENV_ROOT, string(hash(("DedicatedThreads", src, string(VERSION))); base = 16))
+    isfile(joinpath(dir, ".ready")) && return dir
+    failed = joinpath(dir, ".failed")
+    !retry_failed && isfile(failed) && time() - mtime(failed) < _POOLS_RETRY_S && return ""
+    lock(_POOLS_ENV_LOCK) do
+        dir in _POOLS_ENV_BUILDING && return
+        push!(_POOLS_ENV_BUILDING, dir)
+        Threads.@spawn _build_pools_env!(dir, src)
+    end
+    return ""
+end
+
+function _build_pools_env!(dir::String, src::AbstractString)
+    buildlog = joinpath(dir, "build.log")
+    try
+        mkpath(dir)
+        rm(joinpath(dir, ".failed"); force = true)
+        path = expanduser(src)
+        spec = isempty(src) ? "Pkg.add(Pkg.PackageSpec(name = \"DedicatedThreads\", uuid = \"$(_POOLS_PKG_UUID)\"))" :
+               isdir(path)   ? "Pkg.develop(path = $(repr(abspath(path))))" :
+                               "Pkg.add(url = $(repr(String(src))))"
+        code = "using Pkg; $spec; Pkg.precompile()"
+        open(buildlog, "w") do io
+            run(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$dir -e $code`;
+                         stdout = io, stderr = io))
+        end
+        write(joinpath(dir, ".ready"), String(src))
+        @info "slate: dedicated worker threads available to new workers" dir
+    catch
+        touch(joinpath(dir, ".failed"))
+        @info "slate: dedicated worker threads unavailable; workers use Julia's built-in pools" reason = _env_build_error(buildlog) buildlog
+    finally
+        lock(_POOLS_ENV_LOCK) do; delete!(_POOLS_ENV_BUILDING, dir); end
+    end
+    return nothing
+end
+
 # Per-worker TCP ports. A counter hands out the next block, and every port in it is PROBED before it
 # is handed out — because a counter alone is not enough and the failure it produces is silent.
 #
@@ -579,7 +642,7 @@ function _ensure_poller!()
                 pending = Dict{String,Dict{String,String}}()
                 srcnames = Dict{String,Set{String}}()   # parent /src edits → changed def-names
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
-                prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
+                prog = Dict{Tuple{String,String,String},Tuple{Float64,String,Bool}}()   # (notebook, cell, bar id) → LATEST (frac,msg,done)
                 emits = Tuple{String,String,Any}[]   # ordered slate_emit pushes (rid, channel, deserialized VALUE) — NOT coalesced; each event matters
                 binemits = Tuple{String,Vector{UInt8}}[]   # ordered slate_emit_bin frames (rid, raw binary frame) — forwarded to the page WS as-is
                 # (notebook, cell) → LATEST cooked (stdout, stderr) while that cell runs. Coalesced like
@@ -617,11 +680,11 @@ function _ensure_poller!()
                         end
                     elseif m.channel == "slate_revise_err"    # a /src save didn't parse/apply
                         srcerr[rid] = String(m.data)
-                    elseif m.channel == "slate_progress"      # "id|frac|done|msg" — one bar per id
-                        parts = split(String(m.data), "|"; limit = 4)
-                        if length(parts) == 4
-                            prog[(rid, String(parts[1]))] =
-                                (something(tryparse(Float64, parts[2]), 0.0), String(parts[4]), parts[3] == "1")
+                    elseif m.channel == "slate_progress"      # "cid\x1fid\x1ffrac\x1fdone\x1fmsg" — one bar per (cell, id)
+                        parts = split(String(m.data), '\x1f'; limit = 5)
+                        if length(parts) == 5
+                            prog[(rid, String(parts[1]), String(parts[2]))] =
+                                (something(tryparse(Float64, parts[3]), 0.0), String(parts[5]), parts[4] == "1")
                         end
                     elseif m.channel == "slate_cellout"       # "cid\x1fstdout\x1fstderr" — a running cell's output so far
                         parts = split(String(m.data), '\x1f'; limit = 3)
@@ -673,8 +736,8 @@ function _ensure_poller!()
                 for ((rid, cid), (out, err)) in cellouts
                     _do_cellout(rid, cid, out, err)
                 end
-                for ((rid, bid), (frac, msg, done)) in prog
-                    _do_userprog(rid, frac, msg, bid, done)
+                for ((rid, cid, bid), (frac, msg, done)) in prog
+                    _do_userprog(rid, cid, bid, frac, msg, done)
                 end
                 for (rid, json) in prepares
                     _do_prepare(rid, json)
@@ -711,6 +774,9 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # lib/KaimonGate dir only resolves from a dev checkout.
     kgate_dir = _kgate_env()
     infra_dir = _infra_env()   # materialised (instantiated for THIS Julia) — see `_infra_env`
+    pools_dir = _pools_env()   # optional; "" until built (see `_pools_env`)
+    pools_line = isempty(pools_dir) ? "" :
+        "insert!(LOAD_PATH, 4, $(repr(pools_dir)))   # optional dedicated worker threads — after infra"
     # No LOAD_PATH stacking: the notebook runs in a SINGLE active env (`@`, set by
     # `--project`) — either the parent directly (base mode) or a forked env that already
     # contains the parent's deps (forked mode). `PARENT_PROJECT` is recorded only so the
@@ -718,6 +784,7 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     return """
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
     insert!(LOAD_PATH, 3, $(repr(infra_dir)))   # slate-owned infra (Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
+    $pools_line
     import KaimonGate
     # Load Revise BEFORE the notebook loads packages so it tracks the parent project's /src.
     # KaimonGate.serve auto-starts a watcher that PUBs `files_changed` on Revise.revision_event.
@@ -790,6 +857,37 @@ function _slate_logdir()
     end
 end
 
+"""
+    _confined_worker(cmd, k) -> Cmd
+
+A local worker under the host's confinement policy (`KAIMON_CONFINE_POLICY`, with the launcher in
+`KAIMON_CONFINE`; see Kaimon's `confine`), on Linux: it can read everything but what the policy
+denies, and write only its notebook's folder, its project, and a depot, cache and temporary
+directory kept for confined workers (the depot first, for what it compiles and installs, before the
+ones it reads). Without a policy, or elsewhere, `cmd` as it is.
+"""
+function _confined_worker(cmd::Cmd, k::GateKernel)
+    launcher, policy = get(ENV, "KAIMON_CONFINE", ""), get(ENV, "KAIMON_CONFINE_POLICY", "")
+    (isempty(launcher) || isempty(policy) || !Sys.islinux()) && return cmd
+    root = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "confined")
+    depot, cache, tmp = mkpath(joinpath(root, "depot")), mkpath(joinpath(root, "cache")), mkpath(joinpath(root, "tmp"))
+    # This process's depots in full: an empty entry would stand for the bundled ones only, without the user's.
+    # Its gate's folder is its own too: the worker serves over TCP and finds no Kaimon by its files.
+    cmd = addenv(cmd, "JULIA_DEPOT_PATH" => join(unique([depot; DEPOT_PATH]), ':'),
+                 "KAIMONSLATE_CACHE_HOME" => cache, "KAIMON_CACHE_DIR" => joinpath(cache, "kaimon"), "TMPDIR" => tmp)
+    args = [launcher, "--policy", policy]
+    for w in filter(!isempty, [k.nbdir, k.project, depot, cache, tmp])
+        push!(args, "--write", w)
+    end
+    # Nor the host's credentials, which no notebook needs (the token its agents run on, keys); Kaimon's
+    # own variables stay, as the worker connects with them.
+    env = filter(kv -> !_credential_var(first(split(kv, '='; limit = 2))), cmd.env)
+    return Cmd(Cmd([args; "--"; cmd.exec]); env, dir = cmd.dir, ignorestatus = cmd.ignorestatus)
+end
+
+_credential_var(name::AbstractString) =
+    !startswith(name, "KAIMON") && occursin(r"TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|PRIVATE_KEY|AUTH"i, name)
+
 function _spawn_worker!(k::GateKernel)
     k.ns_gen += 1   # a fresh LOCAL process ⇒ blank namespace (mirrors spawn_and_connect_remote!): the
                     # ns_gen-keyed re-establish re-primes it — main-kernel @bind registrations here, and
@@ -836,6 +934,7 @@ function _spawn_worker!(k::GateKernel)
     # Memo-store cap: forward the panel/config setting into the worker (its env/adaptive default
     # applies when unset — passing nothing keeps the worker's own resolution intact).
     MEMO_CAP_GB[] > 0 && (cmd = addenv(cmd, "KAIMONSLATE_MEMO_CAP_GB" => string(MEMO_CAP_GB[])))
+    cmd = _confined_worker(cmd, k)
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing
     # each chunk, so the log is tailable in real time. A plain `stdout=<file>`
     # redirect is block-buffered and only lands on disk when the worker exits —
@@ -1195,7 +1294,7 @@ function _wire_to_output(wire)
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
-                      region::AbstractString = "", regions::AbstractVector = String[])
+                      region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "")
     wire = try
         # prepare! is INSIDE the try: a worker spawn/connect or env-reconstruction failure must
         # surface as this cell's error, NOT propagate up through eval_stale!/sync_from_file! and 500
@@ -1205,7 +1304,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         # must ride as a keyword (Dict key → kwarg) to survive the hop. See worker.jl `__slate_eval`.
         # `ctx_*` seed the worker's task-local Slate execution context (see `_build_slate_ctx`).
         _tool(k, "__slate_eval", Dict{String,Any}("source" => String(source), "filename" => String(filename),
-              _ctx_args(report, region, regions)...); timeout = _eval_timeout())
+              _ctx_args(report, region, regions)..., _lane_args(lane)...); timeout = _eval_timeout())
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end
@@ -1222,6 +1321,10 @@ _ctx_args(report::Report, region::AbstractString, regions::AbstractVector) = (
     "ctx_region"   => String(region),
     "ctx_notebook" => String(report.id),
     "ctx_regions"  => String[String(r) for r in regions])
+
+# The worker thread pool an eval runs on (worker.jl `_route_request`). Sent only when set, so an
+# ordinary eval's arguments are unchanged.
+_lane_args(lane::AbstractString) = isempty(lane) ? () : ("lane" => String(lane),)
 
 # Ask the worker to re-render a native (Makie) figure cell under a Slate PALETTE, for a themed PDF
 # export that overrides the notebook's live theme (see worker.jl `__slate_rerender_fig`). Returns
@@ -1314,6 +1417,7 @@ function rerender_live(k::GateKernel, report::Report)
     end
     (res !== nothing && hasproperty(res, :cids)) || return Tuple{String,Any}[]
     cids, mts, b64s = res.cids, res.mimetypes, res.b64s
+    by_cell = _regroup_rerender_assets(res)
     out = Tuple{String,Any}[]
     for i in eachindex(cids)
         bytes = try; Vector{UInt8}(Base64.base64decode(String(b64s[i]))); catch; continue; end
@@ -1321,12 +1425,30 @@ function rerender_live(k::GateKernel, report::Report)
         wire = (stdout = "", mime = [(String(mts[i]), bytes)], echarts = Any[], tables = Any[],
                 binds = NamedTuple[], value_repr = "", exception = nothing, backtrace = nothing,
                 duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[],
-                animations = Any[], effects = Any[], assets = Any[], live = true)
+                animations = Any[], effects = Any[],
+                assets = get(by_cell, String(cids[i]), Any[]), live = true)
         push!(out, (String(cids[i]), wire))
     end
     return out
 end
 rerender_live(::Kernel, ::Report) = Tuple{String,Any}[]
+
+# `__slate_rerender_live` sends the re-render's assets as ONE flat vector, each record tagged with the
+# cell it belongs to — a vector of them PER CELL is the nesting the gate's structured return does not
+# survive, which is why the chunks ride as parallel arrays. Regroup by that tag.
+#
+# A worker on older code sends no `assets` field at all, so a hub/worker pair that straddles this change
+# degrades to what it did before rather than erroring on a missing property.
+function _regroup_rerender_assets(res)
+    by_cell = Dict{String,Vector{Any}}()
+    hasproperty(res, :assets) || return by_cell
+    for a in res.assets
+        cid = hasproperty(a, :cell) ? String(getproperty(a, :cell)) : ""
+        isempty(cid) && continue
+        push!(get!(by_cell, cid, Any[]), a)
+    end
+    return by_cell
+end
 
 # The in-process peer of the above. Without it, standalone Slate (`dev/hub.jl`, `run.jl` — anything
 # with no gate) fell through to the generic no-op, so a SESSION-BOUND output was stored as its
@@ -1340,24 +1462,24 @@ rerender_live(::Kernel, ::Report) = Tuple{String,Any}[]
 function rerender_live(::InProcessKernel, report::Report)
     report.mod === nothing && return Tuple{String,Any}[]
     out = Tuple{String,Any}[]
-    for (cid, chunks) in rerender_live_outputs(report_module(report))
+    for (cid, chunks, assets) in rerender_live_outputs(report_module(report))
         wire = (stdout = "", mime = chunks, echarts = Any[], tables = Any[],
                 binds = NamedTuple[], value_repr = "", exception = nothing, backtrace = nothing,
                 duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[],
-                animations = Any[], effects = Any[], assets = Any[], live = true)
+                animations = Any[], effects = Any[], assets = assets, live = true)
         push!(out, (String(cid), wire))
     end
     return out
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
-                      region::AbstractString = "", regions::AbstractVector = String[])
-    (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions)
+                      region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "")
+    (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions, lane = lane)
     wire = try
         prepare!(k, report)
         _tool(k, "__slate_eval", Dict{String,Any}(
             "source" => String(source), "filename" => String(filename),
-            _ctx_args(report, region, regions)...,
+            _ctx_args(report, region, regions)..., _lane_args(lane)...,
             "memo_key" => String(memo.key), "memo_names" => collect(String, memo.names),
             "memo_threshold" => Float64(memo.threshold),
             # ▶ force: skip the restore (an explicit play must re-evaluate) but still store the fresh
@@ -1554,9 +1676,10 @@ function env_info(k::GateKernel, report::Report)
 end
 
 # The worker's SlateExtensionsBase extension manifest — what its loaded packages registered for the
-# page to mirror (`frontend` scripts now; more fields as SEB grows). Pulled once per run drain (see
-# `_refresh_extensions!`); returns `nothing` when there's no live worker, so the caller keeps its
-# current registry. No `prepare!`: we only ask a worker that just ran, never spawn one to query.
+# page to mirror (`frontend` scripts now; more fields as SEB grows). Pulled at the end of each run drain
+# (see `_refresh_extensions!`) and on an `/ext-assets/` miss (see `_pull_ext_assets!`); returns `nothing`
+# when there's no live worker, so the caller keeps its current registry. No `prepare!`: we only ask a
+# worker that is up, never spawn one to query.
 function extension_manifest(k::GateKernel)
     k.conn === nothing && return nothing
     return try
@@ -1665,33 +1788,48 @@ end
 # footer's pinned packages. Runs once, before the first eval.
 function _reconstruct_env!(k::GateKernel)
     isempty(k.pending) && return
-    try
-        _tool(k, "__slate_reconstruct",
-              Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent, "pkgs" => k.pending);
-              timeout = _pkg_op_timeout())
-        _write_parent_marker!(k)
-        empty!(k.pending)   # clear ONLY on success — a failed rebuild keeps `pending` so the next use retries
-    catch e
-        e isa InterruptException && rethrow()
-        @warn "KaimonSlate: notebook env reconstruction failed — keeping pending packages to retry" exception = (e, catch_backtrace())
-    end
+    r = _env_rebuild_tool(k, "__slate_reconstruct",
+                          Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent, "pkgs" => k.pending),
+                          _pkg_op_timeout(), "could not rebuild the notebook's packages")
+    r === nothing && return   # a failed rebuild keeps `pending`, so the next spawn retries
+    _write_parent_marker!(k)
+    empty!(k.pending)
     return
 end
 
 # Auto re-resolve a forked notebook env when its parent's Manifest has changed since we
 # seeded it (keeps the one-env invariant: parent updates flow in, notebook adds preserved).
+# The marker is written only on success, so a failed re-resolve (the worker restores the env) is
+# retried at the next spawn.
 function _maybe_sync_parent!(k::GateKernel)
     (isempty(k.parent) || _base_mode(k)) && return
     cur = _parent_manifest_hash(k.parent)
     isempty(cur) && return
     prev = try; isfile(_parent_marker_path(k)) ? read(_parent_marker_path(k), String) : ""; catch; ""; end
     cur == prev && return
-    try
-        _tool(k, "__slate_sync_parent", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent); timeout = _sync_parent_timeout())
-        _write_parent_marker!(k)
-    catch
-    end
+    r = _env_rebuild_tool(k, "__slate_sync_parent", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent),
+                          _sync_parent_timeout(), "could not re-resolve the notebook's packages against its project")
+    r === nothing || _write_parent_marker!(k)
     return
+end
+
+# Run an env rebuild on the worker and report what went wrong (hub log + boot banner): a failure,
+# or local checkouts it had to skip because their path is missing here. `nothing` on failure.
+function _env_rebuild_tool(k::GateKernel, tool::AbstractString, args, timeout, what::AbstractString)
+    note(msg) = (@warn "KaimonSlate: $msg" notebook = k.label; k.online === nothing || (try; k.online(msg); catch; end))
+    r = try
+        _tool(k, tool, args; timeout = timeout)
+    catch e
+        e isa InterruptException && rethrow()
+        note("$what: " * sprint(showerror, e)); return nothing
+    end
+    field(key, d) = r isa AbstractDict ? get(r, Symbol(key), get(r, key, d)) : d
+    if field("ok", false) !== true
+        note("$what: " * string(field("message", "no response from worker"))); return nothing
+    end
+    skipped = field("skipped", String[])
+    isempty(skipped) || note("local checkouts not found on this machine, so not added: " * join(skipped, ", "))
+    return r
 end
 
 function assign_bind!(k::GateKernel, report::Report, name::Symbol, value)
@@ -1767,6 +1905,21 @@ function run_cleanups!(k::GateKernel, ::Report, ids)
     sids = String[String(i) for i in ids]
     isempty(sids) && return nothing
     try; _tool(k, "__slate_cleanup_cells", Dict{String,Any}("ids" => sids); timeout = 20.0); catch; end
+    return nothing
+end
+
+# Take back removed definitions in the WORKER namespace (see worker.jl `__slate_forget`). Synchronous,
+# unlike the cleanup above: the runner calls it before the next cell evaluates, and a reader must not
+# run before the leftover it would otherwise read is gone. No-op if the worker is down.
+function forget!(k::GateKernel, ::Report, cells, names)
+    k.conn === nothing && return nothing
+    (isempty(cells) && isempty(names)) && return nothing
+    try
+        _tool(k, "__slate_forget", Dict{String,Any}("cells" => String[String(c) for c in cells],
+                                                    "names" => String[String(n) for n in names]); timeout = 20.0)
+    catch e
+        @warn "slate: could not remove deleted definitions from the worker" cells = cells names = names exception = e
+    end
     return nothing
 end
 

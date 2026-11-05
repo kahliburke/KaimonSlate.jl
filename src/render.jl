@@ -607,9 +607,24 @@ end
 # the latter *steals* the byte vector (empties it), so a cell rendered twice (every
 # `/state` poll) would come back blank on the second render. Images/base64encode
 # read non-destructively, which is why only text/html + text/latex were affected.
+# The columns of a gallery of `n` figures: two for 2 or 4, three up to 9, four beyond.
+_gallery_cols(n) = n == 2 || n == 4 ? 2 : n <= 9 ? 3 : 4
+
 function _render_chunks(chunks)
     io = IOBuffer()
+    grid = 0                                   # images still to place in an open gallery grid
     for ch in chunks
+        if ch.mime == "application/vnd.kaimonslate.gallery"
+            n = something(tryparse(Int, String(copy(ch.data))), 0)
+            n > 0 || continue
+            grid > 0 && print(io, "</div>")
+            # the grid's layout inline as well as in the stylesheet, so a page holding an older stylesheet, or an
+            # export without it, still lays the figures out side by side
+            print(io, "<div class=\"disp gallery\" style=\"--gallery-cols:", _gallery_cols(n),
+                  ";display:grid;grid-template-columns:repeat(", _gallery_cols(n), ",minmax(0,1fr));gap:8px;align-items:start\">")
+            grid = n
+            continue
+        end
         if ch.mime == "text/html"
             print(io, "<div class=\"disp html\">", String(copy(ch.data)), "</div>")
         elseif ch.mime == "text/latex"
@@ -625,6 +640,7 @@ function _render_chunks(chunks)
             b64 = Base64.base64encode(ch.data)
             print(io, "<div class=\"disp img\"><img alt=\"output\" src=\"data:",
                   ch.mime, ";base64,", b64, "\"/></div>")
+            grid > 0 && (grid -= 1) == 0 && print(io, "</div>")
         elseif ch.mime == "application/vnd.kaimonslate.component+json"
             # A Slate component descriptor {v, component, props} (SlateExtensionsBase `slate_render`):
             # emit a mount placeholder carrying the raw descriptor in a sibling JSON script; the SPA looks
@@ -638,6 +654,7 @@ function _render_chunks(chunks)
             print(io, "<div class=\"disp html\">", String(copy(ch.data)), "</div>")
         end
     end
+    grid > 0 && print(io, "</div>")
     return String(take!(io))
 end
 

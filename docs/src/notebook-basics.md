@@ -151,6 +151,9 @@ Cells that have not been scrolled to yet still contribute to the count — their
 last saved source. Stepping onto a match in a markdown or `@bind` cell opens that cell's source so
 the match can be shown.
 
+Cell names are searched as well, so typing a cell's id finds the cell; the count reads **· cell
+name** while you are on one. The replace row leaves names alone and only rewrites cell contents.
+
 **Replace All is a single action.** It rewrites every match across the notebook in one step, which
 means one **⌘Z** puts it all back — the toast names what it undid — and the [timeline](history.md)
 gets one checkpoint labelled with the search and replacement, so you can also restore it later from
@@ -241,6 +244,11 @@ Pandoc/Quarto) overrides how it is drawn:
 `align` is `left`, `right`, or `center`; `.name` adds a class, `#name` sets an id. The same block
 works on a `<video>` or `<audio>` you dropped into the cell, and on an interpolated `{{ }}` image.
 Sizes carry into the HTML export and the PDF; unrecognised keys are dropped rather than emitted.
+
+A relative path, such as `plot.png` or `figures/plot.png`, names a file in the notebook's project
+folder, the same place `@asset` reads from. The notebook loads it from there, and every export
+carries it: a standalone page and the PDF embed it, a published site copies it beside the page, and
+an app or bundle takes the file along.
 
 ## Completion
 

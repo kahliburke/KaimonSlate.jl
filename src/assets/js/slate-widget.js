@@ -46,6 +46,7 @@ export function registerComponent(kind, Component, mod) {
         call:  (ch, payload, onProgress) => window.slateCall(String(ch), payload, onProgress),
         stream: (ch, init) => _stream(el, ch, init),
       };
+      el._slateCtx = ctx;
       render(h(Component, ctx), el);
     },
     // A value pushed from elsewhere (a re-run, another control) → set the signal. NOT a commit, so it
@@ -68,6 +69,19 @@ export function registerComponent(kind, Component, mod) {
   // Worth defining whenever the on-screen render uses something print can't carry: `<foreignObject>`,
   // a canvas, `font-family: inherit`, or colours taken from the LIVE theme rather than `ctx`.
   if (mod && typeof mod.exportFigure === "function") impl.exportFigure = mod.exportFigure;
+  // KEEP A RETURNED OUTPUT MOUNTED, opt-in. By default a component that a cell returns is mounted fresh
+  // on every run. Export
+  //
+  //   export const keepMounted = true
+  //
+  // to keep it: a re-run renders the same component again with the new `params`, so Preact diffs the
+  // DOM and the component keeps its state (signals, hooks, a canvas it owns). Opt-in because a
+  // component that reads `params` only once, at mount, would show the old values.
+  if (mod && mod.keepMounted === true) impl.update = (el, params) => {
+    if (!el._slateCtx) return;
+    el._slateCtx = { ...el._slateCtx, params: params || {} };
+    render(h(Component, el._slateCtx), el);
+  };
   window.slateRegisterWidget(String(kind), impl);
 }
 

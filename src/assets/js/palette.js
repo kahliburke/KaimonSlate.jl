@@ -556,7 +556,7 @@ function _docPick() {
   const v = _view(), r = v && (v.rec || (v.results && v.results[v.sel])); if (!r) return;
   const ed = editors[selectedId];
   if (ed) { edInsert(selectedId, r.name.replace(/^.*\./, '')); minimizeDocs(); }
-  else if (navigator.clipboard) { navigator.clipboard.writeText((r.module ? r.module + '.' : '') + r.name); }
+  else if (navigator.clipboard) { navigator.clipboard.writeText((r.module ? r.module + '.' : '') + r.name).catch(() => {}); }
 }
 // List: click selects; double-click inserts.
 document.getElementById('doclist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { e.preventDefault(); _select(+li.dataset.i); document.getElementById('docin').focus(); } });

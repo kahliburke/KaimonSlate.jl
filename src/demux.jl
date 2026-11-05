@@ -34,10 +34,16 @@ Base.get(d::DemuxIO, key::Symbol, default) = key === :color ? true : default
 # a Pipe (not a custom IO), so we rebind `Base.stdout`/`Base.stderr` directly (they're non-const). The
 # CURRENT streams become the demux fallback, so non-cell output still flows to the real stream/log.
 # Returns the prior (stdout, stderr) for restore.
+#
+# Package loading runs in the world fixed by `Base._require_world_age`, which Base sets when it
+# initialises, before any of these methods exist. Precompilation prints its progress to `stdout` from
+# that world, where a `DemuxIO` has only the generic `IO` fallbacks. Moving it to the current world
+# makes the methods above visible to loading.
 function install_demux!()
     prev_out, prev_err = Base.stdout, Base.stderr
     @eval Base stdout = $(DemuxIO(:slate_out, prev_out))
     @eval Base stderr = $(DemuxIO(:slate_err, prev_err))
+    Base._require_world_age[] = Base.get_world_counter()
     return (prev_out, prev_err)
 end
 function restore_streams!(prev)

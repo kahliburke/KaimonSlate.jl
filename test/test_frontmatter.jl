@@ -450,6 +450,18 @@ x = 1
             @test [String(get(d, "slug", "")) for d in NS.site_docs("My Portfolio")] == ["beta"]
             @test !NS.unexport_from_site("My Portfolio", "alpha").removed             # idempotent (already gone)
             @test !NS.unexport_from_site("nope", "x").removed                         # unknown site
+            # The slug a doc is built under is found by its docid, so a custom slug or a later title edit
+            # still names its own entry; only an entry with no docid is matched by title.
+            c = withfig(_mknb("#%% md id=t\n# Gamma\n\n#%% code id=fig\n3\n"))
+            c.report.meta["docid"] = "doc-gamma"
+            NS.export_to_site(c, "My Portfolio"; slug = "custom-gamma")
+            @test NS._site_slug_for("My Portfolio", c) == "custom-gamma"
+            c2 = withfig(_mknb("#%% md id=t\n# Gamma, renamed\n\n#%% code id=fig\n3\n"))
+            c2.report.meta["docid"] = "doc-gamma"
+            @test NS._site_slug_for("My Portfolio", c2; by_title = false) == "custom-gamma"
+            other = withfig(_mknb("#%% md id=t\n# Gamma\n\n#%% code id=fig\n4\n"))
+            other.report.meta["docid"] = "doc-other"
+            @test NS._site_slug_for("My Portfolio", other; by_title = false) == ""   # same title, not its entry
         end
     end
 
@@ -553,6 +565,10 @@ x = 1
         @test NS._delatex(raw"The Pseudoprimes to $25 \cdot 10^9$") == "The Pseudoprimes to 25 · 10⁹"
         @test NS._delatex(raw"$10^{27}$ and $\alpha_2$") == "10²⁷ and α₂"
         @test NS._delatex(raw"snake_case stays") == "snake_case stays"   # `_` outside math untouched
+        # The live card and the plain-text blurb decode a command the same way; an unknown one the card
+        # keeps as written, the blurb drops.
+        @test NS._delatex(raw"$a \div b, \forall x \vartheta, \cdots \foo$") == raw"a ÷ b, ∀ x ϑ, ⋯ \foo"
+        @test strip(NS._demath(raw"$a \div b, \forall x \vartheta$")) == "a ÷ b, ∀ x ϑ"
         # state_json ships the key list for [@-autocomplete; the cell renders a card, not raw BibTeX
         nb = _mknb("#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}}\n")
         sj = NS.state_json(nb)
@@ -579,6 +595,9 @@ x = 1
         r = RE.parse_report("#%% md id=a\nSee [@b] then [@a].\n\n#%% md id=refs bibliography\n@book{a,title={A}}\n@book{b,title={B}}\n")
         nums = NS.citation_numbers(r, Set(["a", "b"]))
         @test nums == Dict("b" => 1, "a" => 2)     # `b` is cited first → [1]
+        # a figure cross-reference or a key with no entry takes no number
+        r = RE.parse_report("#%% md id=a\nSee [@fig:flow], [@nope] and [@a].\n\n#%% md id=refs bibliography\n@book{a,title={A}}\n")
+        @test NS.citation_numbers(r, Set(["a"])) == Dict("a" => 1)
         # live HTML-link emit tracks the bibstyle: numeric → [3, p. 7], author-date → (Knuth, 1984)
         numctx = (anchor = "refs", tips = Dict("k" => "Knuth · TeX"), labels = Dict("k" => "3"),
                   numeric = true, numbers = Dict("k" => 3))
@@ -673,6 +692,11 @@ x = 1
         @test sj isa AbstractVector && length(sj) == 3
         @test sj[1]["id"] == "widget:Pkg.Stars" && sj[1]["js"] == "REG_STARS_V2"
         @test sj[1]["esm"] == true && sj[1]["kind"] == "Pkg.Stars"
+
+        # The page-load pull asks nothing of a kernel that has no namespace yet, and leaves the registry
+        # as it is.
+        @test NS._refresh_extensions_for_page!(nb) === nothing
+        @test length(NS._frontend_scripts(nb)) == 3
     end
 
     # The module specifiers those scripts import ride the SAME push. A package declares its imports
@@ -697,5 +721,62 @@ x = 1
         nb.report.meta["imports"] = Dict("mermaid" => "https://example.test/mine.js")
         @test NS.state_json(nb)["moduleImports"]["mermaid"] == "https://example.test/mine.js"
         @test NS.state_json(nb)["moduleImports"] == NS._effective_imports(nb)
+    end
+
+    # A page can import `/ext-assets/<pkg>/…` before a manifest declares `<pkg>`: a stored preview
+    # runs its scripts before the worker is up, and a figure can show before the drain-end pull. The
+    # page keeps a failed module import, so the route must hold the request while the notebook can
+    # still declare `<pkg>`, and must not hold it when the notebook cannot.
+    @testset "/ext-assets/ miss waits for a busy notebook to declare the package" begin
+        SEB = RE.SlateExtensionsBase
+        nb = _mknb("#%% code id=c\n1 + 1\n")
+        RE.report_module(nb.report)                  # an in-process kernel pulls after its namespace exists
+        h = NS.Hub(Dict("fm" => nb), nothing, "127.0.0.1", 0, ReentrantLock(), false, false, Dict{String,Any}())
+        req = NS.HTTP.Request("GET", "/ext-assets/LatePkg/m.js",
+                              ["Referer" => "http://127.0.0.1/n/fm", "Sec-Fetch-Dest" => "script"])
+        dir = mktempdir()
+        @test (@elapsed @test NS._await_ext_asset_dir(h, req, "LatePkg") === nothing) < 60  # idle → 404 now
+
+        # Busy while it opens. The route pull must not push a version: while the notebook opens, the page
+        # answers a version with a state fetch that applies the stored preview over live cells.
+        nb.report.meta["hydrating"] = true
+        v = nb.version
+        t = @async (sleep(1.0); SEB.provide_assets!("LatePkg", dir))
+        try
+            @test NS._await_ext_asset_dir(h, req, "LatePkg") == dir                      # busy → held until declared
+            @test nb.version == v
+        finally
+            wait(t); delete!(SEB._ASSETS, "LatePkg"); delete!(nb.assets, "LatePkg")
+        end
+        nb.report.meta["hydrating"] = false
+
+        # Busy while its runner drains.
+        lock(() -> (NS._RUNNERS[nb.id] = true), NS._RUNNER_LOCK)
+        t = @async (sleep(1.0); SEB.provide_assets!("LatePkg", dir))
+        try
+            @test NS._await_ext_asset_dir(h, req, "LatePkg") == dir
+        finally
+            wait(t); delete!(SEB._ASSETS, "LatePkg"); delete!(nb.assets, "LatePkg")
+            lock(() -> delete!(NS._RUNNERS, nb.id), NS._RUNNER_LOCK)
+        end
+
+        SEB.provide_assets!("NowPkg", dir)           # declared, so any pull of `fm` would find it
+        try
+            # Only a module script keeps its failure: other destinations get a 404 at once, with no pull.
+            img = NS.HTTP.Request("GET", "/ext-assets/NowPkg/a.png",
+                                  ["Referer" => "http://127.0.0.1/n/fm", "Sec-Fetch-Dest" => "image"])
+            @test NS._await_ext_asset_dir(h, img, "NowPkg") === nothing
+            # A Referer with the id of a closed notebook gets a 404 at once; it does not watch `fm` instead.
+            gone = NS.HTTP.Request("GET", "/ext-assets/NowPkg/m.js", ["Referer" => "http://127.0.0.1/n/gone"])
+            @test NS._await_ext_asset_dir(h, gone, "NowPkg") === nothing
+            # A kernel that cannot answer yet is not pulled, and its namespace is not made early.
+            pnb = _mknb("#%% code id=c\n1 + 1\n")
+            pnb.kernel = RE.PendingKernel()
+            ph = NS.Hub(Dict("fm" => pnb), nothing, "127.0.0.1", 0, ReentrantLock(), false, false, Dict{String,Any}())
+            @test NS._await_ext_asset_dir(ph, req, "NowPkg") === nothing
+            @test pnb.report.mod === nothing
+        finally
+            delete!(SEB._ASSETS, "NowPkg")
+        end
     end
 end

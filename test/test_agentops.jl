@@ -375,6 +375,83 @@ end
     end
 end
 
+@testset "an agent mid-turn outlives its notebook's close and returns on reopen" begin
+    # A stand-in agent service: `slate-w` has a turn in flight, `slate-w-rev` is idle.
+    closed = String[]
+    NS._AGENT_SERVICE[] = (tool, args) -> begin
+        aid = String(get(args, "agent_id", ""))
+        tool == :agent_close && push!(closed, aid)
+        tool == :agent_status ? "{\"status\":\"$(aid == "slate-w" ? "working" : "idle")\"}" : "{}"
+    end
+    bind!(nb) = lock(NS._AGENT_LOCK) do
+        for (label, aid) in ("" => "slate-w", "rev" => "slate-w-rev")
+            nb.agents[label] = aid; NS._AGENT_ROUTES[aid] = nb; NS._AGENT_CREW[aid] = label
+        end
+    end
+    event(kind, text = "") = NS.relay_agent_event("agent:slate-w",
+        "{\"kind\":\"$kind\",\"turn\":1,\"data\":{\"text\":\"$text\"}}")
+    hub = NS.start_hub(; port = 8868)
+    withenv("XDG_CACHE_HOME" => mktempdir()) do
+        try
+            nbp = tempname() * ".jl"
+            write(nbp, "#%% code id=a\nbase = 10\n")
+            id = NS.open_notebook!(hub, nbp; autorun = false)
+            nb = hub.notebooks[id]
+            bind!(nb)
+
+            NS.close_notebook!(hub, id)
+            @test closed == ["slate-w-rev"]                          # the idle agent is reaped
+            @test NS._AGENT_ROUTES["slate-w"] === nb                 # the busy one lives on
+            @test haskey(NS._DETACHED_AGENTS, abspath(nbp))
+
+            event("text", "while closed")                            # goes to the transcript on disk
+            nb2 = hub.notebooks[NS.open_notebook!(hub, nbp; autorun = false)]
+            @test nb2.agents == Dict("" => "slate-w")
+            @test nb2.agent_id == "slate-w"
+            @test NS._AGENT_ROUTES["slate-w"] === nb2
+            @test !haskey(NS._DETACHED_AGENTS, abspath(nbp))
+            @test any(l -> occursin("while closed", l), get(NS._AGENT_LOG, nb2.id, String[]))
+
+            # Closed again and never reopened: the agent is closed when its turn ends.
+            NS.close_notebook!(hub, nb2.id)
+            @test haskey(NS._AGENT_ROUTES, "slate-w")
+            event("result")
+            @test timedwait(() -> "slate-w" in closed, 5.0) === :ok
+            @test !haskey(NS._AGENT_ROUTES, "slate-w")
+            @test isempty(NS._DETACHED_AGENTS)
+        finally
+            NS._AGENT_SERVICE[] = nothing
+            NS.stop_hub(hub)
+        end
+    end
+end
+
+@testset "a reopened notebook starts without the closed one's per-id state" begin
+    hub = NS.start_hub(; port = 8869)
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, "#%% code id=a\nbase = 10\n")
+        id = NS.open_notebook!(hub, nbp; autorun = false)
+        nb = hub.notebooks[id]
+        NS._snapshot!(nb; label = "edit a")
+        @test NS.undo_label(nb) == "edit a"
+
+        NS.close_notebook!(hub, id)
+        nb2 = hub.notebooks[NS.open_notebook!(hub, nbp; autorun = false)]
+        @test nb2.id == id
+        @test NS.undo_label(nb2) == ""             # the label of an undo the new stack does not hold
+
+        # A restart owns the failure state: the last bring-up's error does not outlive it. The reopen's
+        # boot is still in flight here, so this is also a restart that has to wait for it rather than hang.
+        nb2.report.meta["hydrate_error"] = "an earlier failure"
+        NS.restart_kernel!(nb2)
+        timedwait(() -> !haskey(nb2.report.meta, "hydrating"), 30.0)
+        @test !haskey(nb2.report.meta, "hydrate_error")
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
 @testset "locked cell self-heals on a fresh autorun=false open (a cold reopen has nothing in memory)" begin
     hub = NS.start_hub(; port = 8861)
     try
@@ -544,21 +621,22 @@ end
 
         # A slate_progress frame is RECORDED for sampling (latest-value-wins) rather than pushed
         # per-frame — that's what stops a 10Hz loop flooding the agent.
-        NS.ReportEngine._do_userprog(nb.report.id, 0.5, "halfway", "bar1", false)
-        rec = lock(NS._USERPROG_LOCK) do; NS._LAST_USERPROG[nb.id]; end
+        zc = nb.report.cells[findfirst(c -> c.id == "zcell", nb.report.cells)]
+        lock(nb.lock) do; NS.ReportEngine.mark_running!(zc); NS._broadcast_progress(nb, zc); end
+        NS.ReportEngine._do_userprog(nb.report.id, "zcell", "bar1", 0.5, "halfway", false)
+        rec = NS._live_latest(nb.id)
         @test rec[1] == 0.5 && rec[2] == "halfway"
-        # A burst collapses: the stash holds only the most recent reading.
+        # A burst collapses: the record holds only the most recent reading.
         for i in 1:20
-            NS.ReportEngine._do_userprog(nb.report.id, i / 20, "step $i", "bar1", false)
+            NS.ReportEngine._do_userprog(nb.report.id, "zcell", "bar1", i / 20, "step $i", false)
         end
-        rec2 = lock(NS._USERPROG_LOCK) do; NS._LAST_USERPROG[nb.id]; end
-        @test rec2[2] == "step 20"
+        @test NS._live_latest(nb.id)[2] == "step 20"
         @test NS._note_run_progress(nb, "zcell", time() - 5) === nothing
 
-        # Closing must drop the reading: notebook ids are reused on reopen, so a leftover would
+        # Closing must drop the record: notebook ids are reused on reopen, so a leftover would
         # be reported against the next notebook's first run as if it described it.
         NS._unwire_callbacks!(nb)
-        @test !haskey(lock(NS._USERPROG_LOCK) do; NS._LAST_USERPROG; end, nb.id)
+        @test NS._live_latest(nb.id) === nothing
     finally
         NS.stop_hub(hub)
     end
@@ -574,19 +652,23 @@ end
         nbp = tempname() * ".jl"
         write(nbp, "#%% md id=intro\n# T\n")
         nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        NS.agent_add_cell!(nb, "y = 2"; id = "ycell")
+        NS._eval!(nb; wait_all = true)
+        yc = nb.report.cells[findfirst(c -> c.id == "ycell", nb.report.cells)]
+        lock(nb.lock) do; NS.ReportEngine.mark_running!(yc); NS._broadcast_progress(nb, yc); end
 
         @test NS._userprog_note(nb.id) == ""                       # nothing reported yet
-        NS.ReportEngine._do_userprog(nb.report.id, 0.45, "step 9/20", "bar", false)
+        NS.ReportEngine._do_userprog(nb.report.id, "ycell", "bar", 0.45, "step 9/20", false)
         note = NS._userprog_note(nb.id)
         @test occursin("45%", note) && occursin("step 9/20", note)
 
         # A FINISHED bar must not be reported as live state — it would read as current progress
         # for whatever runs next.
-        NS.ReportEngine._do_userprog(nb.report.id, 1.0, "all done", "bar", true)
+        NS.ReportEngine._do_userprog(nb.report.id, "ycell", "bar", 1.0, "all done", true)
         @test NS._userprog_note(nb.id) == ""
 
         # And it reaches the actual poll response for a running job.
-        NS.ReportEngine._do_userprog(nb.report.id, 0.7, "phase two", "bar", false)
+        NS.ReportEngine._do_userprog(nb.report.id, "ycell", "bar", 0.7, "phase two", false)
         r = NS._run_bg(nb, "probe"; grace = 0) do
             sleep(5); "done"
         end
@@ -606,6 +688,56 @@ end
 
         # Unknown job ids stay a clean message, not an error.
         @test occursin("No such scratch job", NS.scratch_check("nope"))
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
+# A page that loads mid-run learns of the run only from /api/state: the event stream reports runs
+# that start while it listens. So the state carries each running cell's start and current bars.
+@testset "state carries a running cell's start and progress" begin
+    NS.SlateHistory._ROOT[] = mktempdir()
+    hub = NS.start_hub(; port = 8865)
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, "#%% md id=intro\n# T\n")
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        NS.agent_add_cell!(nb, "w = 3"; id = "wcell")
+        NS._eval!(nb; wait_all = true)
+        wc = nb.report.cells[findfirst(c -> c.id == "wcell", nb.report.cells)]
+        rid = nb.report.id
+        run!() = lock(nb.lock) do; NS.ReportEngine.mark_running!(wc); NS._broadcast_progress(nb, wc); end
+        wjson() = (s = NS.state_json(nb); (s, s["cells"][findfirst(c -> c["id"] == "wcell", s["cells"])]))
+
+        run!()
+        s, c = wjson()
+        @test c["state"] == "running" && c["runStartedAt"] <= s["now"] && isempty(c["progress"])
+        started = c["runStartedAt"]
+
+        # Bars keep the order they appeared in; an update replaces in place, `done` removes.
+        NS.ReportEngine._do_userprog(rid, "wcell", "outer", 0.3, "epoch 3", false)
+        NS.ReportEngine._do_userprog(rid, "wcell", "inner", 0.6, "batch", false)
+        NS.ReportEngine._do_userprog(rid, "wcell", "outer", 0.4, "epoch 4", false)
+        NS.ReportEngine._do_userprog(rid, "wcell", "inner", 1.0, "batch", true)
+        # Progress naming a cell that isn't running has no run to attach to.
+        NS.ReportEngine._do_userprog(rid, "intro", "x", 0.5, "stray", false)
+        _, c = wjson()
+        @test [(b["id"], b["frac"], b["msg"]) for b in c["progress"]] == [("outer", 0.4, "epoch 4")]
+        @test !haskey(NS._CELL_LIVE[nb.id], "intro")
+
+        # A second start announcement (a region cell's) keeps the original start.
+        sleep(0.01); run!()
+        @test wjson()[2]["runStartedAt"] == started
+
+        # A run that ends without a finish broadcast (a reset) is dropped by the next state.
+        NS.ReportEngine.mark_fresh!(wc)
+        _, c = wjson()
+        @test !haskey(c, "runStartedAt") && !haskey(NS._CELL_LIVE[nb.id], "wcell")
+
+        # The ordinary finish drops it too.
+        run!()
+        lock(nb.lock) do; NS.ReportEngine.mark_fresh!(wc); NS._broadcast_progress(nb, wc); end
+        @test !haskey(NS._CELL_LIVE[nb.id], "wcell")
     finally
         NS.stop_hub(hub)
     end
@@ -644,11 +776,68 @@ end
                        "bytes_fmt.mjs", "dag_spline.mjs", "rebaseline_all.mjs",
                        "rebaseline_callsites.mjs", "reconcile_verdict.mjs",
                        "keymap_key_owner.mjs", "keep_focus.mjs", "ansi_html.mjs",
-                       "settings_section_links.mjs")
+                       "settings_section_links.mjs", "echarts_dark_labels.mjs",
+                       "teardown_output.mjs", "carry_mounted.mjs", "duration_fmt.mjs",
+                       "swap_hold.mjs", "pkg_log_tail.mjs", "run_resume.mjs",
+                       "setbind_coalesce.mjs", "src_banner_close.mjs",
+                       "replay_figure.mjs", "copymath.mjs")
             io = IOBuffer()
             ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", script))`; stdout = io, stderr = io))
             ok || print(String(take!(io)))
             @test ok
         end
+    end
+end
+
+# A save replaces the notebook file whole. A reader that came between a plain `write`'s truncation and
+# its end parsed an empty or cut-short notebook, took it for an outside edit, and emptied the live one.
+@testset "a save never shows a reader a partial notebook" begin
+    RE = KaimonSlate.ReportEngine
+    dir = mktempdir()
+    real = joinpath(dir, "real.jl"); write(real, "#%% code id=a\na = 1\n")
+    chmod(real, 0o640)
+    link = joinpath(dir, "nb.jl"); symlink(real, link)
+    nb = NS.LiveNotebook("savewhole", link, RE.parse_report("#%% code id=a\na = 1\n#%% code id=b\nb = 2\n"),
+        RE.InProcessKernel(), 1, String[], String[], ReentrantLock(), Channel{String}[],
+        ReentrantLock(), "", false, Dict{String,String}())
+    before = stat(real).inode
+    NS._persist!(nb; source = "agent")
+    # A new file moved into place, not the old one rewritten: a reader never sees it emptied.
+    @test stat(real).inode != before
+    @test [c.id for c in RE.parse_report(read(link, String)).cells] == ["a", "b"]
+    @test islink(link) && filemode(real) & 0o777 == 0o640
+    @test readdir(dir) == ["nb.jl", "real.jl"]                       # nothing left beside it
+    @test !NS.sync_from_file!(nb)                                     # its own write is not an edit
+
+    # A file written moments ago is not read yet, since an in-place save may still be under way.
+    f = joinpath(dir, "fresh.jl"); write(f, "#%% code id=a\na = 1\n")
+    @test NS._read_settled(f) === nothing
+    sleep(NS._SETTLE_S + 0.05)
+    @test NS._read_settled(f) == "#%% code id=a\na = 1\n"
+
+    # Saves in a tight loop against readers that parse the file, as the watcher and a state poll do.
+    # A read lands inside a write only on another thread.
+    if Threads.nthreads() >= 2
+        ncells = 30
+        text(i) = join(("#%% code id=c$k\nx$k = $i\n" for k in 1:ncells), "\n")
+        function torn_reads(save!, reader; seconds = 0.5, gap = 0.0)
+            p = joinpath(mktempdir(), "nb.jl"); write(p, text(0)); RE.parse_report(text(0))
+            done = Threads.Atomic{Bool}(false); torn = Threads.Atomic{Int}(0); n = Threads.Atomic{Int}(0)
+            ts = [Threads.@spawn while !done[]
+                      t = try; reader(p); catch; nothing; end
+                      t === nothing && (yield(); continue)
+                      Threads.atomic_add!(n, 1)
+                      length(RE.parse_report(t).cells) < ncells && Threads.atomic_add!(torn, 1)
+                  end for _ in 1:2]
+            while n[] < 1; yield(); end
+            t0 = time(); i = 0
+            while time() - t0 < seconds
+                save!(p, text(i += 1)); gap > 0 && sleep(gap)
+            end
+            done[] = true; foreach(wait, ts)
+            return torn[]
+        end
+        @test torn_reads(NS._write_notebook, p -> read(p, String)) == 0     # the hub's own saves
+        @test torn_reads(write, NS._read_settled; seconds = 1.0, gap = 0.05) == 0   # an editor saving in place
     end
 end

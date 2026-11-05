@@ -131,11 +131,41 @@ Pair a pick with [`hidden`](#Controls-drawn-somewhere-else) when the figure is t
 want on screen; otherwise the control strip shows a readout of the current value, since there is
 nothing to drag there.
 
+### Option values
+
+An option value of `Select`, `Radio`, `MultiSelect` or `MultiCheckBox` can be any Julia object: a
+string, a number, a tuple, a `NamedTuple`, a function, or a struct that the notebook defines. The
+cell always reads the option value.
+
+The page sends back only the text of an option. When every option value is a string, symbol, `Bool`,
+character, date or finite number, and no two options have the same text, the page gets the option
+values as they are. Any other option list gives each option a key, `"#opt:1"`, `"#opt:2"` and so on
+by its position, and the option values stay in the worker.
+
+Outside the cell, such a control holds the key: `window.slateBindValue`, the `set_bind` agent tool and
+the hub report it. `set_bind` from a cell, an agent or an extension accepts an option value or its
+key, and a JSON array names a tuple option. A key names a position, so a pick survives a worker
+restart. When the options change while the notebook runs, the pick follows its option value.
+
 ### Labelled options
 
 Any option may be a bare value or a `value => label` pair. As soon as one is a pair, the bound
-variable is a `Choice`: it compares, hashes, prints and interpolates as its value, so it drops into
-arithmetic and dictionary keys unchanged, while `.value`, `.label` and `.index` reach the parts.
+variable is a `Choice`, and `.value`, `.label` and `.index` reach the parts. It prints and
+interpolates as its value, and when that value is a **number, string or character** it also compares,
+hashes and converts as its value — so it drops into arithmetic and dictionary keys unchanged.
+
+For any other value type, `Symbol` most commonly, compare `pick.value` rather than `pick`:
+
+```julia
+@bind scheme Select([:qam => "QAM", :psk => "PSK"])
+scheme.value === :qam        # ✓
+scheme == :qam               # ✗ always false
+```
+
+`Choice` deliberately defines no mixed `==` against `Symbol` and no one-argument `hash`: those
+signatures invalidate roughly a thousand already-compiled methods when the package loads, which costs
+seconds on a notebook's first render. `.value` is also the only spelling that ever worked with `===`
+or `isequal`, so it is the one to reach for regardless of value type.
 `MultiSelect` and `MultiCheckBox` bind a `Selection`, an ordered read-only map of those pairs.
 `Radio` renders markdown and `$math$` in its labels.
 

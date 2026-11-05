@@ -37,28 +37,65 @@ entry. A single value larger than the cap can never stay cached.
 
 ## What gets cached, and when
 
-- **Automatically** — an error-free cell whose run takes more than a moment (about 150 ms) is cached
-  without you doing anything. Fast cells never pay the serialization cost.
+- **Automatically** — an error-free cell whose run takes more than a moment (about 150 ms of wall
+  time, compilation included, so a cell's first run in a session often qualifies) is cached without you
+  doing anything. Fast cells never pay the serialization cost.
 - **`cache` tag** — opt **in** regardless of runtime. Persist a pipeline stage's result so it always
   restores instead of recomputing, even when the cell itself is quick. Ideal for a deterministic
   stage whose *inputs* rarely change.
-- **`nocache` tag** — opt **out**, for impure or side-effecting cells (randomness, wall-clock, a
-  network write). A `nocache` cell is never memoized — and, correctly, it **poisons the cache keys of
+- **`nocache` tag** — opt **out**, for impure or side-effecting cells (a network write, a file the
+  cell appends to). A `nocache` cell is never memoized — and, correctly, it **poisons the cache keys of
   everything downstream**, because restoring a downstream result against a producer that must re-run
   would resurrect stale data.
+- **`volatile` tag** — the same, for a cell whose result differs run to run (`rand()` without a seed,
+  the current time). Slate doesn't detect this itself; a cell calling `rand` caches like any other
+  unless you tag it.
+- **`locked` tag** — freezes a result and always stores it, whatever its runtime.
 
 Set these with the 🏷 tag editor or a `#%%` header token — see [Cell Tags](cell-tags.md#caching).
 
 ![The tag editor popover over a cell header, with the Caching & execution group offering cache, nocache, resource, locked and trace](./assets/tag-editor.png)
 
-Never cached: markdown cells, `using`/`import` barriers, notebook-local function definitions,
-[`resource`](cell-tags.md) cells (live DB/file/socket handles), cells that declare a `reactive` or
-carry [`@replay`](replay.md) (both create live session state by running), and cells the engine
-classifies as non-deterministic (`rand`, wall-clock). The cell's cache badge names the specific
-reason.
+Never cached:
+
+- markdown cells, and cells whose run errored;
+- cells tagged `nocache` or `volatile`;
+- [`resource`](cell-tags.md) cells (live DB/file/socket handles);
+- cells that declare a `reactive` or carry [`@replay`](replay.md), since both create live session
+  state by running;
+- a `using` whose package exports Slate couldn't resolve yet (a resolved `using` cell caches, and its
+  imports are replayed on restore);
+- cells that run `eval` or `include` (they re-run each session; see below for the cells under them);
+- cells holding a value that can't be stored: a live handle you haven't tagged `resource`, a value
+  that won't serialize, or a function that can't be replayed (see below).
+
+The cell's cache badge names the specific reason.
+
+Three of these also keep the cells **below** them from being cached, because their value can differ
+from one run to the next: `nocache`, `volatile`, and an `eval`/`include` cell or an unresolved `using`
+that hasn't run yet. Once an `eval` or `include` cell has run, Slate knows what it binds and the cells
+below cache normally, in later sessions too.
 
 `@replay` in particular is excluded because restoring a memoized cell skips its body, which would
 bring the figure back with no sweep registered.
+
+### Cells that define functions
+
+A cell can define helpers next to the slow work that uses them. Its cache entry stores the computed
+values and leaves the definitions out: on restore they are evaluated again from the cell's source,
+which is cheap, and cells below can call them as usual. This covers functions (plain, docstring'd or
+`@inline`), structs and other types, macros, `const`s bound to a literal, a global bound to an
+anonymous function (`g = x -> …` or `g = function (x) … end`), definitions inside a top-level `begin`,
+a top-level `let` that only names literal or global values and defines functions, and
+`g = let … end` whose value is such a function.
+
+A cell still doesn't cache when one of its functions comes from somewhere a replay can't reach: a
+`let` that computes something (`let k = rand()`), or a function returned from a computation. Its
+cache badge says which function. Moving the definitions to their own cell, or the computation out of
+the `let`, makes it cacheable. A cell that defines functions with an `@eval` loop isn't cached
+either; it re-runs each session, which is usually cheap, and the cells below it still cache.
+
+Values of a type the notebook defines restore like any other value.
 
 ## Cache keys — what invalidates a result
 
@@ -67,16 +104,20 @@ A cell's result restores only when **all** of its real inputs are unchanged. The
 - the cell's own source, and the source of **every cell upstream of it**;
 - the current values of any named session state the cell reads — `@bind` controls and `reactive`
   values alike (moving a slider or pushing a new reactive value re-keys);
-- the contents of any `@asset` files it (or an upstream cell) references;
-- the notebook's **package versions**;
-- the **developed `src/`** of the project — so editing a function a cell calls invalidates the entry;
+- the contents of any `@asset` files, or files read with `include("literal path")`, that it or an
+  upstream cell references;
+- every package the notebook's environment loads, directly or through another package, by version
+  and git tree hash, and the Julia version;
+- the **developed `src/`** of the project and of any path-developed package: every definition in it,
+  by content. Editing any definition re-keys every cell, so nothing computed under the old code is
+  restored; a change to comments or whitespace doesn't;
 - the freeze stamp of any [`locked`](cell-tags.md#Locking-a-result) cell upstream, so refreshing a
   frozen value re-keys everything below it.
 
 Toggling `trace` on a cell re-keys it too.
 
 Change any of those and the cell recomputes; change nothing and it restores. Set
-`KAIMONSLATE_MEMO_DEBUG=1` to log the key components.
+`KAIMONSLATE_MEMO_DEBUG=1` to log the source and package digests each key was built with.
 
 !!! tip "Assert two values are really the same — `slate_fingerprint`"
     `slate_fingerprint(xs...)` returns a canonical content hash with `isequal` semantics
@@ -101,8 +142,8 @@ Two helpers, callable from a cell:
   (the dedup shows here), total on-disk bytes, and the store root.
 - **`slate_memo_entries(; name="")`** → a `Vector` of rows, newest first: `(; key, names, bytes,
   blobs, elided, created)` — the globals each entry restores and their (shared-when-deduped) content
-  hashes. `slate_table(slate_memo_entries())` renders exactly what a cold open will restore;
-  `name="x"` filters to entries carrying a binding `x`.
+  hashes. It lists the whole store, which notebooks share; `name="x"` filters to entries carrying a
+  binding `x`.
 
 And to answer **"why did this cell (not) restore?"**, there is an agent tool, called from an agent or
 the MCP toolset rather than from cell code:
@@ -143,8 +184,9 @@ large tabular/array data reopen and transfer far faster.
   It requires `using DataFrames, Arrow` in the notebook (both); without them a `DataFrame` still
   caches correctly, just as `jls`.
 - **Zero-copy** restore (an mmap-backed view) is used only when the dependency graph proves nothing
-  downstream **mutates** the value. If you then mutate a zero-copy-restored value you'll get a
-  `ReadOnlyMemoryError` — a safe failure; re-running the producer re-stores it mutably.
+  downstream **mutates** the value. If you then mutate a zero-copy-restored value you'll get an
+  error (a `ReadOnlyMemoryError` for an array) rather than a silent change; re-running the producer
+  re-stores it mutably.
 - The Arrow blob is a plain Arrow IPC file on disk, so its bytes are readable by external tools
   (DuckDB, pyarrow). Note this is a property of the stored bytes — KaimonSlate doesn't currently
   surface the blob path for you.

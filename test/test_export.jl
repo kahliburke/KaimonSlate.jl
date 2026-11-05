@@ -8,6 +8,7 @@ using Random: Xoshiro                        # deterministic incompressible byte
 import JSON                                  # hand the @replay control fixture to node
 const ReportEngine = KaimonSlate.ReportEngine
 const NS = KaimonSlate.NotebookServer
+const HTTP = NS.HTTP                         # vendor responses are HTTP.Responses
 
 # A minimal manifest doc entry.
 _doc(slug, date; series = nothing) = begin
@@ -16,6 +17,58 @@ _doc(slug, date; series = nothing) = begin
     d
 end
 _pos(needle, hay) = first(findfirst(needle, hay))
+
+@testset "vendor URLs carry the pinned version" begin
+    kv, sv, cv = NS._vendor_version("katex"), NS._vendor_version("signals"), NS._vendor_version("signals-core")
+    @test !isempty(kv) && NS._vendor_version("no-such-package") == ""
+    page = """<script src="/assets/vendor/katex/katex.min.js"></script>
+              "@preact/signals": "/assets/vendor/signals/dist/signals.module.js",
+              "@preact/signals-core": "/assets/vendor/signals-core/dist/signals-core.module.js" """
+    out = NS._vendor_versioned(page)
+    @test occursin("/assets/vendor/katex@$kv/katex.min.js", out)
+    # a package whose name starts another's is rewritten on its own
+    @test occursin("/assets/vendor/signals@$sv/dist/", out) && occursin("/assets/vendor/signals-core@$cv/dist/", out)
+    @test NS._vendor_versioned("<p>no vendor assets</p>") == "<p>no vendor assets</p>"
+end
+
+@testset "the vendor lock matches vendor.json" begin
+    man, lk = NS._vendor_manifest(), NS._vendor_lockfile()
+    pkgs = NS._vendor_packages(man)
+    @test !isempty(pkgs) && sort(collect(keys(lk))) == pkgs     # regenerate with update_vendor_lock()
+    for pkg in pkgs
+        @test lk[pkg]["version"] == NS._vendor_version(pkg, man)
+        globs = NS._vendor_glob.(man[pkg]["files"])
+        for (sub, sri) in lk[pkg]["files"]
+            @test any(g -> occursin(g, sub), globs) && startswith(sri, "sha384-")
+        end
+    end
+    @test NS._vendor_locked_sri("katex", "no-such-file.js") === nothing
+    @test NS._vendor_locked_sri("katex", "katex.min.js", "0.0.1") === nothing     # another version
+end
+
+@testset "vendor globs" begin
+    g = NS._vendor_glob
+    @test occursin(g("fonts/*.woff2"), "fonts/KaTeX_Main-Regular.woff2")
+    @test !occursin(g("fonts/*.woff2"), "fonts/sub/x.woff2") && !occursin(g("fonts/*.woff2"), "fonts/x.woff")
+    @test occursin(g("dist/preact.module.js*"), "dist/preact.module.js.map")
+    @test occursin(g("**/*.js"), "a/b/c.js") && !occursin(g("katex.min.js"), "katexXmin.js")
+end
+
+@testset "vendor responses" begin
+    # needs the file cached or the network; skipped otherwise, like the export test below
+    if NS._vendor_file("katex", "katex.min.js") !== nothing
+        ver = NS._vendor_version("katex")
+        r = NS._vendor_response(HTTP.Request("GET", "/"), "katex", ver, "katex.min.js")
+        @test r.status == 200 && occursin("immutable", HTTP.header(r, "Cache-Control"))
+        etag = HTTP.header(r, "ETag")
+        @test startswith(etag, "\"sha384-")
+        r = NS._vendor_response(HTTP.Request("GET", "/"), "katex", "", "katex.min.js")   # a bare path
+        @test HTTP.header(r, "Cache-Control") == "no-cache"
+        r = NS._vendor_response(HTTP.Request("GET", "/", ["If-None-Match" => etag]), "katex", "", "katex.min.js")
+        @test r.status == 304 && isempty(r.body)
+    end
+    @test NS._vendor_response(HTTP.Request("GET", "/"), "katex", "", "not-in-the-lock.js").status == 404
+end
 
 @testset "web-cell export importmap (Preact/htm/signals)" begin
     ui = NS._slate_ui_imports()
@@ -316,6 +369,80 @@ end
 # Interim-render preview travelling with an EXPORT: externalized blob URLs must re-inline to
 # self-contained data URIs (the blob-serving server isn't there when the .jl is reopened elsewhere),
 # subject to the size caps; heavy animation manifests are dropped.
+@testset "an asset saved while interpolating markdown reaches the page" begin
+    # A markdown cell's `{{ }}` interpolations run as real captures, so a `show` method can call
+    # `save_asset` — and the interpolation wire carries the record through `_wire_to_output`. The cell
+    # JSON then hardcoded `Any[]` for a markdown cell, which dropped it at the last step: the rendered
+    # markup referenced an asset path that nothing had registered or stored. Echarts and tables from
+    # interpolations were already surfaced, so this was the one of the three that went missing.
+    RE = ReportEngine
+    rec = (; name = "probe", path = "data/probe-abc.bin",
+           mime = "application/octet-stream", bytes = UInt8[7, 8, 9])
+    io = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0,
+                       Any[], "", Any[], Any[], "", "", Any[], Any[rec])
+    c = RE.parse_report("#%% md id=m\ntext {{ p }}\n").cells[1]
+    c.interp = [io]
+    @test c.kind == RE.MARKDOWN
+
+    spec = only(NS.cell_json(c; nbid = "interpnb")["assets"])
+    @test spec["path"] == "data/probe-abc.bin"
+    @test spec["name"] == "probe"
+    @test startswith(spec["url"], "/api/interpnb/blob/")
+    # Registered AND stored — a spec whose blob was never written would 404 just the same.
+    @test NS.blob_lookup(string("interpnb/", spec["sha"]))[2] == UInt8[7, 8, 9]
+end
+
+@testset "the durable blob tier stays inside its disk budget" begin
+    # The tier is content-addressed and write-once, so it only ever grows. `_prune_preview_blobs!`
+    # bounds a notebook that is open and snapshotting; nothing bounded the blobs of every notebook
+    # closed weeks ago, which is the set that actually fills a disk.
+    saved = NS._DBLOB_DIR[]
+    dir = mktempdir()
+    NS._DBLOB_DIR[] = dir
+    try
+        withenv("KAIMONSLATE_BLOB_CACHE_MB" => "0.01") do        # 10,485-byte budget, 8,388 target
+            NS._DBLOB_SWEEP_AT[] = time()                        # no incidental sweep while writing
+            blob = i -> (string("nb/", i), fill(UInt8(i), 4000))
+            for i in 1:3
+                k, b = blob(i)
+                NS._blob_put_durable!(k, "application/octet-stream", b)
+            end
+            total = d -> sum(filesize(joinpath(d, f)) for f in readdir(d) if !endswith(f, ".meta"); init = 0)
+            @test total(dir) == 12_000                            # over budget, nothing swept yet
+            NS._sweep_dblob_dir!(force = true)
+            @test total(dir) <= (10_485 * 8) ÷ 10                 # evicted down to the 80% target
+            @test NS.blob_lookup("nb/1") === nothing              # the least recently used one went
+            @test NS.blob_lookup("nb/3") !== nothing              # the newest stayed
+        end
+    finally
+        NS._DBLOB_DIR[] = saved
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+@testset "a blob that is read survives eviction ahead of an unread newer one" begin
+    # Eviction is oldest-FIRST, which would evict a blob a long-open notebook is still serving purely
+    # for having been written early. `blob_lookup` touches what it reads so "oldest" means least
+    # recently USED; without that, reopening an old notebook would blank its figures.
+    saved = NS._DBLOB_DIR[]
+    dir = mktempdir()
+    NS._DBLOB_DIR[] = dir
+    try
+        withenv("KAIMONSLATE_BLOB_CACHE_MB" => "0.01") do         # 10,485-byte budget, 8,388 target
+            NS._DBLOB_SWEEP_AT[] = time()                         # no incidental sweep while writing
+            NS._blob_put_durable!("nb/old", "application/octet-stream", fill(0x01, 6000))
+            NS._blob_put_durable!("nb/new", "application/octet-stream", fill(0x02, 6000))
+            @test NS.blob_lookup("nb/old") !== nothing            # reading it marks it used
+            NS._sweep_dblob_dir!(force = true)                    # 12,000 > budget → one must go
+            @test NS.blob_lookup("nb/old") !== nothing            # kept: most recently used
+            @test NS.blob_lookup("nb/new") === nothing            # evicted despite being newer
+        end
+    finally
+        NS._DBLOB_DIR[] = saved
+        rm(dir; recursive = true, force = true)
+    end
+end
+
 @testset "preview blob re-inline (export travel)" begin
     nbid = "previewtest_ci"
     png = vcat(UInt8[0x89, 0x50, 0x4e, 0x47], rand(UInt8, 96))     # a small figure blob in the durable store
@@ -329,6 +456,28 @@ end
     @test occursin("data:image/png;base64,", cells[1]["output"])  # URL → self-contained data URI
     @test !occursin("/blob/", cells[1]["output"])                 # no server-dependent URL left
     @test cells[1]["animations"] == Any[]                         # heavy frame stacks dropped from the preview
+
+    # A `save_asset` spec carries its own blob URL, which is just as absent on another machine. The
+    # preview used to inline only the output HTML, so a travelling bundle drew its figures and then
+    # resolved nothing for any widget reading `Slate.asset` — which prefers an inline `data` field.
+    blob = rand(UInt8, 64); bh = string(hash(blob); base = 16)
+    NS._blob_put_durable!(string(nbid, "/", bh), "application/octet-stream", blob)
+    acells = [Dict{String,Any}("id" => "w", "output" => "<div></div>",
+                               "assets" => Any[Dict{String,Any}(
+                                   "path" => "data/x-$bh.bin", "sha" => bh, "name" => "x",
+                                   "mime" => "application/octet-stream", "bytes" => length(blob),
+                                   "url" => "/api/$nbid/blob/$bh")])]
+    NS._inline_preview_blobs!(nbid, acells)
+    a = only(acells[1]["assets"])
+    @test Base64.base64decode(a["data"]) == blob                  # the bytes travel with the preview
+    @test !haskey(a, "url")                                       # the URL could not have resolved
+
+    # The cap applies to assets too: with no budget the spec keeps its URL rather than bloating the file.
+    acells0 = [Dict{String,Any}("id" => "w", "assets" => Any[Dict{String,Any}(
+                   "sha" => bh, "path" => "data/x-$bh.bin", "url" => "/api/$nbid/blob/$bh")])]
+    NS._inline_preview_blobs!(nbid, acells0; budget = 0)
+    @test !haskey(only(acells0[1]["assets"]), "data")
+    @test only(acells0[1]["assets"])["url"] == "/api/$nbid/blob/$bh"
 
     # A total budget of 0 embeds nothing — every asset is left as a URL (recomputes on hydrate).
     cells0 = [Dict{String,Any}("id" => "z", "output" => "<img src=\"/api/$nbid/blob/$h\">")]
@@ -362,6 +511,52 @@ _nb_with_echart(spec, id) = begin
     rep.cells[end].output = out
     NS.LiveNotebook(id, "/tmp/$id.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
         ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+end
+
+# A markdown image written as a path relative to the project, the way most people write one, loads
+# through the notebook's asset route and travels into every export as a dropped file does (#79).
+@testset "a relative image path in markdown names a project file" begin
+    root = mktempdir(); mkpath(joinpath(root, "figures"))
+    png = UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]
+    write(joinpath(root, "figures", "logo.png"), png)
+    write(joinpath(root, "figures", "a b.png"), png)
+    lm(s) = NS._local_media(s, "rel", root)
+    @test lm("![x](figures/logo.png){width=240}") == "![x](/n/rel/asset/figures/logo.png){width=240}"
+    @test lm("![x](./figures/logo.png)") == "![x](/n/rel/asset/figures/logo.png)"
+    @test lm("![x](figures/a%20b.png)") == "![x](/n/rel/asset/figures/a%20b.png)"
+    @test lm("<img src=\"figures/logo.png\" width=\"80\">") == "<img src=\"/n/rel/asset/figures/logo.png\" width=\"80\">"
+    # Not a project file, or not a relative image: left as written.
+    @test all(s -> lm(s) == s, ("![x](figures/missing.png)", "![x](https://e.org/a.png)",
+                                "![x](data:image/png;base64,AA==)", "![x](/n/other/asset/figures/logo.png)",
+                                "![x](../outside.png)", "<script src=\"figures/logo.png\"></script>"))
+
+    rep = _RE.parse_report("#%% md id=t title\n# rel\n\n#%% md id=m\n![logo](figures/logo.png){width=240}\n")
+    rep.meta["assetbase"] = root
+    nb = NS.LiveNotebook("rel", joinpath(root, "rel.jl"), rep, _RE.InProcessKernel(), 1, String[], String[],
+        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    # Live: the page loads it through this notebook's route, under whatever id it is served at.
+    @test occursin("src=\"/n/rel/asset/figures/logo.png\"", NS.cell_json(rep.cells[2]; nbid = "rel", report = rep)["output"])
+    # A standalone page inlines it; a published one keeps it as a sibling file; a bundle carries it.
+    standalone = NS.export_html(nb; inline_assets = true)
+    @test occursin("src=\"data:image/png;base64,", standalone) && !occursin("figures/logo.png", standalone)
+    @test occursin("src=\"figures/logo.png\"", NS.export_html(nb; inline_assets = false))
+    @test haskey(NS._embedded_asset_files(rep.cells, root), "figures/logo.png")
+end
+
+@testset "a markdown file in the project renders for the Files tab" begin
+    root = mktempdir(); mkpath(joinpath(root, "docs", "img"))
+    write(joinpath(root, "docs", "img", "x.png"), UInt8[0x89, 0x50, 0x4e, 0x47])
+    write(joinpath(root, "docs", "guide.md"), "# Guide\n\n![x](img/x.png)\n\nSee \$a^2\$ and [the readme](../README.md).\n")
+    rep = _RE.parse_report("#%% code id=a\nx = 1\n"); rep.meta["assetbase"] = root
+    nb = NS.LiveNotebook("mdf", joinpath(root, "nb.jl"), rep, _RE.InProcessKernel(), 1, String[], String[],
+        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    code, html = NS._md_file_html(nb, "docs/guide.md")
+    @test code == 200 && occursin("<h1", html)
+    # An image path is relative to the file's own folder, as it is wherever else the file is read.
+    @test occursin("src=\"/n/mdf/asset/docs/img/x.png\"", html)
+    @test occursin("../README.md", html)                      # a link is left for the page to follow
+    @test NS._md_file_html(nb, "docs/missing.md")[1] == 404
+    @test NS._md_file_html(nb, "../../etc/passwd")[1] == 400
 end
 
 # A dropped clip lands in a markdown cell as `<video src="/n/<id>/asset/…">`. A standalone page has no
@@ -554,7 +749,7 @@ end
     @test NS._site_ctype("m.wasm") == "application/wasm"
     @test NS._site_ctype("scene.glb") == "model/gltf-binary"
     @test NS._site_ctype("scene.gltf") == "model/gltf+json"
-    @test NS._site_ctype("worker.js") == "application/javascript; charset=utf-8"
+    @test NS._site_ctype("worker.js") == "text/javascript; charset=utf-8"
 
     # `_register_assets!` registry semantics: new pkg → changed; identical dir → unchanged; moved → changed.
     nb2 = _nb_with_echart(_gl_spec(), "gl2")
@@ -580,7 +775,7 @@ end
     snb = _gl_nb()
     NS._register_frontend!(snb, "boot", "fetch(\"/ext-assets/GlobeSlate/echarts-gl.min.js\");", false, "")
     sstand = NS._frontend_export_head(snb, true)
-    @test occursin("data:application/javascript;charset=utf-8;base64,", sstand)  # mime carries no raw space
+    @test occursin("data:text/javascript;charset=utf-8;base64,", sstand)  # mime carries no raw space
     @test !occursin("ext-assets/GlobeSlate/echarts-gl.min.js", sstand)           # no path reference survives
     @test occursin("./ext-assets/GlobeSlate/echarts-gl.min.js", NS._frontend_export_head(snb, false))
 
@@ -605,6 +800,94 @@ end
     cdn = NS._rewrite_ext_asset_urls!(Dict{String,Any}("globe" => Dict{String,Any}("baseTexture" => "https://cdn/x.png")), tnb; inline = false)
     @test cdn["globe"]["baseTexture"] == "https://cdn/x.png"                          # external url untouched
     @test NS._site_ctype("earth.png") == "image/png"                                  # image mime for the live route
+
+    # A cell's HTML output that names vendored assets (a package's `slate_render`, e.g. a plotting
+    # library it `import()`s; `html_fragment` gives the second MIME). A standalone page carries the
+    # module ONCE, as an import-map entry that both cells resolve through, and inlines the image in
+    # place. A site points both urls at the page-local sibling. Either way no live `/ext-assets/`
+    # route survives in the cells.
+    write(joinpath(pkgdir, "lib.mjs"), "export default 42;")
+    _html_nb() = begin
+        html = "<script>import(\"/ext-assets/GlobeSlate/lib.mjs\")</script><img src=\"/ext-assets/GlobeSlate/earth.png\">"
+        rep = _RE.parse_report("#%% md id=t title\n# h\n\n#%% code id=a\n1\n\n#%% code id=b\n2\n")
+        for (c, mime) in zip(rep.cells[2:3], ("text/html", "application/vnd.kaimonslate.html+html"))
+            c.output = _RE.CellOutput("", [_RE.MimeChunk(mime, Vector{UInt8}(html))], Any[], Any[],
+                                      _RE.BindSpec[], "", nothing, nothing, 1.0)
+        end
+        nb = NS.LiveNotebook("h", "/tmp/h.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
+            ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+        nb.assets["GlobeSlate"] = pkgdir
+        nb
+    end
+    hstand = NS.export_html(_html_nb(); inline_assets = true)
+    imap = JSON.parse(match(r"<script type=\"importmap\">(.*?)</script>"s, hstand).captures[1])["imports"]
+    libdata = imap["/ext-assets/GlobeSlate/lib.mjs"]
+    @test String(Base64.base64decode(split(libdata, ",")[2])) == "export default 42;"
+    @test count(libdata, hstand) == 1                                     # once for both cells
+    @test count("import(\"/ext-assets/GlobeSlate/lib.mjs\")", hstand) == 2  # the map resolves the call sites
+    @test !occursin("/ext-assets/GlobeSlate/earth.png", hstand)
+    @test count("src=\"data:image/png;base64,", hstand) == 2
+    @test occursin("window.slateImageView", hstand)                      # figures zoom as on the live page
+    hsite = NS.export_html(_html_nb(); inline_assets = false)
+    @test count("import(\"./ext-assets/GlobeSlate/lib.mjs\")", hsite) == 2
+    @test count("src=\"./ext-assets/GlobeSlate/earth.png\"", hsite) == 2
+    @test !occursin(NS._EXT_ASSET_URL_RE, hsite)
+    # A JS url that the import map does not carry (a cell re-ran after the map was built) stays the
+    # live url: a direct `import("data:…")` of a large module costs gigabytes of renderer memory in
+    # Chrome. A non-JS url still inlines.
+    unmapped = NS._export_ext_asset_html(_html_nb(), "<script>import(\"/ext-assets/GlobeSlate/lib.mjs\")</script><img src=\"/ext-assets/GlobeSlate/earth.png\">";
+                                         inline = true, mapped = Dict{String,String}())
+    @test occursin("import(\"/ext-assets/GlobeSlate/lib.mjs\")", unmapped)
+    @test !occursin("data:text/javascript", unmapped)
+    @test occursin("src=\"data:image/png;base64,", unmapped)
+    # A cache-busted module url is still a module. `splitext` alone reads `lib.mjs?v=2` as `.mjs?v=2`,
+    # which would keep it out of the import map AND let the call site inline it.
+    @test NS._is_js("/ext-assets/P/lib.mjs?v=2") && NS._is_js("/ext-assets/P/lib.js#f")
+    @test NS._is_js("sub/b.js") && !NS._is_js("/ext-assets/P/a.png?v=1")
+
+    # A vendored MODULE is never gzipped, however big. `import()`, `<script src>` and the import map
+    # all hand the url to the browser's own loader, which has no inflate step: `Slate.asset` is the
+    # only consumer that inflates one, and a module never reaches it.
+    @testset "a vendored module is inlined uncompressed" begin
+        big = "export const pad = \"" * repeat("x", 3 * NS._ASSET_GZIP_MIN) * "\";"
+        write(joinpath(pkgdir, "big.mjs"), big)
+        write(joinpath(pkgdir, "big.bin"), repeat("y", 3 * NS._ASSET_GZIP_MIN))
+        gnb = _html_nb()
+        js = NS._inline_ext_asset_urls(gnb, "/ext-assets/GlobeSlate/big.mjs"; compress = true)
+        @test !startswith(js, "data:application/gzip")                  # the loader cannot inflate
+        @test String(Base64.base64decode(split(js, ",")[2])) == big     # and it is the source
+        # Everything else still compresses: the saving is the whole point, and those consumers fetch.
+        bin = NS._inline_ext_asset_urls(gnb, "/ext-assets/GlobeSlate/big.bin"; compress = true)
+        @test startswith(bin, "data:application/gzip")
+        @test length(bin) < length(js)
+    end
+
+    # `nb.assets` is filled at the end of a drain, so an export taken before the first one finishes
+    # saw no vendored directory at all and left every url pointing at a route the page has no server
+    # for. The export pulls the manifest itself now.
+    @testset "an export before the first drain pulls the asset dirs" begin
+        SEB = _RE.SlateExtensionsBase
+        pnb = _html_nb()
+        empty!(pnb.assets)                     # as it stands before the drain-end refresh
+        _RE.report_module(pnb.report)          # an in-process kernel answers once its namespace exists
+        SEB.provide_assets!("GlobeSlate", pkgdir)
+        try
+            h = NS.export_html(pnb; inline_assets = true)
+            # Carried as bytes, resolved from the manifest — not left on a route nothing serves.
+            maps = JSON.parse(match(r"<script type=\"importmap\">(.*?)</script>"s, h).captures[1])["imports"]
+            @test maps["/ext-assets/GlobeSlate/lib.mjs"] == libdata
+            @test haskey(pnb.assets, "GlobeSlate")         # and the pull populated the notebook
+        finally
+            delete!(SEB._ASSETS, "GlobeSlate")
+        end
+    end
+
+    # A `provide_import!` target on the vendored route: inlined standalone, the sibling on a site.
+    inb = _html_nb()
+    inb.pkgimports["glib"] = "/ext-assets/GlobeSlate/lib.mjs"
+    _imap(h) = JSON.parse(match(r"<script type=\"importmap\">(.*?)</script>"s, h).captures[1])["imports"]
+    @test _imap(NS._export_importmap_for(inb; inline = true))["glib"] == libdata
+    @test _imap(NS._export_importmap_for(inb; inline = false))["glib"] == "./ext-assets/GlobeSlate/lib.mjs"
 end
 
 # `save_asset` generated blobs: stored on a cell output, then served live and inlined (standalone) or
@@ -632,7 +915,7 @@ end
     nref = _RE._save_asset("nt", (msg = "hi", n = 42))            # NamedTuple → JSON
     harvested = _RE._harvest_assets(task_local_storage(:slate_assets))
     delete!(task_local_storage(), :slate_assets)
-    @test "$(ref)" == "data/airports-d3198338.json"               # AssetRef interpolates to its path
+    @test "$(ref)" == "data/airports-3796a6d5.json"               # AssetRef interpolates to its path
     # Not just "a hash": the SAME hash on every Julia. This literal is the guard on that — it is
     # what a published site's asset filenames are, so a version-dependent digest would rename
     # every one of them on an upgrade.
@@ -699,6 +982,30 @@ end
     finally
         rm(dir; recursive = true, force = true)
     end
+end
+
+@testset "speaker notes never reach a reader" begin
+    # `notes` cells are addressed to the presenter: the deck skips them, the PDF gives them their own
+    # appendix, and docs/src/slides.md promises the presenter window is "the only place notes are
+    # visible". The HTML and markdown exports are separate renderers with their own skip chains, and
+    # neither knew about the flag — so publishing a deck as a page shipped the notes as ordinary prose.
+    # Omitted, not hidden: a CSS rule would still put the text in the page source.
+    src = "#%% md id=t title\n# Talk\n\n#%% md id=body\nWhat the audience reads.\n\n" *
+          "#%% md id=sp notes\nRemember to mention the unpublished result.\n"
+    rep = _RE.parse_report(src)
+    nb = NS.LiveNotebook("notesnb", "/tmp/notesnb.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
+        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    @test :notes in rep.cells[end].flags          # the tag parsed — otherwise this proves nothing
+
+    secret, public = "unpublished result", "What the audience reads"
+    html, md = NS.export_html(nb), NS.export_markdown(nb)
+    @test occursin(public, html) && !occursin(secret, html)
+    @test occursin(public, md) && !occursin(secret, md)
+
+    # The presenter still gets them: the flag reaches the page as `notes`, which is what slides.js
+    # routes into the notes column and notebook.js turns into `.cell-notes` for the reading view.
+    cj = NS.cell_json(rep.cells[end])
+    @test get(cj, "notes", false) === true
 end
 
 @testset "_apply_ordering! sets section/order in place, leaves unmatched" begin
@@ -793,6 +1100,53 @@ end
             @test ok
         end
     end
+end
+
+# A keyed option widget (see `_norm_options` in widgets.jl) exports its keys and its labels, and no
+# option values. The page finds each key in the replay domain, and the PDF parameter strip shows
+# the label of each selected key.
+@testset "@replay export contract: keyed option widgets" begin
+    RE = ReportEngine
+    widgets = Any[
+        ("pick",  RE.Select([("cat", 1) => "Cat", ("dog", 2) => "Dog"], ("dog", 2))),
+        ("mode",  RE.Radio([(a = 1,), (a = 2,)])),
+        ("picks", RE.MultiSelect([(1, 2), (3, 4)])),
+        ("flags", RE.MultiCheckBox([(1, 2) => "A", (3, 4) => "B"], [(3, 4)])),
+    ]
+    specs = Dict(name => RE.BindSpec(Symbol(name), w.kind, RE._wire_params(w), w.default) for (name, w) in widgets)
+    fixture = Any[]
+    for (name, w) in widgets
+        html = NS._export_control_html(specs[name])
+        # Each `value=` holds a key; an unlabeled option shows its value only as its label text.
+        @test all(m -> startswith(m[1], "#opt:"), eachmatch(r"value=\"([^\"]*)\"", html))
+        push!(fixture, Dict{String,Any}("name" => name, "kind" => w.kind, "html" => html,
+                                        "domain" => RE.bind_domain(w)))
+    end
+    pick = Dict(widgets)["pick"]
+    @test occursin("<option value=\"$(pick.params["options"][2]["value"])\" selected>Dog</option>",
+                   NS._export_control_html(specs["pick"]))
+    node = Sys.which("node")
+    if node === nothing
+        @info "node not found: skipping the keyed @replay export contract (fixture built, not driven)"
+        @test true
+    else
+        mktempdir() do dir
+            path = joinpath(dir, "controls.json")
+            open(io -> JSON.print(io, fixture), path, "w")
+            io = IOBuffer()
+            ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", "export_contract.mjs")) $path`;
+                                  stdout = io, stderr = io))
+            ok || print(String(take!(io)))
+            @test ok
+        end
+    end
+    # The PDF strip shows labels for keys; a plain widget shows its value, as before.
+    c = RE.parse_report("#%% code id=ctl\n1").cells[1]
+    plain = RE.Select([10, 20, 30] .=> ["ten", "twenty", "thirty"], 30)
+    c.binds = [specs["pick"], specs["flags"], RE.BindSpec(:lb, plain.kind, RE._wire_params(plain), plain.default)]
+    strip = NS._emit_controls(c)
+    @test occursin("(\"pick\", \"Dog\")", strip) && occursin("(\"flags\", \"B\")", strip)
+    @test occursin("(\"lb\", \"30\")", strip)
 end
 
 # ── A `@replay`-marked table ──────────────────────────────────────────────────────────────────────
@@ -1455,6 +1809,49 @@ end
     # Reached through the real entry point, not just the helper.
     c = _RE.Cell("m", _RE.MARKDOWN, raw"energy \(E = mc^2\) here")
     @test occursin(raw"$E = mc^2$", NS._md_for_typst(c))
+end
+
+# ── PDF export: math and markdown outputs typeset natively ──────────────────────────────────────────
+# A `text/latex` output, or the markdown form of an HTML output, prints as text and formulas rather
+# than a screenshot. LaTeX written for KaTeX loses the layout commands mitex lacks.
+@testset "typst export typesets math outputs" begin
+    p = NS._portable_tex
+    @test p(raw"\begin{bmatrix}\rule[-1.4em]{0pt}{3.3em}\dfrac{a}{b} \\ \rule[-1.4em]{0pt}{3.3em}c\end{bmatrix}") ==
+          raw"\begin{bmatrix}\dfrac{a}{b} \\ c\end{bmatrix}"
+    @test p(raw"\left[\hspace{-5pt}\begin{array}{r}1\end{array}\hspace{-5pt}\right]") == raw"\left[\begin{array}{r}1\end{array}\right]"
+    @test p(raw"\hphantom{\begin{matrix}x \\ y\end{matrix}}\mathllap{x} &= 1") == raw"{x} &= 1"
+    @test p(raw"a \\[8pt] b") == raw"a \\ b"
+    @test p(raw"a \\ \\[-0.9em] b") == raw"a \\ b"               # an emptied spacer row collapses
+    @test p(raw"a \\ \dfrac{1}{2}") == raw"a \\ \dfrac{1}{2}"     # a row break before a command stays put
+    @test NS._strip_math_delims(raw"$$x^2$$") == "x^2" && NS._strip_math_delims(raw"$θ$") == "θ"
+
+    # Typst is asked before the export commits to native math: an unknown command falls back.
+    @test NS._typst_typesets(:tex, raw"\begin{bmatrix}\dfrac{a}{b} & 1\end{bmatrix}")
+    @test !NS._typst_typesets(:tex, raw"\mathllap{x}")
+    @test NS._typst_typesets(:md, "| code | result |\n|:--|:--|\n| `x` | \$\$x^2\$\$ |\n")
+end
+
+# A value shown as HTML that can also show itself as markdown carries that form, export-only.
+struct _MdCard end
+Base.show(io::IO, ::MIME"text/html", ::_MdCard) = print(io, "<b>card</b>")
+Base.show(io::IO, ::MIME"text/markdown", ::_MdCard) = print(io, "**card**")
+@testset "an HTML output keeps its markdown form for export" begin
+    chunks = Tuple{String, Vector{UInt8}}[]
+    @test _RE._capture_rich!(chunks, _MdCard())
+    @test first.(chunks) == ["text/html", "text/markdown"]
+    @test String(chunks[2][2]) == "**card**"
+    # the browser renders the HTML and ignores the markdown
+    @test KaimonSlate.ReportRender._render_chunks([(mime = m, data = copy(d)) for (m, d) in chunks]) == "<div class=\"disp html\"><b>card</b></div>"
+end
+
+# The same for a value an extension renders (`slate_render`): the export prints its markdown form.
+struct _MdRendered end
+NS.SlateExtensionsBase.slate_render(::_MdRendered) = NS.SlateExtensionsBase.html_fragment("<b>card</b>")
+Base.show(io::IO, ::MIME"text/markdown", ::_MdRendered) = print(io, "**card**")
+@testset "a slate_render output keeps its markdown form for export" begin
+    chunks = Tuple{String, Vector{UInt8}}[]
+    @test _RE._capture_rich!(chunks, _MdRendered())
+    @test first.(chunks) == ["application/vnd.kaimonslate.html+html", "text/markdown"]
 end
 
 # The SCREEN half of the same story. KaTeX is configured for the bracket spellings, but CommonMark

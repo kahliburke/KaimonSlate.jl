@@ -14,15 +14,28 @@ const _showVal = v => Array.isArray(v) ? v.join(', ') : v;
 const _valKey = v => Array.isArray(v) ? JSON.stringify([...v].map(String).sort()) : String(v);
 // Normalize a widget option: a bare value becomes {value, label:String(value)}; an object passes through.
 const _normOpt = o => (o && typeof o === 'object') ? o : { value: o, label: String(o) };
+// A keyed option widget (`_norm_options` in widgets.jl) holds `#opt:` keys in place of option values
+// that the page cannot send back as text. The page shows the label of each key.
+const _isKey = x => typeof x === 'string' && x.startsWith('#opt:');
+const _hasKey = v => _isKey(v) || (Array.isArray(v) && v.some(_isKey));
+// The labels of a value that holds keys (joined with ", " for a list); any other value is unchanged.
+function _keyText(p, v) {
+  if (!_hasKey(v)) return v;
+  const opts = (p && p.options) || [];
+  const lab = x => { const o = opts.find(o => o && o.value === x); return o ? o.label : String(x); };
+  return Array.isArray(v) ? v.map(lab).join(', ') : lab(v);
+}
 // The text shown in a widget's value mirror (`.wval`). A toggle with on/off labels shows the
-// active state's word; a button shows its click count; everything else shows the raw value. Reads
-// the on/off text from the input's data- attributes so the local + server-sync paths agree.
-function _ctrlValLabel(el, v) {
+// active state's word; a button shows its click count; a key shows its option label; everything
+// else shows the raw value. Reads the on/off text from the input's data- attributes so the local +
+// server-sync paths agree. `p` is the widget's params, when the caller has them.
+function _ctrlValLabel(el, v, p) {
   const w = el.dataset.widget;
   if (w === 'button') return '×' + v;
   if (w === 'toggle' && (el.dataset.on != null || el.dataset.off != null))
     return v ? (el.dataset.on != null ? el.dataset.on : 'on') : (el.dataset.off != null ? el.dataset.off : 'off');
-  return _showVal(v);
+  if (!p && _hasKey(v)) p = (_bindSpec(el.dataset.bind, el.dataset.name) || {}).params;
+  return _showVal(_keyText(p, v));
 }
 
 // ── Custom widget registry (extension point) ─────────────────────────────────
@@ -34,11 +47,13 @@ function _ctrlValLabel(el, v) {
 //     wire(el, api) { /* build DOM inside el; on change, api.push(value) */ },
 //     sync(el, value, params) { /* reflect a server-pushed value (optional) */ },
 //     destroy(el) { /* free resources before el is discarded (optional) */ },
+//     update(el, props) { /* redraw a RETURNED output in place when its cell runs again (optional) */ },
 //   });
 // `api` = { push, schedule, flush, value, name, bindId, params, mirror }. `value` is the current
 // value at wire time (build from it; `sync` delivers later reactive updates). `push`/`flush` send
 // the value immediately; `schedule` is throttled/coalesced (same policy as built-ins). `destroy` is
-// called before a rebuild orphans the element, so a widget holding resources can clean up.
+// called before a rebuild orphans the element, so a widget holding resources can clean up. Without
+// `update`, a returned output is mounted fresh on every run; with it, `_swapOutput` keeps the element.
 window.slateWidgets = window.slateWidgets || {};
 window.slateRegisterWidget = function (kind, impl) {
   const im = impl || {};
@@ -63,14 +78,34 @@ window.slateRegisterWidget = function (kind, impl) {
 // rebuild). Mirrors the inline-echart dispose before an innerHTML swap — a plugin holding resources
 // (a math field, global listeners, observers) gets a `destroy(el)` call to clean up. No-op for a
 // widget with no destroy impl, or one that never wired.
-window.teardownCustomWidgets = function (root) {
+// Tear down everything under `root` that holds a browser resource, before the DOM carrying it goes.
+// Three owners: a `@bind` control widget, a `slate_render` component OUTPUT, and any element an
+// extension marked `data-slate-keep` (which hears `slate:discard`).
+//
+// The component output was the gap. The widget contract promises `destroy` "before a rebuild orphans
+// the element", but the only caller selected `.customwidget[data-bind]`, so a figure RETURNED from a
+// cell never got it. A figure that makes a WebGL context per run then exhausts the browser's limit —
+// Chrome keeps 16 per page — and the contexts it drops belong to UNRELATED figures, which go blank.
+// Slate has to be the one to say this: an extension watching the DOM cannot tell a move from a
+// removal, and garbage collection is far too late for a limit that low.
+//
+// `keep` is an optional Set of elements being carried into a new output rather than discarded.
+window.slateTeardownOutput = function (root, keep) {
   if (!root) return;
-  root.querySelectorAll('.customwidget[data-bind]').forEach(el => {
-    if (!el._customWired) return;
-    const impl = window.slateWidgets[el.dataset.widget];
+  const skip = el => !!(keep && keep.has(el));
+  root.querySelectorAll('.customwidget[data-bind], .slatecomponent').forEach(el => {
+    if (!el._customWired || skip(el)) return;
+    const kind = el.dataset.widget || el.dataset.component;
+    const impl = kind && window.slateWidgets[kind];
     if (impl && impl.destroy) { try { impl.destroy(el); } catch (e) { console.error(e); } }
   });
+  root.querySelectorAll('[data-slate-keep]').forEach(el => {
+    if (skip(el)) return;
+    try { el.dispatchEvent(new Event('slate:discard')); } catch (e) { console.error(e); }
+  });
 };
+// The control-strip rebuild keeps its own name: it tears down exactly the strip it is about to replace.
+window.teardownCustomWidgets = function (root) { window.slateTeardownOutput(root); };
 
 // Package-declared front-end scripts (`nbState.frontendScripts` = [{id, js, esm, kind}], from the worker's
 // SlateExtensionsBase manifest — `register_component!`/`register_widget!` in a module `__init__`). Inject each
@@ -154,7 +189,7 @@ function controlMarkup(bindId, b) {
   // stringified VALUE in each option's `value` attr; the LABEL is what's shown (rich for radio).
   const opts = (p.options || []).map(o => _normOpt(o));
   const _selV = String(b.value);
-  let ctrl = '', wval = `<span class="wval">${_esc(_showVal(b.value))}</span>`;
+  let ctrl = '', wval = `<span class="wval">${_esc(_showVal(_keyText(p, b.value)))}</span>`;
   if (w === 'slider')
     ctrl = `<input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${b.value}" ${a}/>`;
   else if (w === 'number')
@@ -465,7 +500,7 @@ function cellHeaderInner(c) {
     '</span>' +
     // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved
     // width) · cache verdict (fixed slot) · state badge (fixed width) — so nothing floats mid-header.
-    `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
+    `<span class="cdur">${c.duration != null ? window.slateDuration(c.duration) : ''}</span>` +
     `<span class="previewslot">${_previewBadge(c)}</span>` +
     `<span class="memoslot">${_memoBadge(c)}</span>` +
     `<span class="badge">${c.state}</span>`;
@@ -497,9 +532,17 @@ function wireControl(el) {
     // cell re-runs and the SERVER-rendered (Makie) figures re-theme too. setSlateTheme no-ops on an
     // unknown value, so this is inert for every other bind.
     if (name === 'ui_theme' && window.setSlateTheme) { try { window.setSlateTheme(v); } catch (_) {} }
+    // A value held while this one was in flight goes next, unless it is the same value and this send
+    // arrived: a select fires `input` and then `change` for one choice.
+    const sent = _valKey(v);
+    let arrived = false;
     api('POST', '/api/bind/' + id, { name, value: v })
-      .then(applyAck)
-      .finally(() => { inflight = false; if (pending !== null) schedule(pending); });
+      .then(s => { arrived = true; return applyAck(s); })
+      .finally(() => {
+        inflight = false;
+        if (arrived && pending !== null && _valKey(pending) === sent) pending = null;
+        if (pending !== null) schedule(pending);
+      });
   };
   const schedule = v => {                       // throttled, coalescing
     pending = v;
@@ -589,6 +632,11 @@ function _bindSpec(bindId, name) {
   const c = _cellById(bindId); if (!c) return null;
   return (c.binds || []).find(b => b.name === name) || null;
 }
+// The descriptor {v, component, props} of a component placeholder, from its sibling JSON script.
+function _componentDesc(el) {
+  const scr = el.parentNode && el.parentNode.querySelector('script.slatecomponent-desc');
+  try { return scr ? JSON.parse(scr.textContent) : null; } catch (e) { return null; }
+}
 // Mount return-value component OUTPUTS: a `slate_render` descriptor {v, component, props} is emitted as a
 // `.slatecomponent` placeholder plus a sibling JSON `<script class="slatecomponent-desc">`. Look the
 // component up in the widget registry and wire it with the props + a DISPLAY ctx (call/stream, no bind
@@ -596,9 +644,8 @@ function _bindSpec(bindId, name) {
 // an as-yet-unregistered component just waits for `slateRegisterWidget` to re-scan (see above).
 function wireOutputComponent(el) {
   if (el._customWired) return;
-  const scr = el.parentNode && el.parentNode.querySelector('script.slatecomponent-desc');
-  if (!scr) return;
-  let desc; try { desc = JSON.parse(scr.textContent); } catch (e) { return; }
+  const desc = _componentDesc(el);
+  if (!desc) return;
   const kind = desc && desc.component;
   const reg = kind && window.slateWidgets && window.slateWidgets[kind];
   el.dataset.component = kind || '';
@@ -630,18 +677,6 @@ function _pickToData(frac, lim, scale) {
 }
 const _pickOwner = name => ((nbState && nbState.cells) || [])
   .find(c => (c.binds || []).some(b => b.name === name));
-
-// `slateSetBind(name, value)` — drive one of the notebook's own controls from front-end JS, by the
-// bound VARIABLE name. The JS counterpart of `set_bind(:name, v)` in cell code, and the same path a
-// dragged slider takes (coerce → restale readers → sync the widget → persist), so a value set from
-// a web cell's canvas is indistinguishable from one the reader dialled in. Resolving the declaring
-// cell here is the point: a custom visualisation shouldn't have to know which cell happens to
-// declare the control it drives. Returns a promise; resolves false if no such control exists.
-window.slateSetBind = function (name, value) {
-  const owner = _pickOwner(name);
-  if (!owner) return Promise.resolve(false);
-  return api('POST', '/api/bind/' + owner.id, { name, value }).then(applyAck).then(() => true);
-};
 
 function mountPicks(c, cell) {
   const picks = c.picks || [];
@@ -879,11 +914,15 @@ function mountPicks(c, cell) {
 }
 
 // Wire every bound widget in a cell — its own @bind widget and/or control strip.
-function mountControls(c) {
+// `hosts`: the control hosts to wire (default: the whole cell). `wireControl` adds listeners, so a host
+// that is already wired must not be passed again.
+function mountControls(c, hosts) {
   const cell = document.getElementById('cell-' + c.id);
   if (!cell) return;
-  cell.querySelectorAll('[data-bind]').forEach(wireControl);
-  cell.querySelectorAll('.radiogroup, .checkgroup, .mslist').forEach(typeset);   // render rich ($math$) option labels
+  for (const h of (hosts || [cell])) {
+    h.querySelectorAll('[data-bind]').forEach(wireControl);
+    h.querySelectorAll('.radiogroup, .checkgroup, .mslist').forEach(typeset);   // render rich ($math$) option labels
+  }
   mountOutputComponents(cell);                                                   // return-value component outputs
   mountPicks(c, cell);                                                           // pick_on! click targets on a figure
 }
@@ -908,10 +947,10 @@ function toggleSource(id, mode) {
 // The ✎ "edit source" header button, for ANY cell kind. md / @bind cells render OUTPUT by default and
 // keep their source in a hidden `.srcedit` overlay → toggle it. code / web cells show their editor
 // inline (no overlay) → just focus it, un-hiding the code first if it was hidden via 🙈.
-function editCellSource(id, kind) {
+async function editCellSource(id, kind) {
   const cell = document.getElementById('cell-' + id); if (!cell) return;
   if (cell.querySelector('.srcedit')) { toggleSource(id, kind === 'md' ? 'markdown' : 'julia'); return; }
-  if (cell.classList.contains('codehidden')) toggleHideCode(id);   // reveal hidden code before focusing
+  if (cell.classList.contains('codehidden')) await toggleHideCode(id);   // reveal hidden code before focusing
   if (window.ensureEditor) window.ensureEditor(id);                // mount if it hasn't lazily yet
   if (window.edFocus) window.edFocus(id);
 }
@@ -983,8 +1022,12 @@ function cancelSource(id) {
 // store. renderAll/updateStates now just publish the state + refresh the chrome; the component
 // diffs cells by id (so editors survive structural ops) and does per-cell output processing in
 // effects. The old full-wipe rebuild and the in-place patch collapse into one publish.
-function renderAll(state)    { _publishState(state); window.loadScratch && window.loadScratch(state && state.scratch); }
-function updateStates(state) { _publishState(state); window.loadScratch && window.loadScratch(state && state.scratch); }
+function renderAll(state)    { _publishState(state); _afterFullState(state); }
+function updateStates(state) { _publishState(state); _afterFullState(state); }
+function _afterFullState(state) {
+  window.loadScratch && window.loadScratch(state && state.scratch);
+  window.onRunState && state && window.onRunState(state);   // a page loaded mid-run picks the run up here
+}
 // Targeted live refresh (SSE `refresh:` / `celldone:`): merge ONLY the changed cells into the state
 // and publish, with no full-state GET.
 //
@@ -1057,7 +1100,7 @@ function markBlank(el, c) {
   el.classList.toggle('cell-blank', blank);
 }
 window.slateMarkBlank = markBlank;
-function resetCellRevs() { for (const k in _cellRev) delete _cellRev[k]; }
+function resetCellRevs() { for (const k in _cellRev) delete _cellRev[k]; window.slateRunForgetRevs && window.slateRunForgetRevs(); }
 window.slateRevIsNew = revIsNew;
 window.slateRevMark = revMark;
 window.slateResetCellRevs = resetCellRevs;
@@ -1291,6 +1334,7 @@ function updateChrome(state) {
     hb.style.display = 'none'; document.body.classList.remove('hyd-preview'); window.clearPrepare && window.clearPrepare();
   }
   updateStaleBadge(state);
+  window.checkSrcBanner && window.checkSrcBanner(state);   // the source-reload banner closes once its cells ran
   // Agent chat needs Kaimon's agent service — a standalone hub (slate --own / serve_notebook)
   // doesn't have it. Disable the button up front instead of letting the first turn error out.
   const ab = document.getElementById('agentbtn');
@@ -1372,7 +1416,7 @@ function paletteChips() {
   cells.forEach(h => (h.controls || []).flat().forEach(s => { (hosts[s.name] ||= []).push(h.id); }));
   const chips = [];
   cells.forEach(c => (c.binds || []).forEach(b =>
-    chips.push({ name: b.name, widget: b.widget, value: b.value, def: c.id, hosts: hosts[b.name] || [] })));
+    chips.push({ name: b.name, widget: b.widget, value: _keyText(b.params, b.value), def: c.id, hosts: hosts[b.name] || [] })));
   return chips;
 }
 function togglePalette() { document.getElementById('palette').classList.toggle('open'); }
@@ -1390,7 +1434,7 @@ function renderPalette() {
       ` title="${window.slateEscHtml(c.name + ' = ' + vt)}&#10;drag into a cell to surface it · click to jump to ‘${c.def}’${c.hosts.length ? ' · surfaced in ' + c.hosts.map(h => '‘' + h + '’').join(', ') : ''}">` +
       `<span class="cname">${c.name}</span><span class="ctype">${c.widget}</span>` +
       `<span class="cright">${host ? `<span class="chost">${host}</span>` : ''}` +
-      `<span class="pval" data-pname="${c.name}">${c.value}</span></span></div>`;
+      `<span class="pval" data-pname="${c.name}">${_esc(String(c.value))}</span></span></div>`;
   }).join('');
 }
 
@@ -1480,7 +1524,7 @@ function syncControlValues(state) {
     else if (window.slateWidgets && window.slateWidgets[w] && window.slateWidgets[w].sync) window.slateWidgets[w].sync(el, v, p);
     else el.value = String(v);
     const wrap = el.closest('.widget, .control'); const m = wrap && wrap.querySelector('.wval');
-    if (m) m.textContent = _ctrlValLabel(el, v);
+    if (m) m.textContent = _ctrlValLabel(el, v, p);
   });
 }
 
@@ -1528,12 +1572,23 @@ function _swapOutput(out, html, live, after) {
   const seq = (out.__slateSwapSeq = (out.__slateSwapSeq || 0) + 1);
   const commit = () => {
     if (out.__slateSwapSeq !== seq) return;
-    out.style.minHeight = out.offsetHeight + 'px';
+    // Measure the height before `_carryMounted` runs. It moves each kept figure out of `out` and
+    // into the stage, so a later measure gets the height without the figure. A hold at that height
+    // lets the page get shorter until the figure is back, and scroll anchoring then moves the view.
+    // The height recorded at the last layout (`_heightObserver`); reading `offsetHeight` here
+    // would force a layout of the whole page for every output swapped.
+    observeHeight(out);
+    out.style.minHeight = (out.__slateHeight !== undefined ? out.__slateHeight : out.offsetHeight) + 'px';
+    const applyUpdates = _carryMounted(out, stage);
+    out.__slateHoldSeq = seq;   // the hold belongs to the swap that committed last
     out.replaceChildren(...Array.from(stage.childNodes));
     runScripts(out);   // a <script> from parsed HTML is inert — re-create so figures boot
     mountOutputComponents(out);   // mount any `slate_render` component OUTPUTS in the freshly-swapped output
+    applyUpdates();
     const mounted = out.querySelectorAll('img');
-    const release = () => { out.style.minHeight = ''; };
+    // The images of an older swap can finish loading after a newer swap has committed. Their release
+    // must not clear the hold of the newer swap.
+    const release = () => { if (out.__slateHoldSeq === seq) out.style.minHeight = ''; };
     if (!mounted.length) requestAnimationFrame(release);
     else {
       let n = mounted.length;
@@ -1554,6 +1609,76 @@ function _swapOutput(out, html, live, after) {
                                        : new Promise(r => { im.onload = im.onerror = r; }))).then(go);
 }
 
+// Carry what the previous output mounted into the new one, so that a re-run UPDATES a figure in place
+// and does not draw it again into an empty element. This is the persistence an echart gets from
+// `EChartHost`. Nothing is kept unless its owner asks for it, in one of two ways:
+//   • a `slate_render` component whose kind registers `update(el, props)`. The mounted element takes
+//     the place of the new placeholder, and gets the new props once it is back in the document.
+//   • any element marked `data-slate-keep="key"`. The old element with the same key takes the place of
+//     the new one, with its children and its JS state. A script in the new output finds it in the DOM.
+// Both match by position among their peers — a component among the mounts of its own KIND, a marked
+// element among those carrying its key — so two figures in one output stay apart. A component that is
+// not kept gets its `destroy`; a marked element that is not kept gets a `slate:discard` event. What a
+// kept element contains is kept with it, and is neither swapped again nor discarded.
+// Returns a function that applies the component updates; call it after the swap.
+function _carryMounted(out, stage) {
+  const updates = [], kept = new Set();
+  const olds = Array.from(out.querySelectorAll('.slatecomponent'));
+  // Pair a new component with a mounted one of the SAME KIND, by position among that kind's peers
+  // rather than among all components. An output that returns a different MIX of kinds than last time
+  // shifts every later position, so a global index offers a figure the props of an unrelated one and
+  // the kind check then keeps nothing at all. Two components of one kind still pair by position,
+  // which is as far as a descriptor carrying no identity of its own can go.
+  const oldByKind = new Map();
+  olds.forEach(el => {
+    const k = el.dataset.component || '';
+    if (!oldByKind.has(k)) oldByKind.set(k, []);
+    oldByKind.get(k).push(el);
+  });
+  const taken = new Map();                       // kind → how many of its mounts are already paired
+  stage.querySelectorAll('.slatecomponent').forEach(nu => {
+    const desc = _componentDesc(nu);
+    const kind = desc && desc.component;
+    if (!kind) return;
+    const n = taken.get(kind) || 0;
+    taken.set(kind, n + 1);                      // consume the slot even if this one cannot be kept
+    const old = (oldByKind.get(kind) || [])[n];
+    const reg = old && old._customWired && window.slateWidgets[kind];
+    if (!reg || !reg.update) return;
+    nu.replaceWith(old);
+    kept.add(old);
+    updates.push(() => reg.update(old, desc.props || {}));
+  });
+  const byKey = root => {
+    const m = new Map();
+    root.querySelectorAll('[data-slate-keep]').forEach(el => {
+      const k = el.dataset.slateKeep;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(el);
+    });
+    return m;
+  };
+  const prev = byKey(out);
+  byKey(stage).forEach((news, k) => news.forEach((nu, i) => {
+    // A key nested inside one that was already carried has left the stage with its ancestor. Swapping
+    // it now would move the old inner element out of the old outer one and into a detached tree,
+    // punching a hole in the element we just kept.
+    if (!stage.contains(nu)) return;
+    const old = (prev.get(k) || [])[i];
+    if (!old) return;
+    nu.replaceWith(old);
+    kept.add(old);
+    // What a carried element contains is carried with it, so it is still mounted and not discarded.
+    old.querySelectorAll('[data-slate-keep]').forEach(d => kept.add(d));
+  }));
+  // One teardown pass for everything the swap did not carry: a wired component's `destroy` and a
+  // `slate:discard` for a marked element, which is exactly what `slateTeardownOutput` does on the
+  // cell-unmount path. Deferred to here, AFTER both pairing passes have recorded what they kept, so
+  // an element carried by one pass is not torn down because the other did not claim it.
+  window.slateTeardownOutput(out, kept);
+  return () => updates.forEach(f => { try { f(); } catch (e) { console.error(e); } });
+}
+
 // A <script> assigned via innerHTML is parsed but never executed. Rich output
 // (notably a WGLMakie/Bonito figure: a module bundle <script src> that defines
 // `Bonito`, then an inline module that calls `Bonito.init_session(…)`) only boots
@@ -1564,7 +1689,9 @@ function _swapOutput(out, html, live, after) {
 async function runScripts(root) {
   if (!root) return;
   for (const old of Array.from(root.querySelectorAll('script'))) {
+    if (old.__slateRan) continue;   // already run, inside an element `_carryMounted` kept
     const s = document.createElement('script');
+    s.__slateRan = true;
     for (const a of old.attributes) s.setAttribute(a.name, a.value);
     if (old.textContent) s.textContent = old.textContent;
     const loaded = s.src ? new Promise(res => { s.onload = s.onerror = res; }) : null;

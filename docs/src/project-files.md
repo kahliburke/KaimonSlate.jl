@@ -50,6 +50,7 @@ Click a file to open it on the right.
 | Kind | What you get |
 | --- | --- |
 | Text | A full editor with line numbers, find and replace (⌘F), bracket matching, ⌘/ to comment, and Julia autocompletion |
+| Markdown (`.md`, `.markdown`) | The file rendered as a markdown cell is, math included; **✎ Source** switches to the editor and **◉ Preview** back |
 | Image | A preview with its pixel dimensions |
 | Audio, video | A player |
 | Anything else | "Binary file, not shown", with a download link |
@@ -68,6 +69,11 @@ Files over 4 MB will not open in the editor, and a file that is not valid UTF-8 
 than mangled.
 
 Your cursor and scroll position in each file are remembered while the notebook is open.
+
+In a rendered markdown file, an image path is read from the file's own folder, as it would be on
+GitHub or in an editor's preview. A link to another file in the project opens that file in the panel,
+and a link to a web address opens in a new tab. The preview shows the file as saved, so switching to it
+from unsaved edits asks you to save or discard them first.
 
 ## Editing and saving
 

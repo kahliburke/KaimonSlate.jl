@@ -25,8 +25,14 @@ echart(:line, days, @replay(w, movavg(sales, w)); title = "Rolling mean")
 as a bare symbol. Inside the expression that name refers to the value being swept, so the code you
 write is the code you would have written without the macro.
 
-While you are authoring, `@replay` is a pass-through. It computes the one value the control is
-sitting on, so the cell costs exactly what the bare expression costs. The sweep happens at export.
+While you are authoring, `@replay` is a pass-through. It evaluates the expression in place, for the
+one value the control is sitting on, so the cell costs what the bare expression costs. The sweep
+happens at export.
+
+A moved control runs the whole cell again, and Julia compiles some of a cell's code again on each
+run: closures, comprehensions, `do` blocks, and top-level loops. For a fast control, put the work in
+functions in an earlier cell, and keep the expression in `@replay` a call to them. A loop written
+inside the `@replay` expression runs in Julia's interpreter, which is slow for heavy work.
 
 ## What can drive a replay
 
@@ -37,7 +43,7 @@ A control qualifies when its domain is finite and small enough to enumerate.
 | `Slider` | the min/max/step grid |
 | `NumberField` | the same grid, and only when it is bounded |
 | `Checkbox` / `Toggle` | `false`, `true` |
-| `Select` / `Radio` | the option values |
+| `Select` / `Radio` | the option values, or their [keys](widgets.md#Option-values) |
 | `RangeSlider` | the ordered low/high pairs |
 | `TableSelect` | the row indices, plus "nothing selected" |
 | `MultiSelect` / `MultiCheckBox` | the power set of the options |
@@ -111,6 +117,28 @@ from the resolution you chose last time.
 
 Publishing does not carry that setting. A published site sweeps every mark at full resolution.
 
+Each mark sweeps on its own. When several marks take a field each from one expensive call, the
+export makes that call once per mark at every position:
+
+```julia
+y1 = @replay(θ, simulate(θ).position)
+y2 = @replay(θ, simulate(θ).velocity)    # simulate runs twice per position
+```
+
+Compute the results over the control's domain once, in a cell of their own, and have each `@replay`
+read from them:
+
+```julia
+runs = Dict(v => simulate(v) for v in 0:5:70)    # the control's domain
+```
+
+```julia
+y1 = @replay(θ, runs[θ].position)
+y2 = @replay(θ, runs[θ].velocity)
+```
+
+The first cell does not read `θ`, so moving the control does not run it again.
+
 ## What the reader gets
 
 Each control is enabled only once its data has loaded, so a control that is live is a control
@@ -127,8 +155,11 @@ checked while you write the cell. The shape is checked when you export, so a `@r
 scalar, ragged results, or a non-`Real` element type registers fine and then fails at export with a
 message naming the problem.
 
-**One mark's failure costs that mark only.** The sweep warns, that control exports frozen, and the
-rest of the page is unaffected. A table whose sweep did not resolve degrades to an ordinary static
+**A figure moves as a whole or not at all.** All of a figure's marks on one control move together:
+the control drives the figure only when every one of those marks has its data, swept over the same
+positions. If one mark's sweep fails, or a per-mark stride gives it different positions, that figure
+stays as exported when the control moves, and the browser console names the marks. Other figures on
+the same control still follow it. A table whose sweep did not resolve degrades to an ordinary static
 table.
 
 **A `@replay` cell is never cached.** Restoring a memoized cell skips its body, which would bring the

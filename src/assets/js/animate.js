@@ -228,18 +228,23 @@
       if (this.frames || this.fetching || !this.key) return;
       this.fetching = true;
       this.box.classList.add('anim-loading');
+      const key = this.key;   // a re-run can swap the manifest while this stack downloads
       try {
         const [fb, lb] = await Promise.all([
           fetch(this._url(this.manifest.framesUrl)).then(r => r.arrayBuffer()),
           fetch(this._url(this.manifest.lutUrl)).then(r => r.arrayBuffer()),
         ]);
+        if (key !== this.key) return;                              // stale: the finally fetches the current one
         this.frames = new Uint8Array(fb);
         this.lut = new Uint8Array(lb);
         this._initGL();
         this._draw();
         if (this._wantAutoplay) this.play();
       } catch (e) { console.warn('anim fetch failed', e); }
-      finally { this.fetching = false; this.box.classList.remove('anim-loading'); }
+      finally {
+        this.fetching = false; this.box.classList.remove('anim-loading');
+        if (key !== this.key) this._ensureData();
+      }
     }
 
     _url(u) { return (window.apiBase ? window.apiBase : '') + u; }   // base-URL safe (matches blob URLs)
@@ -376,6 +381,13 @@
       }
       return elapsedS * this.fps;
     }
+    _elapsedAt(layer) {                        // the inverse: fractional frame → elapsed (speed-scaled)
+      if (this.times) {
+        const i = Math.max(0, Math.min(this.N - 1, Math.floor(layer))), j = Math.min(this.N - 1, i + 1);
+        return this.times[i] + (layer - i) * (this.times[j] - this.times[i]) - this.times[0];
+      }
+      return layer / Math.max(1e-6, this.fps);
+    }
 
     play() { if (this.playing || this.N <= 1) return; this.playing = true; this.elPlay.textContent = '⏸'; this.t0 = 0; this._startLoop(); }
     pause() { this.playing = false; this.elPlay.textContent = '▶'; this._stopLoop(); }
@@ -388,7 +400,7 @@
     _frame(ts) {
       this.raf = 0;
       if (!this.playing || !this.visible) return;
-      if (!this.t0) this.t0 = ts - (this.layer / Math.max(1e-6, this.fps)) * 1000 / this.speed;
+      if (!this.t0) this.t0 = ts - this._elapsedAt(this.layer) * 1000 / this.speed;   // resume where it stands
       const elapsed = (ts - this.t0) / 1000 * this.speed;        // wall-clock → frame-drop is automatic
       let layer = this._layerAt(elapsed);
       if (layer >= this.N - 1) {

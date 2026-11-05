@@ -134,31 +134,36 @@ end
 # from the same unit. Served on `bind:port` (default 127.0.0.1 — front it with an SSH tunnel or proxy).
 struct RsyncServeTarget <: PublishTarget
     name::String
-    dest::String        # rsync destination AND served root: "user@host:/path/to/site"
+    dest::String        # rsync destination: "user@host:/path/to/site"
+    root::String        # what the target's server serves: `dest`, or for a site under a subpath, the target's own dest
     url::String         # public URL to report (through your tunnel / reverse proxy)
     delete::Bool        # mirror deletes (rsync --delete)
     bind::String        # remote bind address (default 127.0.0.1)
     port::Int           # remote bind port
 end
 
-# Bind 0.0.0.0 by DEFAULT so the site is directly reachable at http://<host>:<port>/ — no SSH
-# tunnel. `url` auto-derives from the dest host + port when left blank, so the "live" link points
-# at the real address instead of localhost. (Set bind=127.0.0.1 to keep it private and front it
-# with your own proxy/tunnel.)
-function RsyncServeTarget(; name, dest::AbstractString, url = "", delete::Bool = true,
-                         bind::AbstractString = "0.0.0.0", port::Integer = 8080)
+# Binds 127.0.0.1 by default, the same as a target read from the ledger: the site stays private
+# until you front it with a tunnel or proxy, or set `bind = "0.0.0.0"`. With a non-loopback bind and
+# no `url`, the URL is derived from the dest host and port.
+#
+# Sites sharing the target at different subpaths share its one server: each syncs into its subpath
+# (`dest`), and the server serves the target's root, so every site's URL resolves on the same port.
+function RsyncServeTarget(; name, dest::AbstractString, root::AbstractString = "", url = "", delete::Bool = true,
+                         bind::AbstractString = "127.0.0.1", port::Integer = 8080)
     u = String(url)
-    if isempty(strip(u))
+    if isempty(strip(u)) && !(String(bind) in ("127.0.0.1", "localhost", "::1"))
         host = first(_split_ssh_dest(String(dest)))          # "user@host" → host
         h = isempty(host) ? "" : String(split(host, '@')[end])
         isempty(h) || (u = "http://$h:$(Int(port))/")
     end
-    return RsyncServeTarget(String(name), String(dest), u, delete, String(bind), Int(port))
+    return RsyncServeTarget(String(name), String(dest), isempty(root) ? String(dest) : String(root), u, delete,
+                            String(bind), Int(port))
 end
 
 # The bundled deployables (shipped in src/serve/), staged to the remote control dir on each publish.
 const _SLATE_SERVE_SCRIPT    = normpath(joinpath(@__DIR__, "serve", "slate_serve.jl"))
 const _SLATE_SERVE_BOOTSTRAP = normpath(joinpath(@__DIR__, "serve", "bootstrap.sh"))
+const _SLATE_SERVE_MIME      = normpath(joinpath(@__DIR__, "serve", "mime_types.jl"))
 
 # "user@host:/path" → ("user@host", "/path"). No colon ⇒ ("", dest) (invalid; flagged in preflight).
 function _split_ssh_dest(dest::AbstractString)
@@ -190,12 +195,15 @@ end
 function _rsync_serve_steps(t::RsyncServeTarget, dir, host, remote_dir, slug, ctrl)
     rargs = String["-az"]; t.delete && push!(rargs, "--delete")
     append!(rargs, [string(dir, "/"), t.dest])
+    root_dir = last(_split_ssh_dest(t.root))     # the server serves the target's root; `dest` is this site
     return Cmd[
+        `ssh $host mkdir -p $remote_dir`,          # rsync creates only the last path component
         `rsync $rargs`,
         `ssh $host mkdir -p $ctrl`,
         `scp -q $_SLATE_SERVE_SCRIPT $host:$ctrl/slate_serve.jl`,
+        `scp -q $_SLATE_SERVE_MIME $host:$ctrl/mime_types.jl`,
         `scp -q $_SLATE_SERVE_BOOTSTRAP $host:$ctrl/bootstrap.sh`,
-        `ssh $host bash $ctrl/bootstrap.sh $slug $remote_dir $(t.bind) $(string(t.port))`,
+        `ssh $host bash $ctrl/bootstrap.sh $slug $root_dir $(t.bind) $(string(t.port))`,
     ]
 end
 
@@ -258,7 +266,7 @@ function with_subpath(t::PublishTarget, subpath::AbstractString)
         return GenericUploadTarget(; name = t.name, kind = t.kind, dest = string(rstrip(t.dest, '/'), "/", sp),
             url = _suburl(t.url, sp), endpoint = t.endpoint, delete = t.delete)
     elseif t isa RsyncServeTarget
-        return RsyncServeTarget(; name = t.name, dest = string(rstrip(t.dest, '/'), "/", sp),
+        return RsyncServeTarget(; name = t.name, dest = string(rstrip(t.dest, '/'), "/", sp), root = t.root,
             url = _suburl(t.url, sp), delete = t.delete, bind = t.bind, port = t.port)
     end
     error("target '$(t.name)' is root-only (a $(split(string(typeof(t)), '.')[end]) deploys a whole project) — " *
@@ -287,6 +295,11 @@ function purge_deployed!(t::RsyncServeTarget)
     derr = _rsync_serve_dest_error(host, remote_dir, t.bind)
     isempty(derr) || return (; ok = false, log = derr)
     slug = _serve_slug(t.name)
+    # A site under a subpath shares the target's server with its siblings: remove only its own files.
+    if t.dest != t.root
+        ok, out = _run_capture(`ssh $host rm -rf $remote_dir`)
+        return (; ok = ok, log = ok ? "removed $remote_dir on $host (the target's server keeps serving its other sites)" : out)
+    end
     script = join([
         "systemctl --user disable --now slate-serve-$slug.service 2>/dev/null || true",
         "rm -f \"\${XDG_CONFIG_HOME:-\$HOME/.config}/systemd/user/slate-serve-$slug.service\"",

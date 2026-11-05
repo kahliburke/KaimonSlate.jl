@@ -159,7 +159,7 @@ function _rich_scan!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
             bytes = Base.invokelatest(_mime_bytes, MIME(m), x)
             m == "text/html" && (bytes = _fix_at_refs(bytes))
             push!(chunks, (m, bytes))
-            startswith(m, "image/") && _capture_export_vector!(chunks, x)
+            startswith(m, "image/") ? _capture_export_vector!(chunks, x) : _capture_export_markdown!(chunks, x)
             return true
         end
     end
@@ -210,6 +210,26 @@ function _fix_at_refs(bytes::Vector{UInt8})
     return Vector{UInt8}(replace(s, _ATREF_RE => _atref_span))
 end
 
+# A returned collection of figures — every element's richest form an image — is captured as a GALLERY: a
+# marker chunk carrying the count, then each figure's own chunks (its image, and its PDF for export). The
+# renderer lays the images following the marker out as a grid; anything that reads image chunks one by one
+# (snapshots, export) still finds them. Bounded so a long vector of images is not rendered wholesale.
+const _GALLERY_MIME = "application/vnd.kaimonslate.gallery"
+const _GALLERY_MAX = 64
+function _richest_mime(x)
+    for m in _RICH_MIMES
+        Base.invokelatest(showable, m, x) && return m
+    end
+    return ""
+end
+function _capture_gallery!(chunks::Vector{Tuple{String,Vector{UInt8}}}, value)
+    (value isa AbstractVector || value isa Tuple) && 2 <= length(value) <= _GALLERY_MAX || return false
+    all(x -> startswith(_richest_mime(x), "image/"), value) || return false
+    push!(chunks, (_GALLERY_MIME, Vector{UInt8}(string(length(value)))))
+    foreach(x -> _capture_rich!(chunks, x), value)
+    return true
+end
+
 # When we just captured a raster figure (image/*), also try to render it to PDF — a
 # vector form for publication export. We attempt `show(io, MIME"application/pdf", x)`
 # *directly* (not gated on `showable`): CairoMakie gates `showable` on its active output
@@ -221,6 +241,24 @@ function _capture_export_vector!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
     try
         bytes = Base.invokelatest(_mime_bytes, MIME(_EXPORT_VEC_MIME), x)
         isempty(bytes) || push!(chunks, (_EXPORT_VEC_MIME, bytes))
+    catch
+    end
+    return
+end
+
+# A value shown as HTML, LaTeX or a Slate display MIME (`slate_render`) that can also show itself as
+# markdown (a table of formulas, a derivation with notes) is captured in that form too. Typst can't
+# typeset HTML, and LaTeX built for KaTeX can lean on commands mitex lacks; markdown with `$…$` math
+# goes through cmarker and mitex like a markdown cell, so it prints as text and formulas rather than
+# a screenshot. Like the vector PDF above, the chunk is export-only: `_render_chunks` ignores
+# `text/markdown`.
+const _EXPORT_MD_MIME = "text/markdown"
+function _capture_export_markdown!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
+    any(c -> c[1] == _EXPORT_MD_MIME, chunks) && return
+    try
+        Base.invokelatest(showable, MIME(_EXPORT_MD_MIME), x) || return
+        bytes = Base.invokelatest(_mime_bytes, MIME(_EXPORT_MD_MIME), x)
+        isempty(bytes) || push!(chunks, (_EXPORT_MD_MIME, bytes))
     catch
     end
     return
@@ -391,6 +429,16 @@ end
 struct _CellLogger <: Logging.AbstractLogger
     parent::Logging.AbstractLogger
     sink                       # (id, frac::Float64, msg::String, done::Bool) -> Any  (cell progress channel)
+    cid::String                # the cell being evaluated — see `_current_cell_id`
+end
+
+# The cell that progress reported from the current task belongs to. The cell's logger carries it, and
+# a task the cell spawns inherits its logger, so a `Threads.@spawn`ed loop calling `slate_progress`
+# is attributed to the cell that started it. "" outside a cell eval.
+function _current_cell_id()
+    l = Logging.current_logger()
+    l isa _CellLogger && return l.cid
+    return String(get(task_local_storage(), :slate_cell, ""))
 end
 Logging.shouldlog(::_CellLogger, _...) = true                          # filter in handle_message
 Logging.min_enabled_level(l::_CellLogger) = min(Logging.LogLevel(-1), Logging.min_enabled_level(l.parent))
@@ -624,11 +672,15 @@ function _asset_base(name::AbstractString)
     safe == stem && return safe
     return string(safe, "-", string(hash(stem) % UInt16; base = 36))
 end
-# Short id → cache-bust + dedup. `slate_fingerprint`, not `hash`: this ends up in the FILENAME of an
-# exported asset, so it has to mean the same thing everywhere. `hash` is not stable across Julia
-# versions (1.12 and 1.13 disagree on the same bytes), which would rename every asset in a published
-# site on a Julia upgrade and give two collaborators different names for identical content — exactly
-# the dedup this is for. It also leaks Dict iteration order, which the JSON branch below passes in.
+# Short id → cache-bust + dedup. The id goes in the FILENAME of an exported asset, so it must be the
+# same on every Julia version. `hash` is not: 1.12 and 1.13 disagree on the same bytes, which would
+# rename every asset in a published site on a Julia upgrade and give two collaborators different
+# names for identical content, which defeats the dedup.
+# Bytes take a plain SHA-256: equal bytes give an equal id on every Julia. `slate_fingerprint` gives
+# the same identity for bytes, but it writes a tag and a 64-bit value for each byte, so it hashes
+# 9 times the data. Any other value takes `slate_fingerprint`, because `hash` also leaks the Dict
+# iteration order that the JSON branch below passes in.
+_asset_hash(x::AbstractVector{UInt8}) = bytes2hex(SHA.sha256(x))[1:8]
 _asset_hash(x) = slate_fingerprint(x)[1:8]
 
 function _asset_push!(rec)
@@ -738,6 +790,31 @@ function _harvest_effects(raw, srcs::AbstractVector)
     return out
 end
 
+# The globals a run bound, observed rather than predicted: every name that is new in the namespace or
+# now holds a different object. `objectid` keeps no reference, so a value the cell replaces can still be
+# collected while it runs. Compiler-generated names and Slate's own are left out. A name rebound to an
+# identical value doesn't show; the hub merges each run's report with what it already knows.
+function _ns_snapshot(mod::Module)
+    snap = Dict{Symbol,UInt}()
+    for n in names(mod; all = true, imported = false)
+        _ns_observable(n) || continue
+        isdefinedglobal(mod, n) || continue
+        snap[n] = objectid(getglobal(mod, n))
+    end
+    return snap
+end
+function _ns_bound_since(mod::Module, snap::Dict{Symbol,UInt})
+    out = Symbol[]
+    for n in names(mod; all = true, imported = false)
+        _ns_observable(n) || continue
+        isdefinedglobal(mod, n) || continue
+        get(snap, n, nothing) == objectid(getglobal(mod, n)) || push!(out, n)
+    end
+    return sort!(out)
+end
+_ns_observable(n::Symbol) = (s = String(n); !startswith(s, '#') && !startswith(s, "__slate") && !occursin("##", s) &&
+                             !(n in (:eval, :include)))
+
 # Run + clear the cleanup callbacks a cell registered (see the notebook namespace's `__slate_cleanups`).
 # Clears FIRST so a callback that itself re-registers targets the imminent new run, and isolates each
 # callback so one bad cleanup can't block the others (or the re-eval about to follow). Fired on re-eval
@@ -808,7 +885,40 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
                         _ns_read(mod, :__slate_on_bind) : (name, f) -> (() -> nothing),
               bind_observable = _ns_defined(mod, :bind_observable) ?
                                 _ns_read(mod, :bind_observable) : (name) -> nothing,
-              bind_names = () -> (reg === nothing ? Symbol[] : sort!(collect(keys(reg)))))
+              bind_names = () -> (reg === nothing ? Symbol[] : sort!(collect(keys(reg)))),
+              # Save bytes as an asset of the cell running now, for a package render that needs to put
+              # bulk data beside its markup. See `_ctx_save_asset` for why it can answer `nothing`.
+              save_asset = _ctx_save_asset)
+end
+
+# The ctx `save_asset` capability: the saved asset's page path, or `nothing` where no asset sink is
+# open. Slate also installs the context on paths that harvest nothing — a `__slate_call` handler, the
+# reactive handler task, the in-process call path — and there `_save_asset` would take the bytes and
+# hand back a path that 404s. Answering `nothing` instead lets a package fall back to inlining, which
+# is the difference between a degraded render and a broken one.
+_ctx_save_asset(name, data; mime = "", dtype = nothing) =
+    haskey(task_local_storage(), :slate_assets) ?
+        string(_save_asset(name, data; mime = mime, dtype = dtype)) : nothing
+
+# A package is precompiled against the copies of its dependencies this process has already loaded.
+# Julia keeps a bounded number of compiled caches per package, so when other environments recompile a
+# loaded dependency, the cache file it was loaded from can be deleted. Nothing built on it can be
+# precompiled in this process after that, and the cause is only in the precompile subprocess's own
+# output. A precompile failure therefore names the loaded packages whose cache file is gone.
+const STALE_CACHE_NOTE = "were loaded from compiled caches that have since been deleted"
+function _stale_cache_hint(msg::AbstractString)
+    occursin("Failed to precompile", msg) || return ""
+    gone = String[]
+    try
+        for (id, o) in Base.pkgorigins
+            cp = o.cachepath
+            cp === nothing || isfile(cp) || push!(gone, id.name)
+        end
+    catch
+    end
+    isempty(gone) && return ""
+    return "\n\n" * join(sort!(gone), ", ") * " " * STALE_CACHE_NOTE *
+           ", so packages that depend on them cannot be precompiled in this session. Restart the worker."
 end
 
 function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";
@@ -836,6 +946,10 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     cid = replace(filename, r"^cell:" => "")
     task_local_storage(:slate_cell, cid)
     _ns_defined(mod, :__slate_cleanups) && _run_cell_cleanups!(_ns_read(mod, :__slate_cleanups), cid)
+    # …and take back the methods its last run defined, so an edited signature doesn't leave the old one.
+    startswith(filename, "cell:") && _redefine_cell!(mod, cid, source)
+    # Clear this cell's `@replay` marks, so that this run registers the full set again (see `_do_replay`).
+    _ns_defined(mod, :__slate_replay_forget) && _ns_read(mod, :__slate_replay_forget)(cid)
 
     # Cell-effects sink (see `_slate_effect`): declarations a cell / a package it calls makes during eval,
     # attributed to the executing statement. Seeded here, harvested + cleared after the eval — like the
@@ -856,6 +970,89 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     tracesink = _ns_defined(mod, :__slate_trace_sink) ? _ns_read(mod, :__slate_trace_sink) : nothing
     tracesink === nothing || (tracesink[] = nothing)
 
+    # The return value renders INSIDE this eval's capture and execution context (`render_value!`, called
+    # at the end of the eval below): a `show` that prints, logs or calls `display` lands in the cell's
+    # own streams, and teardown it registers with `slate_on_cleanup` belongs to this cell.
+    # A cell whose last code line ends in `;` is "quiet": its RETURN value is not displayed (as in the
+    # REPL / Jupyter); stdout and explicit `display(…)` calls still show.
+    quiet = _is_quiet_cell(source)
+    echarts = Any[]
+    tables = Any[]
+    animations = Any[]
+    assets = Any[]
+    value_repr = ""
+    overflow = NamedTuple[]                       # full results saved to disk for "open full output"
+    function render_value!()
+        # Capture the return value: an ECharts spec / a table are kept raw (reduced to
+        # JSON-safe primitives here but JSON-*encoded* server-side, dodging JSON
+        # world-age in the eval frame); otherwise the richest MIME. The table check
+        # precedes rich MIME so a DataFrame renders as our interactive table rather
+        # than its own `text/html` show method.
+        # Generated assets the cell registered (`save_asset`), deduped by content path, are taken AFTER the
+        # render, since a package's `show` / `slate_render` may save one. The `finally` takes them even when
+        # the render throws: the task is reused, so the sink must not outlive this eval.
+        if value !== nothing && !quiet
+            try
+                # A bare Matrix/SparseMatrixCSC/structured-LinearAlgebra return auto-renders via
+                # slate_matrix (KaTeX / dotted notation / downsampled heatmap, picked by size and
+                # type) instead of dumping the terminal grid below — replace, then fall through the
+                # SAME dispatch (a heatmap comes back as an EChart; the KaTeX forms fall to the
+                # generic rich-MIME branch below via their `show(io, MIME"text/latex", …)` method).
+                # …EXCEPT when the matrix already knows how to typeset itself. A package whose
+                # element type carries its own `show(io, MIME"text/latex", ::AbstractArray{T})`
+                # (e.g. `Matrix{Sym}` from SymPy/SymPyCore) renders exact symbolic entries that
+                # `_matrix_texnum` cannot format at all — hijacking it discards the better
+                # rendering AND throws a MethodError from inside `show`, where the `try` above
+                # can no longer help. Defer to the value's own LaTeX in that case.
+                if value isa AbstractMatrix &&
+                   !(try Base.invokelatest(showable, MIME"text/latex"(), value) catch; false end)
+                    value = try; Base.invokelatest(slate_matrix, value); catch; value; end
+                end
+                if (try Base.invokelatest(_capture_gallery!, chunks, value) catch; false end)
+                    # a collection of figures, laid out together
+                elseif value isa EChart
+                    push!(echarts, value.option)
+                elseif value isa Animation
+                    push!(animations, (manifest = value.manifest, frames = value.frames, lut = value.lut))
+                elseif (st = (try Base.invokelatest(_as_slate_table, value) catch; nothing end)) !== nothing
+                    push!(tables, _table_wire(st))
+                elseif value isa NamedTuple && (rec = (try Base.invokelatest(record_html, value) catch; nothing end)) !== nothing
+                    # A NamedTuple of results reads as a grid of fields (record_display.jl).
+                    push!(chunks, (_RECORD_SLATE_HTML, Vector{UInt8}(rec)))
+                    # Keep the value against this cell so a field can later be opened in its own right
+                    # (a matrix in its real `slate_matrix` rendering). `filename` is "cell:<id>".
+                    startswith(filename, "cell:") &&
+                        (try Base.invokelatest(record_remember!, filename[6:end], value) catch; end)
+                else
+                    try
+                        Base.invokelatest(_capture_rich!, chunks, value)
+                    catch
+                    end
+                end
+            finally
+                assets = _harvest_assets(get(task_local_storage(), :slate_assets, nothing))
+                delete!(task_local_storage(), :slate_assets)
+            end
+        else
+            assets = _harvest_assets(get(task_local_storage(), :slate_assets, nothing))
+            delete!(task_local_storage(), :slate_assets)
+        end
+
+        # text/plain repr — skipped when richer output exists (the renderer suppresses
+        # it anyway), and `invokelatest`-guarded for the world-age reason. A NamedTuple keeps it beside
+        # its record grid: the page shows the grid, and an agent reading the result gets the numbers.
+        if value !== nothing && !quiet && (isempty(chunks) || value isa NamedTuple) && isempty(echarts) && isempty(tables) && isempty(animations)
+            try
+                # `:displaysize` bounds how much `show` even generates for big containers (≈40 rows),
+                # then `_cap_keep!` is the hard ceiling for anything still huge (e.g. a giant String value).
+                value_repr = Base.invokelatest(sprint, show, MIME("text/plain"), value;
+                                               context = (:limit => true, :displaysize => (40, 160)))
+                value_repr = _cap_keep!(overflow, "value", value_repr, "txt")
+            catch
+            end
+        end
+    end
+
     value = nothing
     err = nothing
     btrace = nothing
@@ -864,14 +1061,18 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # BEFORE the buffers are consumed, so the last thing the page sees is the real result, never a
     # half-sampled frame that arrived after it.
     outwatch = _start_cellout(capture, _cellout_sink(mod), cid)
+    # What the namespace holds before the cell runs, to report afterwards what the run bound (`:defines`).
+    observing = startswith(filename, "cell:") && !occursin('#', cid)
+    nssnap = observing ? Base.invokelatest(_ns_snapshot, mod) : nothing
     t0 = time_ns()
     try
         # ConsoleLogger on the captured stderr (`_logio`), so @warn/@info/@error land in this cell's
         # stream — coloured, since the stream reports `:color => true` and the renderer turns SGR into
         # spans. Wrapped so ProgressLogging `@progress` records drive the cell meter instead of printing.
-        _logger = _CellLogger(Logging.ConsoleLogger(_logio(capture)), _progress_sink(mod))
+        _logger = _CellLogger(Logging.ConsoleLogger(_logio(capture)), _progress_sink(mod), cid)
         Logging.with_logger(_logger) do
             value = _eval_cell_source(mod, source, filename)
+            render_value!()
         end
     catch e
         err = e
@@ -883,22 +1084,25 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         delete!(task_local_storage(), :slate_cell)
         delete!(task_local_storage(), :slate_replay_seq)
     end
+    # An eval that threw never reached `render_value!`, whose `finally` takes the asset sink.
+    haskey(task_local_storage(), :slate_assets) &&
+        (assets = _harvest_assets(task_local_storage(:slate_assets)); delete!(task_local_storage(), :slate_assets))
     binds = copy(get(task_local_storage(), :__slate_binds, NamedTuple[]))
     delete!(task_local_storage(), :__slate_binds)
     # Harvest the cell-effect declarations: resolve each record's statement index → its deparsed source
     # (the replay unit), dedup by (kind, names, stmt_src). Then clear the eval-scoped task-local keys.
     effects = _harvest_effects(get(task_local_storage(), :slate_effects, nothing),
                                get(task_local_storage(), :slate_stmt_srcs, String[]))
+    if nssnap !== nothing
+        bound = Base.invokelatest(_ns_bound_since, mod, nssnap)
+        isempty(bound) || push!(effects, (; kind = :defines, names = bound, stmt_src = "", data = nothing))
+    end
     for k in (:slate_effects, :slate_stmt, :slate_stmt_srcs)
         haskey(task_local_storage(), k) && delete!(task_local_storage(), k)
     end
-    # Generated assets the cell registered (empty unless it called `save_asset`). Deduped by content path.
-    assets = _harvest_assets(get(task_local_storage(), :slate_assets, nothing))
-    delete!(task_local_storage(), :slate_assets)
     # Trace rows the cell recorded (empty unless it was `@trace`-wrapped). JSON-safe Dicts, like `tables`.
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
     tracesink === nothing || (tracesink[] = nothing)
-    overflow = NamedTuple[]                       # full results saved to disk for "open full output"
     # Replay in-place redraws (`\r`, backspace, cursor moves) BEFORE capping, so a progress bar reads
     # as the one line it was drawn as instead of a cascade of frames — and so those frames don't eat
     # the character budget. Cooking happens here, once, at the point the streams become the wire form,
@@ -908,85 +1112,11 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     stderr_str = _cap_keep!(overflow, "stderr", cook_terminal(raw_err), "txt")
     dur_ms = (time_ns() - t0) / 1e6
 
-    # Capture the return value: an ECharts spec / a table are kept raw (reduced to
-    # JSON-safe primitives here but JSON-*encoded* server-side, dodging JSON
-    # world-age in the eval frame); otherwise the richest MIME. The table check
-    # precedes rich MIME so a DataFrame renders as our interactive table rather
-    # than its own `text/html` show method.
-    # A cell whose last code line ends in `;` is "quiet" — suppress the RETURN
-    # value's display (like the REPL / Jupyter). stdout and explicit `display(…)`
-    # calls (already in `chunks`) still show.
-    quiet = _is_quiet_cell(source)
-    echarts = Any[]
-    tables = Any[]
-    animations = Any[]
-    if err === nothing && value !== nothing && !quiet
-        # Re-establish this eval's execution context around the RETURN VALUE's rich render. The value's
-        # `show` runs HERE — AFTER the eval's `finally` already cleared `:slate_ctx`/`:slate_cell` — but a
-        # package `show` method (e.g. a Bonito figure's `setup_connection`) registers per-cell teardown via
-        # `slate_on_cleanup`, which is a no-op without the context. Set it for the render, clear it after
-        # (finally), so a re-run of the cell actually tears down what the LAST render allocated (a live
-        # session, a subscription) instead of leaking it. Explicit `display(…)` during the eval already
-        # ran inside the context; only the trailing return-value render falls outside it.
-        slate_ctx === nothing || (task_local_storage(:slate_ctx, slate_ctx); task_local_storage(:slate_cell, cid))
-        try
-            # A bare Matrix/SparseMatrixCSC/structured-LinearAlgebra return auto-renders via
-            # slate_matrix (KaTeX / dotted notation / downsampled heatmap, picked by size and
-            # type) instead of dumping the terminal grid below — replace, then fall through the
-            # SAME dispatch (a heatmap comes back as an EChart; the KaTeX forms fall to the
-            # generic rich-MIME branch below via their `show(io, MIME"text/latex", …)` method).
-            # …EXCEPT when the matrix already knows how to typeset itself. A package whose
-            # element type carries its own `show(io, MIME"text/latex", ::AbstractArray{T})`
-            # (e.g. `Matrix{Sym}` from SymPy/SymPyCore) renders exact symbolic entries that
-            # `_matrix_texnum` cannot format at all — hijacking it discards the better
-            # rendering AND throws a MethodError from inside `show`, where the `try` above
-            # can no longer help. Defer to the value's own LaTeX in that case.
-            if value isa AbstractMatrix &&
-               !(try Base.invokelatest(showable, MIME"text/latex"(), value) catch; false end)
-                value = try; Base.invokelatest(slate_matrix, value); catch; value; end
-            end
-            if value isa EChart
-                push!(echarts, value.option)
-            elseif value isa Animation
-                push!(animations, (manifest = value.manifest, frames = value.frames, lut = value.lut))
-            elseif (st = (try Base.invokelatest(_as_slate_table, value) catch; nothing end)) !== nothing
-                push!(tables, _table_wire(st))
-            elseif value isa NamedTuple && (rec = (try Base.invokelatest(record_html, value) catch; nothing end)) !== nothing
-                # A NamedTuple of results reads as a grid of fields (record_display.jl).
-                push!(chunks, (_RECORD_SLATE_HTML, Vector{UInt8}(rec)))
-                # Keep the value against this cell so a field can later be opened in its own right
-                # (a matrix in its real `slate_matrix` rendering). `filename` is "cell:<id>".
-                startswith(filename, "cell:") &&
-                    (try Base.invokelatest(record_remember!, filename[6:end], value) catch; end)
-            else
-                try
-                    Base.invokelatest(_capture_rich!, chunks, value)
-                catch
-                end
-            end
-        finally
-            slate_ctx === nothing || (delete!(task_local_storage(), :slate_ctx); delete!(task_local_storage(), :slate_cell))
-        end
-    end
-
-    # text/plain repr — skipped when richer output exists (the renderer suppresses
-    # it anyway), and `invokelatest`-guarded for the world-age reason. A NamedTuple keeps it beside
-    # its record grid: the page shows the grid, and an agent reading the result gets the numbers.
-    value_repr = ""
-    if err === nothing && value !== nothing && !quiet && (isempty(chunks) || value isa NamedTuple) && isempty(echarts) && isempty(tables) && isempty(animations)
-        try
-            # `:displaysize` bounds how much `show` even generates for big containers (≈40 rows),
-            # then `_cap_keep!` is the hard ceiling for anything still huge (e.g. a giant String value).
-            value_repr = Base.invokelatest(sprint, show, MIME("text/plain"), value;
-                                           context = (:limit => true, :displaysize => (40, 160)))
-            value_repr = _cap_keep!(overflow, "value", value_repr, "txt")
-        catch
-        end
-    end
     # A cell's runtime error may still arrive wrapped in a LoadError (defensive — unwrap to the
     # REAL error: UndefVarError, DomainError, …). Parse errors arrive as `ParseError` directly.
     realerr = err isa LoadError ? err.error : err
     exc = realerr === nothing ? nothing : sprint(showerror, realerr)
+    exc === nothing || (exc *= _stale_cache_hint(exc))
     # Trim our eval machinery (the `Core.eval`/`_eval_cell_source` + capture/gate frames below it)
     # from the backtrace — user/package frames sit above it — so the trace shows where the error
     # actually is. `Core.eval` appears as `:eval` in boot.jl.
@@ -1039,7 +1169,12 @@ end
 # the way a Bonito server serves a fresh session per page load. First run the extensions' page-reset hooks
 # (SEB `on_live_reset` — e.g. BonitoSlate drops its Bonito page-root so figures re-render as a fresh session
 # tree), then RE-RUN each retained cell's source in `mod` (a clean fresh figure, no accumulated screens) and
-# collect its wire. Returns `[(cid, wire), …]` (empty if nothing is live). Best-effort per cell.
+# collect its wire. Returns `[(cid, chunks, assets), …]` (empty if nothing is live). Best-effort per cell.
+#
+# `assets` rides along because a re-render is a real eval: a cell that calls `save_asset` registers its
+# bytes into this run's sink, and the markup it produces references them by path. Returning the chunks
+# alone published markup whose asset paths nothing had registered, so every `Slate.asset` in a live
+# output resolved to a 404 after a page reconnect.
 function rerender_live_outputs(mod::Module)
     try; Base.invokelatest(SlateExtensionsBase.run_live_resets); catch; end
     # A re-render must carry the SAME Slate execution context a normal cell eval gets. `run_capture` FIRES the
@@ -1052,7 +1187,7 @@ function rerender_live_outputs(mod::Module)
     # `emit`/`on`/`off`/`cleanup` from the namespace, and `__slate_call` passes empty strings for the same
     # reason.
     ctx = _build_slate_ctx(mod, "", "", String[])
-    outs = Tuple{String,Vector{Tuple{String,Vector{UInt8}}}}[]
+    outs = Tuple{String,Vector{Tuple{String,Vector{UInt8}}},Vector{Any}}[]
     for (cid, spec) in lock(() -> collect(_LIVE_OUTPUTS), _LIVE_OUTPUTS_LOCK)
         w = try
             run_capture(mod, spec.source, spec.filename; capture = DemuxCapture(), slate_ctx = ctx)
@@ -1060,7 +1195,7 @@ function rerender_live_outputs(mod::Module)
             nothing
         end
         (w !== nothing && !isempty(w.mime)) || continue
-        push!(outs, (String(cid), collect(Tuple{String,Vector{UInt8}}, w.mime)))
+        push!(outs, (String(cid), collect(Tuple{String,Vector{UInt8}}, w.mime), collect(Any, w.assets)))
     end
     return outs
 end

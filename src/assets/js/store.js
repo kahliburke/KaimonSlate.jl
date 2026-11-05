@@ -11,8 +11,9 @@ import { signal, computed } from '@preact/signals';
 // Seed from the last state the classic boot published (window.__slateState). The boot's
 // reload() is async and may run before this module loads, so it stashes state there for us.
 export const nbState  = signal(window.__slateState || null); // the whole /api/state payload
-export const selected = signal(window.selectedId || null);   // ACTIVE/anchor cell id (command mode; the one single-cell ops act on)
-export const selectedSet = signal(new Set(window.selectedId ? [window.selectedId] : [])); // ALL selected ids (multi-select)
+const _sel0 = (window.slateSelectedId && window.slateSelectedId()) || null;
+export const selected = signal(_sel0);   // ACTIVE/anchor cell id (command mode; the one single-cell ops act on)
+export const selectedSet = signal(new Set(_sel0 ? [_sel0] : [])); // ALL selected ids (multi-select)
 export const focus    = signal(null);                        // dep-focus: show ONLY this cell's dependency chain
 // EDIT MODE: the id of the cell whose editor holds the keyboard, else null. Mode has to be state,
 // not a class poked onto the DOM: <Cell> rewrites the cell's `class` whenever its computed value
@@ -104,7 +105,10 @@ export function setLiveState(id, s) {
 // Source comparison, shared by every caller — trailing whitespace is not an edit. Defined once
 // here because two private copies drifted (one exact `!==`, one tolerant), and the strict copy
 // painted cells `edited` over a trailing newline the other considered clean.
-export const srcEq = (a, b) => (a || '').replace(/\s+$/, '') === (b || '').replace(/\s+$/, '');
+// Blank lines before a cell's first line and whitespace after its last are not part of it: the server
+// stores a cell without them, so text that differs only there is the same cell.
+const _srcCore = s => (s || '').replace(/^(?:[ \t]*\r?\n)+/, '').replace(/\s+$/, '');
+export const srcEq = (a, b) => _srcCore(a) === _srcCore(b);
 export function markDirty(id) { if (!localDirty.value[id]) localDirty.value = { ...localDirty.value, [id]: true }; }
 // Typing back to the saved source is no longer an edit — drop BOTH marks. Called ONLY from an
 // editor's own input handler, once its text agrees with the source again: the transient `edited`

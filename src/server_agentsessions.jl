@@ -147,15 +147,19 @@ function note_external_tool!(nb::LiveNotebook, agent_id::AbstractString, toolnam
     return nothing
 end
 
-_agent_available() = isdefined(Main, :Kaimon) &&
+# A stand-in for Kaimon's agent service, `(tool, args) -> JSON string`; tests set it.
+const _AGENT_SERVICE = Ref{Any}(nothing)
+
+_agent_available() = _AGENT_SERVICE[] !== nothing || (isdefined(Main, :Kaimon) &&
     isdefined(getfield(Main, :Kaimon), :KaimonGate) &&
-    isdefined(getfield(Main, :Kaimon).KaimonGate, :call_tool)
+    isdefined(getfield(Main, :Kaimon).KaimonGate, :call_tool))
 
 # Call a core Kaimon `agent_*` tool over the gate service endpoint. The handlers
 # return a JSON string on success (e.g. `{"agent_id":…}`/`{"turn":…}`) or a plain
 # `"Error …"` string on failure — parse the former, raise the latter.
 function _agent_call(tool::Symbol, args::Dict{String,Any})
-    raw = getfield(Main, :Kaimon).KaimonGate.call_tool(tool, args)
+    svc = _AGENT_SERVICE[]
+    raw = svc !== nothing ? svc(tool, args) : getfield(Main, :Kaimon).KaimonGate.call_tool(tool, args)
     s = raw isa AbstractString ? String(raw) : string(raw)
     parsed = try; JSON.parse(s); catch; nothing; end
     (parsed isa AbstractDict) || error(s)   # non-JSON ⇒ the handler's error text

@@ -642,8 +642,9 @@ No-op if nothing declares `name`, and inert on a standalone run. Distinct from t
           the same lightweight live refresh as a `@bind` change (edit `app.css` → the page updates).
 
         `@asset bytes "logo.png"` returns raw `Vector{UInt8}` (images/binaries) instead of a String.
-        Assets are ALSO served by a real URL under the notebook (`asset/<path>`), so front-end JS can
-        `<script src="asset/app.js">` (cacheable, debuggable, source-mapped) rather than inlining.
+        Assets are ALSO served by a real URL under the notebook (`/n/<id>/asset/<path>`): front-end JS
+        gets it from `Slate.assetUrl("app.js")` (cacheable, debuggable, source-mapped) rather than
+        inlining, and a markdown image names a project file by a relative path, `![logo](figures/logo.png)`.
         The primary use is feeding TRACKED source into `WebPage` / display HTML.
         ```julia
         WebPage(css=@asset("app.css"), js=@asset("app.js"), html=@asset("app.html"))  # edits stay live

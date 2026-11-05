@@ -148,18 +148,31 @@ dtype_js() = string(
 Serialize a [`SlateBinary`](@ref) into the self-describing binary streaming frame (see the layout above).
 The channel + meta + dtype + shape are the header; the array's raw column-major bytes are the payload.
 """
-function encode_binary_frame(channel::AbstractString, x::SlateBinary{T,N}) where {T,N}
+encode_binary_frame(channel::AbstractString, x::SlateBinary) =
+    encode_binary_frame!(UInt8[], channel, x)
+
+"""
+    encode_binary_frame!(buf, channel, x::SlateBinary) -> buf
+
+[`encode_binary_frame`](@ref) into `buf`, resized to the frame's length. A buffer reused for frame
+after frame grows to the largest of them once and is not reallocated after that, so a stream of
+large frames allocates only the small header per frame.
+"""
+function encode_binary_frame!(buf::Vector{UInt8}, channel::AbstractString, x::SlateBinary{T,N}) where {T,N}
     ch = codeunits(String(channel))
     mb = codeunits(sprint(_write_json, x.meta))
-    # Sized exactly: unhinted, the buffer doubles its way to the payload and allocates a multiple of
-    # the frame it produces — per frame, on the task that is streaming.
     n = 1 + 2 + length(ch) + 2 + length(mb) + 1 + 1 + 4N + sizeof(x.data)
-    io = IOBuffer(; sizehint = n)
-    write(io, 0x01)                                            # version
-    write(io, UInt16(length(ch))); write(io, ch)
-    write(io, UInt16(length(mb))); write(io, mb)
-    write(io, _bin_dtype(T))
-    write(io, UInt8(N)); for d in size(x.data); write(io, UInt32(d)); end
-    write(io, reinterpret(UInt8, vec(x.data)))                # raw LE bytes, column-major
-    return take!(io)
+    resize!(buf, n)
+    i = 0
+    put8(v) = (@inbounds buf[i += 1] = UInt8(v); nothing)
+    put16(v) = (put8(v & 0xff); put8((v >> 8) & 0xff))
+    put32(v) = (put16(v & 0xffff); put16((v >> 16) & 0xffff))
+    put8(0x01)                                                 # version
+    put16(length(ch)); copyto!(buf, i + 1, ch, 1, length(ch)); i += length(ch)
+    put16(length(mb)); copyto!(buf, i + 1, mb, 1, length(mb)); i += length(mb)
+    put8(_bin_dtype(T))
+    put8(N); for d in size(x.data); put32(UInt32(d)); end
+    # Raw LE bytes, column-major, straight from the array.
+    GC.@preserve buf x unsafe_copyto!(pointer(buf, i + 1), Ptr{UInt8}(pointer(x.data)), sizeof(x.data))
+    return buf
 end

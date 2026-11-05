@@ -94,7 +94,7 @@
     // `column=N` cells live inside a `.cell-row` flex wrapper in the notebook (see notebook.js). Moving
     // the bare cell nodes would drop that wrapper and stack them — so rebuild the row grouping here,
     // recreating `.cell-row` wrappers in the slide. The live cells still move (never clone); each one's
-    // real home (its original `.cell-row` in #nb) is remembered for restore.
+    // real home (its `.cellslot` in #nb, see notebook.js `MemoCell`) is remembered for restore.
     const cells = (nbState && nbState.cells) || [];
     let row = null;   // the current open `.cell-row`, or null when at top level
     for (const id of sld.ids) {
@@ -102,7 +102,7 @@
       if (!el) continue;
       const c = cells.find(x => x.id === id);
       const col = c ? _slideCellColumn(c) : 1;
-      D.restore.push({ el, parent: el.parentNode, next: el.nextSibling });   // remember home for exit
+      D.restore.push({ el, slot: el.parentNode });   // remember home for exit
       if (col >= 2 && row) { row.appendChild(el); continue; }                // extra column → into open row
       // A default-column cell may still anchor a row if the NEXT slide cell is column≥2.
       const j = sld.ids.indexOf(id);
@@ -163,21 +163,40 @@
     slide.classList.toggle('has-split', !!slide.querySelector(':scope > .cell.slide-split'));
   }
   function _unmount() {
-    // Restore in REVERSE so each cell's `next` sibling is already home before we place it — that keeps
-    // the anchor a real child of `parent` (preserving original order) instead of forcing an append.
-    for (let i = D.restore.length - 1; i >= 0; i--) {
-      const r = D.restore[i];
-      // Only use `next` as the insert anchor if it's STILL a child of `parent`; a non-child reference
-      // node makes insertBefore throw (the bug when sibling cells shared a slide).
-      const anchor = r.next && r.next.parentNode === r.parent ? r.next : null;
+    for (const r of D.restore) {
       r.el.classList.remove('slide-split');   // shed present-only layout tag before it goes home
       _restoreCellCharts(r.el);                // undo present-only chart box-fit → notebook sizing
-      if (r.parent && r.parent.isConnected) r.parent.insertBefore(r.el, anchor);
-      else { const nb = document.getElementById('nb'); nb && nb.appendChild(r.el); }
+      if (r.slot.isConnected) r.slot.appendChild(r.el);
+      else r.el.remove();                      // its cell is gone (see `_deckSettle`)
     }
     D.restore = [];
     const stage = document.getElementById('deckstage');
     if (stage) stage.innerHTML = '';
+  }
+  // notebook.js calls this when a `MemoCell` unmounts. A slide cell whose `.cellslot` left #nb was
+  // deleted, or preact mounted it again in a new slot (for example when a `column=N` tag moves it into
+  // or out of a row). After the render, put the new node in the old one's place on the slide, or take
+  // the deleted cell off the slide.
+  let _settling = false;
+  function _deckSettle() {
+    if (!D.open || _settling) return;
+    _settling = true;
+    queueMicrotask(() => {
+      _settling = false;
+      const nb = document.getElementById('nb');
+      let changed = false;
+      D.restore = D.restore.filter(r => {
+        if (r.slot.isConnected) return true;
+        changed = true;
+        const el = nb && nb.querySelector('#' + CSS.escape(r.el.id));   // the new node, if any
+        if (!el) { r.el.remove(); return false; }
+        r.slot = el.parentNode;
+        r.el.replaceWith(el);
+        r.el = el;
+        return true;
+      });
+      if (changed) requestAnimationFrame(() => _relayout());
+    });
   }
   function _transClass(dir) {
     const t = (nbState && nbState.slideTransition) || 'fade';
@@ -337,7 +356,12 @@
     if (IS_PRESENTER) { _presenterKey(e); return; }
     if (!D.open) return;
     const tag = (e.target && e.target.tagName) || '';
-    if (/INPUT|TEXTAREA/.test(tag) || (e.target && e.target.isContentEditable)) return;  // let editors type
+    if (/INPUT|TEXTAREA/.test(tag) || (e.target && e.target.isContentEditable)) {   // let editors type
+      // Escape gives the keys back to the deck: a focused input (a slider, a text field) lets go. The
+      // blur waits for the input's own handlers, because an input can cancel on Escape and commit on blur.
+      if (e.key === 'Escape' && tag === 'INPUT') { const t = e.target; setTimeout(() => { if (document.activeElement === t) t.blur(); }); }
+      return;
+    }
     switch (e.key) {
       case 'ArrowRight': case 'PageDown': case ' ': e.preventDefault(); slideNext(); break;
       case 'ArrowLeft': case 'PageUp': e.preventDefault(); slidePrev(); break;
@@ -472,5 +496,6 @@
   window.slideToggleCode = slideToggleCode;
   window.slideFullscreen = slideFullscreen;
   window.openPresenter = openPresenter;
+  window._deckSettle = _deckSettle;
   window._deckOpen = () => D.open;
 })();

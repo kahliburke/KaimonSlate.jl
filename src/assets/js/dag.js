@@ -575,12 +575,12 @@ let _dagRouteData = null, _dagRouteTimer = 0;
 async function _dagFetchRoutes() {
   try {
     const d = await (await fetch(_apipath('/api/peer-plan'))).json();
-    const map = {}; for (const r of (d.routes || [])) map[r.src + ' ' + r.dst] = r;
+    const map = {}; for (const r of (d.routes || [])) map[r.src + '\0' + r.dst] = r;
     _dagRouteData = map;
   } catch (_) { if (!_dagRouteData) _dagRouteData = {}; }
   if (_dagRegionsOn) _dagQueue();                          // repaint with fresh verdicts/throughput
 }
-function _dagRouteFor(src, dst) { return _dagRouteData ? _dagRouteData[src + ' ' + dst] : null; }
+function _dagRouteFor(src, dst) { return _dagRouteData ? _dagRouteData[src + '\0' + dst] : null; }
 // Poll while the overlay is on (throughput/verdicts drift); stop when off.
 function _dagRoutesPoll(on) {
   if (_dagRouteTimer) { clearInterval(_dagRouteTimer); _dagRouteTimer = 0; }
@@ -2239,7 +2239,10 @@ function toggleDag() {
   });
   _dagReflowCharts();                                        // the notebook column changed width
   if (open) requestAnimationFrame(_dagRender);               // after the pane lays out (sizes valid)
-  else { _dagCardClose(); _dagPulseSync(); }
+  else {
+    _dagCardClose(); _dagPulseSync();
+    const x = document.getElementById('dagxferdash'); if (x) { _dagXferDashDispose(); x.remove(); }   // its 3 s poll
+  }
   _dagRoutesPoll(open && _dagRegionsOn);                     // region-routing poll rides the pane's open state
 }
 // The pane reflows the notebook column, but only window.resize normally re-measures the

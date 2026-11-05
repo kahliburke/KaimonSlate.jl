@@ -531,6 +531,21 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
     end
 
+    @testset "a cell whose macro isn't defined yet is retried whole, not resolved in part" begin
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        # Before its macro exists, only the cell's OTHER statement expands. That partial answer must
+        # not be cached as the cell's bindings: the macro's write would then never be recovered.
+        r = parse_report("#%% code id=m\nmacro defpart(name)\n    esc(:(\$name = 41))\nend\n" *
+                         "#%% code id=call\n@defpart part_val\nalso_val = 1\n" *
+                         "#%% code id=read\nz = part_val + 1")
+        build_dependencies!(r)
+        eval_stale!(r)
+        @test :part_val in findcell(r, "call").writes       # the macro's write, recovered post-drain
+        @test :also_val in findcell(r, "call").writes
+        @test "call" in findcell(r, "read").deps
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+    end
+
     @testset "refine_macros! restales readers that raced a recovered producer" begin
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
         # In a PARALLEL drain a reader can start before its (not-yet-linked) macro producer and
@@ -553,13 +568,36 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
     end
 
+    @testset "a second macro writer of one name is restaled, though it ran cleanly" begin
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        # Two cells define the same name through a macro. Recovered after a parallel drain, the second
+        # depends on the first and may have raced it, so it re-runs even though it didn't error; being a
+        # recovered writer itself must not exempt it. They ran together, so the first re-runs too.
+        r = parse_report("#%% code id=m\nmacro mk2(name, v)\n    esc(:(\$name = \$v))\nend\n" *
+                         "#%% code id=w1\n@mk2 twice_val 1\n" *
+                         "#%% code id=w2\n@mk2 twice_val 2")
+        build_dependencies!(r); eval_stale!(r)
+        @test "w1" in findcell(r, "w2").deps
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED)   # force re-resolution
+        writers = Set{String}()
+        @test refine_macros!(r; rebuild = false, recovered = writers)
+        @test writers == Set(["w1", "w2"])
+        ReportEngine.rebuild_precise!(r)
+        ReportEngine.restale_macro_racers!(r, writers)
+        @test findcell(r, "w2").state == STALE
+        @test findcell(r, "w1").state == STALE        # it ran alongside w2, which may have disturbed it
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+    end
+
     @testset "macroexpand config opt-out keeps the conservative analysis" begin
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
         r = parse_report("#%% code id=s\nBase.@kwdef struct KwOpt\n    x::Int = 1\nend\n" *
                          "#%% code id=u\nfoo2 = KwOpt(x = 2)")
         r.meta["macroexpand"] = false
         build_dependencies!(r); eval_stale!(r)
-        @test :KwOpt ∉ findcell(r, "s").writes              # no recovery when opted out
+        s = findcell(r, "s")
+        @test :KwOpt ∉ setdiff(s.writes, s.observed)        # no expansion-recovered write when opted out…
+        @test :KwOpt in s.observed                          # …though the run is still seen to bind it
         @test isempty(ReportEngine.pending_macro_cells(r))  # and no round-trips queued
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
     end

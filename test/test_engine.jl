@@ -227,6 +227,34 @@ mean(data)
         @test length(ids) == length(unique(ids))
     end
 
+    @testset "a return value's show writes into the cell's own streams" begin
+        r = parse_report("""
+            #%% code id=a
+            struct _Loud end
+            Base.show(io::IO, ::MIME"text/plain", ::_Loud) = (println("from show"); @warn "show warned"; print(io, "loud"))
+            _Loud()
+            """)
+        eval_report!(r)
+        o = r.cells[1].output
+        @test o.exception === nothing && o.value_repr == "loud"
+        @test occursin("from show", o.stdout) && occursin("show warned", o.stderr)
+    end
+
+    @testset "package specs parse the same for every kernel" begin
+        s = ReportEngine._pkg_add_specs(["Foo", "Bar@1.2", "https://github.com/x/Y.jl#main", "./local"])
+        @test [p.name for p in s.adds[1:2]] == ["Foo", "Bar"]
+        @test s.adds[3].url == "https://github.com/x/Y.jl" && s.adds[3].rev == "main"
+        @test length(s.devs) == 1 && s.devs[1].path == abspath("./local")
+        @test s.labels == ["Foo", "Bar@1.2", "https://github.com/x/Y.jl#main", "./local"]
+        @test ReportEngine._pkg_apply("add", " , ")["ok"] == false            # nothing named
+    end
+
+    @testset "a repeated explicit id gets a free suffix" begin
+        r = @test_logs (:warn, r"`a`.*`a_2`") (:warn, r"`a`.*`a_3`") parse_report(
+            "#%% code id=a\nx = 1\n#%% code id=a\ny = 2\n#%% code id=a_2_x\nw = 0\n#%% code id=a\nz = 3\n")
+        @test [c.id for c in r.cells] == ["a", "a_2", "a_2_x", "a_3"]
+    end
+
     @testset "ECharts DSL — clear ArgumentError on bad input" begin
         S = ReportEngine.series
         @test_throws ArgumentError S(:line, [1, 2, 3], [1, 2])       # mismatched x/y
@@ -248,13 +276,17 @@ mean(data)
     @testset "progress-logging bridge → cell meter" begin
         rec = NamedTuple[]   # (id, frac, msg, done)
         lg = ReportEngine._CellLogger(Logging.NullLogger(),
-                                          (i, f, m, d) -> push!(rec, (id = i, frac = f, msg = m, done = d)))
-        Logging.with_logger(lg) do
+                                          (i, f, m, d) -> push!(rec, (id = i, frac = f, msg = m, done = d)), "fit")
+        cells = Logging.with_logger(lg) do
             Logging.@logmsg Logging.LogLevel(-1) "train" progress = 0.5 _id = :bar1
             Logging.@logmsg Logging.LogLevel(-1) "inner" progress = 0.25 _id = :bar2   # a SECOND scope id
             Logging.@logmsg Logging.LogLevel(-1) "train" progress = "done" _id = :bar1
             @info "ordinary log — not progress"        # must NOT reach the sink
+            # Progress is attributed to the cell through its logger, which a spawned task inherits.
+            (ReportEngine._current_cell_id(), fetch(Threads.@spawn ReportEngine._current_cell_id()))
         end
+        @test cells == ("fit", "fit")
+        @test ReportEngine._current_cell_id() == ""                # outside a cell eval
         @test length(rec) == 3
         @test rec[1] == (id = "bar1", frac = 0.5, msg = "train", done = false)
         @test rec[2] == (id = "bar2", frac = 0.25, msg = "inner", done = false)   # distinct bar id
@@ -471,6 +503,42 @@ end
     # in-process kernels: memo-store queries degrade to empties (no Main.SlateWorker here)
     @test ReportEngine.slate_memo_stats().manifests == 0
     @test isempty(ReportEngine.slate_memo_entries())
+end
+
+@testset "slate_fingerprint: the chunked array path writes the same bytes" begin
+    # A numeric array is fingerprinted in chunks rather than element by element. The chunked encoding
+    # has to be INDISTINGUISHABLE from the element loop, or every memo keyed on an array silently
+    # misses once and the stored results are stranded. `Any[...]` holds the same values behind an
+    # abstract eltype, which takes the element loop — so each pair below is fast path vs element loop
+    # over identical data, and any drift in the encoding shows up here rather than as a cache miss.
+    # `Array{Any}` rather than `Any[c...]`: splatting flattens, and the header carries ndims and size,
+    # so the multidimensional case would differ for a reason that has nothing to do with the encoding.
+    fp = ReportEngine.slate_fingerprint
+    cases = Any[
+        Int8[-128, 0, 127], Int16[-3, 7], Int32[-2^30, 2^30], Int64[-2^62, 0, 2^62],
+        UInt8[0x00, 0x7f, 0xff], UInt16[0, 65535], UInt32[0, 4294967295],
+        Float64[1.5, -2.25, 0.0], Float32[1.5f0, -0.0f0], Float16[Float16(1.5)],
+        Float64[-0.0, 0.0],                                  # signed zero stays distinct
+        Float64[Inf, -Inf],
+        Int64[], Float64[],                                  # empty: no chunk to flush
+        collect(1:(8192 * 2 + 5)),                           # spans several chunks, with a partial tail
+        rand(Int32, 3, 4),                                   # multidimensional, column order
+    ]
+    mismatched = [string(eltype(c), size(c)) for c in cases if fp(c) != fp(Array{Any}(c))]
+    @test isempty(mismatched)
+
+    # NaN canonicalisation has to survive the chunked path too: any payload fingerprints alike, and
+    # an array of NaN still differs from an array of a real number.
+    nan_a = Float64[NaN, 1.0]
+    nan_b = Float64[reinterpret(Float64, 0x7ff8000000000123), 1.0]
+    @test fp(nan_a) == fp(nan_b) == fp(Array{Any}(nan_a))
+    @test fp(nan_a) != fp(Float64[1.0, 1.0])
+
+    # The element loop still owns everything else: an abstract eltype, and types the fast path skips
+    # because their encoding is not the integer one (`Bool`) or can leave Int64 range (`UInt64`).
+    @test fp(Bool[true, false]) == fp(Array{Any}(Bool[true, false]))
+    @test fp(UInt64[0x00, typemax(UInt64)]) == fp(Array{Any}(UInt64[0x00, typemax(UInt64)]))
+    @test fp([1, 2, 3]) == fp(Array{Any}([1, 2, 3]))
 end
 
 @testset "opening a new path creates the directories leading to it" begin

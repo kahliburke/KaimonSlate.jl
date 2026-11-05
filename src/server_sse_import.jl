@@ -370,6 +370,10 @@ function _start_watcher!(nb::LiveNotebook)
                 # starved the eval). Only sync when mtime actually advanced; `sleep` floors event storms
                 # to ≤5 Hz — the same hardening as the @asset watcher below.
                 m = _asset_mtime(nb.path)
+                # A write still under way: let it settle, then read it (`_read_settled`).
+                while m != last && 0 <= time() - m < _SETTLE_S
+                    sleep(_SETTLE_S); m = _asset_mtime(nb.path)
+                end
                 if m != last
                     last = m
                     sync_from_file!(nb) && _broadcast(nb, string(nb.version))

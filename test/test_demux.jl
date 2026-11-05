@@ -49,4 +49,18 @@ include(joinpath(@__DIR__, "..", "src", "demux.jl"))
             restore_streams!(prev)
         end
     end
+
+    @testset "package loading's world sees the demux methods" begin
+        old = Base._require_world_age[]
+        prev = install_demux!()
+        try
+            res = with_captured_output() do
+                Base.invoke_in_world(Base._require_world_age[], println, stdout, "from loading")
+            end
+            @test strip(res.stdout) == "from loading"
+        finally
+            restore_streams!(prev)
+            Base._require_world_age[] = old
+        end
+    end
 end

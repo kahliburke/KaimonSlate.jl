@@ -125,6 +125,25 @@ end
 _is_server_write(report_id, h::UInt64) =
     lock(_SWRITES_LOCK) do; h in get(_SERVER_WRITES, String(report_id), UInt64[]); end
 
+# Write a notebook's text to `path` whole: into a file beside it, then moved over it, so a reader (the
+# watcher, a `/state` poll, both of which `sync_from_file!`) sees the old text or the new one. A read
+# between a plain `write`'s truncation and its last byte parses as a notebook with fewer cells, or
+# none, matches no recorded server write, and replaces the live notebook. A symlink is written
+# through, since a rename would replace the link, and the file keeps its mode.
+function _write_notebook(path::AbstractString, s::AbstractString)
+    target = ispath(path) ? realpath(path) : String(path)
+    tmp = joinpath(dirname(target), "." * basename(target) * ".saving-" * string(rand(UInt64); base = 36))
+    try
+        write(tmp, s)
+        ispath(target) && chmod(tmp, filemode(target) & 0o7777)
+        mv(tmp, target; force = true)
+    catch
+        rm(tmp; force = true)
+        rethrow()
+    end
+    return nothing
+end
+
 # Persist the notebook to its `.jl` AND record a durable checkpoint. The single
 # write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
 function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::AbstractString = "")
@@ -150,7 +169,7 @@ function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::
         @warn "KaimonSlate: could not preserve bundle footer on save" exception = (e, catch_backtrace())
     end
     _note_server_write!(nb.report.id, canon)     # register BEFORE writing: a watcher tick fired by
-    write(nb.path, s)                             # this write must recognize it as OURS, not external
+    _write_notebook(nb.path, s)                   # this write must recognize it as OURS, not external
     nb.version += 1                               # every in-app commit advances the version (CAS basis)
     _history!(nb; source = source, label = label)
     return nb
@@ -191,6 +210,20 @@ function _notebook_adds(nb::LiveNotebook)
             detached = info.parent === nothing, ok = true)
 end
 
+# One footer record. A local checkout or git package also records where it came from, so a rebuild
+# can develop or clone it again instead of looking its name up in a registry.
+function _env_record(d)
+    r = Dict{String,Any}("name" => string(get(d, "name", "")), "version" => string(get(d, "version", "")),
+                         "uuid" => string(get(d, "uuid", "")))
+    src = string(get(d, "source", "registry")); origin = string(get(d, "origin", ""))
+    # A checkout under the home directory is recorded `~/…`, so the footer holds for anyone who keeps
+    # it at the same place.
+    home = homedir()
+    src == "path" && startswith(origin, home * "/") && (origin = "~" * origin[ncodeunits(home)+1:end])
+    src in ("path", "git") && !isempty(origin) && (r["source"] = src; r["origin"] = origin)
+    return r
+end
+
 # Sync the `.jl` reproducibility footer (`report.meta["env"]`) to the notebook's current
 # package delta and persist if it changed. Called after package operations.
 function _refresh_env_meta!(nb::LiveNotebook)
@@ -198,10 +231,7 @@ function _refresh_env_meta!(nb::LiveNotebook)
     # nb.lock (protocol), then apply the change + persist under the lock. Sole caller: `notebook_pkg_op!`.
     info = _notebook_adds(nb)
     info.ok || return nb   # env probe failed transiently — leave the footer as-is rather than wiping it
-    env = Dict{String,Any}[Dict{String,Any}("name" => string(get(d, "name", "")),
-                                             "version" => string(get(d, "version", "")),
-                                             "uuid" => string(get(d, "uuid", "")))
-                           for d in info.adds]
+    env = Dict{String,Any}[_env_record(d) for d in info.adds]
     @report_op nb report begin
         cur = get(report.meta, "env", Dict{String,Any}[])
         changed = if isempty(env)
@@ -308,18 +338,20 @@ end
 function set_notebook_config!(nb::LiveNotebook, key::AbstractString, value; clear::Bool = false)
     it = _config_item(String(key))
     it === nothing && return Dict{String,Any}("ok" => false, "message" => "unknown config key '$key'")
-    if clear || (value isa AbstractString && isempty(strip(String(value))))
-        delete!(nb.report.meta, it.key)
-    else
-        nb.report.meta[it.key] = it.type === :bool ? (value === true || value == "true") :
-                                 it.type === :int  ? something(tryparse(Int, string(value)), it.default) :
-                                 String(string(value))
+    @report_op nb report begin   # a run mutates the report concurrently; the persist must not tear it
+        if clear || (value isa AbstractString && isempty(strip(String(value))))
+            delete!(report.meta, it.key)
+        else
+            report.meta[it.key] = it.type === :bool ? (value === true || value == "true") :
+                                  it.type === :int  ? something(tryparse(Int, string(value)), it.default) :
+                                  String(string(value))
+        end
+        it.key == "threads" && nb.kernel isa ReportEngine.GateKernel &&
+            (nb.kernel.threads = get(report.meta, "threads", ""))
+        it.key == "juliaflags" && nb.kernel isa ReportEngine.GateKernel &&
+            (nb.kernel.extra_flags = get(report.meta, "juliaflags", ""))
+        _persist!(nb)
     end
-    it.key == "threads" && nb.kernel isa ReportEngine.GateKernel &&
-        (nb.kernel.threads = get(nb.report.meta, "threads", ""))
-    it.key == "juliaflags" && nb.kernel isa ReportEngine.GateKernel &&
-        (nb.kernel.extra_flags = get(nb.report.meta, "juliaflags", ""))
-    _persist!(nb)
     it.restart && restart_kernel!(nb)
     return Dict{String,Any}("ok" => true)
 end
@@ -340,12 +372,28 @@ function restore_history!(nb::LiveNotebook, hash::AbstractString)
     return true
 end
 
+# The notebook's text as a writer left it, or `nothing` while one may be part way through: the file
+# was written moments ago, or its size or mtime moved during the read. An editor that saves in place
+# truncates the file first, and a read in that window parses as a notebook with fewer cells, or none.
+# The hub's own saves are whole (`_write_notebook`); this covers every other writer. An mtime ahead
+# of the clock, as a network filesystem can report, counts as settled.
+const _SETTLE_S = 0.15
+function _read_settled(path::AbstractString)
+    s1 = stat(path)
+    0 <= time() - s1.mtime < _SETTLE_S && return nothing
+    txt = read(path, String)
+    s2 = stat(path)
+    (s2.mtime == s1.mtime && s2.size == s1.size == sizeof(txt)) || return nothing
+    return txt
+end
+
 # Pull in external edits (VS Code, the agent, …). Re-reads the file; if it differs
 # (canonically) from our state, reconciles → runs stale → bumps version. Returns
 # true if changed. The server's own writes match canonically, so they don't loop.
 function sync_from_file!(nb::LiveNotebook)
     isfile(nb.path) || return false
-    disk = read(nb.path, String)
+    disk = _read_settled(nb.path)
+    disk === nothing && return false     # a writer is part way through; the next tick reads it whole
     norm = try
         serialize_report(parse_report(disk; id = nb.report.id))
     catch
@@ -434,12 +482,27 @@ end
 # builds a `path → asset` registry from these so `Slate.asset(path)` resolves live. Mirrors `_animation_specs`.
 function _asset_specs(c::Cell, nbid::AbstractString = "")
     (c.output === nothing || isempty(c.output.assets) || isempty(nbid)) && return Any[]
+    return Any[_asset_spec!(a, c.id, nbid) for a in c.output.assets]
+end
+
+# One asset record → its wire spec, bytes parked in the content-addressed store. Shared so the cell
+# and interpolation paths below cannot register an asset two different ways.
+function _asset_spec!(a, cellid::AbstractString, nbid::AbstractString)
+    bytes = _asset_bytes(a); d = _asset_common(a, bytes, cellid)
+    _blob_put_durable!(string(nbid, "/", d["sha"]), d["mime"], bytes)
+    d["url"] = string("/api/", nbid, "/blob/", d["sha"])
+    return d
+end
+
+# Assets a markdown cell's `{{ }}` interpolations generated — symmetric with the echarts and tables
+# below. The interpolation wire already carries them (`_wire_to_output`), so without this an asset a
+# `show` method saves while interpolating is harvested and then dropped here, leaving markup that
+# points at a path nothing ever registered.
+function _md_interp_assets(c::Cell, nbid::AbstractString)
+    isempty(nbid) && return Any[]
     specs = Any[]
-    for a in c.output.assets
-        bytes = _asset_bytes(a); d = _asset_common(a, bytes, c.id)
-        _blob_put_durable!(string(nbid, "/", d["sha"]), d["mime"], bytes)
-        d["url"] = string("/api/", nbid, "/blob/", d["sha"])
-        push!(specs, d)
+    for o in c.interp, a in o.assets
+        push!(specs, _asset_spec!(a, c.id, nbid))
     end
     return specs
 end
@@ -547,7 +610,9 @@ function _externalize_blobs(nbid::AbstractString, html::AbstractString)
         length(bytes) <= _PREVIEW_MAX_ASSET && _blob_put_durable!(key, mime, bytes)
         dim = _png_dims(bytes)
         sz = dim === nothing ? "" : string(" width=\"", dim[1], "\" height=\"", dim[2], "\"")
-        string("<img", pre, "src=\"/api/", nbid, "/blob/", h, "\"", sz, post, ">")
+        # The blob URL hides the type; the full-window view scales vector images up to fit.
+        vec = mime == "image/svg+xml" ? " data-vector" : ""
+        string("<img", pre, "src=\"/api/", nbid, "/blob/", h, "\"", sz, vec, post, ">")
     end)
 end
 
@@ -578,6 +643,60 @@ function _blob_put_durable!(key::AbstractString, mime::AbstractString, bytes::Ve
         end
     catch
     end
+    _sweep_dblob_dir!()
+    return nothing
+end
+
+# ── Bounding the durable tier ────────────────────────────────────────────────
+# The tier is content-addressed and write-once, so nothing in it is ever overwritten: it only grows.
+# `_prune_preview_blobs!` bounds a notebook that is OPEN and still snapshotting, and leaves the blobs
+# it is using — correctly, since a reopen shows that frozen render without re-running. What nothing
+# bounds is the rest: every notebook closed last month still owns every raster and asset it ever
+# minted, on a machine that may open hundreds.
+#
+# So: a disk budget with oldest-first eviction, as a backstop rather than a policy. `blob_lookup`
+# touches what it reads, which makes "oldest" mean least-recently-USED rather than least-recently
+# written — a long-open notebook's blobs are not evicted out from under it just for being old.
+#
+# Budget is `KAIMONSLATE_BLOB_CACHE_MB` (default 2 GiB). Swept from the write path, at most once every
+# `_DBLOB_SWEEP_S`: a full directory listing is far too expensive to do per blob.
+_dblob_budget() = round(Int, 2^20 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_CACHE_MB", "")), 2048.0))
+const _DBLOB_SWEEP_S = 600.0
+const _DBLOB_SWEEP_AT = Ref(0.0)
+const _DBLOB_SWEEP_LOCK = ReentrantLock()
+
+function _sweep_dblob_dir!(; force::Bool = false)
+    due = lock(_DBLOB_SWEEP_LOCK) do
+        t = time()
+        (force || t - _DBLOB_SWEEP_AT[] > _DBLOB_SWEEP_S) ? (_DBLOB_SWEEP_AT[] = t; true) : false
+    end
+    due || return nothing
+    try
+        dir = _dblob_dir()
+        budget = _dblob_budget()
+        files = Tuple{String,Int,Float64}[]            # (path, bytes, mtime)
+        total = 0
+        for fn in readdir(dir)
+            endswith(fn, ".meta") && continue
+            p = joinpath(dir, fn)
+            st = try; stat(p); catch; continue; end
+            isfile(st) || continue
+            total += Int(st.size)
+            push!(files, (p, Int(st.size), st.mtime))
+        end
+        total <= budget && return nothing
+        sort!(files; by = f -> f[3])                   # least recently used first
+        # Evict to 80% rather than exactly to the budget, so the next write does not immediately
+        # trigger another full listing.
+        target = (budget * 8) ÷ 10
+        for (p, sz, _) in files
+            total <= target && break
+            rm(p; force = true); rm(p * ".meta"; force = true)
+            total -= sz
+        end
+    catch e
+        @debug "KaimonSlate: durable blob sweep failed" exception = (e, catch_backtrace())
+    end
     return nothing
 end
 
@@ -588,6 +707,9 @@ function blob_lookup(key::AbstractString)
     f = _dblob_file(key)
     isfile(f) || return nothing
     meta = isfile(f * ".meta") ? split(read(f * ".meta", String), "\n") : ["application/octet-stream", ""]
+    # Mark it used, so the sweep's oldest-first eviction is least-recently-USED. Blobs are served
+    # immutable, so a page fetches one once and this costs nothing per render.
+    try; touch(f); catch; end
     return (String(meta[1]), read(f), length(meta) >= 2 ? String(meta[2]) : "")
 end
 
@@ -894,6 +1016,10 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         _rewrite_citations(c.source, bibctx === nothing ? Set{String}() : Set(keys(bibctx.tips));
                            emit = bibctx === nothing ? _cite_literal : _cite_link_emit(bibctx),
                            figrefs = figrefs, figemit = _fig_link_emit) : c.source
+    # A relative image path names a file in the project; the page loads it through this notebook's
+    # asset route (`_local_media`).
+    c.kind == MARKDOWN && report !== nothing &&
+        (_mdsrc = _local_media(_mdsrc, nbid, String(get(report.meta, "assetbase", ""))))
     d = Dict{String,Any}(
         "id"      => c.id,
         # How recent this payload is. The same cell reaches the browser over two transports, and
@@ -917,12 +1043,12 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
-        "assets" => c.kind == MARKDOWN ? Any[] : _asset_specs(c, nbid),
+        "assets" => c.kind == MARKDOWN ? _md_interp_assets(c, nbid) : _asset_specs(c, nbid),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
         # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor. A name the
         # cell only MUTATES (`prog[] = …`) isn't defined here, so it's excluded (go-to-def lands on the definer).
-        "defs"    => c.kind == CODE || c.kind == ReportEngine.TOOL ?
+        "defs"    => ReportEngine.is_code_kind(c.kind) ?
                      sort!(String[string(w) for w in cell_definitions(c)]) : String[],
     )
     # A web cell ships its three panes (split from the `@web(...)` source) so the editor can mount a
@@ -939,7 +1065,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # itself. "cacheable"/"" ⇒ no badge. Drives the cell cache badge + the run-status restore counter
     # (a fast restore burst otherwise reads as a glitch), mirroring the DAG's cache indicator.
     memostate = ""; memowhy = ""    # computed once, shared by the cell badge (here) AND the DAG stats card (below)
-    if c.kind == CODE
+    if ReportEngine.is_code_kind(c.kind)
         o = c.output
         rt = o === nothing ? "" : o.memo
         memostate, memowhy = rt in ("restored", "stored", "handle", "uncacheable") ? (rt, o.memo_why) :
@@ -1031,15 +1157,17 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # `@bind` variables this cell READS (so the header can one-click surface their controls) —
     # excluding any it defines itself. Not code-only: a markdown or web cell reads the free
     # variables of its `{{ }}` interpolations (see `_infer_bindings_uncached!`), so prose driven by
-    # a control can offer that control too.
-    if !isempty(c.reads)
+    # a control can offer that control too. A cell that names a control in `bind_observable(:name)`
+    # does not read it (`c.observes`, no edge), but the control drives the cell, so it is offered too.
+    if !isempty(c.reads) || !isempty(c.observes)
         own = Set(String(b.name) for b in c.binds)
-        uses = sort!(unique!(String[String(s) for s in c.reads if haskey(bindref, String(s)) && !(String(s) in own)]))
+        uses = sort!(unique!(String[String(s) for s in Iterators.flatten((c.reads, c.observes))
+                                    if haskey(bindref, String(s)) && !(String(s) in own)]))
         isempty(uses) || (d["binduses"] = uses)
     end
     # Names this cell defines that are ALSO defined by another cell — a silent footgun in a shared
     # namespace (last-writer-wins). The UI flags it so collisions don't masquerade as dead reactivity.
-    if c.kind == CODE && !isempty(multidef)
+    if ReportEngine.is_code_kind(c.kind) && !isempty(multidef)
         dup = sort!(String[string(w) for w in cell_definitions(c) if string(w) in multidef])
         isempty(dup) || (d["dupdefs"] = dup)
     end
@@ -1055,7 +1183,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     nd = ReportEngine._manual_needs(c.flags)
     isempty(nd) || (d["needs"] = nd)
     # Truncated outputs → append an access bar (open ↗ / editor / download) to the rendered output.
-    if c.kind == CODE && c.output !== nothing && !isempty(c.output.overflow)
+    if ReportEngine.is_code_kind(c.kind) && c.output !== nothing && !isempty(c.output.overflow)
         bar = _overflow_bar(nbid, c.output.overflow)
         isempty(bar) || (d["output"] = String(d["output"]) * bar)
     end
@@ -1089,6 +1217,12 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
     isempty(cell.binds) && return nb
     nsym = Symbol(name)
     any(b -> b.name == nsym, cell.binds) || return nb   # not a bind of this cell → no-op (no phantom worker assign)
+    # The value a control already holds changes nothing, so its readers are not run again. A control
+    # can send one value twice as it settles (a select fires `input` and then `change`). A button is
+    # exempt: pressing it is the change.
+    spec = cell.binds[findfirst(b -> b.name == nsym, cell.binds)]
+    unchanged(v) = spec.widget != "button" && (isequal(v, spec.value) || (v == spec.value) === true)
+    unchanged(value) && return nb
     # Push the value to the kernel the DEFINING cell runs on, OFF nb.lock (protocol): a region-tagged
     # `@bind` cell lives on its region kernel (attach + `prepare!` are round-trips), and `assign_bind!`
     # coerces the value on the worker — all shared-gate work, serialized on the notebook's eval mutex (as
@@ -1106,6 +1240,7 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
         end
         ReportEngine.assign_bind!(bk, nb.report, nsym, value)   # coerce on the worker + update its registry/global
     end
+    unchanged(coerced) && return nb    # sent in another form (a label, a string number) of the same value
     # Mirror the coerced value into the host BindSpec + restale readers under nb.lock (host mutation only).
     @report_op nb report begin
         i = findfirst(b -> b.name == nsym, cell.binds)
@@ -1270,9 +1405,44 @@ end
 # The cells payload for a NON-live state (inactive/hydrating): the embedded frozen render if present
 # (already `cell_json`-shaped), else the parsed cells rendered un-run.
 function _static_cells(nb::LiveNotebook)
-    haskey(nb.report.meta, "preview") && return nb.report.meta["preview"]
+    if haskey(nb.report.meta, "preview")
+        # A stored render keeps the `rev` values of the process that saved it. This process counts
+        # from zero, and the browser ignores a payload whose `rev` is not above the last one it drew
+        # (`revIsNew` in view.js). A stored rev of 18 thus blocks the live outputs of this run up to
+        # rev 18, and the page keeps the stored output. Give each stored cell a rev below every live
+        # rev, so any live payload replaces it and a late stored payload does not replace a live one.
+        cells = nb.report.meta["preview"]
+        for e in cells
+            e isa AbstractDict && (e["rev"] = -1)
+        end
+        return cells
+    end
     bindref, hostednames = _bind_index(nb.report)
     return [cell_json(c, bindref, hostednames) for c in nb.report.cells]
+end
+
+# A running cell's payload carries what a page needs to pick the run up part-way: when it started
+# (hub clock — the page measures it against `now`, so the two clocks never meet) and the bars it
+# shows. Without them a page loaded mid-run had no start time and dropped every later progress frame.
+#
+# While hydrating, the cells are the stored preview, whose states describe the last save rather than
+# this run; the running ones are marked running here. The preview is shared across requests, so the
+# array and each touched cell are copied rather than written to.
+function _annotate_running!(nb::LiveNotebook, meta::AbstractDict)
+    meta["now"] = time()
+    live = _live_snapshot!(nb)
+    (isempty(live) || !haskey(meta, "cells")) && return meta
+    cells = meta["cells"] = Any[c for c in meta["cells"]]
+    for (i, c) in pairs(cells)
+        c isa AbstractDict || continue
+        l = get(live, String(get(c, "id", "")), nothing)
+        l === nothing && continue
+        d = cells[i] = Dict{String,Any}(c)
+        d["state"] = "running"
+        d["runStartedAt"] = l.started
+        d["progress"] = [Dict{String,Any}("id" => b[1], "frac" => b[2], "msg" => b[3]) for b in l.bars]
+    end
+    return meta
 end
 
 function state_json(nb::LiveNotebook)
@@ -1365,7 +1535,7 @@ function state_json(nb::LiveNotebook)
         meta["hydratingKind"] = get(nb.report.meta, "hydratingKind",
                                     haskey(nb.report.meta, "preview") ? "env" : "run")
         haskey(nb.report.meta, "hydratingHost") && (meta["hydratingHost"] = nb.report.meta["hydratingHost"])
-        return meta
+        return _annotate_running!(nb, meta)
     end
     bindref, hostednames = _bind_index(nb.report)
     md = Set{String}(get(nb.report.meta, "multidef", String[]))   # names defined in 2+ cells → per-cell flag
@@ -1401,7 +1571,7 @@ function state_json(nb::LiveNotebook)
     # it loads. Pushing the whole effective map lets the browser extend its import map with whatever is
     # missing, so a specifier works in the session that installed it (see view.js `applyPackageImports`).
     let im = _effective_imports(nb); isempty(im) || (meta["moduleImports"] = im); end
-    return meta
+    return _annotate_running!(nb, meta)
 end
 
 # A web cell's source in the exact form `_web_skin` emits, so the browser's pane reassembly matches it

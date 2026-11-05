@@ -36,7 +36,11 @@ function Base.show(io::IO, ::MIME"text/html", w::WebPage)
             print(io, "<script>Function(new TextDecoder().decode(Uint8Array.from(atob('",
                   Base64.base64encode(w.js), "'),c=>c.charCodeAt(0))))()</script>")
         else
-            print(io, "<script>", replace(w.js, "</script>" => "<\\/script>"), "</script>")
+            # A block of its own: the page is one global scope, and a cell that renders again (or two
+            # cells) would otherwise declare the same top-level `const`/`let` twice, which rejects the
+            # whole script. A `function` declared at its top level is still hoisted to the page, so
+            # markup can call it. The line breaks keep a trailing `//` comment off the closing brace.
+            print(io, "<script>{\n", replace(w.js, "</script>" => "<\\/script>"), "\n}</script>")
         end
     end
     return nothing

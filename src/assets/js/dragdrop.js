@@ -416,7 +416,7 @@ function _topAnchor() {
   return best ? { id: best.dataset.cid, off: Math.round(bestTop) } : null;
 }
 function _savePos() {
-  try { localStorage.setItem(_posKey(), JSON.stringify({ y: Math.round(window.scrollY), sel: window.selectedId || null, anchor: _topAnchor() })); } catch (_) {}
+  try { localStorage.setItem(_posKey(), JSON.stringify({ y: Math.round(window.scrollY), sel: (window.slateSelectedId && window.slateSelectedId()) || null, anchor: _topAnchor() })); } catch (_) {}
 }
 addEventListener('scroll', () => { clearTimeout(_posT); _posT = setTimeout(_savePos, 200); }, { passive: true });
 addEventListener('pagehide', _savePos);                                                       // fires on reload/unload

@@ -23,6 +23,7 @@ module SlateLook; include("test_slate_look.jl"); end
 module Engine;    include("test_engine.jl");    end
 module Eval;      include("test_eval.jl");      end
 module Deps;      include("test_deps.jl");      end
+module Edits;     include("test_edits.jl");     end
 module Envprep;   include("test_envprep.jl");   end
 module Tools;     include("test_tools.jl");     end
 module Registry;  include("test_registry.jl");  end
@@ -57,14 +58,16 @@ module WscallBinary; include("test_wscall_binary.jl"); end
 module WsOrder;   include("test_ws_order.jl");   end
 module BindObs;   include("test_bind_observable.jl"); end
 module RecordDisplay; include("test_record_display.jl"); end
+module MatrixDisplay; include("test_matrix_display.jl"); end
+module Confine;   include("test_confine.jl");   end
 
 # Every module above belongs here. A file that is `include`d but left out of this tuple is still
 # COMPILED, so it never looks broken — it is simply never run, and its testsets pass silently by
 # not existing.
-const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memostore, Effectstore, Blobchannel, RemotePool, Regions, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
+const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memostore, Effectstore, Blobchannel, RemotePool, Regions, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps, Edits,
                    Envprep, Tools, Registry, Toolcell,
                    Web, Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi, Agentops, Repro, Slides,
-                   Frontmatter, Export, DocBundle, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, WsOrder, BindObs, RecordDisplay)
+                   Frontmatter, Export, DocBundle, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, WsOrder, BindObs, RecordDisplay, MatrixDisplay, Confine)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
 # ReTest matches a plain String LITERALLY (regex metacharacters escaped), so "deps|eval" would match

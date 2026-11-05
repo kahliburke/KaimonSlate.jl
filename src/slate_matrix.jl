@@ -51,7 +51,8 @@ function _matrix_grid(z::AbstractMatrix; max_cells::Int = 200 * 200)
     grid, gnr, gnc
 end
 
-function _matrix_grid_csc(z; max_cells::Int = 200 * 200)
+# `keep(i, j)` picks the stored entries a wrapper reads (one triangle for `Symmetric`/triangular).
+function _matrix_grid_csc(z; max_cells::Int = 200 * 200, keep = (i, j) -> true)
     nr, nc = size(z)
     factor = ceil(Int, sqrt(nr * nc / max_cells))
     gnr, gnc = cld(nr, factor), cld(nc, factor)
@@ -61,12 +62,44 @@ function _matrix_grid_csc(z; max_cells::Int = 200 * 200)
         bj = (j - 1) ÷ factor + 1
         for k in cp[j]:(cp[j+1]-1)
             i = rv[k]
+            keep(i, j) || continue
             bi = (i - 1) ÷ factor + 1
             v = abs(real(nzv[k]))
             v > grid[bi, bj] && (grid[bi, bj] = v)
         end
     end
     grid, gnr, gnc
+end
+
+# A transposed, symmetric or triangular view of a sparse matrix has no storage of its own, and
+# indexing it entry by entry walks every structural zero. Grid the parent's storage and lay it out
+# the way the view reads it; any other parent takes the generic path.
+function _matrix_grid(z::Union{LinearAlgebra.Adjoint,LinearAlgebra.Transpose}; max_cells::Int = 200 * 200)
+    p = parent(z)
+    (_is_csc_like(p) && length(z) > max_cells) || return invoke(_matrix_grid, Tuple{AbstractMatrix}, z; max_cells)
+    g, gnr, gnc = _matrix_grid_csc(p; max_cells)
+    return permutedims(g), gnc, gnr
+end
+function _matrix_grid(z::Union{LinearAlgebra.Symmetric,LinearAlgebra.Hermitian}; max_cells::Int = 200 * 200)
+    p = parent(z)
+    (_is_csc_like(p) && length(z) > max_cells) || return invoke(_matrix_grid, Tuple{AbstractMatrix}, z; max_cells)
+    g, gn, _ = _matrix_grid_csc(p; max_cells, keep = z.uplo == 'U' ? (i, j) -> i <= j : (i, j) -> i >= j)
+    return max.(g, permutedims(g)), gn, gn
+end
+function _matrix_grid(z::Union{LinearAlgebra.UpperTriangular,LinearAlgebra.UnitUpperTriangular,
+                               LinearAlgebra.LowerTriangular,LinearAlgebra.UnitLowerTriangular};
+                      max_cells::Int = 200 * 200)
+    p = parent(z)
+    (_is_csc_like(p) && length(z) > max_cells) || return invoke(_matrix_grid, Tuple{AbstractMatrix}, z; max_cells)
+    upper = z isa Union{LinearAlgebra.UpperTriangular,LinearAlgebra.UnitUpperTriangular}
+    unit = z isa Union{LinearAlgebra.UnitUpperTriangular,LinearAlgebra.UnitLowerTriangular}
+    keep = unit ? (upper ? (i, j) -> i < j : (i, j) -> i > j) : (upper ? (i, j) -> i <= j : (i, j) -> i >= j)
+    g, gnr, gnc = _matrix_grid_csc(p; max_cells, keep)
+    if unit                                   # the unit diagonal is implied, not stored
+        f = ceil(Int, sqrt(length(z) / max_cells))
+        for i in 1:size(z, 1); b = (i - 1) ÷ f + 1; g[b, b] = max(g[b, b], 1.0); end
+    end
+    return g, gnr, gnc
 end
 
 function _matrix_grid(z::LinearAlgebra.SymTridiagonal; max_cells::Int = 200 * 200)
@@ -160,19 +193,48 @@ end
 # Symbolic dotted notation for a large-but-regular banded matrix — reads like a textbook,
 # no per-entry enumeration. Only meaningful for a matrix whose type already guarantees this
 # shape (see `_matrix_pick_kind`).
+# Symbolic notation for a large structured matrix, drawn by its shape: `:diagonal`, `:band` (tri- and
+# bidiagonal), `:upper` or `:lower` triangular. Each entry label is the band's value when the band is
+# constant, `\ast` when it varies, and `0` for a band the type does not have.
 struct DottedMatrixTeX
     n::Int
-    diag::Float64
-    offdiag::Float64
+    shape::Symbol
+    diag::String
+    upper::String
+    lower::String
 end
 function Base.show(io::IO, ::MIME"text/latex", t::DottedMatrixTeX)
-    d, o = t.diag, t.offdiag
-    print(io, "\$\$\\begin{bmatrix}",
-        "$d & $o & \\cdots & $o \\\\ ",
-        "$o & $d & \\ddots & \\vdots \\\\ ",
-        "\\vdots & \\ddots & \\ddots & $o \\\\ ",
-        "$o & \\cdots & $o & $d",
-        "\\end{bmatrix}_{", t.n, "\\times", t.n, "}\$\$")
+    d, u, l = t.diag, t.upper, t.lower
+    rows = t.shape === :diagonal ? ["$d & 0 & \\cdots & 0", "0 & $d & \\ddots & \\vdots",
+                                    "\\vdots & \\ddots & \\ddots & 0", "0 & \\cdots & 0 & $d"] :
+           t.shape === :upper    ? ["$d & $u & \\cdots & $u", "0 & $d & \\ddots & \\vdots",
+                                    "\\vdots & \\ddots & \\ddots & $u", "0 & \\cdots & 0 & $d"] :
+           t.shape === :lower    ? ["$d & 0 & \\cdots & 0", "$l & $d & \\ddots & \\vdots",
+                                    "\\vdots & \\ddots & \\ddots & 0", "$l & \\cdots & $l & $d"] :
+                                   ["$d & $u & 0 & \\cdots & 0", "$l & $d & $u & \\ddots & \\vdots",
+                                    "0 & $l & \\ddots & \\ddots & 0", "\\vdots & \\ddots & \\ddots & $d & $u",
+                                    "0 & \\cdots & 0 & $l & $d"]
+    print(io, "\$\$\\begin{bmatrix}", join(rows, " \\\\ "), "\\end{bmatrix}_{", t.n, "\\times", t.n, "}\$\$")
+end
+
+# The label for one band: its value when constant, `\ast` when not, `0` when the band is absent.
+_band_label(v, digits) = isempty(v) ? "0" :
+    all(==(first(v)), v) ? string(round(real(first(v)); digits = digits)) : "\\ast"
+
+function _dotted(M, digits)
+    LA = LinearAlgebra
+    n = max(size(M)...)
+    d = _band_label(LA.diag(M), digits)
+    M isa LA.Diagonal && return DottedMatrixTeX(n, :diagonal, d, "0", "0")
+    M isa LA.SymTridiagonal && (e = _band_label(M.ev, digits); return DottedMatrixTeX(n, :band, d, e, e))
+    M isa LA.Tridiagonal && return DottedMatrixTeX(n, :band, d, _band_label(M.du, digits), _band_label(M.dl, digits))
+    if M isa LA.Bidiagonal
+        e = _band_label(M.ev, digits)
+        return M.uplo == 'U' ? DottedMatrixTeX(n, :band, d, e, "0") : DottedMatrixTeX(n, :band, d, "0", e)
+    end
+    # A triangle's off-diagonal entries are not stored as a band, and reading them all is O(n²).
+    upper = M isa Union{LA.UpperTriangular,LA.UnitUpperTriangular}
+    return DottedMatrixTeX(n, upper ? :upper : :lower, d, "\\ast", "\\ast")
 end
 
 """
@@ -210,13 +272,17 @@ function slate_matrix(M::AbstractMatrix;
          M[something(rows, 1:size(M, 1)), something(cols, 1:size(M, 2))]
     k = kind === :auto ? _matrix_pick_kind(Mv) : kind
     if k === :katex
-        return blockrows === nothing ? MatrixTeX(Mv, digits) : BlockMatrixTeX(Mv, blockrows, blockcols, digits)
+        (blockrows === nothing && blockcols === nothing) && return MatrixTeX(Mv, digits)
+        # One side given: the other is a single block.
+        br = blockrows === nothing ? [size(Mv, 1)] : collect(Int, blockrows)
+        bc = blockcols === nothing ? [size(Mv, 2)] : collect(Int, blockcols)
+        sum(br) == size(Mv, 1) || throw(ArgumentError("slate_matrix: blockrows add up to $(sum(br)), but the matrix has $(size(Mv, 1)) rows"))
+        sum(bc) == size(Mv, 2) || throw(ArgumentError("slate_matrix: blockcols add up to $(sum(bc)), but the matrix has $(size(Mv, 2)) columns"))
+        return BlockMatrixTeX(Mv, br, bc, digits)
     elseif k === :dotted
-        d = Mv isa Union{LinearAlgebra.Diagonal,LinearAlgebra.Bidiagonal,LinearAlgebra.Tridiagonal,LinearAlgebra.SymTridiagonal} ?
-            first(LinearAlgebra.diag(Mv)) : Mv[1, 1]
-        o = Mv isa LinearAlgebra.SymTridiagonal ? (isempty(Mv.ev) ? 0.0 : first(Mv.ev)) :
-            Mv isa LinearAlgebra.Tridiagonal ? (isempty(Mv.du) ? 0.0 : first(Mv.du)) : 0.0
-        return DottedMatrixTeX(max(size(Mv)...), round(real(d); digits = digits), round(real(o); digits = digits))
+        Mv isa _MATRIX_BANDED_TYPES ||
+            throw(ArgumentError("slate_matrix: kind=:dotted needs a Diagonal, Bidiagonal, Tridiagonal, SymTridiagonal or triangular matrix, not $(typeof(Mv))"))
+        return _dotted(Mv, digits)
     else
         mc = downsample ? max_cells : typemax(Int)
         return _matrix_heatmap(Mv; max_cells = mc, colors = colors)

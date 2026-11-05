@@ -96,6 +96,11 @@ end
     @test NS._png_dims(pngbytes) == (640, 480)
     @test NS._externalize_blobs("", html) == html   # empty nbid → unchanged (export path keeps inline base64)
     @test NS._externalize_blobs("nbX", "<p>no images</p>") == "<p>no images</p>"
+    # a raster is not marked vector; an SVG is, so the full-window view can scale it up
+    @test !occursin("data-vector", out)
+    svg = Base64.base64encode("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"900\" height=\"620\"/>")
+    svgout = NS._externalize_blobs("nbX", "<div class=\"disp img\"><img alt=\"output\" src=\"data:image/svg+xml;base64,$svg\"/></div>")
+    @test occursin("/api/nbX/blob/", svgout) && occursin(" data-vector", svgout)
 end
 
 # `Mod.<tab>` enumerates `names(M; all=true, imported=true)`, which also returns everything M

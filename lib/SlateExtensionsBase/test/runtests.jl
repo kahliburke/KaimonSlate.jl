@@ -109,16 +109,41 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
         @test c.value === :a && c.v === :a
         @test c.label == "Apple" && c.l == "Apple"
         @test c.index == 2 && c.i == 2
-        @test c == :a && :a == c                 # compares as its value
-        @test string(c) == "a" && "$(c)" == "a"  # prints/interpolates as its value
-        @test hash(c) == hash(:a)                 # hashes as its value
-        @test Dict(:a => 10)[c] == 10             # usable as a dict key
-        # scalar convert/index transparency
+        @test string(c) == "a" && "$(c)" == "a"  # prints/interpolates as its value, for any value type
+        @test propertynames(c) == (:value, :label, :index, :v, :l, :i)
+
+        # Comparison/convert transparency covers NUMBER, STRING and CHARACTER values.
+        cs = Choice("a", "Apple", 2)
+        @test cs == "a" && "a" == cs
+        @test hash(cs, UInt(0)) == hash("a", UInt(0))
+        @test Dict("a" => 10)[cs] == 10           # usable as a dict key
         cn = Choice(3, "three")
         @test convert(Int, cn) === 3
         @test Int(cn) === 3
         @test [10, 20, 30][cn] == 30              # to_index
-        @test propertynames(c) == (:value, :label, :index, :v, :l, :i)
+        @test convert(String, cs) === "a"
+    end
+
+    @testset "Choice: a non-scalar value is read through `.value`" begin
+        # The methods that would make a Symbol-valued Choice compare as its value are a one-argument
+        # `hash` and an untyped mixed `==`, and those invalidate about 1300 compiled method instances
+        # when this package loads — around three seconds on the first render on 1.12. So they are not
+        # defined, and `.value` is the spelling.
+        #
+        # Pinned rather than merely omitted: re-adding them is an easy and plausible "fix" for a bug
+        # report that `pick == :a` is false, and the cost would not be visible from that call site.
+        #
+        # Nothing is lost that ever worked reliably — `===` and `isequal` against a bare Symbol were
+        # false even when `==` was true, so the transparency was always partial, and `pick === :a`
+        # read correctly while silently taking the wrong branch.
+        c = Choice(:a, "Apple", 2)
+        @test c.value === :a
+        @test !(c == :a) && !(:a == c)
+        @test !isequal(c, :a)
+        @test_throws MethodError convert(Symbol, c)
+        # A Choice still compares to another Choice, whatever the value type.
+        @test c == Choice(:a, "Apple", 2) && isequal(c, Choice(:a, "different label", 9))
+        @test !(c == Choice(:b, "Berry", 1))
     end
 
     @testset "Selection" begin
@@ -216,7 +241,9 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
         s = html(WebPage(css = "a{}", html = "<p>", js = "x=1"))
         @test occursin("<style>a{}</style>", s)
         @test occursin("<p>", s)
-        @test occursin("<script>x=1</script>", s)
+        @test occursin("<script>{\nx=1\n}</script>", s)
+        # The script runs in a block of its own, so rendering it twice doesn't redeclare its consts.
+        @test occursin("{\nconst a = 1 // note\n}", html(WebPage(js = "const a = 1 // note")))
         # empty sections omitted
         @test !occursin("<style>", html(WebPage(html = "x")))
         @test !occursin("<script>", html(WebPage(html = "x")))
@@ -246,6 +273,9 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
         @test slate_side() == "" && slate_notebook() == ""
         @test slate_emit("ch", (a = 1,)) === nothing        # no-op, no throw
         @test slate_everywhere(:op) === nothing
+        # `nothing` rather than a path, so a render falls back to inlining instead of emitting markup
+        # that points at an asset the page will never resolve.
+        @test slate_save_asset("blob", UInt8[1, 2]) === nothing
 
         # Seed a fake context (a NamedTuple, exactly as the engine builds it) and read it back.
         emitted = Tuple{Any,Any}[]
@@ -263,6 +293,9 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
             @test emitted == [("net", (loss = 0.5,))]
             slate_everywhere(:my_op, :my_rule)
             @test effects == [(:everywhere, [:my_op, :my_rule])]
+            # A context with no `save_asset` field at all — an older Slate — still answers `nothing`
+            # rather than throwing, so an extension can call the accessor unconditionally.
+            @test slate_save_asset("blob", UInt8[1]) === nothing
         finally
             delete!(task_local_storage(), :slate_ctx)
         end
@@ -310,6 +343,39 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
         @test length(m.frontend) == length(frontend_scripts())
 
         empty!(SlateExtensionsBase._FRONTEND)
+    end
+
+    # A front-end registered from a file (`@pkg_asset` → `PkgAsset`) follows edits to that file: the
+    # registry re-reads it when its mtime moves, so a JS change needs no worker restart.
+    @testset "file-backed front-end follows the file" begin
+        mktempdir() do dir
+            f = joinpath(dir, "x.js")
+            write(f, "V1")
+            a = PkgAsset(f)
+            @test a == "V1" && String(a) == "V1" && "<" * a * ">" == "<V1>" && a.path == f
+            @test sprint(print, a) == "V1" && length(a) == 2
+
+            provide_frontend!(a; id = "file:x")
+            register_component!("filekind", PkgAsset(f))
+            @test frontend_scripts()["file:x"] == "V1"
+
+            write(f, "V2"); Base.Filesystem.touch(f)
+            SlateExtensionsBase._FRONTEND_FILES["file:x"] =
+                (path = f, mtime = SlateExtensionsBase._FRONTEND_FILES["file:x"].mtime - 10)
+            SlateExtensionsBase._FRONTEND_FILES["widget:filekind"] =
+                (path = f, mtime = SlateExtensionsBase._FRONTEND_FILES["widget:filekind"].mtime - 10)
+            byid = Dict(e.id => e for e in extension_manifest().frontend)
+            @test byid["file:x"].js == "V2"
+            @test byid["widget:filekind"].js == "V2" && byid["widget:filekind"].kind == "filekind"
+
+            rm(f)                                             # a vanished file keeps its last text
+            @test frontend_scripts()["file:x"] == "V2"
+
+            provide_frontend!("INLINE"; id = "file:x")        # re-registered from a plain string: no file
+            @test !haskey(SlateExtensionsBase._FRONTEND_FILES, "file:x")
+            @test frontend_scripts()["file:x"] == "INLINE"
+        end
+        empty!(SlateExtensionsBase._FRONTEND); empty!(SlateExtensionsBase._FRONTEND_FILES)
     end
 
     # Package-vendored asset DIRECTORIES: `provide_assets!(pkg, dir)` declares a front-end asset tree
@@ -506,6 +572,20 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
             slate_on("compute", a -> a + 1)
         end
         @test haskey(handlers, "compute") && handlers["compute"](1) == 2
+
+        # The do-block spelling, which the docs show and which is what a Julia user reaches for.
+        # It passes the function FIRST, so without a method for that order the pair registers
+        # reversed: the channel becomes permanently unreachable and NOTHING reports it — the
+        # browser just says "no slate_on handler registered" for a channel that was registered.
+        empty!(handlers)
+        task_local_storage(:slate_ctx, (; on = (c, f) -> (handlers[string(c)] = f; nothing))) do
+            slate_on("doblock") do a
+                a * 10
+            end
+        end
+        @test haskey(handlers, "doblock")
+        @test handlers["doblock"](4) == 40
+        @test !any(k -> startswith(k, "#"), keys(handlers))   # not keyed by the closure's name
     end
 
     # `slate_off` — the symmetric handler removal — routed through the context's `:off`.
@@ -628,4 +708,14 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
         @test occursin("z()", ejs)                           # run body passes through unescaped
     end
 
+    @testset "encode_binary_frame! writes the same frame into a reused buffer" begin
+        a = rand(Float32, 64, 32)
+        sb = SlateBinary(a; i = 3)
+        buf = zeros(UInt8, 10)
+        @test encode_binary_frame!(buf, "ch", sb) === buf
+        @test buf == encode_binary_frame("ch", sb)
+        big = fill(0xff, 2 * length(buf))
+        encode_binary_frame!(big, "ch", sb)                  # a larger buffer shrinks to the frame
+        @test big == buf
+    end
 end

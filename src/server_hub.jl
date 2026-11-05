@@ -95,59 +95,9 @@ _file_mtime(path::AbstractString) = try; round(Int, mtime(abspath(path))); catch
 # page (clickjacking: the origin guard allows same-origin clicks, so a redressed frame could drive it).
 # A stricter CSP is deliberately NOT set: cell output is allowed to render arbitrary HTML/JS by design.
 const _FRAME_GUARD = ["X-Frame-Options" => "DENY", "Content-Security-Policy" => "frame-ancestors 'none'"]
-_html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store", _FRAME_GUARD...], body)
+_html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store", _FRAME_GUARD...],
+                            _vendor_versioned(body))
 _asset(body, ctype) = HTTP.Response(200, ["Content-Type" => ctype, "Cache-Control" => "no-store", _FRAME_GUARD...], body)
-
-# ── Front-end vendor cache (offline support) ──────────────────────────────────
-# Third-party assets (CodeMirror, ECharts, KaTeX, Preact/signals/htm) are pinned in
-# assets/vendor.json (package → version + base URL) and served from /assets/vendor/<pkg>/<sub>.
-# Each file is fetched from `<base><sub>` on first request, cached OUTSIDE the repo, and
-# served from disk after — so the notebook works offline once warm. Bump a version in
-# vendor.json to upgrade (new files re-download under a version-keyed cache path).
-const _VENDOR_JSON = joinpath(@__DIR__, "assets", "vendor.json")
-const _VENDOR_CACHE = get(ENV, "KAIMONSLATE_ASSET_CACHE",
-                          joinpath(get(DEPOT_PATH, 1, joinpath(homedir(), ".julia")), "scratchspaces", "kaimonslate-assets"))
-const _VENDOR_LOCK = ReentrantLock()
-
-function _vendor_ctype(p)
-    e = lowercase(splitext(p)[2])
-    return e in (".js", ".mjs")   ? "application/javascript; charset=utf-8" :
-           e == ".css"            ? "text/css; charset=utf-8" :
-           e == ".woff2"          ? "font/woff2" :
-           e == ".woff"           ? "font/woff" :
-           e == ".ttf"            ? "font/ttf" :
-           e in (".map", ".json") ? "application/json; charset=utf-8" :
-           "application/octet-stream"
-end
-
-# Resolve `<pkg>/<sub>` to a cached local file, fetching from the pinned base URL on first
-# request (atomic write under a lock). Returns the path, or nothing on bad input / unknown
-# package / fetch failure. The version is part of the cache path, so upgrades never collide.
-function _vendor_file(pkg::AbstractString, sub::AbstractString)
-    (isempty(sub) || occursin("..", sub) || startswith(sub, "/")) && return nothing
-    man = try; JSON.parsefile(_VENDOR_JSON); catch; return nothing; end
-    entry = get(man, pkg, nothing)
-    (entry isa AbstractDict && haskey(entry, "version") && haskey(entry, "base")) || return nothing
-    ver = String(entry["version"]); base = replace(String(entry["base"]), "{version}" => ver)
-    dest = joinpath(_VENDOR_CACHE, pkg, ver, sub)
-    isfile(dest) && return dest
-    return lock(_VENDOR_LOCK) do
-        isfile(dest) && return dest
-        mkpath(dirname(dest))
-        tmp = dest * ".part"
-        try
-            # BOUNDED: a request that never returns would otherwise wedge its caller forever — and the
-            # caller can be the notebook server answering a page request, or an export warming a few dozen
-            # font files in a row. A slow/blocked CDN must degrade to "unresolved" (the caller then falls
-            # back to a CDN url), never to a hang.
-            r = HTTP.get(base * sub; redirect = true, retry = false, status_exception = true,
-                         connect_timeout = 10, request_timeout = 60)
-            write(tmp, r.body); mv(tmp, dest; force = true); dest
-        catch
-            rm(tmp; force = true); nothing
-        end
-    end
-end
 
 # ── Persisted open-notebook registry (survive a server restart) ───────────────
 # The in-memory hub registry is empty after a restart, so a browser polling

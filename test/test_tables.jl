@@ -164,6 +164,13 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
         @test [r[1] for r in P.fetch_page(prov, P.PageRequest(1, 10, 1, true, "")).rows] == [5, 4, 3, 2, 1]
         @test [r[1] for r in P.fetch_page(prov, P.PageRequest(2, 2, 1, false, "")).rows] == [3, 4]  # sorted page 2
         @test P.fetch_page(prov, P.PageRequest(1, 10, 0, false, "a")).total == 1  # search across cols
+        # a short column reads as empty cells instead of failing the page
+        ragged = P.InMemoryPagedProvider(cols, Vector{Any}[Any[3, 1, 2], Any["x"]])
+        pg = P.fetch_page(ragged, P.PageRequest(1, 10, 1, false, ""))
+        @test pg.total == 3 && [r[1] for r in pg.rows] == [1, 2, 3]
+        @test [r[2] for r in pg.rows] == [nothing, nothing, "x"]
+        @test P.fetch_page(ragged, P.PageRequest(1, 10, 2, false, "")).total == 3   # sort on the short column
+        @test P.fetch_page(ragged, P.PageRequest(1, 10, 0, false, "x")).total == 1
     end
 
     @testset "paged: capture wire + table_page round-trip" begin

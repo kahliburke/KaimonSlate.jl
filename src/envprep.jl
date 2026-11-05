@@ -121,6 +121,53 @@ function _manifest_for(projectfile::AbstractString)
     return ""
 end
 
+"""
+    deps_digest(projectfile, exclude = ()) -> UInt
+
+Hash of every package the notebook's environment loads, as its resolving manifest (`_manifest_for`)
+records them, plus the Julia version. It starts from `projectfile`'s direct `[deps]` minus the names
+in `exclude` (Slate's own worker packages) and follows each entry's `deps` through the manifest, so
+a package reached only through another one counts, and a package only Slate's worker brings doesn't.
+Each entry contributes its name, UUID, version, `git-tree-sha1` and any `path`/`repo-url`/`repo-rev`.
+A workspace member reads the shared manifest at the workspace root. `UInt(0)` when there is no
+manifest or a file does not parse.
+
+This is what lets the memo key change when the code a cached result came from changes outside the
+notebook's own source: an upgrade of a dependency of a dependency, or a new Julia.
+"""
+function deps_digest(projectfile::AbstractString, exclude = ())
+    try
+        man = _manifest_for(projectfile); isempty(man) && return UInt(0)
+        pdeps = sort!([d for d in keys(get(Pkg.TOML.parsefile(projectfile), "deps", Dict{String,Any}()))
+                       if !(d in exclude)])
+        mdeps = get(Pkg.TOML.parsefile(man), "deps", Dict{String,Any}())   # format 2: "deps" → name → [entry]
+        seen = Set{String}()
+        todo = copy(pdeps)
+        while !isempty(todo)
+            dn = pop!(todo)
+            dn in seen && continue
+            push!(seen, dn)
+            entries = get(mdeps, dn, nothing)
+            entries isa Vector || continue
+            for e in entries
+                e isa AbstractDict || continue
+                d = get(e, "deps", nothing)
+                d isa AbstractVector && append!(todo, String[String(x) for x in d])
+                d isa AbstractDict && append!(todo, String[String(k) for k in keys(d)])
+            end
+        end
+        h = hash(string(VERSION), UInt(0x4d616e00))
+        for dn in sort!(collect(seen))
+            entries = get(mdeps, dn, nothing)
+            sig = entries isa Vector ? sort!([join((get(e, k, "") for k in
+                                              ("uuid", "version", "git-tree-sha1", "path", "repo-url", "repo-rev")), "|")
+                                              for e in entries if e isa AbstractDict]) : String[]
+            h = hash((dn, sig), h)
+        end
+        return h
+    catch; return UInt(0); end
+end
+
 # `[sources]` with every relative `path` rewritten absolute (anchored on `base`), so a parent's
 # dev/path dep still resolves once its env is copied into a scratch fork dir.
 function _abs_sources(sources, base::AbstractString)
@@ -247,29 +294,56 @@ function seed_env_project!(envdir::AbstractString, parent::AbstractString)
 end
 
 """
-    env_add_code(delta) -> String
+    readd_specs(delta; pinned = false) -> (; devs, adds, skipped)
 
-Pkg code that re-adds the notebook's OWN packages (its `Slate.env` footer) after a re-seed.
+`Pkg.PackageSpec` keyword sets that re-create a notebook's OWN packages (its `Slate.env` records)
+after a re-seed, each the way it was added: a local checkout (`source = "path"`) is developed from
+its path, a git package (`"git"`) is added from its `url#rev`, and any other package is added by
+name and uuid. A checkout whose path does not exist on this machine goes to `skipped`, so the rest
+still install.
 
-Seeding rebuilds a fork from its PARENT, which knows nothing about what the notebook added. So
-without this, any upstream `Project.toml` edit stales the fork, the rebuild re-seeds, and every
-package the notebook installed disappears — surfacing much later as "Package X not found" at the
-notebook's first `using`, with nothing to connect it to the upstream change.
-
-Packages are added by name and uuid and left to resolve. The footer records a version too, but
-pinning it would fight the parent's fresh resolution, which is the thing that just changed.
+Seeding rebuilds a fork from its PARENT, which knows nothing about what the notebook added, so every
+rebuild path re-adds these afterwards. A registry package is left to resolve unless `pinned`: its
+recorded version would fight the parent's fresh resolution, which is the thing that just changed.
 """
-function env_add_code(delta)
-    specs = String[]
+function readd_specs(delta; pinned::Bool = false)
+    devs = NamedTuple[]; adds = NamedTuple[]; skipped = String[]
     for e in (delta isa AbstractVector ? delta : ())
         e isa AbstractDict || continue
-        nm = String(get(e, "name", ""))
+        f(k) = string(get(e, k, get(e, Symbol(k), "")))
+        nm = f("name")
         isempty(nm) && continue
-        uu = String(get(e, "uuid", ""))
-        push!(specs, isempty(uu) ? "Pkg.PackageSpec(name=raw\"$(nm)\")" :
-                                   "Pkg.PackageSpec(name=raw\"$(nm)\", uuid=raw\"$(uu)\")")
+        src = f("source"); origin = f("origin")
+        if src == "path" && !isempty(origin)
+            dir = abspath(expanduser(origin))
+            isdir(dir) ? push!(devs, (; path = dir)) : push!(skipped, nm)
+        elseif src == "git" && !isempty(origin)
+            url, rev = (split(origin, '#'; limit = 2)..., "")
+            push!(adds, isempty(rev) ? (; url = String(url)) : (; url = String(url), rev = String(rev)))
+        else
+            uu = f("uuid"); v = f("version")
+            s = isempty(uu) ? (; name = nm) : (; name = nm, uuid = uu)
+            pinned && !isempty(v) && (s = merge(s, (; version = v)))
+            push!(adds, s)
+        end
     end
-    return isempty(specs) ? "" : "; Pkg.add([" * join(specs, ", ") * "])"
+    return (; devs, adds, skipped)
+end
+
+"""
+    env_add_code(delta) -> String
+
+Pkg code that re-adds the notebook's own packages (`readd_specs`) after a re-seed, for a rebuild
+that runs in a subprocess. Checkouts are developed first, so a package that depends on one
+resolves against it.
+"""
+function env_add_code(delta)
+    s = readd_specs(delta)
+    spec(t) = "Pkg.PackageSpec(" * join(("$k=$(repr(v))" for (k, v) in pairs(t)), ", ") * ")"
+    code = ""
+    isempty(s.devs) || (code *= "; Pkg.develop([" * join(spec.(s.devs), ", ") * "])")
+    isempty(s.adds) || (code *= "; Pkg.add([" * join(spec.(s.adds), ", ") * "])")
+    return code
 end
 
 # The parent fingerprint the fork was seeded from — everything `seed_env_project!` reads: the parent's

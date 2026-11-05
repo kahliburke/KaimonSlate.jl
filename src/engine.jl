@@ -114,6 +114,26 @@ CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backt
     CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects, assets, false)
 
 """
+What one notebook function does when it is CALLED, as seen in its body: the globals it reads
+(`refs`), assigns through `global` (`writes`) and mutates (`mut_g`), which positional parameters it
+mutates (`mut_p`), and the calls it makes with each argument's base name (`calls`). A cell that calls
+the function takes these on (`build_dependencies!`); the cell that defines it does not, since
+defining a function runs none of its body.
+"""
+mutable struct FuncSummary
+    params::Vector{Union{Symbol,Nothing}}
+    refs::Set{Symbol}
+    writes::Set{Symbol}
+    mut_g::Set{Symbol}
+    mut_p::Set{Int}
+    calls::Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}
+end
+FuncSummary(params) = FuncSummary(params, Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Int}(),
+                                  Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[])
+Base.copy(f::FuncSummary) = FuncSummary(copy(f.params), copy(f.refs), copy(f.writes), copy(f.mut_g),
+                                        copy(f.mut_p), copy(f.calls))
+
+"""
 A single report cell. `id` is the persistent identity (survives edits/moves);
 `src_hash` answers "did the source change". Inference/eval fields are populated
 later by the dependency + eval passes.
@@ -127,6 +147,10 @@ mutable struct Cell
     reads_now::Set{Symbol}        # the subset of `reads` made at TOP LEVEL (not deferred into a
                                   # function/macro body) — feeds the `backref` ordering diagnostic;
                                   # never used for edges, so under-approximation is harmless
+    observes::Set{Symbol}         # the controls this cell names in a literal `bind_observable(:name)`.
+                                  # The cell consumes such a control as an Observable and does not read
+                                  # the variable, so these names are not in `reads` and make no edge.
+                                  # They only let the cell header offer the control (`binduses`).
     writes::Set{Symbol}           # rebindings/definitions ∪ in-place mutations — the full write-set used for
                                   # ordering (most-recent-writer), parallel write-conflicts, and reactive self-trigger
     mutates::Set{Symbol}          # the subset of `writes` reached ONLY via in-place mutation here (x[]=…, x.f=…,
@@ -147,14 +171,24 @@ mutable struct Cell
                                   # push and the full state a mutating request answers with) and, with
                                   # no way to tell new from old, applies whichever lands last. This is
                                   # how it tells.
+    funcs::Dict{Symbol,FuncSummary}   # the notebook functions this cell defines, by name (see FuncSummary)
+    topcalls::Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}   # calls its top-level code makes,
+                                  # with each positional argument's base name (mutated-parameter mapping)
+    soft_assigns::Set{Symbol}     # names assigned inside a top-level loop or `try` (soft scope): an update
+                                  # of the global when an earlier cell defines it (`build_dependencies!`)
+    observed::Set{Symbol}         # globals a run of this source was SEEN to bind that the analysis didn't
+                                  # predict (`note_defines!`), kept for the source they were seen with
+    observed_complete::Bool       # a clean run of this source was observed, so `writes ∪ observed` is all it
+                                  # binds: an `eval` cell then stops being a barrier for the cells below
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
 function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
-                Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0)
+                Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
+                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0,
+                Dict{Symbol,FuncSummary}(), Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[], Set{Symbol}(), Set{Symbol}(), false)
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation
@@ -379,6 +413,18 @@ function _unique_auto_id(kind::CellKind, source::AbstractString, idx::Integer, u
     return id
 end
 
+# An explicit id that is already taken (a cell copied in an editor, header and all) gets the first
+# free `_2`, `_3`… suffix, so every id-keyed lookup still sees one cell per id. The next save writes
+# the new id into the file.
+function _unique_explicit_id(id::AbstractString, used::AbstractSet{String})
+    id in used || return String(id)
+    n = 2
+    while string(id, "_", n) in used; n += 1; end
+    new = string(id, "_", n)
+    @warn "Two cells in this notebook have the id `$id`; the later one is now `$new`."
+    return new
+end
+
 "Trim a leading and trailing run of blank lines, preserving interior blanks."
 function _strip_blank_edges(lines::Vector{<:AbstractString})
     lo = firstindex(lines)
@@ -538,7 +584,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
             idx = length(report.cells) + 1
             src = join(trimmed, "\n")
             kind === MARKDOWN && (src = _unwrap_md(src))   # strip the `@md\"\"\"…\"\"\"` runnable skin, if present
-            id_ = cid === nothing ? _unique_auto_id(kind, src, idx, used_ids) : cid
+            id_ = cid === nothing ? _unique_auto_id(kind, src, idx, used_ids) : _unique_explicit_id(cid, used_ids)
             push!(used_ids, id_)
             cell = Cell(id_, kind, src)
             cell.controls = ctrls
@@ -582,14 +628,19 @@ function _render_env_footer(env)::String
     println(io, _ENV_MARK_OPEN, " · notebook packages (auto-maintained — manage via the package panel)")
     for p in env
         nm = get(p, "name", ""); isempty(nm) && continue
-        println(io, "#   ", nm, " ", get(p, "version", ""), " ", get(p, "uuid", ""))
+        print(io, "#   ", nm, " ", get(p, "version", ""), " ", get(p, "uuid", ""))
+        src = get(p, "source", ""); origin = get(p, "origin", "")
+        src in ("path", "git") && !isempty(origin) && print(io, " ", src, "=", origin)
+        println(io)
     end
     print(io, _ENV_MARK_CLOSE)
     return String(take!(io))
 end
 
-# Parse the footer's body lines (`#   <name> <version> <uuid>`) back into the sorted
-# Vector of dicts. Tolerant of missing version/uuid (older/edited footers).
+const _UUID_RE = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"i
+
+# Parse the footer's body lines (`#   <name> <version> <uuid> [path=<dir> | git=<url#rev>]`) back
+# into the sorted Vector of dicts. Tolerant of a missing version/uuid (older/edited footers).
 function _parse_env_footer(lines)::Vector{Dict{String,Any}}
     out = Dict{String,Any}[]
     inenv = false                                       # only read entries inside the Slate.env block
@@ -597,11 +648,24 @@ function _parse_env_footer(lines)::Vector{Dict{String,Any}}
         startswith(l, _ENV_MARK_OPEN) && (inenv = true; continue)
         inenv || continue                               # a different Slate.* block (e.g. config) → skip
         startswith(l, _ENV_MARK_CLOSE) && break
-        m = match(r"^#\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?\s*$", l)
+        m = match(r"^#\s+(.*?)\s*$", l)
         m === nothing && continue
-        push!(out, Dict{String,Any}("name" => m.captures[1],
-                                    "version" => something(m.captures[2], ""),
-                                    "uuid" => something(m.captures[3], "")))
+        body = m.captures[1]
+        src = ""; origin = ""
+        o = match(r"(?:^|\s)(path|git)=(.*)$", body)   # last: a path may contain spaces
+        if o !== nothing
+            src = o.captures[1]; origin = strip(o.captures[2])
+            body = o.offset == 1 ? "" : body[1:prevind(body, o.offset)]
+        end
+        toks = split(body)
+        isempty(toks) && continue
+        ver = ""; uu = ""
+        for t in toks[2:end]
+            occursin(_UUID_RE, t) ? (uu = String(t)) : (ver = String(t))
+        end
+        d = Dict{String,Any}("name" => String(toks[1]), "version" => ver, "uuid" => uu)
+        isempty(origin) || (d["source"] = src; d["origin"] = String(origin))
+        push!(out, d)
     end
     return sort(out; by = p -> p["name"])
 end
@@ -764,7 +828,9 @@ include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest for sema
 include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
 include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
 include(joinpath(@__DIR__, "record_source.jl")) # record_field_range — where a record field came from in the cell source
+include(joinpath(@__DIR__, "celldefs.jl"))  # what a cell defines, and taking it back (engine + worker)
 include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worker)
+include(joinpath(@__DIR__, "pkg_ops.jl"))   # shared package add/update/rm specs (engine + worker)
 include(joinpath(@__DIR__, "format.jl"))    # _format_cell — server-side table cell renderer (JS mirror: fmtCell)
 include(joinpath(@__DIR__, "completion.jl")) # shared REPLCompletions (engine + worker)
 include(joinpath(@__DIR__, "macroexpand.jl")) # shared cell macro-expansion (engine + worker)

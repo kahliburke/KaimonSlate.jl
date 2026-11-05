@@ -596,8 +596,8 @@ async function regionShots(browser) {
     // a cell's live boundary-transfer progress bar (⇄ name: N/M MB ← host)
     try {
       await page.evaluate(() => {
-        window.onCellRun && window.onCellRun('train')
-        window.onCellProgress && window.onCellProgress({ id: 'train', frac: 0.375, msg: '⇄ feat: 79/210 MB ← 🖧 gpu-box' })
+        window.onCellRun && window.onCellRun({ id: 'train' })
+        window.onCellProgress && window.onCellProgress({ cid: 'train', id: 'xfer-train', frac: 0.375, msg: '⇄ feat: 79/210 MB ← 🖧 gpu-box' })
       })
       await page.waitForSelector('.cell[data-cid="train"] .cellprog', { timeout: 5000 })
       await sleep(500)

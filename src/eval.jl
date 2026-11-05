@@ -96,15 +96,15 @@ end
 
 # In-cell progress: a running cell can call `slate_progress(frac; msg)` (frac ∈ 0..1) to report how
 # far along it is; the server relays it to the UI (a bar on the cell + the "currently running" chip).
-# Same out-of-band registry pattern; the callback takes (frac::Float64, msg::String).
+# Same out-of-band registry pattern; the callback takes (cid, bar id, frac::Float64, msg, done).
 const _USERPROG_REGISTRY = Dict{String,Any}()
 register_userprog!(report_id::AbstractString, cb) = _reg_set!(_USERPROG_REGISTRY, report_id, cb)
 unregister_userprog!(report_id::AbstractString) = _reg_del!(_USERPROG_REGISTRY, report_id)
-function _do_userprog(report_id::AbstractString, frac, msg, id = "", done = false)
+function _do_userprog(report_id::AbstractString, cid, id, frac, msg, done = false)
     cb = _reg_get(_USERPROG_REGISTRY, report_id)
     cb === nothing && return nothing
     f = try; clamp(Float64(frac), 0.0, 1.0); catch; 0.0; end
-    try; cb(f, String(msg), String(id), done === true); catch e; @debug "eval: user-progress callback failed" report_id exception = e; end
+    try; cb(String(cid), String(id), f, String(msg), done === true); catch e; @debug "eval: user-progress callback failed" report_id exception = e; end
     return nothing
 end
 
@@ -262,7 +262,7 @@ function _new_module(report::Report)
     _populate_notebook_ns!(m;
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query, slate_refresh = (vars...) -> _do_refresh(rid, vars),
-        slate_progress = (frac; msg = "", id = "", done = false) -> _do_userprog(rid, frac, msg, id, done),
+        slate_progress = (frac; msg = "", id = "", done = false) -> _do_userprog(rid, _current_cell_id(), id, frac, msg, done),
         # A SlateBinary streams as a raw binary frame (encode_binary_frame packs channel+meta+dtype+shape+
         # bytes) forwarded to the page as-is — mirrors the worker's `slate_emit`. Any other value takes the
         # JSON emit path. Without this branch the in-process kernel would JSON-encode the SlateBinary itself.
@@ -342,6 +342,23 @@ gate kernel dispatches to its worker; in-process fires directly. A no-op for a b
 run_cleanups!(::Kernel, ::Report, ids) = nothing
 
 """
+    forget!(kernel, report, cells, names)
+
+Take back what no cell defines any more, in the namespace where cells run: delete the methods the
+removed `cells` defined, and remove the global `names` no cell writes now, so a reader fails the way
+a fresh run would instead of using a leftover value. Applied before the next cell runs (see
+[`flush_forget!`](@ref)). A no-op for a base kernel.
+"""
+forget!(::Kernel, ::Report, cells, names) = nothing
+
+"Apply the report's pending [`forget!`](@ref) to `kernel`, if there is any."
+function flush_forget!(kernel::Kernel, report::Report)
+    cells, names = take_forget!(report)
+    (isempty(cells) && isempty(names)) || forget!(kernel, report, cells, names)
+    return nothing
+end
+
+"""
     InProcessKernel(projectdir = "", envdir = "") <: Kernel
 
 Evaluate cells in the report's own in-process `Module`. The namespace lives on `report.mod`,
@@ -388,10 +405,22 @@ function run_cleanups!(::InProcessKernel, report::Report, ids)
     return nothing
 end
 
+"Take back removed definitions in the report's in-process namespace (see [`forget!`](@ref))."
+function forget!(::InProcessKernel, report::Report, cells, names)
+    report.mod === nothing && return nothing
+    for id in cells
+        _forget_cell!(report.mod, String(id))
+    end
+    _unbind_globals!(report.mod, names)
+    return nothing
+end
+
 "Evaluate `source` in the kernel and capture stdout + rich output → `CellOutput`. `region`/`regions`
-seed the task-local Slate execution context (see `_build_slate_ctx`); `region=\"\"` ⇒ the main kernel."
+seed the task-local Slate execution context (see `_build_slate_ctx`); `region=\"\"` ⇒ the main kernel.
+`lane` says which of a worker's thread pools runs it (`\"ui\"` for reactive refreshes, see worker.jl
+`_route_request`); kernels without lanes ignore it."
 eval_capture(k::InProcessKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
-             region::AbstractString = "", regions::AbstractVector = String[]) =
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
     _in_notebook_env(k) do
         _eval_capture(report_module(report), source, filename;
                       slate_ctx = _build_slate_ctx(report_module(report), report.id, region, regions))
@@ -399,10 +428,12 @@ eval_capture(k::InProcessKernel, report::Report, source::AbstractString, filenam
 
 # Memo-aware entry (5-arg `memo` = (; key, names, threshold)). Default: ignore caching and just
 # evaluate — only the gate kernel (real notebooks) implements durable memoization. Keeps in-process
-# and test kernels working unchanged. `region`/`regions` flow through to the execution context.
+# and test kernels working unchanged. `region`/`regions` flow through; `lane` only when set, so a
+# kernel that doesn't take it is unaffected.
 eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo;
-             region::AbstractString = "", regions::AbstractVector = String[]) =
-    eval_capture(k, report, source, filename; region = region, regions = regions)
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
+    isempty(lane) ? eval_capture(k, report, source, filename; region = region, regions = regions) :
+                    eval_capture(k, report, source, filename; region = region, regions = regions, lane = lane)
 
 """
     PendingKernel <: Kernel
@@ -443,18 +474,21 @@ function _await_real(k::PendingKernel)
     return k.real::Kernel
 end
 
-# The 14 Kernel operations with no generic `::Kernel` fallback — each blocks for the real
-# kernel, then forwards. (`shutdown!`, `cancel_cells`, `memo_pin!`, `worker_log_tail`, the
-# 5-arg memo `eval_capture`, and `_kernel_status` already have safe non-blocking `::Kernel`
-# fallbacks above/elsewhere and need no override here.)
+# Each override blocks for the real kernel, then forwards. Two notes on what is and isn't here:
+#   - the 5-arg memo `eval_capture` must stay: its generic `::Kernel` fallback drops `memo`, so an
+#     eval that races the boot would reach the real kernel with no memo key, and neither restore
+#     nor store;
+#   - `shutdown!`, `cancel_cells`, `memo_pin!`, `worker_log_tail`, `_kernel_status` and
+#     `run_cleanups!` keep their non-blocking `::Kernel` fallbacks. Nothing has run on a kernel that
+#     is still booting, so there is nothing to cancel, pin or clean up.
 prepare!(k::PendingKernel, report::Report) = prepare!(_await_real(k), report)
 reset!(k::PendingKernel, report::Report) = reset!(_await_real(k), report)
 eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
-             region::AbstractString = "", regions::AbstractVector = String[]) =
-    eval_capture(_await_real(k), report, source, filename; region = region, regions = regions)
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
+    eval_capture(_await_real(k), report, source, filename; region = region, regions = regions, lane = lane)
 eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
-             region::AbstractString = "", regions::AbstractVector = String[]) =
-    eval_capture(_await_real(k), report, source, filename, memo; region = region, regions = regions)
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
+    eval_capture(_await_real(k), report, source, filename, memo; region = region, regions = regions, lane = lane)
 complete(k::PendingKernel, report::Report, code::AbstractString, pos::Integer) =
     complete(_await_real(k), report, code, pos)
 assign_bind!(k::PendingKernel, report::Report, name::Symbol, value) =
@@ -696,12 +730,7 @@ function pkg_op(k::InProcessKernel, ::Report, op::AbstractString, name::Abstract
         isempty(k.envdir) && return Dict{String,Any}("ok" => false, "message" => "this notebook has no environment of its own")
         ensure_notebook_env!(k.envdir)   # first add materialises it — base mode until then
     end
-    r = _in_env(dir) do
-        op == "add"    ? Pkg.add(String(name)) :
-        op == "update" ? Pkg.update(String(name)) :
-                         Pkg.rm(String(name))
-        return Dict{String,Any}("ok" => true, "message" => "")
-    end
+    r = _in_env(() -> _pkg_apply(op, name), dir)   # the specs the worker accepts (pkg_ops.jl)
     # No re-layering afterwards: `_in_notebook_env` rebuilds the scope from `k` at every eval, so an
     # env that only came into existence just now is picked up by the next cell on its own.
     return r
@@ -862,7 +891,8 @@ function _memoizable(cell::Cell)
     # drift (the theme regression). RESOURCE — a live DB/socket/file handle that can't/shouldn't be
     # serialized (re-inits cheaply every open, like `:nocache`); its downstream is unlocked separately
     # in `_memo_key`, where a `:resource` upstream is key-transparent, not a purity barrier. VOLATILE —
-    # non-deterministic (`rand`/`now`); a cached value would be a lie.
+    # tagged non-deterministic (`volatile`, set by the author: nothing infers it from `rand`/`now`); a
+    # cached value would be a lie.
     _cell_effect(cell) in (RESOURCE, VOLATILE, IMPURE) && return false
     # A cell that PROVIDES names (`using`/`import`) is memoizable via IMPORT SCAFFOLD: cache its
     # genuinely-defined values (writes ∖ provides) and, on restore, replay just its `using`/`import`
@@ -930,35 +960,6 @@ function _is_tracked_include(src::AbstractString)
     return walk(ex) && seen[]
 end
 
-# A top-level statement that DEFINES something rather than computing it: a function (long or short
-# form), a type, a macro, or a `const` bound to a literal. Such a statement is self-sufficient — it
-# establishes a name without consuming another cell's data — so it belongs on every side alongside the
-# imports. A `const` bound to an EXPRESSION does not qualify: `const N = size(data, 1)` reads upstream
-# data and is compute, not definition.
-#
-# A definition may still REFERENCE an upstream global in its body (`f(x) = x * SCALE`). That defines
-# cleanly on the far side (Julia resolves globals at call time) and the region presync stages the
-# cell's data reads alongside it, so the binding is normally there when it runs.
-function _is_definition_stmt(s)
-    s isa Expr || return false
-    s.head in (:function, :macro, :struct, :abstract, :primitive) && return true
-    # short form `f(x) = …` / `f(x) where {T} = …` — an `=` whose LHS is a call signature
-    if s.head === :(=) && length(s.args) >= 1
-        lhs = s.args[1]
-        while lhs isa Expr && lhs.head === :where
-            lhs = lhs.args[1]
-        end
-        return lhs isa Expr && lhs.head === :call
-    end
-    # `const X = <literal>` — a definition only when nothing is computed from upstream data
-    if s.head === :const && length(s.args) == 1 && s.args[1] isa Expr && s.args[1].head === :(=)
-        rhs = s.args[1].args[2]
-        return rhs isa Union{Number,AbstractString,Char,Bool,QuoteNode} ||
-               (rhs isa Expr && rhs.head === :call && rhs.args[1] === :(:) &&
-                all(a -> a isa Number, rhs.args[2:end]))
-    end
-    return false
-end
 
 # The SCOPE-ESTABLISHING part of a cell's source: its top-level `using`/`import` statements, its
 # DEFINITIONS (functions, types, literal consts), plus any theme-setter call (`_THEME_CALL_NAMES`).
@@ -1020,7 +1021,8 @@ function _key_poisoned(byid, closure)
         c = byid[id]
         :resource in c.flags && continue
         (:nocache in c.flags || :volatile in c.flags) && return true
-        (:opaque in c.flags && !_is_pure_using(c.source) && !_is_tracked_include(c.source)) && return true
+        (:opaque in c.flags && !_is_pure_using(c.source) && !_is_tracked_include(c.source) &&
+         _full_barrier(c)) && return true
     end
     return false
 end
@@ -1059,6 +1061,17 @@ _state_digest(v) = try; slate_fingerprint(v); catch; "?"; end
 # re-digests and one that hasn't is a dict lookup — the identity check is exactly the question being
 # asked, and cheap for the scalars controls carry.
 const _BIND_DIGEST_CACHE = Dict{Tuple{String,String},Tuple{Any,String}}()
+
+# The value a control's memo digest is made from. A keyed option widget holds a key, which names the
+# option's position and not its value, so the key stands in as the digest of the option it picks
+# (`_norm_options`): another list with another value at that position gives another memo key.
+function _memo_bind_value(b)
+    opts = get(b.params, "options", nothing)
+    (opts isa AbstractVector && any(o -> o isa AbstractDict && haskey(o, "digest"), opts)) || return b.value
+    dig(k) = (i = findfirst(o -> o isa AbstractDict && get(o, "value", nothing) == k, opts);
+              i === nothing ? k : String(opts[i]["digest"]))
+    return b.value isa AbstractVector ? map(dig, b.value) : dig(b.value)
+end
 function _bind_digest(rid::AbstractString, name::AbstractString, v)
     k = (String(rid), String(name))
     hit = lock(_STATE_DIGESTS_LOCK) do; get(_BIND_DIGEST_CACHE, k, nothing); end
@@ -1121,7 +1134,7 @@ function _memo_key(report::Report, cell::Cell)
     sdig = state_digests(report.id)
     svals = Tuple{String,String}[]
     for c in report.cells, b in c.binds
-        b.name in readnames && push!(svals, (string(b.name), _bind_digest(report.id, string(b.name), b.value)))
+        b.name in readnames && push!(svals, (string(b.name), _bind_digest(report.id, string(b.name), _memo_bind_value(b))))
     end
     if sdig !== nothing
         for n in readnames
@@ -1146,6 +1159,9 @@ function _memo_key(report::Report, cell::Cell)
     core = (cell.source, (:trace in cell.flags), depsrc, svals)
     isempty(frozen) || (core = (core..., frozen))   # locked-upstream freeze stamps (cells with none keep their old key)
     isempty(assets) || (core = (core..., assets))   # @asset file content (asset-free cells keep their old key)
+    # A cell whose entry leaves its definitions to be replayed (`_replay_plan`) gets a key of its own,
+    # so a Slate that would restore the entry without replaying them never finds it.
+    isempty(_replay_plan(cell.source).idx) || (core = (core..., :replays_definitions))
     return string(hash(core); base = 16)
 end
 
@@ -1170,9 +1186,10 @@ function _memo_status(report::Report, cell::Cell)
     # Not memoizable — surface WHICH of `_memoizable`'s conditions failed (message only; the decision
     # already happened above, so this can't drift from it). Same order as `_memoizable`.
     :nocache in cell.flags && return ("uncacheable", "opted out with the `nocache` tag")
+    :eval_barrier in cell.flags && return ("uncacheable", "evaluates code at run time (`eval`/`include`)")
     :opaque in cell.flags && return ("uncacheable", "an unresolved `using`/macro barrier — its effects can't be tracked")
     eff = _cell_effect(cell)
-    eff == VOLATILE && return ("uncacheable", "non-deterministic (e.g. `rand`/`time`) — a cached value would be stale")
+    eff == VOLATILE && return ("uncacheable", "tagged `volatile`")
     eff == RESOURCE && return ("uncacheable", "opens a live handle (DB/socket/file) — tag it `resource`; it re-opens each run")
     return ("uncacheable", "not a pure function of its source and inputs")
 end
@@ -1211,6 +1228,9 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     out = eval_capture(kernel, report, src, "cell:" * cell.id, memo)
     mark_result!(cell, out)
     cell.binds = out.binds
+    # A global the run bound that the analysis missed gets its edges now, before its readers run; an
+    # `eval` cell's first observed run makes its outgoing edges precise.
+    note_run!(report, cell, out) && rebuild_precise!(report)
     _emit_progress(report.id, cell)   # announce: finished (the result/error can light up immediately)
     return cell
 end

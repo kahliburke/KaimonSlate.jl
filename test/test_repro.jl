@@ -58,6 +58,30 @@ using .ReportEngine
         @test r.meta["env"][1]["name"] == "Foo"
         @test r.meta["env"][1]["version"] == ""
     end
+
+    @testset "a checkout or git package keeps where it came from" begin
+        # A rebuild re-creates each package the way it was added, so the footer has to carry the
+        # path of a developed checkout and the url of a git package (a path may contain spaces).
+        r = parse_report("""
+        #%% code id=a
+        x = 1
+
+        # ╔═╡ Slate.env
+        #   Dev 0.3.0 e4421f97-9838-4fd0-9fa5-94f11373bf78 path=~/code/My Dev.jl
+        #   Git 1.0.0 f4c9f34b-fa6a-4506-9309-e8c0bac809fa git=https://example.com/Git.jl#main
+        #   Reg 2.1.0 2edaba10-b0f1-5616-af89-8c11ac63239a
+        #   NoVer  61c947e1-3e6d-4ee4-985a-eec8c727bd6e path=/opt/NoVer
+        # ╚═╡
+        """)
+        env = Dict(e["name"] => e for e in r.meta["env"])
+        @test (env["Dev"]["source"], env["Dev"]["origin"], env["Dev"]["version"]) == ("path", "~/code/My Dev.jl", "0.3.0")
+        @test (env["Git"]["source"], env["Git"]["origin"]) == ("git", "https://example.com/Git.jl#main")
+        @test !haskey(env["Reg"], "source")
+        @test (env["NoVer"]["version"], env["NoVer"]["uuid"]) == ("", "61c947e1-3e6d-4ee4-985a-eec8c727bd6e")
+        s1 = serialize_report(r)
+        @test serialize_report(parse_report(s1)) == s1
+        @test parse_report(s1).meta["env"] == r.meta["env"]
+    end
 end
 
 # Per-notebook durable settings (Slate.config footer) — incl. the new `agentmodel` override that
@@ -405,6 +429,12 @@ end
             @test read(joinpath(inst, "data", "saved.csv"), String) == "user,data\n"  # user data survives
             @test !ispath(joinpath(inst, "stale.jl"))    # a file v2 no longer carries is not left behind
             @test isfile(joinpath(inst, "Project.toml")) && isfile(joinpath(inst, ".slatebundle.json"))
+
+            # What comes back describes the bundle just installed, not the one it replaced.
+            b3 = _make_bundle_b64(proj, [(name = "Foo", source = localpkg)], "renamed.jl", cells2)
+            write(sj, cells2 * "\n" * _bundle_footer(b3) * "\n")
+            r3 = _reconstruct_bundle!(sj)
+            @test r3.fresh && endswith(r3.notebook, "renamed.jl")
         end
     end
 

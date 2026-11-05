@@ -1,0 +1,83 @@
+{
+  "dagre": {
+    "version": "3.0.0",
+    "files": {
+      "dagre.min.js": "sha384-4Hc2rSui9BAmCvULK/OR9Fe5ZQN9Ec6OgQucGv+wzBAJ+TiZO6+09gNqMpCQTn/m",
+      "dagre.min.js.map": "sha384-dysX1hpILnC6K2OubsrfoUQydBvNjjW4QOIToVdfT3EJbgyWh0zLkRMa228OSyHv"
+    }
+  },
+  "echarts": {
+    "version": "5.5.1",
+    "files": {
+      "echarts.min.js": "sha384-Mx5lkUEQPM1pOJCwFtUICyX45KNojXbkWdYhkKUKsbv391mavbfoAmONbzkgYPzR"
+    }
+  },
+  "htm": {
+    "version": "3.1.1",
+    "files": {
+      "dist/htm.module.js": "sha384-k7/PyxcXOQ/zfJq1v0TM/CcBLQ2m2NzGg2tfHehdgJGqcY7RBwIP4Ye+ssG+QK1I",
+      "preact/index.module.js": "sha384-nuDht3SdxF7bbNOrOpIAVPw6aY3958/pop1FqpEl26WVUvdVDx4l/G6et/QCIJQY"
+    }
+  },
+  "html2canvas": {
+    "version": "1.4.1",
+    "files": {
+      "html2canvas.min.js": "sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H"
+    }
+  },
+  "katex": {
+    "version": "0.19.1",
+    "files": {
+      "contrib/auto-render.min.js": "sha384-bjyGPfbij8/NDKJhSGZNP/khQVgtHUE5exjm4Ydllo42FwIgYsdLO2lXGmRBf5Mz",
+      "contrib/copy-tex.min.js": "sha384-Pe2JWbaShhSRT0SESJ9XLPeAsi4yrNi7r/CiH0Coq7giBjK5a6Ae7XcybE8rNlQP",
+      "contrib/mathtex-script-type.min.js": "sha384-W8gaN87yMtPe/iAcxlyIDA8OVOzZvVD4c/HEE6QHhIyo8yHnVSXLzzy+eNWwpivm",
+      "contrib/mhchem.min.js": "sha384-fB8BH//9nBzROkMUsu/Dr35jWHIbnKesUo9rW0hfEgw8mZGnkAyBAjKX9F98OVuo",
+      "contrib/render-a11y-string.min.js": "sha384-w3bkc2xWSs8j/dQoawQevXgFq0dC2q9D7zLNkgqJw8WpW1oQBKBch9lEWttloIDF",
+      "fonts/KaTeX_AMS-Regular.woff2": "sha384-PY9KakbvJJoGRFr9TsImY6e9PzVmMRFtphQ0xTPhQj7VgIR9nnPXP2nA4P49sNux",
+      "fonts/KaTeX_Caligraphic-Bold.woff2": "sha384-GhFwF3Lk94gRRX3fKvK8qVRIaPRKBawaOWoLpTeJCC1rYaTrY7A8sjVjyaJCdvb0",
+      "fonts/KaTeX_Caligraphic-Regular.woff2": "sha384-0LpsQdZ8FRkW+0vIhMl+kNMsgYPhTA7pbCJDt43k6AHTpq7dv67sLl+bIaMuOiON",
+      "fonts/KaTeX_Fraktur-Bold.woff2": "sha384-23N9yDc6628Shv+2pdeDIDYIXemJPKfZaANtneHGjhBoaxqeQsZQFBRLj+0/drG9",
+      "fonts/KaTeX_Fraktur-Regular.woff2": "sha384-N4B5/o3aSwC8EE7MIGghu2mB6cSIwYHNyiY9bhuVnozyLoHpYT+VEEjdYqJ+7mN7",
+      "fonts/KaTeX_Main-Bold.woff2": "sha384-MnzwPa3V5+Sly78huHTxfNszB+vQQmvhX4O4+m3UZ7LzQoA9wxEhsgxQsvW1y8dV",
+      "fonts/KaTeX_Main-BoldItalic.woff2": "sha384-XtHiL6YLLShFl6oq2ZOcqTQBsloU+AvJDaGE7Xz/76bt4BWZuJn8tsj7dHnKndKi",
+      "fonts/KaTeX_Main-Italic.woff2": "sha384-pZ+saBD2/qiUjsKqk1z1NqixWQMZGxYCRcit0Dqfscp5Mj2xUX8bxMm8iKOYsAsQ",
+      "fonts/KaTeX_Main-Regular.woff2": "sha384-K4rU/m6R4ygdFA2s4iphVuNOm4ksiQlo7BPut2DKbuGQFsmOTsh1vie2QdS8+qD/",
+      "fonts/KaTeX_Math-BoldItalic.woff2": "sha384-/bG/IuB65SsDidFgz28e7vwT1pxHih+EkPgQpjqmDVtOaSsPi/CXI7uT4nJnozAI",
+      "fonts/KaTeX_Math-Italic.woff2": "sha384-ahAgpD3waV7F+QiHuM0WaQnVF/FMS0RXhS0dsThbGBuwv3RPHoxvT/8UGwzyOATH",
+      "fonts/KaTeX_SansSerif-Bold.woff2": "sha384-FWRmzdMUcxpbgWzOqA1THk/7QOuMshS6cTUeprW3TVnzjVrGnO9oCvWhE9lEwgGX",
+      "fonts/KaTeX_SansSerif-Italic.woff2": "sha384-cIAn4buHZvRkXL5LFuK8pAPVzxv0niY78zTOBRHvRmalHZh9IYFAzZQPwNnHj05g",
+      "fonts/KaTeX_SansSerif-Regular.woff2": "sha384-hFb2fFUxKsM3r80syP3hRUPdmRjMS09eYDF7almTU926xWabYjc1wdbrC7CaV5N/",
+      "fonts/KaTeX_Script-Regular.woff2": "sha384-A6AdZ/mywRJao07EiGdwk4swWZyx+X1pi9aYMAdEYNUcIzbZzbrOlEnIBFn2tUvI",
+      "fonts/KaTeX_Size1-Regular.woff2": "sha384-vXXP3yBdT6+htUbz5gNLFqA/PE6AUmW++GDGZTnxOaHX2IFPIG1ie1qo3Ra6QXHy",
+      "fonts/KaTeX_Size2-Regular.woff2": "sha384-hCKAtKJzh4FhbOKEWInGgZoaS+sek0VFv7B866K51w2+KRZ5E6GJcpWQHbEPGPZz",
+      "fonts/KaTeX_Size3-Regular.woff2": "sha384-dJES0vnXQqt06SV8gVM87Qsddvp2jjMCSjJ/jfADNWOP1feq4AqxkHeo/HZRTeya",
+      "fonts/KaTeX_Size4-Regular.woff2": "sha384-N0i7aW7M3/ioHKtRjR78Td+YATjbmUh0waMuUQOjBtv/bp4qTWd58I4etzZ71USy",
+      "fonts/KaTeX_Typewriter-Regular.woff2": "sha384-EwGF1si4JOX2592vVUMe7CnToRBlq2lo+w+8tVWLrJW5ZiwBuSry7Ozgs+cGHjmB",
+      "katex.min.css": "sha384-WwGtaC6ywCHxA5cstpj/3+xIZvTez8dq2IcBQaXRkenHZ7FVVq1ZROtURwfbtTlG",
+      "katex.min.js": "sha384-a1WQdjRj162i159OYq041X6I4K8NenkrI09LlPmiHg0YOb7CR+wJOraXwK9abpnE"
+    }
+  },
+  "preact": {
+    "version": "10.24.3",
+    "files": {
+      "dist/preact.module.js": "sha384-uC5whOdxCWL5wuXeyxgSc6bmTEWxeJaGd5Z5aaIPDhxHO4p/m/bun9ZOqyGIUJlQ",
+      "dist/preact.module.js.map": "sha384-KOHZLp2hUivwyXou+CCqddS2nVvrKyWH2pG/uXX3b/hefsc7EvMN0Bl6cGPcCvUI",
+      "hooks/dist/hooks.module.js": "sha384-kh/sP2hz+dAHS/kZYM6pwqFPGtgktIiEQmld0X0I50NzLTss9qDSOg9Sw4N5X0Rc",
+      "hooks/dist/hooks.module.js.map": "sha384-L9Hd2T4yKCuqPmvOabeq1DO8y/BqrPysI4ZSXS8S2a/guG9oOCzSqQLUSN+aQDmy"
+    }
+  },
+  "signals": {
+    "version": "1.3.0",
+    "files": {
+      "dist/signals.module.js": "sha384-nG7utvx5tYKecI6nESSWuYE0/X9nnYRZ5e2KtZImTplgzNBJ6WDuql5ACUJ14ycw",
+      "dist/signals.module.js.map": "sha384-C2N4WJXDLa4vkS6n0GAPOMSPpzBdVgjRjZEgwKp0p7cSFuinR0xi+lOPVi/bCTwx"
+    }
+  },
+  "signals-core": {
+    "version": "1.8.0",
+    "files": {
+      "dist/signals-core.module.js": "sha384-NxxEQURakzWyao1NZlwGD3TbnyGpT1GPoeFbzQAkePs4bi+PQ5T2GmbtbEg+4l6B",
+      "dist/signals-core.module.js.map": "sha384-15ZiaPG0cECfmMca/VBjyaQu5M4RdKb7u0JVOFikpGO0ATevt2uQ4NLE4m8rKY0x"
+    }
+  }
+}

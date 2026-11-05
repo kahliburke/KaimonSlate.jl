@@ -236,6 +236,7 @@
         <span id="filepath" class="filepath hint">select a file</span>
         <span id="filestale" class="filestale" style="display:none" title="this file changed on disk while you were editing it">changed on disk</span>
         <button id="fileopennb" class="ftbtn" style="display:none" title="open this file as a notebook">📓 Open as notebook</button>
+        <button id="filemdtoggle" class="ftbtn" style="display:none" onclick="_filesMdToggle()"></button>
         <a id="filedownload" class="ftbtn" style="display:none" download>⭳ Download</a>
         <button id="filesave" class="filesave" onclick="_filesSave()" disabled>Saved</button>
       </div>
@@ -647,7 +648,7 @@
       <input type="checkbox" id="mdreadme"> Save as <code>README.md</code> (renders on GitHub)</label></div>
   <div class="setrow exrow fmt-markdown sethint"><span></span>GitHub-flavored Markdown — paste into Discourse / Slack / GitHub, or save a <code>.md</code>. Figures embed as data-URI images (GitHub won't render those; upload a PNG alongside).</div>
   <div class="setrow exrow fmt-website"><label>Theme</label>
-    <select id="sitetheme"><option value="dark">Dark (matches UI)</option><option value="light">Light (publication)</option></select></div>
+    <select id="sitetheme"><option value="asis">As-is</option><option value="dark">Dark</option><option value="light">Light (publication)</option></select></div>
   <div class="setrow exrow fmt-website"><label>Source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="sitesource" checked> Include cell source (uncheck for a clean reading page)</label></div>
@@ -689,15 +690,7 @@
        duplicate would resolve to whichever comes first in the document (the popover) — so this
        picker would silently read someone else's element. -->
   <div class="setrow exrow fmt-app"><label for="appexptheme" title="What a visitor sees before choosing their own. They can still change it in the app's settings.">Theme</label>
-    <select id="appexptheme">
-      <option value="">Midnight (default)</option>
-      <option value="graphite">Graphite</option>
-      <option value="nord">Nord</option>
-      <option value="dracula">Dracula</option>
-      <option value="solarized-dark">Solarized Dark</option>
-      <option value="daylight">Daylight</option>
-      <option value="solarized-light">Solarized Light</option>
-    </select></div>
+    <select id="appexptheme"></select></div>
   <div class="setrow exrow fmt-app"><label title="Reading-column width in px. Wide suits dashboards; the default suits prose.">Page width</label>
     <input id="apppagewidth" type="number" min="720" max="3000" step="20" placeholder="980"
       style="width:110px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-size:.82rem"/>
@@ -711,7 +704,7 @@
   <div class="setrow exrow fmt-app"><label title="Serve the app as a workbook: cells tagged `workbook` stay editable and runnable, so a reader can fill in exercises. Everything else is still refused. Ships a copy of the notebook as you wrote it, so a reader can reset an exercise back to its starting point.">Workbook</label>
     <label style="display:flex;align-items:center;gap:7px;color:var(--dim);font-size:.8rem">
       <input id="appworkbook" type="checkbox"/> readers can edit and run the cells tagged <code>workbook</code></label></div>
-  <div class="setrow exrow fmt-app sethint"><span></span>Writes a self-contained folder. Running <code>run.sh</code> (macOS/Linux) or <code>run.bat</code> (Windows) inside it installs the Julia packages, reconstructs this notebook's exact environment, and serves it as an <b>app</b>: prose, results and live controls, with the authoring API refused by the server. Copy it to another machine or keep it here — it needs only Julia 1.10+. Ships the project's <b>git-tracked</b> files; add anything else under “Also ship”. <b>No authentication</b> — whoever can reach the port can drive it.</div>
+  <div class="setrow exrow fmt-app sethint"><span></span>Writes a self-contained folder. Running <code>run.sh</code> (macOS/Linux) or <code>run.bat</code> (Windows) inside it installs the Julia packages, reconstructs this notebook's exact environment, and serves it as an <b>app</b>: prose, results and live controls, with the authoring API refused by the server. Copy it to another machine or keep it here — it needs only Julia 1.12+. Ships the project's <b>git-tracked</b> files; add anything else under “Also ship”. <b>No authentication</b> — whoever can reach the port can drive it.</div>
   <div class="setrow exrow fmt-app" id="appoutrow" style="display:none"><span></span><div id="appout" class="publog" style="flex:1;margin:0"></div></div>
   <div class="setrow exrow fmt-docs"><label title="Folder to write the bundle into, on THIS machine. Relative paths resolve against the notebook's project. The folder's name is what a docs page calls the notebook: ```@slate <name>```. Re-exporting replaces it.">Folder</label>
     <input id="docsdir" type="text" placeholder="docs/slate/notebook" autocomplete="off" spellcheck="false"
@@ -771,6 +764,8 @@
 <script src="/assets/js/keyboard.js"></script>
 <script src="/assets/js/search.js"></script>   <!-- ⌘F: one find bar across every cell -->
 <script src="/assets/js/settings.js"></script>
+<script src="/assets/js/imgzoom.js"></script>   <!-- zoom/pan + full-window view for image outputs -->
+<script src="/assets/js/copymath.js"></script>  <!-- copying typeset math gives its LaTeX -->
 <script src="/assets/js/appmode.js"></script>   <!-- app mode: reading view, app bar, plain-language failures -->
 <script src="/assets/js/workbook.js"></script>  <!-- workbook mode: run/reset on the cells a reader fills in -->
 

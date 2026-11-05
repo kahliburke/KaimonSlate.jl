@@ -177,21 +177,24 @@ page_columns(p::InMemoryPagedProvider) = p.columns
 
 function fetch_page(p::InMemoryPagedProvider, req::PageRequest)
     ncols = length(p.data)
-    nrows = ncols == 0 ? 0 : length(p.data[1])
+    # A Tables.jl source need not have equal-length columns: a short column reads as an empty cell,
+    # as it does in the eager table path.
+    nrows = ncols == 0 ? 0 : maximum(length, p.data)
+    cell(ci, ri) = ri <= length(p.data[ci]) ? p.data[ci][ri] : nothing
     idx = collect(1:nrows)
     if !isempty(req.search)
         q = lowercase(req.search)
-        idx = filter(ri -> any(ci -> occursin(q, lowercase(string(p.data[ci][ri]))), 1:ncols), idx)
+        idx = filter(ri -> any(ci -> occursin(q, lowercase(string(something(cell(ci, ri), "")))), 1:ncols), idx)
     end
     total = length(idx)
     if req.sort_col > 0 && req.sort_col <= ncols
-        col = p.data[req.sort_col]
-        sort!(idx; lt = (i, j) -> _pcmp(col[i], col[j]) < 0, rev = req.sort_desc)
+        sc = req.sort_col
+        sort!(idx; lt = (i, j) -> _pcmp(cell(sc, i), cell(sc, j)) < 0, rev = req.sort_desc)
     end
     start = (req.page - 1) * req.page_size + 1
     stop = min(start + req.page_size - 1, total)
     pidx = start <= total ? idx[start:stop] : Int[]
-    rows = Vector{Any}[Any[p.data[ci][ri] for ci in 1:ncols] for ri in pidx]
+    rows = Vector{Any}[Any[cell(ci, ri) for ci in 1:ncols] for ri in pidx]
     return PageResult(rows, total)
 end
 

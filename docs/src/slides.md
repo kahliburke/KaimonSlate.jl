@@ -18,8 +18,14 @@ fullscreen, and `Esc` exits back to the editor.
 ### The presenter window
 
 Press `s` (or the 🪞 button, or *Open presenter window* in the palette) for a second window showing
-the current and next slide, a timer, and the **speaker notes** from your `notes` cells. That window
-is the only place notes are visible. The two stay in step as you advance.
+the current and next slide, a timer, and the **speaker notes** from your `notes` cells. The two stay
+in step as you advance.
+
+A `notes` cell shows while you are **authoring** — marked with a dashed rule so you can tell at a
+glance which cells are yours alone — and nowhere else. It never reaches a slide, the reading view
+(`zen`, and an app) hides it, and the HTML and markdown exports omit it entirely rather than hiding
+it in CSS, so the text is not in the published page's source either. The PDF carries notes only when
+you ask for the appendix (below). Style them yourself with the `.cell-notes` class.
 
 ![A notebook presented full-screen as a slide, with its heading, prose, and a live chart](./assets/present-slide.png)
 
@@ -28,13 +34,15 @@ is the only place notes are visible. The two stay in step as you advance.
 Segmentation follows a small set of boundary rules:
 
 1. A **markdown heading** at or above the slide level (default `##` / H2) starts a new slide.
-2. A cell tagged **`slide`** forces a new slide, regardless of headings.
+2. A cell tagged **`slide`** forces a new slide, regardless of headings. It carries a small `slide`
+   chip in the editor — the other boundaries are headings you can already see, this one isn't — and
+   the `.slide-start` class if you want to mark it differently.
 3. **PDF only.** A **thematic break** (`---` on its own line) *inside* a markdown cell splits it
    mid-cell into separate slides. The live deck keeps the cell whole, because it moves the real cell
    onto the stage so charts and `@bind` controls stay live, and a cell cannot be cut in half. Split
    the cell yourself to get the same break in both.
 4. A cell tagged **`notes`** attaches to the current slide as **speaker notes** (never shown in
-   the slide body).
+   the slide body, the reading view, or an export — see above).
 5. Cells before the first boundary form the leading **title slide**.
 6. `collapsed` cells are omitted (matching the article/report export).
 

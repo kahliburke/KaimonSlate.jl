@@ -12,8 +12,11 @@
 #
 # Statements headed by a Slate handler macro are EXCLUDED from expansion: their bespoke static
 # analysis (deps.jl) is already precise, and expanding one would fabricate bindings the analysis
-# deliberately withholds (e.g. `@onclick`'s control is intentionally NOT a read). A statement
-# whose expansion throws is skipped — failure only ever costs precision, never a real dependency.
+# deliberately withholds (e.g. `@onclick`'s control is intentionally NOT a read). If any statement's
+# expansion throws (typically its macro isn't defined yet, before the cell that loads it has run), the
+# whole cell's expansion fails: the conservative analysis stands and the cell is retried later. The
+# rest of the cell alone would be missing what that statement defines, and cached as a success it
+# would never be retried.
 const _EXPAND_SKIP = (Symbol("@bind"), Symbol("@reactive"), Symbol("@onclick"), Symbol("@onchange"),
                       Symbol("@asset"), Symbol("@use"))
 
@@ -77,9 +80,10 @@ function _splice_includes(mod::Module, s, depth::Int = 0, seen::Set{String} = Se
 end
 
 "Expand `src`'s top-level statements in `mod` (recursively, NEVER evaluating) → the expanded
-exprs. A macro may return `Expr(:toplevel, …)` (`@enum` does) whose sub-statements still carry
-unresolved `hygienic-scope` nodes — re-expanding each one resolves them. A top-level literal
-`include` is replaced by the included file's own statements first (`_splice_includes`)."
+exprs, or none at all if any statement fails to expand. A macro may return `Expr(:toplevel, …)`
+(`@enum` does) whose sub-statements still carry unresolved `hygienic-scope` nodes — re-expanding
+each one resolves them. A top-level literal `include` is replaced by the included file's own
+statements first (`_splice_includes`)."
 function _expand_cell_statements(mod::Module, src::AbstractString)
     top = try; Meta.parseall(String(src)); catch; return Any[]; end
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
@@ -88,12 +92,13 @@ function _expand_cell_statements(mod::Module, src::AbstractString)
         s isa LineNumberNode && continue
         s isa Expr && s.head === :macrocall && !isempty(s.args) && s.args[1] in _EXPAND_SKIP && continue
         e = try; macroexpand(mod, s; recursive = true); catch; nothing; end
-        e === nothing && continue
+        e === nothing && return Any[]
         if e isa Expr && e.head === :toplevel
             for a in e.args
                 a isa LineNumberNode && continue
                 a2 = try; macroexpand(mod, a; recursive = true); catch; nothing; end
-                a2 === nothing || push!(out, a2)
+                a2 === nothing && return Any[]
+                push!(out, a2)
             end
         else
             push!(out, e)

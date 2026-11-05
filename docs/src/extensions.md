@@ -160,7 +160,9 @@ All five are no-ops outside a Slate cell, so package code can call them uncondit
 change back the same way a native control does, through `window.slateSetBind(name, value)` — that
 keeps the registry, the global, `@onchange`, the notebook's own chrome and the persisted value in
 step. If you reflect Slate's value back into your control, guard the echo by comparing against
-`window.slateBindValue(name)` and writing only on a genuine difference.
+`window.slateBindValue(name)` and writing only on a genuine difference. An option widget with
+[keyed options](widgets.md#Option-values) holds the key of an option (`params.options[i].value`) in
+`slateBindValue` and `slate_bind_value`, and `slateSetBind(name, key)` selects that option.
 
 Pair this with `hidden(…)` at the `@bind` site so the notebook draws no second copy. See
 [Widgets & @bind](widgets.md#Controls-drawn-somewhere-else).
@@ -237,6 +239,12 @@ end
 
 const GL_URL = @ext_asset_url("echarts-gl/echarts-gl.min.js")
 ```
+
+An export repoints these URLs in chart specs, in front-end scripts, and in the HTML that a cell
+outputs. A published site points them at its own copy of the directory. A standalone page inlines
+each file that it uses, and puts a JS module that cell HTML imports in its import map once, for all
+cells. Load such a module with `import` or `import()`, and keep it to one file. A standalone page
+does not resolve a `<script src>` to the module, or a relative import inside it.
 
 [`provide_served_asset!`](@ref) is for the other case: a big runtime that many outputs share. It
 registers bytes at a content-addressed URL and returns the path. The bytes stay in the worker; the

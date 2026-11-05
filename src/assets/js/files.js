@@ -142,7 +142,7 @@ function _filesRow(r) {
     if (n.notebook) ico.title = 'a Slate notebook — double-click to open it';
     el.appendChild(ico);
     el.appendChild(document.createTextNode(' ' + n.name));
-    if (n.path === (_filesTree.self || ' ')) {
+    if (n.path === (_filesTree.self || '\0')) {
       const s = document.createElement('span'); s.className = 'ftself'; s.textContent = 'notebook';
       s.title = "this notebook's own source"; el.appendChild(s);
     }
@@ -376,6 +376,8 @@ async function _fileOpMkdir(dir) {
   if (j) { _openDirs.add(path); await _filesLoadTree({ select: path }); }
 }
 
+// `p` is `dir` itself or a path inside it.
+const _underPath = (p, dir) => p === dir || p.startsWith(dir + '/');
 async function _fileOpRename(n) {
   const to = await promptDark('Rename ' + n.path + ' to:', n.name, { ok: 'Rename' });
   if (!to || to === n.name) return;
@@ -383,8 +385,12 @@ async function _fileOpRename(n) {
   const dst = _joinRel(_dirName(n.path), to).replace(/^\/+/, '');
   const j = await _fileOp({ op: 'rename', path: n.path, to: dst });
   if (!j) return;
-  if (_fileOpen === n.path) { _fileOpen = j.path; _filesSetPath(j.path); _filesSetDownload(j.path); }
-  if (_fileStates[n.path]) { _fileStates[j.path] = _fileStates[n.path]; delete _fileStates[n.path]; }
+  if (_fileOpen && _underPath(_fileOpen, n.path)) {
+    _fileOpen = j.path + _fileOpen.slice(n.path.length); _filesSetPath(_fileOpen); _filesSetDownload(_fileOpen);
+  }
+  for (const p of Object.keys(_fileStates)) {
+    if (_underPath(p, n.path)) { _fileStates[j.path + p.slice(n.path.length)] = _fileStates[p]; delete _fileStates[p]; }
+  }
   await _filesLoadTree({ select: j.path });
   _toast('Renamed → ' + j.path);
 }
@@ -408,7 +414,7 @@ async function _fileOpDelete(n) {
   if (!await confirmDark(msg, 'Delete', 'danger')) return;
   const j = await _fileOp({ op: 'delete', path: n.path, recursive: isDir });
   if (!j) return;
-  if (_fileOpen && (_fileOpen === n.path || (isDir && _fileOpen.startsWith(n.path + '/')))) _filesClose();
+  if (_fileOpen && _underPath(_fileOpen, n.path)) _filesClose();
   delete _fileStates[n.path];
   _fileSel = _dirName(n.path);
   await _filesLoadTree();
@@ -471,6 +477,7 @@ async function _filesOpen(path, kind, forceText) {
   _filesStashState();
   _fileSel = path; _filesMarkSel();
   const effective = forceText ? 'text' : kind;
+  if (effective === 'text' && _isMd(path) && !_fileMdSource && !forceText) return _filesMdPreview(path);
   if (effective === 'text') {
     try {
       const r = await fetch(_apipath('/api/file?path=' + encodeURIComponent(path) + (forceText ? '&as=text' : '')));
@@ -505,10 +512,11 @@ function _filesMount(path, content, mtime) {
   const host = document.getElementById('fileedit');
   if (_fileView) { try { _fileView.destroy(); } catch (_) {} _fileView = null; }
   host.textContent = '';
-  _fileOpen = path; _fileDirty = false; _fileMtime = mtime || 0; _fileStale = false;
+  _fileOpen = path; _fileDirty = false; _fileMtime = mtime || 0; _fileStale = false; _fileMdShown = null;
   _filesSetPath(path);
   _filesSetDownload(path);
   _filesSyncDirty();
+  _filesSyncMdToggle();
   _fileView = window.mkFileEditor(host, content, {
     filename: path,
     state: _fileStates[path],
@@ -524,18 +532,27 @@ function _filesClose() {
   _fileOpen = null; _fileDirty = false; _fileMtime = 0; _fileStale = false;
   const pe = document.getElementById('filepath'); if (pe) { pe.textContent = 'select a file'; pe.classList.add('hint'); }
   const dl = document.getElementById('filedownload'); if (dl) dl.style.display = 'none';
+  _fileMdShown = null;
   _filesSyncDirty();
+  _filesSyncMdToggle();
 }
 
 // ── media / binary preview mode ─────────────────────────────────────────────
-function _filesPreview(path, kind) {
+// The preview pane, emptied, with the editor put away. `md` is the markdown file it will show, if any.
+function _filesPreviewShell(path, md) {
   if (_fileView) { try { _fileView.destroy(); } catch (_) {} _fileView = null; }
-  _fileOpen = null; _fileDirty = false; _fileMtime = 0; _fileStale = false; _filesSyncDirty();
+  _fileOpen = null; _fileDirty = false; _fileMtime = 0; _fileStale = false; _fileMdShown = md || null;
+  _filesSyncDirty();
+  _filesSyncMdToggle();
   _filesSetPath(path);
   _filesSetDownload(path);
   document.getElementById('fileedit').style.display = 'none';
   const pv = document.getElementById('filepreview');
   pv.style.display = ''; pv.textContent = '';
+  return pv;
+}
+function _filesPreview(path, kind) {
+  const pv = _filesPreviewShell(path);
   const url = _assetURL(path);
 
   if (kind === 'image') {
@@ -573,6 +590,68 @@ function _previewActions(path, kind, offerText) {
     row.appendChild(t);
   }
   return row;
+}
+
+// ── markdown files: shown rendered, the way a markdown cell is ──────────────────
+const _isMd = p => /\.(md|markdown)$/i.test(String(p || ''));
+let _fileMdSource = false;   // Source chosen: markdown files open in the editor until Preview is chosen
+let _fileMdShown = null;     // the markdown file the preview pane shows
+// `a/b/../c` → `a/c`; null when it climbs out of the project.
+function _normRel(p) {
+  const out = [];
+  for (const seg of String(p).replace(/\\/g, '/').split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (!out.length) return null; out.pop(); } else out.push(seg);
+  }
+  return out.join('/');
+}
+async function _filesMdPreview(path) {
+  let html;
+  try {
+    const r = await fetch(_apipath('/api/file-md?path=' + encodeURIComponent(path)));
+    if (!r.ok) { await alertDark('Could not preview ' + path + ':\n' + (await r.text())); return; }
+    html = await r.text();
+  } catch (e) { await alertDark('Preview failed: ' + e); return; }
+  const pv = _filesPreviewShell(path, path);
+  const md = document.createElement('div'); md.className = 'md fpmd';
+  md.innerHTML = html;
+  // An address elsewhere opens in a new tab; a relative one names a project file and opens it here.
+  md.querySelectorAll('a[href]').forEach(a => {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(a.getAttribute('href'))) { a.target = '_blank'; a.rel = 'noopener'; }
+  });
+  md.addEventListener('click', e => {
+    const a = e.target.closest('a[href]'); if (!a) return;
+    const href = a.getAttribute('href');
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('#') || href.startsWith('/')) return;
+    e.preventDefault();
+    let rel; try { rel = decodeURIComponent(href.split('#')[0]); } catch (_) { rel = href.split('#')[0]; }
+    const target = _normRel(_joinRel(_dirName(path), rel));
+    const node = target === null ? null : _findNode(target);
+    if (!node) { _toast('Not a file in this project: ' + (target || href), 3500, 'err'); return; }
+    if (node.dir) { _filesLoadTree({ select: target }); return; }
+    _filesOpen(target, node.kind || 'text');
+  });
+  pv.appendChild(md);
+  if (window.typeset) try { window.typeset(md); } catch (_) {}
+}
+// Preview ⇄ Source for the markdown file on screen. The preview renders what is on disk, so unsaved
+// edits are saved or discarded first.
+async function _filesMdToggle() {
+  if (_fileMdShown) {
+    const p = _fileMdShown; _fileMdSource = true;
+    await _filesOpen(p, 'text');
+  } else if (_fileOpen && _isMd(_fileOpen)) {
+    if (!await _filesConfirmDiscard()) return;
+    const p = _fileOpen; _filesStashState(); _fileMdSource = false;
+    await _filesMdPreview(p);
+  }
+}
+function _filesSyncMdToggle() {
+  const b = document.getElementById('filemdtoggle'); if (!b) return;
+  const cur = _fileMdShown || _fileOpen;
+  b.style.display = _isMd(cur) ? '' : 'none';
+  b.textContent = _fileMdShown ? '✎ Source' : '◉ Preview';
+  b.title = _fileMdShown ? 'edit this file' : 'show this file rendered';
 }
 
 // ── toolbar / status helpers ────────────────────────────────────────────────

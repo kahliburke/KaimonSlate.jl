@@ -86,4 +86,32 @@ const FIG_HTML = "<div class=\"some-renderer-card\"><canvas></canvas></div>"
         @test cells["fig"]["live"] == "placeholder" && !occursin("canvas", cells["fig"]["output"])
         @test cells["plain"]["live"] == "" && occursin("canvas", cells["plain"]["output"])
     end
+
+    @testset "a stored render never outranks a live payload" begin
+        # A reopen serves the render that an earlier process saved while this process runs the cells.
+        # That process counted its revs on its own, so the saved rev can be above every rev of this
+        # run. The browser drops a payload whose rev is not above the one it drew, so a served stored
+        # rev must stay below the lowest rev that a live cell can carry.
+        nb = _mknb(SRC)
+        nb.report.meta["hydrating"] = true
+        nb.report.meta["preview"] = Any[Dict{String,Any}("id" => "fig", "rev" => 18, "output" => "old")]
+        served = only(NS.state_json(nb)["cells"])
+        @test served["id"] == "fig" && served["output"] == "old"
+        @test served["rev"] < RE.parse_report(SRC).cells[1].rev
+    end
+end
+
+# An export that re-runs a figure asks the worker the cell ran on: the notebook's own, or its
+# region's. It never starts one.
+@testset "an export finds the running worker of a cell's region" begin
+    nb = _mknb(SRC)
+    marker = :region_worker
+    NS._REGION_KERNELS[(nb.id, "gpu")] = marker
+    try
+        @test NS._running_kernel(nb, "") === nb.kernel
+        @test NS._running_kernel(nb, "gpu") === marker
+        @test NS._running_kernel(nb, "cpu") === nothing
+    finally
+        delete!(NS._REGION_KERNELS, (nb.id, "gpu"))
+    end
 end

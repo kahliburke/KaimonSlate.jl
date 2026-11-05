@@ -64,7 +64,9 @@ include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_sched
 include(joinpath(@__DIR__, "macroexpand.jl")) # _expand_cell_source — macro-aware deps (engine + worker)
 include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
 include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
+include(joinpath(@__DIR__, "celldefs.jl"))  # what a cell defines, and taking it back (engine + worker)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
+include(joinpath(@__DIR__, "pkg_ops.jl"))   # _pkg_apply — package add/update/rm (shared with the engine)
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 include(joinpath(@__DIR__, "prepare.jl"))   # PrepareTracker — classify precompile output into structured status (shared w/ engine)
 
@@ -79,9 +81,10 @@ function _new_ns()
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query,
         slate_refresh = (vars...) -> KaimonGate._publish_stream("slate_refresh", join(string.(vars), ",")),
-        # wire: "id|frac|done|msg" (id/frac/done are |-free; msg is the rest — split limit=4)
+        # wire: "cid\x1fid\x1ffrac\x1fdone\x1fmsg" — the cell the bar belongs to, then the bar itself
         slate_progress = (frac; msg = "", id = "", done = false) ->
-            KaimonGate._publish_stream("slate_progress", string(id, "|", Float64(frac), "|", done === true ? 1 : 0, "|", msg)),
+            KaimonGate._publish_stream("slate_progress", string(_current_cell_id(), "\x1f", id, "\x1f", Float64(frac),
+                                                                "\x1f", done === true ? 1 : 0, "\x1f", msg)),
         # Live cell output (capture.jl's streaming watchdog). Wire: "cid\x1fstdout\x1fstderr" — the
         # unit separator, as elsewhere, because the payload is arbitrary text and `|` is not.
         slate_cellout = (cid, out, err) ->
@@ -114,6 +117,14 @@ function _new_ns()
     return m
 end
 const _NS = Ref{Module}(_new_ns())
+
+# The namespace is `Module(:NB)`, whose full name is `Main.NB`, and that is the path a stored value
+# records for a type a cell defined: the raw codec writes the element type as `Main.NB.Sample`, and jls
+# resolves the type's module by the same path. Binding the live namespace there is what lets such a
+# value decode. Done at run time only (`__init__`, a reset, an adopt): an image build can't write into
+# `Main`.
+_bind_ns!(m::Module) = (Base.invokelatest(Core.eval, Main, :(global $(nameof(m)) = $m)); m)
+_set_ns!(m::Module) = (_NS[] = m; _bind_ns!(m))
 
 # ── Capture tools (invoked by the server via synchronous :tool_call) ───────────
 # Each returns a serialization-friendly value that rides back binary in the gate
@@ -196,27 +207,27 @@ function _memo_dir()
 end
 
 # The DEVELOPED source dirs whose edits should invalidate a memo entry: the parent project's `src/`
-# plus any dev'd path-dependency's `src/` (from `path = "…"` lines in the active Manifest). Derived
-# deterministically from disk + the Manifest — NOT Revise's `pkgdatas`.
+# plus any dev'd path-dependency's `src/` (from `path = "…"` lines in the Manifest that resolves the
+# active project). Derived deterministically from disk + the Manifest — NOT Revise's `pkgdatas`.
 function _memo_src_dirs()
     dirs = String[]
     p = PARENT_PROJECT[]
     isempty(p) || (d = joinpath(p, "src"); isdir(d) && push!(dirs, d))
     try
         proj = Base.active_project()
-        if proj !== nothing
-            base = dirname(proj); man = joinpath(base, "Manifest.toml")
-            if isfile(man)
-                for m in eachmatch(r"(?m)^\s*path\s*=\s*\"([^\"]+)\"", read(man, String))
-                    pd = String(m.captures[1])
-                    # `_replicate_env!` rewrites remote dev paths as literal "~/…" — without
-                    # expanduser the remote worker can't FIND the synced source it should digest,
-                    # so its src_digest fell to the empty-constant while the local one didn't:
-                    # divergent fullkeys, and every transferred memo entry missed (found live).
-                    startswith(pd, "~") && (pd = expanduser(pd))
-                    isabspath(pd) || (pd = normpath(joinpath(base, pd)))
-                    d = joinpath(pd, "src"); isdir(d) && push!(dirs, d)
-                end
+        man = proj === nothing ? "" : _manifest_for(proj)
+        if !isempty(man)
+            # A relative `path` is anchored on the manifest's dir: the workspace root for a member.
+            base = dirname(man)
+            for m in eachmatch(r"(?m)^\s*path\s*=\s*\"([^\"]+)\"", read(man, String))
+                pd = String(m.captures[1])
+                # `_replicate_env!` rewrites remote dev paths as literal "~/…" — without
+                # expanduser the remote worker can't FIND the synced source it should digest,
+                # so its src_digest fell to the empty-constant while the local one didn't:
+                # divergent fullkeys, and every transferred memo entry missed (found live).
+                startswith(pd, "~") && (pd = expanduser(pd))
+                isabspath(pd) || (pd = normpath(joinpath(base, pd)))
+                d = joinpath(pd, "src"); isdir(d) && push!(dirs, d)
             end
         end
     catch
@@ -269,32 +280,22 @@ function _src_digest()
 end
 
 # Digest of the notebook env's DIRECT deps → resolved versions (Project [deps] minus the
-# worker-infra adds KaimonGate/Revise). HOST-PORTABLE by construction: the remote worker env is
-# the notebook env RESOLVED TOGETHER with that infra, so whole-Manifest bytes can never match
-# across hosts (found live: local 4239… vs remote f48c… made every transferred entry miss).
+# worker-infra adds KaimonGate/Revise; see `deps_digest`). HOST-PORTABLE by construction: the remote
+# worker env is the notebook env RESOLVED TOGETHER with that infra, so whole-Manifest bytes can never
+# match across hosts (found live: local 4239… vs remote f48c… made every transferred entry miss).
 # The user's own name→version/tree-sha pairs are the behavior-pinning, host-invariant core.
-const _MANIFEST_DIGEST = Ref{Tuple{Float64,UInt}}((-1.0, UInt(0)))
+# Cached by the resolving manifest's path + mtime.
+const _MANIFEST_DIGEST = Ref{Tuple{String,Float64,UInt}}(("", -1.0, UInt(0)))
 const _INFRA_DEPS = ("KaimonGate", "Revise", "ExpressionExplorer")   # mirror _WORKER_INFRA_PKGS (server_history.jl)
 function _manifest_digest()
     try
         proj = Base.active_project(); proj === nothing && return UInt(0)
-        man = joinpath(dirname(proj), "Manifest.toml"); isfile(man) || return UInt(0)
+        man = _manifest_for(proj); isempty(man) && return UInt(0)
         mt = Float64(mtime(man))
-        _MANIFEST_DIGEST[][1] == mt && return _MANIFEST_DIGEST[][2]
-        # Real TOML parsing (via MemoStore's stdlib import — the memo guard covers us): the
-        # notebook's direct deps from Project [deps], each mapped to its resolved
-        # version/tree-sha in the Manifest (format-2 layout: top-level "deps" → name → [entry]).
-        pdeps = sort!([d for d in keys(get(MemoStore.TOML.parsefile(proj), "deps", Dict{String,Any}()))
-                       if !(d in _INFRA_DEPS)])
-        mdeps = get(MemoStore.TOML.parsefile(man), "deps", Dict{String,Any}())
-        h = UInt(0x4d616e00)
-        for dn in pdeps
-            e = get(mdeps, dn, nothing)
-            ver = (e isa Vector && !isempty(e) && e[1] isa AbstractDict) ?
-                  string(get(e[1], "version", ""), get(e[1], "git-tree-sha1", "")) : ""
-            h = hash((dn, ver), h)
-        end
-        _MANIFEST_DIGEST[] = (mt, h); return h
+        c = _MANIFEST_DIGEST[]
+        (c[1] == man && c[2] == mt) && return c[3]
+        h = deps_digest(proj, _INFRA_DEPS)
+        _MANIFEST_DIGEST[] = (man, mt, h); return h
     catch; return UInt(0); end
 end
 
@@ -503,7 +504,8 @@ function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
                 binds = keep(:binds, NamedTuple[]), value_repr = vrepr,
                 exception = nothing, backtrace = nothing, duration_ms = ms,
                 trace = Any[], stderr = "", overflow = NamedTuple[],
-                animations = keep(:animations, Any[]))
+                animations = keep(:animations, Any[]), effects = keep(:effects, Any[]),
+                assets = keep(:assets, Any[]), live = keep(:live, false))
         ok = try
             _memo_store(key, names, wire; unread = unread, safe = safe)
         catch
@@ -619,14 +621,40 @@ end
 # functions of (source, environment), so replaying reproduces the real run. Returns false if any
 # replay throws (→ caller distrusts the restore and recomputes) — e.g. a `set_theme!(local_var)`
 # referencing a cell-local, or a package that stored fine but won't `using` now (a real env change).
-function _replay_scaffold!(m::Module, source::AbstractString)
-    top = try; Meta.parseall(String(source)); catch; return true; end   # unparseable → nothing to replay
+# Evaluate the type definitions among a cell's replayed statements (structs, abstract and primitive
+# types, `@kwdef` structs). Failures are left to the restore, which then misses and runs the cell.
+function _replay_types!(m::Module, source::AbstractString, cid::AbstractString)
+    plan = _replay_plan(source)
+    fname = Symbol(isempty(cid) ? "none" : "cell:" * cid)
+    for i in plan.idx
+        ln, s = plan.stmts[i]
+        d = _unwrap_definition(s)
+        (d isa Expr && d.head in (:struct, :abstract, :primitive)) || continue
+        try; Base.invokelatest(Core.eval, m, Expr(:toplevel, LineNumberNode(ln.line, fname), s))
+        catch e; @debug "slate memo: type replay before decode failed" cell = cid exception = e; end
+    end
+    return nothing
+end
+
+function _replay_scaffold!(m::Module, source::AbstractString; cid::AbstractString = "")
+    fname = isempty(cid) ? "none" : "cell:" * cid
+    top = try; Meta.parseall(String(source); filename = fname); catch; return true; end   # unparseable → nothing to replay
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
     for s in stmts                                   # top-level using/import — bring names into scope
         s isa LineNumberNode && continue
         (s isa Expr && s.head in (:using, :import)) || continue
         try; Base.invokelatest(Core.eval, m, s)
         catch e; @info "slate memo: import replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
+    end
+    # The statements that re-establish the cell's definitions (`_replay_plan`): the entry stores none of
+    # the names they bind (see `_eval_one`), so they run again here, in source order. Each carries a line
+    # node naming this cell's `cell:<id>` file, the tag that later removes the methods it defines.
+    isempty(cid) || _redefine_cell!(m, cid, source)
+    plan = _replay_plan(source)
+    for i in plan.idx
+        ln, s = plan.stmts[i]
+        try; Base.invokelatest(Core.eval, m, Expr(:toplevel, LineNumberNode(ln.line, Symbol(fname)), s))
+        catch e; @info "slate memo: definition replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
     end
     for s in stmts                                   # top-level `@bind name W(…)` — RE-REGISTER the widget
         s isa LineNumberNode && continue             # (assign the control global) without running the cell's
@@ -799,6 +827,11 @@ function _eval_one(source::String, filename::String, memo_key::String,
                    memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[];
                    slate_ctx = nothing)
     cid = replace(filename, r"^cell:" => "")
+    # What the cell's top-level definitions bind is re-established from source on restore
+    # (`_replay_scaffold!`), so the entry stores only the rest. A function value can't be stored
+    # faithfully, and this is what lets a cell that defines helpers beside an expensive result cache.
+    defs = _definition_names(source)
+    store_names = isempty(defs) ? memo_names : String[n for n in memo_names if !(Symbol(n) in defs)]
     # The decision record for this eval (see _MEMO_TRACE): filled in as the memo layer acts,
     # committed at every exit — `slate.memo_trace` reads it back.
     tr = Dict{String,Any}("srckey" => memo_key)
@@ -811,17 +844,33 @@ function _eval_one(source::String, filename::String, memo_key::String,
     if !isempty(memo_key) && !memo_force
         # `memo_names` = the cell's declared writes; the restore needs them to reject an entry that
         # would define none of them (see `_memo_restore`).
-        w = _memo_restore(memo_key; unread = memo_unread, writes = memo_names, trace = tr)
+        # A stored value of a type this cell defines decodes only once the type exists, so the cell's
+        # type definitions run first. On a miss the cell runs anyway, and an unchanged struct
+        # definition evaluates as a no-op.
+        _replay_types!(_NS[], source, cid)
+        w = _memo_restore(memo_key; unread = memo_unread, writes = store_names, trace = tr)
         # A restored cell is memoized WITHOUT running its source, so its cheap global side effects —
         # `using X` (a provider's imported names) and `set_theme!` (the ambient Makie theme) — are
         # replayed here so any downstream cell that later re-runs sees the right scope + theme. A
         # replay failure (env changed under us) distrusts the entry → fall through to a full
         # recompute rather than serve a half-scoped restore.
-        if w !== nothing && _replay_scaffold!(_NS[], source)
-            @info "slate memo: restored (no recompute)" cell = cid
-            tr["action"] = "restored"
-            _trace_commit!(cid, tr)
-            return merge(w, (memo = "restored",))   # tell the server this run came from the durable cache
+        # The stored wire's `binds` hold each control's value at STORE time, but the `@bind` replay
+        # reconciles the value against the live registry. The hub copies the reported values and keys
+        # the memo entries of the readers with them, so report the values the replay gave. Otherwise
+        # the hub shows the stored value while the namespace holds another one, and a reader that runs
+        # stores its output under the key of the wrong value.
+        if w !== nothing
+            sink = task_local_storage(_BIND_SINK_KEY, NamedTuple[])
+            replayed = try; _replay_scaffold!(_NS[], source; cid = cid)
+                       finally; delete!(task_local_storage(), _BIND_SINK_KEY); end
+            if replayed
+                @info "slate memo: restored (no recompute)" cell = cid
+                tr["action"] = "restored"
+                _trace_commit!(cid, tr)
+                live = Dict(b.name => b for b in sink)
+                binds = [get(live, b.name, b) for b in w.binds]
+                return merge(w, (binds = binds, memo = "restored"))   # tell the server this run came from the durable cache
+            end
         end
     elseif !isempty(memo_key) && memo_force
         tr["miss"] = "explicit ▶ run (memo_force) — restore skipped, fresh result re-stores"
@@ -848,7 +897,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # the serialize cost).
     if !isempty(memo_key) && r.exception === nothing &&
        (memo_always || (memo_threshold > 0 && r.duration_ms >= memo_threshold))
-        if _memo_store(memo_key, memo_names, r; unread = memo_unread, safe = memo_safe, trace = tr)
+        if _memo_store(memo_key, store_names, r; unread = memo_unread, safe = memo_safe, trace = tr)
             @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
             tr["action"] = "stored"; tr["ms"] = round(r.duration_ms; digits = 1)
             _trace_commit!(cid, tr)
@@ -904,7 +953,8 @@ function __slate_eval(source::String; filename::String = "string",
                      memo_always::Bool = false, memo_unread::Vector{String} = String[],
                      memo_safe::Vector{String} = String[],
                      ctx_region::String = "", ctx_notebook::String = "",
-                     ctx_regions::Vector{String} = String[])
+                     ctx_regions::Vector{String} = String[],
+                     lane::String = "")   # read by `_route_request` before this runs; "ui" ⇒ the UI threads
     # Register this eval's task under its cell id so __slate_cancel can interrupt it (the server runs
     # parallel cells as concurrent __slate_eval calls; a stop throws InterruptException into them).
     cid = replace(filename, r"^cell:" => "")
@@ -1101,7 +1151,7 @@ end
 
 "Discard the namespace (full rebuild). Fire the outgoing namespace's per-cell cleanups first so a live
 resource it holds (a Bonito `Session`) is released rather than orphaned in the discarded module."
-__slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _run_all_cleanups!(_NS[]); _NS[] = _new_ns(); true)
+__slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _run_all_cleanups!(_NS[]); _set_ns!(_new_ns()); true)
 
 "Run the given cells' `slate_on_cleanup` callbacks in the warm namespace — deleted-cell teardown, driven
 by the server (`run_cleanups!` → this) when `update_source!` detects removed cells. Unknown ids no-op."
@@ -1115,6 +1165,19 @@ function __slate_cleanup_cells(; ids::Vector = Any[])
     end
     n > 0 && @info "slate: ran cleanups for deleted cells" count = n
     return n
+end
+
+"Take back what no cell defines any more: delete the methods the removed `cells` defined, and remove the
+global `names` no cell writes now (`forget!` on the hub). Returns the names actually removed."
+function __slate_forget(; cells::Vector = Any[], names::Vector = Any[])
+    m = _NS[]
+    nm = 0
+    for id in cells
+        nm += _forget_cell!(m, String(id))
+    end
+    gone = _unbind_globals!(m, Symbol[Symbol(n) for n in names])
+    (nm > 0 || !isempty(gone)) && @info "slate: removed deleted definitions" methods = nm globals = gone
+    return String[String(g) for g in gone]
 end
 
 "Encode the namespace global `name` into this worker's content-addressed store and return its
@@ -1283,7 +1346,7 @@ sitting on the ~75s OS TCP timeout. Never throws. Returns (; reachable::Bool, rt
 function __slate_probe_peer(ip::String, port::Int)
     result = Threads.Atomic{Int}(0)              # 0 pending · 1 open · 2 refused/error
     t0 = time()
-    Threads.@spawn begin
+    _spawn_infra() do
         r = try
             s = Sockets.connect(ip, port); close(s); 1
         catch
@@ -1640,7 +1703,7 @@ function __slate_adopt(parent::String; datadir::AbstractString = "", nbdir::Abst
         ENV["KAIMONSLATE_DATADIR"] = String(datadir)
     end
     _run_all_cleanups!(_NS[])   # release the prior namespace's live per-cell resources before rebuild
-    _NS[] = _new_ns()
+    _set_ns!(_new_ns())
     @info "slate: adopted by a notebook" parent = parent datadir = datadir
     return true
 end
@@ -1702,12 +1765,20 @@ structured-return serialization. The hub rebuilds each cell's wire (see `rerende
 has ONE rich chunk (its `html+html` card), so we take the first chunk per cell."
 function __slate_rerender_live()
     cids = String[]; mimetypes = String[]; b64s = String[]
-    for (cid, chunks) in rerender_live_outputs(_NS[])
+    # Assets ride as ONE flat vector rather than one per cell: an asset record is already a
+    # NamedTuple with payload-dependent fields, and that exact shape crosses the gate today as
+    # `__slate_eval`'s `wire.assets`. Nesting a vector of them PER CELL is the shape that does not
+    # survive (hence the flat arrays above), so each record carries the cell it belongs to instead and
+    # the hub regroups. Without this a reconnected live output published markup pointing at asset paths
+    # nothing had registered.
+    assets = Any[]
+    for (cid, chunks, cas) in rerender_live_outputs(_NS[])
         isempty(chunks) && continue
         m, b = chunks[1]
         push!(cids, cid); push!(mimetypes, String(m)); push!(b64s, Base64.base64encode(b))
+        for a in cas; push!(assets, merge((; cell = String(cid)), a)); end
     end
-    return (; cids = cids, mimetypes = mimetypes, b64s = b64s)
+    return (; cids = cids, mimetypes = mimetypes, b64s = b64s, assets = assets)
 end
 
 "Run extensions' `on_worker_reset` hooks — this worker replaced the one an extension was set up in."
@@ -1760,6 +1831,85 @@ catch e
     false
 end
 _blog("ExpressionExplorer loaded (ok=$(_EE_OK))")
+
+# ── Infrastructure threads ────────────────────────────────────────────────────────────────────
+# Cell code runs on `:default`. When it saturates that pool (CPU-bound tasks that rarely yield), any
+# worker machinery also scheduled there stalls with it. So the worker keeps two pools of its own OS
+# threads, from DedicatedThreads (an optional env on LOAD_PATH, see gate_kernel.jl `_pools_env`):
+#   • `:slate` — the control plane: status, cancel, the hub heartbeat, telemetry, blob transfers.
+#     Never runs notebook code, so it always answers.
+#   • `:slate_ui` — what keeps the page live: markdown interpolation, live re-renders, table pages,
+#     completions, and cells re-run by a reactive push. These do run notebook code (`show` methods,
+#     `{{ }}` expressions, reader cells), so they are kept off `:slate`: a slow one delays only UI work.
+# Everything else, including every cell a user runs, stays on `:default`. Without the package the
+# control plane runs on `:interactive` and UI work on `:default`.
+const _POOLS_OK = try
+    @eval import DedicatedThreads
+    true
+catch e
+    @info "slate: DedicatedThreads unavailable — worker control plane runs on :interactive" error = sprint(showerror, e)
+    false
+end
+_blog("DedicatedThreads loaded (ok=$(_POOLS_OK))")
+
+const _INFRA_THREADS = 2
+const _UI_THREADS = 2
+const _INFRA_POOL = Ref{Any}(nothing)
+const _UI_POOL = Ref{Any}(nothing)
+
+function _start_worker_pools!()
+    _POOLS_OK || return nothing
+    _INFRA_POOL[] = DedicatedThreads.DedicatedPool(_INFRA_THREADS; name = :slate)
+    _UI_POOL[] = DedicatedThreads.DedicatedPool(_UI_THREADS; name = :slate_ui)
+    return nothing
+end
+
+"Run `f()` on the control-plane threads (never notebook code); returns its Task."
+function _spawn_infra(f)
+    pool = _INFRA_POOL[]
+    pool === nothing && return Threads.@spawn :interactive f()
+    return DedicatedThreads.spawn(f, pool)
+end
+
+"Run `f()`, which may run notebook code, on the UI threads; returns its Task."
+function _spawn_ui(f)
+    pool = _UI_POOL[]
+    pool === nothing && return Threads.@spawn f()
+    # Outside the pool's scope, so notebook code's own `spawn(f)` still defaults to `:default`.
+    return DedicatedThreads.spawn(() -> DedicatedThreads.with_pool(f, nothing), pool)
+end
+
+# Gate requests that never run notebook code → the control plane.
+const _CONTROL_TOOLS = Set([
+    "__slate_running", "__slate_cancel", "__slate_cancel_cells", "__slate_ports",
+    "__slate_client_key", "__slate_server_key", "__slate_authorize_client", "__slate_revoke_client",
+    "__slate_probe_peer",
+])
+
+# Gate requests that render or answer the page → the UI threads. Each may run notebook code, but
+# only display-sized work: an expression, a `show`, a page of a table.
+const _UI_TOOLS = Set([
+    "__slate_interp", "__slate_rerender_live", "__slate_rerender_fig", "__slate_table_page",
+    "__slate_matrix_render", "__slate_complete", "__slate_get_served_asset",
+    "__slate_extension_manifest", "__slate_module_help",
+])
+
+# KaimonGate request router (`set_request_router!`): a spawner for requests that leave the default
+# lane, `nothing` for those that stay on it.
+function _route_request(request)
+    type = get(request, :type, nothing)
+    type === :ping && return _spawn_infra
+    type === :tool_call || return nothing
+    name = get(request, :name, "")
+    name in _CONTROL_TOOLS && return _spawn_infra
+    name in _UI_TOOLS && return _UI_POOL[] === nothing ? nothing : _spawn_ui
+    # A cell re-run by a reactive push (the hub tags it, server.jl `_UI_LANE_CELLS`).
+    if name == "__slate_eval" && _UI_POOL[] !== nothing
+        args = get(request, :arguments, nothing)
+        args isa AbstractDict && get(args, "lane", "") == "ui" && return _spawn_ui
+    end
+    return nothing
+end
 
 "Macro-expand cell sources in the live notebook namespace (recursive, NO evaluation) and ANALYZE
 them right here, where the macros live — returns id → {reads, writes} name lists. A cell whose
@@ -1874,6 +2024,7 @@ end
 # activate + `dev` the parent package in so `using ParentModule` works, preserving the parent's
 # pinned versions. One consistent env.
 function _seed_notebook_env!(envdir::AbstractString, parent::AbstractString)
+    _await_loads()
     pname = seed_env_project!(envdir, parent)   # shared policy (envprep.jl)
     stamp_env!(envdir, parent)
     Pkg.activate(envdir)
@@ -1899,12 +2050,36 @@ function __slate_fork(envdir, parent)
     end
 end
 
+"Re-create the notebook's own packages after a re-seed, each the way it was added (`readd_specs`,
+envprep.jl). Returns the names of local checkouts that are missing on this machine."
+function _readd!(delta; pinned::Bool = false, preserve = Pkg.PRESERVE_TIERED)
+    s = readd_specs(delta; pinned)
+    isempty(s.devs) || Pkg.develop([Pkg.PackageSpec(; d...) for d in s.devs]; preserve)
+    isempty(s.adds) || Pkg.add([Pkg.PackageSpec(; a...) for a in s.adds]; preserve)
+    return s.skipped
+end
+
+# The top-level files of an env dir (project, manifest, stamps), so a rebuild that fails part-way
+# can put the env back as it was instead of leaving the bare parent seed.
+_env_snapshot(dir) = Dict(f => read(joinpath(dir, f)) for f in readdir(dir) if isfile(joinpath(dir, f)))
+function _env_restore!(dir, saved)
+    for f in readdir(dir)
+        isfile(joinpath(dir, f)) && !haskey(saved, f) && rm(joinpath(dir, f); force = true)
+    end
+    for (f, bytes) in saved
+        write(joinpath(dir, f), bytes)
+    end
+end
+
 "Re-resolve a forked notebook env against the CURRENT parent (called when the parent's
 Manifest changed): re-seed from the parent, then re-add the notebook's own packages so the
-two stay one consistent environment. Returns `{ok, adds}`."
+two stay one consistent environment. On failure the env is restored as it was. Returns
+`{ok, adds, skipped}` or `{ok=false, message}`."
 function __slate_sync_parent(envdir, parent)
+    e = String(envdir); p = String(parent)
+    _await_loads()
+    saved = _env_snapshot(e)
     try
-        e = String(envdir); p = String(parent)
         fdeps = Set{String}()
         fpf = joinpath(e, "Project.toml")
         isfile(fpf) && (fdeps = Set(keys(get(Pkg.TOML.parsefile(fpf), "deps", Dict{String,Any}()))))
@@ -1915,31 +2090,28 @@ function __slate_sync_parent(envdir, parent)
             pdeps = Set(keys(get(pt, "deps", Dict{String,Any}())))
             pname = string(get(pt, "name", ""))
         end
-        adds = sort(collect(setdiff(fdeps, pdeps, Set([pname, ""]))))   # the notebook's own packages
+        names = setdiff(fdeps, pdeps, Set([pname, ""]))   # the notebook's own packages
+        # How each was added (path / git / registry), read from the env before the re-seed replaces it.
+        info = Dict(d["name"] => d for d in __slate_project_deps())
+        own = [get(info, n, Dict{String,Any}("name" => n)) for n in sort(collect(names))]
         _seed_notebook_env!(e, p)
-        isempty(adds) || Pkg.add(adds; preserve = Pkg.PRESERVE_ALL)
-        return Dict{String,Any}("ok" => true, "adds" => adds)
-    catch e
-        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+        skipped = _readd!(own; preserve = Pkg.PRESERVE_ALL)
+        return Dict{String,Any}("ok" => true, "adds" => [d["name"] for d in own], "skipped" => skipped)
+    catch err
+        try; _env_restore!(e, saved); Pkg.activate(e); catch; end
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, err))
     end
 end
 
 "Reconstruct a notebook env from its `.jl` footer: seed from the parent, then add the
 notebook's own packages at the recorded versions. Called on open when the env dir is
-absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is a list of
-`{name, version, uuid}`. Returns `{ok, message}`."
+absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is the footer's
+`{name, version, uuid[, source, origin]}` records. Returns `{ok, skipped}` or `{ok=false, message}`."
 function __slate_reconstruct(envdir, parent, pkgs)
     try
         _seed_notebook_env!(String(envdir), String(parent))
-        specs = Pkg.PackageSpec[]
-        for p in pkgs
-            nm = String(get(p, "name", get(p, :name, "")))
-            isempty(nm) && continue
-            v = string(get(p, "version", get(p, :version, "")))
-            push!(specs, isempty(v) ? Pkg.PackageSpec(name = nm) : Pkg.PackageSpec(name = nm, version = VersionNumber(v)))
-        end
-        isempty(specs) || Pkg.add(specs)
-        return Dict{String,Any}("ok" => true)
+        skipped = _readd!(pkgs; pinned = true)
+        return Dict{String,Any}("ok" => true, "skipped" => skipped)
     catch e
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end
@@ -1966,8 +2138,8 @@ end
 "The worker's SlateExtensionsBase extension manifest — what its loaded packages registered for the
 page to mirror: `{frontend:[{id, js, esm, kind}]}` (widget renderers + editor extensions declared from
 `__init__`; `esm` ⇒ ES module; a non-empty `kind` ⇒ a component whose default export Slate wraps). The
-server pulls this once per run drain and injects the scripts into the page. Empty when no such package
-is loaded."
+server pulls this at the end of each run drain and on an `/ext-assets/` miss, and injects the scripts
+into the page. Empty when no such package is loaded."
 function __slate_extension_manifest()
     out = Dict{String,Any}("frontend" => Dict{String,Any}[], "assets" => Dict{String,Any}[],
                            "imports" => Dict{String,Any}[], "fences" => String[])
@@ -1991,62 +2163,8 @@ function __slate_extension_manifest()
     return out
 end
 
-"Add or remove package(s) in the worker's OWN active project (the notebook's deps).
-`op` is \"add\" or \"rm\". `name` is one spec, or several separated by whitespace/commas — all applied
-in a single resolve (one precompile). Each add-spec may be a registry name (`Foo` or `Foo@1.2`), a git
-URL (`https://…​[.git][#rev]`, `git@…`) → `Pkg.add(url=…)`, or a LOCAL path (`/…`, `~/…`, `./…`, or an
-existing dir) → `Pkg.develop(path=…)` (so it's a dev'd dep, hot-reloadable + carried to remote workers).
-Returns `{ok, message}`."
-# Classify each add-token into a registry/git spec (→ Pkg.add) or a local-path spec (→ Pkg.develop),
-# with a human label. Shared by the notebook-env add and the parent-project add.
-function _pkg_add_specs(tokens)
-    adds = Pkg.PackageSpec[]; devs = Pkg.PackageSpec[]; labels = String[]
-    for tok in tokens
-        t = String(tok)
-        if occursin(r"^(https?://|git://|git@|ssh://)"i, t) || endswith(t, ".git") || endswith(t, ".git/")
-            parts = split(t, '#'; limit = 2)                      # url or url#rev (branch/tag/sha)
-            url = String(parts[1]); rev = length(parts) == 2 ? String(parts[2]) : ""
-            push!(adds, isempty(rev) ? Pkg.PackageSpec(url = url) : Pkg.PackageSpec(url = url, rev = rev))
-        elseif startswith(t, "/") || startswith(t, "~/") || startswith(t, "./") ||
-               startswith(t, "../") || isdir(expanduser(t))
-            push!(devs, Pkg.PackageSpec(path = abspath(expanduser(t))))
-        elseif occursin('@', t)                                   # name@version
-            nm, ver = split(t, '@'; limit = 2)
-            push!(adds, Pkg.PackageSpec(name = String(nm), version = String(ver)))
-        else
-            push!(adds, Pkg.PackageSpec(name = t))
-        end
-        push!(labels, t)
-    end
-    return (adds = adds, devs = devs, labels = labels)
-end
-
-function __slate_pkg(op, name)
-    tokens = filter(!isempty, split(String(name), r"[\s,]+"))
-    isempty(tokens) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
-    o = String(op)
-    try
-        if o == "rm"
-            Pkg.rm(String.(tokens))
-            return Dict{String,Any}("ok" => true, "message" => "removed $(join(tokens, ", "))")
-        elseif o == "update"
-            # Distinct from `add`: adding a package that's already a dep keeps the resolved version,
-            # so an upgrade needs `Pkg.update`. Scoped to the named packages — a bare update would
-            # move the notebook's whole environment, which is not what "update this one" means.
-            Pkg.update(String.(tokens))
-            return Dict{String,Any}("ok" => true, "message" => "updated $(join(tokens, ", "))")
-        elseif o == "add"
-            s = _pkg_add_specs(tokens)
-            isempty(s.adds) || Pkg.add(s.adds)
-            isempty(s.devs) || Pkg.develop(s.devs)
-            return Dict{String,Any}("ok" => true, "message" => "added $(join(s.labels, ", "))")
-        else
-            return Dict{String,Any}("ok" => false, "message" => "unknown op '$o'")
-        end
-    catch e
-        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
-    end
-end
+# `slate_pkg` / the package pane: `_pkg_apply` (pkg_ops.jl), shared with the in-process kernel.
+__slate_pkg(op, name) = _pkg_apply(op, name)
 
 """
     _same_registry(reg, url) -> Bool
@@ -2089,6 +2207,7 @@ function __slate_pkg_parent(op, name, parent)
     isempty(String(parent)) && return Dict{String,Any}("ok" => false, "message" => "no parent project")
     tokens = filter(!isempty, split(String(name), r"[\s,]+"))
     isempty(tokens) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
+    _await_loads()
     cur = try; dirname(Pkg.project().path); catch; ""; end
     try
         Pkg.activate(String(parent))
@@ -2139,6 +2258,9 @@ const _SRC_DEFS = Dict{String,Dict{String,UInt64}}()
 # watcher. Both rehash the Dict, so they need to be serialised. The file PARSE stays outside the
 # lock — it is the slow part, and the worst a concurrent parse costs is doing it twice.
 const _SRC_DEFS_LOCK = ReentrantLock()
+# path → (def-name → names its source mentions): the package's call graph, for `_src_reaching`.
+# Guarded by `_SRC_DEFS_LOCK` alongside `_SRC_DEFS`.
+const _SRC_REFS = Dict{String,Dict{String,Set{String}}}()
 _file_path(pd, rpath) = try; joinpath(pd.info.basedir, String(rpath)); catch; String(rpath); end
 
 # (def-name → body-hash) for one source file, parsed fresh from disk.
@@ -2148,6 +2270,41 @@ function _file_defs(path::AbstractString)
     src = try; read(path, String); catch; return d; end
     top = try; Meta.parseall(src); catch; return d; end
     return _collect_defs!(d, top)
+end
+
+function _file_refs(path::AbstractString)
+    d = Dict{String,Set{String}}()
+    src = try; read(path, String); catch; return d; end
+    top = try; Meta.parseall(src); catch; return d; end
+    return _collect_refs!(d, top)
+end
+
+# The tracked definitions that reach a changed name through the package source, transitively. The
+# compiler's invalidations only cover code that has been compiled in this worker; a cell restored
+# from the cache never ran its calls, and this is what still finds it.
+function _src_reaching(changed, queue)
+    # Only the packages this pass revised: names are matched bare, and across every tracked package
+    # an edit's names would run into unrelated code that happens to share them.
+    paths = Set{String}()
+    for item in queue
+        try
+            pd = item[1]
+            for rpath in pd.info.files
+                push!(paths, _file_path(pd, rpath))
+            end
+        catch
+        end
+    end
+    refs = Dict{String,Set{String}}()
+    lock(_SRC_DEFS_LOCK) do
+        for path in paths
+            d = get(_SRC_REFS, path, nothing); d === nothing && continue
+            for (k, v) in d
+                union!(get!(Set{String}, refs, k), v)
+            end
+        end
+    end
+    return collect(_reaching_defs(refs, changed))
 end
 
 # Baseline the defs of any tracked file we haven't seen yet, WITHOUT reporting — so the first
@@ -2162,8 +2319,10 @@ function _seed_new_src_defs!()
             path = _file_path(pd, rpath)
             lock(_SRC_DEFS_LOCK) do; haskey(_SRC_DEFS, path); end && continue
             defs = _file_defs(path)                      # parsed off the lock
+            refs = _file_refs(path)
             lock(_SRC_DEFS_LOCK) do
                 get!(_SRC_DEFS, path, defs)              # a racing seeder may have won; either is fine
+                get!(_SRC_REFS, path, refs)
             end
         end
     catch
@@ -2192,7 +2351,8 @@ function _changed_names(queue)
                     haskey(newdefs, nm) || push!(changed, nm)
                 end
             end
-            lock(_SRC_DEFS_LOCK) do; _SRC_DEFS[path] = newdefs; end
+            newrefs = _file_refs(path)
+            lock(_SRC_DEFS_LOCK) do; _SRC_DEFS[path] = newdefs; _SRC_REFS[path] = newrefs; end
         catch
         end
     end
@@ -2387,8 +2547,7 @@ function _start_src_watcher()
             (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || continue
             queue = collect(R.revision_queue)
             before = _qe_keys(R)
-            thrown = nothing
-            try; R.revise(); catch e; thrown = e; end
+            invs, thrown = _logged_revise(R)
             emsg = _revise_error_msg(R, thrown, before)
             if !isempty(emsg)
                 @warn "slate hot-reload: revise error" error = emsg
@@ -2400,6 +2559,7 @@ function _start_src_watcher()
                 _LAST_SRC_ERR[] = ""
                 names = _changed_names(queue)
                 _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
+                append!(names, _src_reaching(names, queue)); append!(names, _invalidated_names(invs, queue)); unique!(names)
                 @info "slate hot-reload: revised" files = length(queue) changed = names
                 isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
                 _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
@@ -2416,10 +2576,76 @@ end
 function __slate_revise()
     isdefined(Main, :Revise) || return String[]
     queue = try; collect(Main.Revise.revision_queue); catch; Tuple[]; end
-    try; Main.Revise.revise(); catch; end
+    invs, _ = _logged_revise(Main.Revise)
     names = _changed_names(queue)
     _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
-    return names
+    append!(names, _src_reaching(names, queue)); append!(names, _invalidated_names(invs, queue))
+    return unique!(names)
+end
+
+# Run a Revise pass with Julia's invalidation log on. The log lists the compiled code a method change
+# invalidates: every caller inference linked to a replaced method, transitively, which is the set of
+# functions whose behaviour the edit can change. Returns `(log, error)`.
+function _logged_revise(R)
+    invs = ccall(:jl_debug_method_invalidation, Any, (Cint,), 1)
+    thrown = nothing
+    try
+        try; R.revise(); catch e; thrown = e; end
+    finally
+        ccall(:jl_debug_method_invalidation, Any, (Cint,), 0)
+    end
+    return invs, thrown
+end
+
+# Functions a show/print method shapes the output of: a change to one changes how values of the types
+# in its signature display, in cells that never call anything that changed.
+const _DISPLAY_FNS = (:show, :print, :display, :repr, :string, :summary, :showerror, :show_default)
+
+# From the invalidation log of a revise pass: the names of the functions whose compiled code it
+# invalidated, limited to the revised packages and the notebook (an edited `show` method also
+# invalidates Base's `repr` and `print`, which would otherwise mark every cell that prints); for a
+# replaced display method, the type names in its signature, and `=name` for each notebook global whose
+# value has one of those types, since the cell that made it shows it.
+function _invalidated_names(invs, queue)
+    roots = Set{Module}()
+    for item in queue
+        try
+            m = get(Base.loaded_modules, item[1].info.id, nothing)
+            m isa Module && push!(roots, m)
+        catch
+        end
+    end
+    ns = _NS[]
+    out = String[]
+    types = Set{Symbol}()
+    for x in invs
+        if x isa Core.MethodInstance && x.def isa Method
+            m = x.def
+            (m.module === ns || Base.moduleroot(m.module) in roots) || continue
+            s = String(m.name)
+            startswith(s, '#') || push!(out, s)
+        elseif x isa Method && x.name in _DISPLAY_FNS
+            sig = Base.unwrap_unionall(x.sig)
+            for P in sig.parameters[2:end]
+                P = Base.unwrap_unionall(P)
+                (P isa DataType && (P.name.module === ns || Base.moduleroot(P.name.module) in roots)) &&
+                    push!(types, nameof(P))
+            end
+        end
+    end
+    for t in types
+        push!(out, String(t))
+    end
+    if !isempty(types)
+        mentions(T) = T isa DataType && (nameof(T) in types || any(mentions, T.parameters))
+        for n in Base.invokelatest(names, ns; all = true, imported = false)
+            Base.invokelatest(isdefinedglobal, ns, n) || continue
+            v = Base.invokelatest(getglobal, ns, n)
+            (v isa Type || v isa Function || v isa Module) && continue
+            mentions(typeof(v)) && push!(out, "=" * String(n))
+        end
+    end
+    return out
 end
 
 # GateTools exposed to the KaimonSlate server.
@@ -2515,6 +2741,7 @@ function tools()
         KaimonGate.GateTool("__slate_call", __slate_call),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_cleanup_cells", __slate_cleanup_cells),
+        KaimonGate.GateTool("__slate_forget", __slate_forget),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
     KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),
@@ -2733,12 +2960,18 @@ function _telemetry_loop!(stats_path::String)
     pagesz = Sys.islinux() ? Int(ccall(:sysconf, Clong, (Cint,), 30)) : 4096   # _SC_PAGESIZE
     clk    = Sys.islinux() ? Int(ccall(:sysconf, Clong, (Cint,), 2))  : 100   # _SC_CLK_TCK
     # macOS: proc_pid_rusage (libproc, unprivileged — no /proc, no Instruments, no root) gives CURRENT
-    # RSS + cumulative user/system CPU ns. Offsets from rusage_info_v0 (see perf_monitor_macos.jl).
+    # RSS + cumulative user/system CPU time. Offsets from rusage_info_v0 (see perf_monitor_macos.jl).
+    # The CPU times are in Mach absolute-time units: nanoseconds on Intel, but 125/3 ns ticks on Apple
+    # Silicon, so convert with the timebase or cpu% reads ~42x low there.
+    mach_ns_per_tick = Sys.isapple() ? let tb = Ref{NTuple{2,UInt32}}((0, 0))
+        ccall(:mach_timebase_info, Cint, (Ptr{NTuple{2,UInt32}},), tb) == 0 && tb[][2] != 0 ?
+            tb[][1] / tb[][2] : 1.0
+    end : 1.0
     macos_rusage() = try
         buf = Vector{UInt8}(undef, 256)
         ccall(:proc_pid_rusage, Cint, (Cint, Cint, Ptr{UInt8}), Int32(getpid()), Cint(0), buf) == 0 || return nothing
-        (user_ns = reinterpret(UInt64, @view buf[17:24])[1],
-         sys_ns  = reinterpret(UInt64, @view buf[25:32])[1],
+        (user_ns = reinterpret(UInt64, @view buf[17:24])[1] * mach_ns_per_tick,
+         sys_ns  = reinterpret(UInt64, @view buf[25:32])[1] * mach_ns_per_tick,
          rss     = reinterpret(UInt64, @view buf[65:72])[1])
     catch; nothing; end
     cputime() = if Sys.islinux()
@@ -2899,14 +3132,24 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                 (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)
             end)))
     catch e; @warn "slate: timestamp logger install failed" exception = e; end
+    # The worker's own thread pools, started before the port opens, and the gate routing requests onto
+    # them (see `_route_request`). With a KaimonGate that has no `set_request_router!`, every request
+    # still gets a `:default` task.
+    try; _start_worker_pools!(); catch e; @warn "slate: worker thread pools failed to start; using the built-in pools" exception = e; end
+    isdefined(KaimonGate, :set_request_router!) && KaimonGate.set_request_router!(_route_request)
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
     # key — proper mutual auth. Local + :ssh_tunnel workers leave them off (loopback / SSH-encrypted).
+    # The gate's event-driven request loop, where this KaimonGate has one: each reply goes out as
+    # soon as it is ready, which is what a cell run's sequence of requests waits on. Left to
+    # KAIMON_GATE_OWNER_WAKE when that is set, so it can still be switched off.
+    owner_wake = hasmethod(KaimonGate.serve, Tuple{}, (:owner_wake,)) && !haskey(ENV, "KAIMON_GATE_OWNER_WAKE") ?
+                 (; owner_wake = true) : (;)
     _blog("start(): entering KaimonGate.serve")
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
                      allow_restart = false, spawned_by = "slate",
-                     curve = curve, allowed_clients = allowed_clients)
+                     curve = curve, allowed_clients = allowed_clients, owner_wake...)
     _blog("start(): gate SERVING — port reachable (hub can dial now)")
     # DEFERRED (~5s): Revise/src-watcher setup is heavy compilation; running it now would contend for
     # the codegen lock with the hub's CURVE handshake in the first seconds after the port opens (the
@@ -2920,7 +3163,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # ALWAYS CURVE (decoupled from hub transport): allow-listed on :direct (its OWN Slate-side ZAP
     # handler + allow-file, not the gate's), encryption-only behind SSH on :tunnel. No plaintext blob
     # path on any worker. Needs the memo/CAS layer (MemoStore + codecs) — memo-off means no store to serve.
-    data_port > 0 && _MEMO_OK && Threads.@spawn begin
+    data_port > 0 && _MEMO_OK && _spawn_infra() do
         sleep(5)   # DEFERRED: another CURVE-server setup; keep it out of the hub's handshake window
         # The blob server binds `blob_bind` when given (remote workers → 0.0.0.0 so same-subnet PEERS can
         # reach it for direct pulls) else the gate's `host` (local → loopback). CURVE-protected regardless
@@ -2960,19 +3203,23 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
             end
         end
     end
-    # Dedicated transfer executor — pumps queued peer pulls (verb `X`) on a default-pool thread, off the
-    # gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
-    data_port > 0 && _MEMO_OK && Threads.@spawn try; _xfer_executor!(); catch e
-        @warn "slate worker: transfer executor died" exception = e
+    # Dedicated transfer executor — pumps queued peer pulls (verb `X`) on an infrastructure thread, off
+    # the gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
+    data_port > 0 && _MEMO_OK && _spawn_infra() do
+        try; _xfer_executor!(); catch e
+            @warn "slate worker: transfer executor died" exception = e
+        end
     end
     # Reap idle/dead pooled ssh forwards so a peer pair that stops transferring releases its held SSH
     # connection; kill them all on shutdown so exit never orphans the standing ssh children.
     if data_port > 0 && _MEMO_OK
         atexit(_ssh_fwd_killall!)
-        Threads.@spawn try
-            while true; sleep(30); _ssh_fwd_reap_idle!(); end
-        catch e
-            @warn "slate worker: ssh-forward reaper died" exception = e
+        _spawn_infra() do
+            try
+                while true; sleep(30); _ssh_fwd_reap_idle!(); end
+            catch e
+                @warn "slate worker: ssh-forward reaper died" exception = e
+            end
         end
     end
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
@@ -3029,10 +3276,12 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # Sample every worker — local kernels too. The `.stats` sidecar is still remote-only (empty
     # stats_path skips it), but the `slate_telemetry` PUB now flows from every worker process, so the
     # hub's watchdog can see cpu/rss/gc on a local kernel and not just remote regions.
-    Threads.@spawn try
-        _telemetry_loop!(stats_path)
-    catch e
-        @warn "slate worker: telemetry sampler died" exception = e
+    _spawn_infra() do
+        try
+            _telemetry_loop!(stats_path)
+        catch e
+            @warn "slate worker: telemetry sampler died" exception = e
+        end
     end
     # `serve` runs the message loop on a spawned thread and returns — but this is
     # a non-interactive `-e` process, so we must block to keep it alive until a
@@ -3052,6 +3301,6 @@ end
 # SlateExtensionsBase, so the registrations would silently not survive (see KaimonSlate.__init__ for
 # the same fix and what it looked like when it broke). Idempotent; belongs here so packaging the
 # worker can never quietly regress the widget value lifecycle.
-__init__() = _register_builtin_kinds!()
+__init__() = (_register_builtin_kinds!(); _bind_ns!(_NS[]); nothing)
 
 end # module SlateWorker

@@ -51,6 +51,7 @@ include("cell_actions.jl")
 include("palette.jl")
 include("render.jl")
 include("binary.jl")
+include("logging.jl")
 
 # Controls
 export Widget, Choice, Selection, UploadedFile, indices, to_widget, auto_widget, kind_for
@@ -64,7 +65,7 @@ export PaletteCommand, to_palette_command, auto_palette_command, register_palett
 # Output
 export WebPage, register_widget_js
 # Auto-registered front-end (no boot cell)
-export register_widget!, register_component!, provide_frontend!, @pkg_asset,
+export register_widget!, register_component!, provide_frontend!, @pkg_asset, PkgAsset,
        provide_served_asset!, served_asset, slate_live_render, on_live_reset, run_live_resets,
 on_worker_reset, run_worker_resets,
        required_assets, ensure_widget_assets!, ensure_module_frontend!, ensure_module_frontends!,
@@ -73,7 +74,8 @@ on_worker_reset, run_worker_resets,
        ext_asset_url, @ext_asset_url, pkg_key, provide_import!, package_imports
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
-       slate_emit, slate_effect, slate_everywhere, slate_on, slate_off, slate_on_cleanup
+       slate_emit, slate_effect, slate_everywhere, slate_on, slate_off, slate_on_cleanup,
+       slate_save_asset
 # Controls — for an extension that draws a `@bind` control itself
 export slate_bind_widget, slate_bind_value, slate_bind_names, slate_on_bind, slate_bind_observable
 # Rich output (Slate display MIMEs)
@@ -81,6 +83,7 @@ export slate_render, component, html_fragment, SlateComponentMIME, SlateHtmlMIME
 # Markdown fenced blocks claimed by an extension (```mermaid → that package's value)
 export register_fence_renderer!, fence_renderer, fence_languages, render_fence
 # Binary numeric streaming
-export SlateBinary, encode_binary_frame
+export SlateBinary, encode_binary_frame, encode_binary_frame!
+export HookLogger
 
 end # module

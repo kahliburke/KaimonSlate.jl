@@ -236,3 +236,41 @@ end
             @test NS.doc_bundle_default_dir(nb) == joinpath(root, "docs", "slate", "loose")
     end
 end
+
+# A docs page embeds the same cell HTML the exported page writes, so the bundle gets what the page
+# does: a relative image found in the project, `/ext-assets/` urls as siblings the embed rebases, and
+# speaker notes left out.
+@testset "doc bundle: project images, vendored urls, speaker notes" begin
+    mktempdir() do dir
+        mkpath(joinpath(dir, "figures"))
+        write(joinpath(dir, "figures", "logo.png"), UInt8[0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
+        src = """
+        #%% md id=fig
+        ![logo](figures/logo.png){width=240}
+
+        #%% md id=n1 notes
+        Say this out loud.
+
+        #%% code id=w
+        widget()
+        """
+        path = joinpath(dir, "media.jl")
+        write(path, src)
+        rep = RE.parse_report(src; id = "media")
+        rep.meta["assetbase"] = dir
+        byid = Dict(c.id => c for c in rep.cells)
+        byid["w"].output = _out(display = [RE.MimeChunk("text/html",
+                                Vector{UInt8}("<img src=\"/ext-assets/Pkg/icon.png\">"))])
+        nb = NS.LiveNotebook("media", path, rep, RE.InProcessKernel(), 1, String[], String[], ReentrantLock(),
+                             Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+        out = joinpath(dir, "bundle")
+        man = NS.export_doc_bundle(nb, out)
+        cells = Dict(c["id"] => c for c in man["cells"])
+        @test !haskey(cells, "n1")
+        fig = JSON.parsefile(joinpath(out, cells["fig"]["file"]))
+        @test cells["fig"]["native"] === false
+        @test occursin("src=\"figures/logo.png\"", fig["html"]) && isfile(joinpath(out, "figures", "logo.png"))
+        w = JSON.parsefile(joinpath(out, cells["w"]["file"]))
+        @test occursin("src=\"./ext-assets/Pkg/icon.png\"", w["html"])
+    end
+end

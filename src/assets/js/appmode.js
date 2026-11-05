@@ -52,12 +52,14 @@
   // failed, using the failing cell's heading where the notebook gives it one — a document written
   // for an app has section headings, and naming the step that failed beats naming a cell id.
   function cellLabel(cell) {
-    // The nearest preceding markdown heading is the author's own name for this step.
-    let n = cell;
-    while (n) {
-      const h = n.querySelector && n.querySelector('.md h1, .md h2, .md h3');
+    // The nearest preceding markdown heading is the author's own name for this step. Walked over the
+    // cells in document order, not by sibling: a `column=N` cell sits inside a `.cell-row`, so the
+    // cell before it in the document is not its sibling and a sibling walk stops at the row. Reached
+    // only with a failing cell in hand, so the query costs nothing while the page is running clean.
+    const cells = Array.from(document.querySelectorAll('#nb .cell'));
+    for (let i = cells.indexOf(cell); i >= 0; i--) {
+      const h = cells[i].querySelector('.md h1, .md h2, .md h3');
       if (h && h.textContent.trim()) return h.textContent.trim();
-      n = n.previousElementSibling;
     }
     return '';
   }

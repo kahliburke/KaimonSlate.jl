@@ -19,6 +19,9 @@ const headings = computed(() => {
   const out = [];
   for (const c of cells.value) {
     if (c.kind !== 'md' || typeof c.source !== 'string') continue;
+    // A `notes` cell is presenter-only, and the TOC is a reader-facing panel in an app — a heading
+    // listed here would show its text and scroll to a cell the reading view hides.
+    if (c.notes) continue;
     let inFence = false, hi = 0;
     for (const ln of c.source.split('\n')) {
       if (/^\s*(```|~~~)/.test(ln)) { inFence = !inFence; continue; }

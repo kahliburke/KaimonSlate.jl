@@ -454,6 +454,31 @@ function set_worker_extra_flags!(spec::AbstractString; respawn::Bool = true)
     return s
 end
 
+"""
+Where workers get DedicatedThreads, which gives them dedicated threads for the control plane
+and UI work (see `ReportEngine._pools_env`): \"\" installs it by name from the depot's registries,
+\"off\" disables it, and anything else is a local checkout or a git URL. Falls back to the
+`KAIMONSLATE_WORKER_POOLS` environment variable when slate.json doesn't set it.
+"""
+worker_pools_source()::String =
+    String(get(_slate_config(), "worker_pools_source", get(ENV, "KAIMONSLATE_WORKER_POOLS", "")))
+
+"""
+    set_worker_pools_source!(spec) -> String
+
+Persist where workers get DedicatedThreads (see `worker_pools_source`). Workers spawned once
+the env for that source has built use it; running workers are left alone.
+"""
+function set_worker_pools_source!(spec::AbstractString)
+    s = strip(String(spec))
+    ReportEngine.WORKER_POOLS_SOURCE[] = s
+    cfg = _slate_config(); cfg["worker_pools_source"] = s
+    _persist_slate_config!(cfg)
+    ReportEngine._pools_env(; retry_failed = true)   # start building it now, ahead of the next spawn
+    @info "slate: worker pools source set" spec = s
+    return s
+end
+
 "Persisted hub port; 0 means unset — the `KAIMONSLATE_PORT` env var or the 8765 default applies."
 configured_port()::Int = something(tryparse(Int, string(get(_slate_config(), "port", ""))), 0)
 
@@ -609,6 +634,8 @@ set_run_location_default!(spec::AbstractString) = NotebookServer.set_runon_defau
 function _load_slate_config!()
     s = worker_threads()
     isempty(s) || (ReportEngine.WORKER_THREADS[] = s)
+    ReportEngine.WORKER_POOLS_SOURCE[] = worker_pools_source()
+    ReportEngine._pools_env(; retry_failed = true)   # build (or retry) the optional pools env in the background, ahead of spawns
     ef = worker_extra_flags()
     isempty(ef) || (ReportEngine.WORKER_EXTRA_FLAGS[] = ef)
     ReportEngine.MEMO_CAP_GB[] = memo_cap_gb()
@@ -1557,6 +1584,9 @@ function create_tools(GateTool::Type)
 
     `name` is the bound variable (e.g. "njobs"), NOT a cell id. `value` is JSON: a number ("42"),
     bool ("true"), string, or array ("[1,2]"); a bare word that isn't valid JSON is taken literally.
+    For Select/Radio/MultiSelect/MultiCheckBox, `value` is an option value, and an array names a
+    tuple option ("[\"dog\", 2]"). Some option lists (tuples, structs, two options with the same
+    text) give each option an `#opt:` key: the reply then shows the key, and `value` can also be a key.
     For a Button, OMIT `value` — a valueless set is a CLICK: the server increments the click count
     and fires the handler, so you never need to read (or race) the current count.
     """
@@ -1704,7 +1734,9 @@ function create_tools(GateTool::Type)
         # is the normal case for this tool, and the fallback is quiet: the PDF still builds and
         # those cells come out as plain text. Count them first so the answer can say so, rather
         # than leaving the caller to notice that a grid they expected is missing.
-        htmlcells = count(c -> NotebookServer._has_html_output(c), nb.report.cells)
+        # HTML outputs that carry a markdown form are typeset, so they need no tab
+        htmlcells = count(c -> NotebookServer._has_html_output(c) &&
+                               NotebookServer._output_chunk(c.output, "text/markdown") === nothing, nb.report.cells)
         notab = htmlcells > 0 && lock(nb.llock) do; isempty(nb.listeners); end
         # Deck defaults: code hidden unless the caller explicitly opts in.
         slides = layout == "slides"
@@ -1740,7 +1772,7 @@ function create_tools(GateTool::Type)
         export_app(notebook, dir; theme="", pagewidth="", port="0", agent="0") -> String
 
     Write this notebook to `dir` as a self-contained **application**. Running `julia run.jl` inside
-    that folder — here, or on any machine you copy it to, needing only Julia 1.10+ — installs the
+    that folder — here, or on any machine you copy it to, needing only Julia 1.12+ — installs the
     environment, reconstructs the notebook's exact packages, and serves it as an app: prose,
     results, figures and live controls, with the authoring API refused server-side. Windows users
     double-click `run.bat`.

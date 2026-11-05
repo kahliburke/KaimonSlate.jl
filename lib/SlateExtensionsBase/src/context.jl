@@ -71,6 +71,29 @@ function slate_emit(channel, value)
 end
 
 """
+    slate_save_asset(name, data; mime = "", dtype = nothing) -> Union{String,Nothing}
+
+Save `data` as an asset of the cell running now and return its page path, for `Slate.asset(path)` in
+the browser. Call it from a `slate_render` or `show` method to put BULK DATA beside your markup
+instead of inside it: the bytes go to Slate's content-addressed store, so they ride the cell's memo,
+are served with an immutable cache header, and are inlined into a static export — a figure's
+coordinates then cost one cached fetch rather than megabytes of JSON in every `/state` response.
+
+`data` is a byte vector, a string, or a numeric array (which travels column-major with its shape and
+dtype, readable as a typed array). `dtype` narrows an array before storing.
+
+Returns `nothing` where Slate keeps no assets for the caller — outside a cell eval, and on paths that
+install the context but harvest nothing, such as a `slate_on` handler or a task your render spawned
+(`task_local_storage` does not reach a child task). Treat that as "send it another way" and fall back
+to inlining; a path is never returned unless it will resolve.
+"""
+function slate_save_asset(name, data; mime = "", dtype = nothing)
+    f = _ctx_field(:save_asset)
+    f === nothing && return nothing
+    return f(name, data; mime = mime, dtype = dtype)
+end
+
+"""
     slate_effect(kind::Symbol; names = Symbol[], data...) -> nothing
 
 Declare a cell EFFECT to Slate over the code→Slate channel — e.g. `slate_effect(:everywhere;
@@ -172,6 +195,18 @@ function slate_on(channel, f)
     on(channel, f)
     return nothing
 end
+
+# The do-block spelling, which the docs show and which is the natural Julia idiom:
+#
+#     slate_on("stats") do args
+#         …
+#     end
+#
+# A do-block passes the function FIRST, so without this method it lands in `slate_on(channel, f)`
+# with the arguments reversed: the pair is registered the wrong way round and the channel is then
+# permanently unreachable, with no error at either end. The browser just reports "no slate_on
+# handler registered" for a channel the notebook believes it registered.
+slate_on(f::Function, channel::AbstractString) = slate_on(channel, f)
 
 """
     slate_off(channel) -> nothing
