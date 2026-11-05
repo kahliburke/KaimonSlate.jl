@@ -118,6 +118,14 @@ function _new_ns()
 end
 const _NS = Ref{Module}(_new_ns())
 
+# The namespace is `Module(:NB)`, whose full name is `Main.NB`, and that is the path a stored value
+# records for a type a cell defined: the raw codec writes the element type as `Main.NB.Sample`, and jls
+# resolves the type's module by the same path. Binding the live namespace there is what lets such a
+# value decode. Done at run time only (`__init__`, a reset, an adopt): an image build can't write into
+# `Main`.
+_bind_ns!(m::Module) = (Base.invokelatest(Core.eval, Main, :(global $(nameof(m)) = $m)); m)
+_set_ns!(m::Module) = (_NS[] = m; _bind_ns!(m))
+
 # ── Capture tools (invoked by the server via synchronous :tool_call) ───────────
 # Each returns a serialization-friendly value that rides back binary in the gate
 # response's `value` field.
@@ -613,6 +621,21 @@ end
 # functions of (source, environment), so replaying reproduces the real run. Returns false if any
 # replay throws (→ caller distrusts the restore and recomputes) — e.g. a `set_theme!(local_var)`
 # referencing a cell-local, or a package that stored fine but won't `using` now (a real env change).
+# Evaluate the type definitions among a cell's replayed statements (structs, abstract and primitive
+# types, `@kwdef` structs). Failures are left to the restore, which then misses and runs the cell.
+function _replay_types!(m::Module, source::AbstractString, cid::AbstractString)
+    plan = _replay_plan(source)
+    fname = Symbol(isempty(cid) ? "none" : "cell:" * cid)
+    for i in plan.idx
+        ln, s = plan.stmts[i]
+        d = _unwrap_definition(s)
+        (d isa Expr && d.head in (:struct, :abstract, :primitive)) || continue
+        try; Base.invokelatest(Core.eval, m, Expr(:toplevel, LineNumberNode(ln.line, fname), s))
+        catch e; @debug "slate memo: type replay before decode failed" cell = cid exception = e; end
+    end
+    return nothing
+end
+
 function _replay_scaffold!(m::Module, source::AbstractString; cid::AbstractString = "")
     fname = isempty(cid) ? "none" : "cell:" * cid
     top = try; Meta.parseall(String(source); filename = fname); catch; return true; end   # unparseable → nothing to replay
@@ -821,6 +844,10 @@ function _eval_one(source::String, filename::String, memo_key::String,
     if !isempty(memo_key) && !memo_force
         # `memo_names` = the cell's declared writes; the restore needs them to reject an entry that
         # would define none of them (see `_memo_restore`).
+        # A stored value of a type this cell defines decodes only once the type exists, so the cell's
+        # type definitions run first. On a miss the cell runs anyway, and an unchanged struct
+        # definition evaluates as a no-op.
+        _replay_types!(_NS[], source, cid)
         w = _memo_restore(memo_key; unread = memo_unread, writes = store_names, trace = tr)
         # A restored cell is memoized WITHOUT running its source, so its cheap global side effects —
         # `using X` (a provider's imported names) and `set_theme!` (the ambient Makie theme) — are
@@ -1124,7 +1151,7 @@ end
 
 "Discard the namespace (full rebuild). Fire the outgoing namespace's per-cell cleanups first so a live
 resource it holds (a Bonito `Session`) is released rather than orphaned in the discarded module."
-__slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _run_all_cleanups!(_NS[]); _NS[] = _new_ns(); true)
+__slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _run_all_cleanups!(_NS[]); _set_ns!(_new_ns()); true)
 
 "Run the given cells' `slate_on_cleanup` callbacks in the warm namespace — deleted-cell teardown, driven
 by the server (`run_cleanups!` → this) when `update_source!` detects removed cells. Unknown ids no-op."
@@ -1676,7 +1703,7 @@ function __slate_adopt(parent::String; datadir::AbstractString = "", nbdir::Abst
         ENV["KAIMONSLATE_DATADIR"] = String(datadir)
     end
     _run_all_cleanups!(_NS[])   # release the prior namespace's live per-cell resources before rebuild
-    _NS[] = _new_ns()
+    _set_ns!(_new_ns())
     @info "slate: adopted by a notebook" parent = parent datadir = datadir
     return true
 end
@@ -3167,6 +3194,6 @@ end
 # SlateExtensionsBase, so the registrations would silently not survive (see KaimonSlate.__init__ for
 # the same fix and what it looked like when it broke). Idempotent; belongs here so packaging the
 # worker can never quietly regress the widget value lifecycle.
-__init__() = _register_builtin_kinds!()
+__init__() = (_register_builtin_kinds!(); _bind_ns!(_NS[]); nothing)
 
 end # module SlateWorker
