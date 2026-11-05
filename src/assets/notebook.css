@@ -3143,7 +3143,8 @@ html.deck-shot .slidefig > .sf-layer.step.on:has(~ .sf-layer.on) { transition: n
 /* `?deck=sheet`: every slide at its last step, for a look at the whole deck at once. */
 html.deck-sheet-mode body > *:not(.deck-sheet) { display: none !important; }
 .deck-sheet { position: absolute; top: 0; left: 0; right: 0; z-index: 10000; min-height: 100vh; padding: 14px;
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; background: #04060b; }
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-content: start; gap: 14px;
+  background: #04060b; }
 .deck-sheet-cell { position: relative; aspect-ratio: var(--sheet-ar, 16/9); overflow: hidden; border-radius: 6px;
   outline: 1px solid rgba(255, 255, 255, .08); }
 .deck-sheet-n { position: absolute; left: 8px; top: 6px; font: 600 13px/1 system-ui, sans-serif; color: #fff;
