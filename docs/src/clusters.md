@@ -777,7 +777,3 @@ Two differences are visible in use:
   a running allocation without logging in again; PBS has nothing equivalent, so it uses the ssh hop
   PBS sites already rely on. The hub still authenticates once (that ssh is issued *on* the login
   node's session), but the site has to permit it, which is the usual configuration.
-
-## What is not here yet
-
-* **Kubernetes.** The design is meant to take it without a rewrite. It does not run yet.
