@@ -120,6 +120,41 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
         @test isempty(m("!x"))               # negation is not a bang call
     end
 
+    @testset "a cell that calls a function takes on what its body does" begin
+        # A function body reads and changes globals when it's CALLED, so its effects belong to the
+        # cells that call it (resolved against the writers above each caller), not the one defining it.
+        cases = [
+            "body reads a global defined below it" => (["A" => "f() = a + 1", "B" => "a = 1", "C" => "y = f()"], "B" => "a = 2"),
+            "transitively" => (["G" => "g() = a * 10", "F" => "f() = g() + 1", "B" => "a = 1", "C" => "y = f()"], "B" => "a = 3"),
+            "stored closure" => (["H" => "h = () -> a + 100", "B" => "a = 1", "C" => "y = h()"], "B" => "a = 5"),
+            "keyword default" => (["F" => "kd(; k = K) = k", "B" => "K = 1", "C" => "y = kd()"], "B" => "K = 9"),
+            "global assigned in the body" =>
+                (["F" => "setg() = (global gg = base * 2; nothing)", "B" => "base = 1", "C" => "setg()", "R" => "r = gg + 0"],
+                 "B" => "base = 4"),
+            "body mutates a global" =>
+                (["V" => "v = Int[]", "F" => "addone() = push!(v, 1)", "C" => "addone(); nothing", "R" => "n = length(v)"],
+                 "C" => "addone(); addone(); nothing"),
+            "helper mutates its argument" =>
+                (["V" => "d = Dict{Int,Int}()", "W" => "put7(x) = (x[7] = 7; nothing)", "C" => "put7(d)", "R" => "ks = sort(collect(keys(d)))"],
+                 "C" => "put7(d); d[8] = 8; nothing"),
+            "argument mutated two calls deep" =>
+                (["G" => "inner(x) = push!(x, 1)", "F" => "outer(x) = (inner(x); nothing)", "V" => "v = Int[]", "C" => "outer(v)", "R" => "n = length(v)"],
+                 "C" => "outer(v); outer(v)"),
+            "Ref updated in a helper" =>
+                (["R0" => "counter = Ref(0)", "F" => "bump() = (counter[] += 1)", "C" => "bump(); nothing", "R" => "c = counter[]"],
+                 "C" => "bump(); bump(); nothing"),
+            "non-bang broadcast helper" =>
+                (["V" => "vv = [1.0, 2.0]", "F" => "scale(v) = (v .*= 2; v)", "C" => "scale(vv); nothing", "R" => "t = sum(vv)"],
+                 "C" => "scale(vv); scale(vv); nothing"),
+            "methods split across cells" =>
+                (["F" => "function fe end", "M1" => "fe(x::Int) = x + k1", "K" => "k1 = 1", "C" => "y = fe(1)"], "K" => "k1 = 7"),
+            "editing a helper doesn't re-run its data" =>
+                (["V" => "w = [1]", "F" => "addw() = push!(w, 2)", "C" => "addw(); nothing", "R" => "n = length(w)"],
+                 "F" => "addw() = push!(w, 2, 3)"),
+        ]
+        @test isempty(failing(cases))
+    end
+
     @testset "a removed definition leaves the namespace" begin
         # The namespace keeps a deleted cell's globals and methods unless they're taken back: the
         # reader of a deleted definition must fail the way a fresh run does.

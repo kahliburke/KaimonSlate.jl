@@ -114,6 +114,26 @@ CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backt
     CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects, assets, false)
 
 """
+What one notebook function does when it is CALLED, as seen in its body: the globals it reads
+(`refs`), assigns through `global` (`writes`) and mutates (`mut_g`), which positional parameters it
+mutates (`mut_p`), and the calls it makes with each argument's base name (`calls`). A cell that calls
+the function takes these on (`build_dependencies!`); the cell that defines it does not, since
+defining a function runs none of its body.
+"""
+mutable struct FuncSummary
+    params::Vector{Union{Symbol,Nothing}}
+    refs::Set{Symbol}
+    writes::Set{Symbol}
+    mut_g::Set{Symbol}
+    mut_p::Set{Int}
+    calls::Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}
+end
+FuncSummary(params) = FuncSummary(params, Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Int}(),
+                                  Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[])
+Base.copy(f::FuncSummary) = FuncSummary(copy(f.params), copy(f.refs), copy(f.writes), copy(f.mut_g),
+                                        copy(f.mut_p), copy(f.calls))
+
+"""
 A single report cell. `id` is the persistent identity (survives edits/moves);
 `src_hash` answers "did the source change". Inference/eval fields are populated
 later by the dependency + eval passes.
@@ -151,6 +171,9 @@ mutable struct Cell
                                   # push and the full state a mutating request answers with) and, with
                                   # no way to tell new from old, applies whichever lands last. This is
                                   # how it tells.
+    funcs::Dict{Symbol,FuncSummary}   # the notebook functions this cell defines, by name (see FuncSummary)
+    topcalls::Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}   # calls its top-level code makes,
+                                  # with each positional argument's base name (mutated-parameter mapping)
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -158,7 +181,8 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0)
+                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0,
+                Dict{Symbol,FuncSummary}(), Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[])
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation

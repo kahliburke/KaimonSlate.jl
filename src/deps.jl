@@ -48,9 +48,79 @@ end
 # short form). Its body may legitimately name globals defined LOWER in the document (resolved when
 # called), so such references are excluded from `reads_now` and never trip the backref diagnostic.
 # Struct definitions are NOT deferred: field types/supertypes evaluate at definition time.
-_is_deferred_def(s) = s isa Expr && (
-    s.head === :function || s.head === :macro ||
-    (s.head === :(=) && s.args[1] isa Expr && s.args[1].head in (:call, :where)))
+# A docstring or `@inline` around the definition doesn't change that, and neither does binding an
+# anonymous function to a global (`h = () -> a`).
+function _is_deferred_def(s)
+    s = _unwrap_definition(s)
+    s isa Expr || return false
+    (s.head === :function || s.head === :macro) && return true
+    s.head === :(=) && length(s.args) == 2 || return false
+    s.args[1] isa Expr && s.args[1].head in (:call, :where, :(::)) && return _def_signature(s) !== nothing
+    return s.args[1] isa Symbol && s.args[2] isa Expr && s.args[2].head === :(->)
+end
+
+# Calls in `ex` by a plain name, with the base name of each positional argument (`nothing` when the
+# argument isn't a name or a field/index path off one): what lets a mutated parameter be traced back
+# to the global the caller passed.
+function _named_calls!(out::Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}, ex)
+    ex isa Expr || return out
+    if ex.head === :call && !isempty(ex.args) && ex.args[1] isa Symbol
+        args = Union{Symbol,Nothing}[_base_symbol(a) for a in ex.args[2:end]
+                                     if !(a isa Expr && a.head in (:parameters, :kw))]
+        push!(out, (ex.args[1], args))
+    end
+    for a in ex.args
+        _named_calls!(out, a)
+    end
+    return out
+end
+
+# (name, positional parameter names, body) of a deferred definition, or nothing for one that isn't a
+# plainly named function (a macro, a qualified `Base.show` extension).
+function _function_parts(s)
+    d = _unwrap_definition(s)
+    d isa Expr || return nothing
+    if d.head === :(=) && d.args[1] isa Symbol && d.args[2] isa Expr && d.args[2].head === :(->)
+        a = d.args[2].args[1]
+        ps = a isa Expr && a.head === :tuple ? a.args : Any[a]
+        return (d.args[1], Union{Symbol,Nothing}[_param_name(p) for p in ps if !(p isa Expr && p.head === :parameters)],
+                d.args[2].args[2])
+    end
+    d.head === :macro && return nothing
+    sig = _def_signature(d)
+    (sig === nothing || !(sig.args[1] isa Symbol)) && return nothing
+    ps = Union{Symbol,Nothing}[_param_name(p) for p in sig.args[2:end] if !(p isa Expr && p.head === :parameters)]
+    return (sig.args[1], ps, d.args[2])
+end
+_param_name(p::Symbol) = p
+_param_name(p::Expr) = p.head in (:(::), :kw, :(=), :(...)) && !isempty(p.args) ? _param_name(p.args[1]) : nothing
+_param_name(::Any) = nothing
+
+# The summaries of the functions a cell's deferred definitions define (see `FuncSummary`).
+function _summarize_functions!(cell::Cell, stmts)
+    for s in stmts
+        _is_deferred_def(s) || continue
+        parts = _function_parts(s)
+        parts === nothing && continue
+        name, params, body = parts
+        refs = try
+            Set{Symbol}(EE.compute_reactive_node(_unwrap_definition(s)).references)
+        catch
+            Set{Symbol}()
+        end
+        delete!(refs, name)
+        sm = get!(() -> FuncSummary(params), cell.funcs, name)
+        union!(sm.refs, refs)
+        union!(sm.writes, _collect_global_decls!(Set{Symbol}(), body))
+        mw = Set{Symbol}(); mr = Set{Symbol}(); _collect_mutations!(mw, mr, body)
+        for n in mw
+            k = findfirst(==(n), params)
+            k === nothing ? (n in refs && push!(sm.mut_g, n)) : push!(sm.mut_p, k)
+        end
+        _named_calls!(sm.calls, body)
+    end
+    return cell
+end
 
 # Leaf name a dotted/`as` import path binds: `A.B.C` → :C, `M as L` → :L.
 _leaf_name(s::Symbol) = s
@@ -493,7 +563,8 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
-const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol},Int,Set{Symbol}}}()
+const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol},Int,Set{Symbol},
+                                     Dict{Symbol,FuncSummary},Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # Bounded LRU: entries carry a recency tick (`_BIND_TICKS`, bumped on every hit/store) and overflow
 # evicts the least-recently-used ~10% — the old clear-on-full wholesale `empty!` made a long-lived
@@ -531,12 +602,15 @@ function infer_bindings!(cell::Cell)
         hit[8] ? push!(cell.flags, :macrocall) : delete!(cell.flags, :macrocall)   # unknown-macro cell (expansion candidate)
         empty!(cell.reads_now); union!(cell.reads_now, hit[9])   # top-level reads (backref diagnostic)
         empty!(cell.observes); union!(cell.observes, hit[11])   # `bind_observable(:name)` controls
+        empty!(cell.funcs); for (k, v) in hit[12]; cell.funcs[k] = copy(v); end   # function summaries
+        empty!(cell.topcalls); append!(cell.topcalls, hit[13])
         return cell
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && _bind_cache_evict!()
-        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now), gen, copy(cell.observes))
+        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now), gen, copy(cell.observes),
+                                Dict{Symbol,FuncSummary}(k => copy(v) for (k, v) in cell.funcs), copy(cell.topcalls))
         _BIND_TICKS[cell.id] = (_BIND_TICK[] += 1)
     end
     return cell
@@ -549,6 +623,7 @@ _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_an
 
 function _infer_bindings_uncached!(cell::Cell)
     empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides); empty!(cell.observes)
+    empty!(cell.funcs); empty!(cell.topcalls)
     delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall)
     if cell.kind == MARKDOWN || cell.kind == WEB
         # A markdown or web cell "reads" the free variables of its `{{ expr }}` blocks, so it joins the
@@ -666,15 +741,19 @@ function _infer_bindings_uncached!(cell::Cell)
             union!(cell.writes, _strip_anon(node.definitions))
             union!(cell.writes, _strip_anon(node.funcdefs_without_signatures))
             union!(cell.writes, _collect_global_decls!(Set{Symbol}(), blk))
-            _record_global_mutations!(cell, blk, node.references)
-            # Top-level reads (backref diagnostic): re-analyze only the NON-deferred statements —
-            # a reference inside a function/macro body resolves at call time and must not count.
+            # A function body mutates when the function is called, so only the cell's immediate code
+            # counts here; the bodies go into the cell's function summaries, which its callers take on.
+            # The same split gives the top-level reads (backref diagnostic): a reference inside a
+            # function/macro body resolves at call time and must not count.
             imm = Any[s for s in nonbind if !_is_deferred_def(s)]
             if !isempty(imm)
                 iblk = Expr(:block, imm...)
+                _record_global_mutations!(cell, iblk, node.references)
                 union!(cell.reads_now, EE.compute_reactive_node(iblk).references)
                 union!(cell.reads_now, _macrocall_arg_refs!(Set{Symbol}(), iblk))
+                _named_calls!(cell.topcalls, iblk)
             end
+            _summarize_functions!(cell, nonbind)
         catch e
             @debug "deps: cell-body reactive-node analysis failed — falling back to :opaque" cell = cell.id exception = e
             push!(cell.flags, :opaque)
@@ -941,6 +1020,7 @@ function build_dependencies!(report::Report)
         end
         empty!(c.deps)
     end
+    _apply_function_effects!(report)       # callers take on what the notebook functions they reach do
     _scan_imports!(report)                 # notebook-level `@use` import-map declarations → report.meta
     writer = Dict{Symbol,String}()        # name → id of most-recent prior writer
     barrier::Union{String,Nothing} = nothing
@@ -1135,6 +1215,82 @@ function take_forget!(report::Report)
         end
     end
     return (sort!(collect(String, cells)), names)
+end
+
+# The notebook's function summaries merged by name (every cell that adds a method contributes) and
+# closed over the calls between them: a function reaches what the notebook functions it calls reach,
+# and a parameter it passes to a callee that mutates that position is mutated too.
+function _notebook_function_effects(report::Report)
+    S = Dict{Symbol,FuncSummary}()
+    for c in report.cells
+        c.kind == CODE || continue
+        for (f, sm) in c.funcs
+            acc = get(S, f, nothing)
+            if acc === nothing
+                S[f] = copy(sm)
+            else
+                union!(acc.refs, sm.refs); union!(acc.writes, sm.writes); union!(acc.mut_g, sm.mut_g)
+                union!(acc.mut_p, sm.mut_p); append!(acc.calls, sm.calls)
+            end
+        end
+    end
+    changed = !isempty(S)
+    while changed
+        changed = false
+        for (f, sm) in S
+            n0 = (length(sm.refs), length(sm.writes), length(sm.mut_g), length(sm.mut_p))
+            for g in collect(sm.refs)
+                (g === f || !haskey(S, g)) && continue
+                gs = S[g]
+                union!(sm.refs, gs.refs); union!(sm.writes, gs.writes); union!(sm.mut_g, gs.mut_g)
+            end
+            for (g, args) in sm.calls
+                gs = get(S, g, nothing); gs === nothing && continue
+                for j in gs.mut_p
+                    j <= length(args) || continue
+                    b = args[j]; b === nothing && continue
+                    k = findfirst(==(b), sm.params)
+                    k === nothing ? (b in sm.refs && push!(sm.mut_g, b)) : push!(sm.mut_p, k)
+                end
+            end
+            delete!(sm.refs, f)
+            n0 == (length(sm.refs), length(sm.writes), length(sm.mut_g), length(sm.mut_p)) || (changed = true)
+        end
+    end
+    return S
+end
+
+# A cell that calls a notebook function, or hands it off as a value, takes on what its body does: it
+# reads the globals the body reads (resolved against the writers above THIS cell), and it is the
+# writer of the globals the body assigns or mutates. A global the cell passes in a parameter position
+# the function mutates is mutated by the cell. A markdown or web cell interpolating a call reads what
+# the function reads.
+function _apply_function_effects!(report::Report)
+    S = _notebook_function_effects(report)
+    isempty(S) && return report
+    changes!(c, n) = (n in c.writes || push!(c.mutates, n); push!(c.writes, n); push!(c.reads, n))
+    for c in report.cells
+        if c.kind == MARKDOWN || c.kind == WEB
+            for f in intersect(c.reads, keys(S)); union!(c.reads, S[f].refs); end
+            continue
+        end
+        c.kind == CODE || continue
+        for f in intersect(c.reads_now, keys(S))
+            sm = S[f]
+            union!(c.reads, sm.refs)
+            for n in sm.writes; changes!(c, n); end
+            for n in sm.mut_g; changes!(c, n); end
+        end
+        for (f, args) in c.topcalls
+            sm = get(S, f, nothing); sm === nothing && continue
+            for j in sm.mut_p
+                j <= length(args) || continue
+                b = args[j]
+                b !== nothing && b in c.reads_now && changes!(c, b)
+            end
+        end
+    end
+    return report
 end
 
 # Names a cell changes in place rather than defines: what it mutates, plus what it both reads and
