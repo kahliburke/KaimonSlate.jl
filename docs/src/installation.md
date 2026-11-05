@@ -36,8 +36,8 @@ Ollama if you want the agent. This gives KaimonSlate its gate workers and the ag
 KaimonSlate is in the **General** registry. Install it as an **app** — this puts a `slate` launcher
 on your `PATH`. From the Pkg REPL (press `]`):
 
-```julia-repl
-pkg> app add KaimonSlate
+```
+app add KaimonSlate
 ```
 
 The SDK it builds on, `SlateExtensionsBase`, is in General too, so writing an extension needs nothing
@@ -48,16 +48,16 @@ acts on whatever environment is active and won't install the launcher.
 
 !!! note "Upgrading from a pre-release install"
     Earlier instructions used `app dev` plus a manual `instantiate` of `~/.julia/dev/KaimonSlate`.
-    That still works but pins you to whatever is in that clone. To switch, run `pkg> app rm
-    KaimonSlate`, add the registry, then `pkg> app add KaimonSlate`. The old clone can be deleted.
+    That still works but pins you to whatever is in that clone. To switch, run `app rm KaimonSlate`
+    in the Pkg REPL, add the registry, then `app add KaimonSlate`. The old clone can be deleted.
 
 #### Upgrading
 
-Two steps, and the second one matters:
+Two steps in the Pkg REPL, and the second one matters:
 
-```julia-repl
-pkg> registry update          # registries are cached; a new version isn't visible until you refresh
-pkg> app up KaimonSlate       # `up` is short for `update`
+```
+registry update          # registries are cached; a new version isn't visible until you refresh
+app up KaimonSlate       # `up` is short for `update`
 ```
 
 ```sh
@@ -117,11 +117,11 @@ slate --help          # every flag
 
 !!! warning "`slate` at the `julia>` prompt won't work"
     Typing `slate` in the Julia REPL raises `UndefVarError: slate not defined` — the REPL is looking
-    for a Julia binding, and the app is a program on your `PATH`. Run it from your shell, or shell
-    out from the REPL with `;`:
+    for a Julia binding, and the app is a program on your `PATH`. Run it from your shell, or from
+    the REPL's shell mode (press `;`), or with `run`:
 
-    ```julia-repl
-    julia> ;slate my_analysis.jl
+    ```julia
+    run(`slate my_analysis.jl`)
     ```
 
     To drive the hub *from* Julia instead, use the library API — `serve_notebook("nb.jl")`; see
@@ -165,11 +165,11 @@ The normal way to install one is from inside a notebook, through the
 [🧩 Extensions gallery](extension-gallery.md) or the [📦 Packages panel](packages.md). The first
 install adds the registry for you, so nothing below is needed.
 
-As a manual fallback, add the registry to your own environment:
+As a manual fallback, add the registry to your own environment from the Pkg REPL:
 
-```julia-repl
-pkg> registry add https://github.com/kahliburke/SlateRegistry
-pkg> add SlatePlotly
+```
+registry add https://github.com/kahliburke/SlateRegistry
+add SlatePlotly
 ```
 
 Pkg searches every installed registry, so adding it changes nothing about how ordinary packages
@@ -184,7 +184,7 @@ gh auth login          # choose HTTPS for the git protocol
 gh auth setup-git      # writes the credential helper; a separate step, easily missed
 ```
 
-A newly published version isn't visible until `pkg> registry update`.
+A newly published version isn't visible until you run `registry update` in the Pkg REPL.
 
 ## Standalone (without Kaimon)
 

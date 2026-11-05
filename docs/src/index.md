@@ -74,10 +74,10 @@ evaluate in a per-notebook gate worker, and the browser stays in sync over a liv
 
 Install [Kaimon](https://github.com/kahliburke/Kaimon.jl) — the recommended runtime, which gives
 each notebook its own worker and powers the AI agent — then install the **`slate` app** from the
-Pkg REPL:
+Pkg REPL (press `]`):
 
-```julia-repl
-pkg> app add KaimonSlate      # installs the `slate` launcher
+```
+app add KaimonSlate      # installs the `slate` launcher
 ```
 
 See [Installation](installation.md) for the full steps.

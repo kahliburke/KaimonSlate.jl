@@ -20,7 +20,7 @@ is all a widget actually needs.
 ## Installation
 
 ```julia
-pkg> add SlateExtensionsBase
+import Pkg; Pkg.add("SlateExtensionsBase")
 ```
 
 ## Extension points

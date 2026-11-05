@@ -90,8 +90,8 @@ The `slate` app is the usual entry point. **Requires Julia 1.12+.**
 
 KaimonSlate is in the General registry. Install the app from the Pkg REPL (press `]`):
 
-```julia-repl
-pkg> app add KaimonSlate
+```
+app add KaimonSlate
 ```
 
 Installing the app writes a **`slate` executable** — a shell script, or `slate.bat` on Windows — into
@@ -113,11 +113,11 @@ slate my_analysis.jl  # open a notebook in the browser (created if missing)
 if you're already in the REPL.)
 
 To upgrade, update the app and then run it once — launching `slate` is what points Kaimon at the new
-install, which a running Kaimon picks up within a few seconds:
+install, which a running Kaimon picks up within a few seconds. In the Pkg REPL:
 
-```julia-repl
-pkg> registry update
-pkg> app up KaimonSlate
+```
+registry update
+app up KaimonSlate
 ```
 ```sh
 slate

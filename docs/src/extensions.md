@@ -7,8 +7,8 @@ channel. Notebook authors just `using YourPackage` — everything else wires its
 Extensions build against **`SlateExtensionsBase`** (SEB), a small SDK in the General registry that
 depends on nothing but `Base` and stdlib. Your package depends on SEB, *not* on KaimonSlate:
 
-```julia-repl
-pkg> add SlateExtensionsBase
+```julia
+import Pkg; Pkg.add("SlateExtensionsBase")
 ```
 
 That split is the point. KaimonSlate is a server, a hub, a worker pool and a browser front-end;
@@ -383,7 +383,7 @@ Long-lived state needs to know when the ground shifts underneath it:
 ## Publishing
 
 Nothing about an extension is special to Pkg — it is a normal package. If you register it in
-General, a user needs only `pkg> add YourPackage`. Extensions that aren't public can go in a
+General, a user needs only `add YourPackage` in the Pkg REPL. Extensions that aren't public can go in a
 private repository and a registry of their own; see [Installation](installation.md#Extension-packages).
 
 For a `[compat]` entry, pin the SDK:
