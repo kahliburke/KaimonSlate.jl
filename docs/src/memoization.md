@@ -106,8 +106,8 @@ A cell's result restores only when **all** of its real inputs are unchanged. The
   values alike (moving a slider or pushing a new reactive value re-keys);
 - the contents of any `@asset` files, or files read with `include("literal path")`, that it or an
   upstream cell references;
-- the version (and git tree hash) of each package the notebook's environment adds directly. A
-  change in a package only reached through another package's dependencies doesn't re-key;
+- every package the notebook's environment loads, directly or through another package, by version
+  and git tree hash, and the Julia version;
 - the **developed `src/`** of the project and of any path-developed package: every definition in it,
   by content. Editing any definition re-keys every cell, so nothing computed under the old code is
   restored; a change to comments or whitespace doesn't;
