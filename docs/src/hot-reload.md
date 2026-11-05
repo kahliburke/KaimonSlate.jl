@@ -70,8 +70,8 @@ whose instances already exist, needs a worker restart. Slate does not work aroun
 
 ## Caching
 
-A source edit changes the cache key of every cell, so nothing computed under the old code is
-restored. The old entries are not deleted, they simply stop matching, and re-storing is cheap because
+An edit to any definition in tracked source changes the cache key of every cell, so nothing computed
+under the old code is restored. An edit to comments or whitespace changes no key. The old entries are not deleted, they simply stop matching, and re-storing is cheap because
 the data blobs are shared.
 
 This happens in the worker and is not affected by the toggle below. Turning hot-reload off stops the
