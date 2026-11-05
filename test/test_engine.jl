@@ -426,7 +426,7 @@ end
     S = id -> ReportEngine._memo_status(r, r.cells[findfirst(c -> c.id == id, r.cells)])
     @test S("cheap")[1] == "cacheable"                                    # pure, keyable → cacheable (no badge)
     @test S("nc")[1] == "uncacheable" && occursin("nocache", S("nc")[2])  # explicit opt-out
-    @test S("vol")[1] == "uncacheable" && occursin("deterministic", S("vol")[2])   # volatile
+    @test S("vol")[1] == "uncacheable" && occursin("volatile", S("vol")[2])      # volatile
     @test S("downvol")[1] == "uncacheable" && occursin("upstream", S("downvol")[2]) # impure upstream poisons the key
     @test S("uses") == ("", "")                                          # pure `using` → not a badge target
     @test S("note") == ("", "")                                          # markdown → not a badge target
