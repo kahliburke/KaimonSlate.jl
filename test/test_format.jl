@@ -41,9 +41,10 @@ end
     @test back.meta["format"] == RE.FORMAT && isempty(RE.format_changes(back))
     @test RE.serialize_report(back) == out                          # stable once current
 
-    # In the current format `sweep` is not a kind: it stays a tag, as any unknown token does.
+    # In the current format `sweep` is not a kind: as any unknown first word, it marks a cell from a
+    # newer Slate, kept as written.
     cur = RE.parse_report("#%% sweep id=s\n1\n\n# ╔═╡ Slate.config\n#   format = 2\n# ╚═╡\n")
-    @test cur.cells[1].kind === RE.CODE && :sweep in cur.cells[1].flags
+    @test cur.cells[1].kind === RE.FOREIGN && cur.cells[1].header == "sweep id=s"
 
     # Format 1 ran a campaign in a code cell; it becomes a job, as a sweep does.
     camp = RE.parse_report("#%% code id=size\n@campaign(size, vary = (x,), satisfy = (r,))\n\n#%% code id=other\ny = 2\n")
