@@ -2071,7 +2071,9 @@ body.toc-open .dagpane.dock-bottom { left:300px; }
 .dagpane.full { top:var(--topbar-h, 49px); left:0; right:0; bottom:0; width:auto; height:auto; z-index:66;
   border:none; box-shadow:none; }
 .dagpane.full .daggrip { display:none; }
-.dagpane .aphead { flex:0 0 auto; flex-wrap:wrap; row-gap:8px; }
+.dagpane .aphead { flex:0 0 auto; flex-wrap:wrap; row-gap:8px; position:relative; padding-right:52px; }
+/* The close button keeps the top-right corner when the tools wrap. */
+.dagpane .aphead > .pclose { position:absolute; top:14px; right:14px; }
 .dagpane .aphead .hbtn { font-size:.95rem; padding:4px 11px; }   /* match the rest of the UI's control weight */
 /* The stat line ("N cells · M edges") stays on one line and ellipsizes instead of wrapping to several,
    giving way before the tools; the tools wrap to a second row rather than overflowing a narrow panel. */
