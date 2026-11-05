@@ -2506,8 +2506,7 @@ function _start_src_watcher()
             (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || continue
             queue = collect(R.revision_queue)
             before = _qe_keys(R)
-            thrown = nothing
-            try; R.revise(); catch e; thrown = e; end
+            invs, thrown = _logged_revise(R)
             emsg = _revise_error_msg(R, thrown, before)
             if !isempty(emsg)
                 @warn "slate hot-reload: revise error" error = emsg
@@ -2519,6 +2518,7 @@ function _start_src_watcher()
                 _LAST_SRC_ERR[] = ""
                 names = _changed_names(queue)
                 _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
+                append!(names, _invalidated_names(invs, queue)); unique!(names)
                 @info "slate hot-reload: revised" files = length(queue) changed = names
                 isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
                 _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
@@ -2535,18 +2535,25 @@ end
 function __slate_revise()
     isdefined(Main, :Revise) || return String[]
     queue = try; collect(Main.Revise.revision_queue); catch; Tuple[]; end
-    # Julia logs the compiled code a method change invalidates: every caller inference linked to a
-    # replaced method, transitively. That is the set of functions whose behaviour the edit can change.
-    invs = ccall(:jl_debug_method_invalidation, Any, (Cint,), 1)
-    try
-        try; Main.Revise.revise(); catch; end
-    finally
-        ccall(:jl_debug_method_invalidation, Any, (Cint,), 0)
-    end
+    invs, _ = _logged_revise(Main.Revise)
     names = _changed_names(queue)
     _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
     append!(names, _invalidated_names(invs, queue))
     return unique!(names)
+end
+
+# Run a Revise pass with Julia's invalidation log on. The log lists the compiled code a method change
+# invalidates: every caller inference linked to a replaced method, transitively, which is the set of
+# functions whose behaviour the edit can change. Returns `(log, error)`.
+function _logged_revise(R)
+    invs = ccall(:jl_debug_method_invalidation, Any, (Cint,), 1)
+    thrown = nothing
+    try
+        try; R.revise(); catch e; thrown = e; end
+    finally
+        ccall(:jl_debug_method_invalidation, Any, (Cint,), 0)
+    end
+    return invs, thrown
 end
 
 # Functions a show/print method shapes the output of: a change to one changes how values of the types
