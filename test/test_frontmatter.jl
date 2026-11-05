@@ -714,7 +714,7 @@ x = 1
             seen[] = Dict(headers)
             auth = get(seen[], "Authorization", "")
             auth == "" && return NS.HTTP.Response(401, "{\"error\": \"Sign in.\"}")
-            auth == "Bearer kbt_noread" && return NS.HTTP.Response(403, "{}")
+            auth == "Bearer zemi_noread" && return NS.HTTP.Response(403, "{}")
             get(seen[], "If-None-Match", "") == "\"v1\"" && return NS.HTTP.Response(304)
             return NS.HTTP.Response(200, ["ETag" => "\"v1\""], lib)
         end
@@ -729,13 +729,13 @@ x = 1
                 @test r.status == :pending && isempty(r.entries)
                 NS._bib_refresh!(r)
                 @test r.status == :signin && r.message == "Needs an API token"
-                NS.publish_secret_set!(NS.bib_token_ref(url), "kbt_noread")
+                NS.publish_secret_set!(NS.bib_token_ref(url), "zemi_noread")
                 NS._bib_refresh!(r)
                 @test r.status == :denied
-                NS.publish_secret_set!(NS.bib_token_ref(url), "kbt_good")
+                NS.publish_secret_set!(NS.bib_token_ref(url), "zemi_good")
                 NS._bib_refresh!(r)
                 @test r.status == :ok && r.etag == "\"v1\"" && [e.key for e in r.entries] == ["arXiv:2401.00001", "rec-7"]
-                @test seen[]["Authorization"] == "Bearer kbt_good"
+                @test seen[]["Authorization"] == "Bearer zemi_good"
                 NS._bib_refresh!(r)                          # revalidated: 304 keeps the copy
                 @test seen[]["If-None-Match"] == "\"v1\"" && r.status == :ok && length(r.entries) == 2
                 @test length(NS._bib_load_cached(url).entries) == 2   # the copy on disk serves a new session

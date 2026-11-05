@@ -47,7 +47,7 @@ async function _bibPost(el, path, body) {
 }
 async function bibToken(el) {
   const host = (el.closest('[data-url]').dataset.url.match(/^https?:\/\/([^/?#]+)/i) || ['', ''])[1];
-  const token = await promptDark(`API token for ${host}`, '', { placeholder: 'kbt_…', ok: 'Save' });
+  const token = await promptDark(`API token for ${host}`, '', { placeholder: 'zemi_…', ok: 'Save' });
   if (token) await _bibPost(el, 'token', { token });
 }
 function bibRefresh(el) { _bibPost(el, 'refresh', {}); }
