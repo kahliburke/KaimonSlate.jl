@@ -59,6 +59,23 @@ function _is_deferred_def(s)
     return s.args[1] isa Symbol && s.args[2] isa Expr && s.args[2].head === :(->)
 end
 
+function _dotted_paths!(out::Set{Symbol}, ex)
+    ex isa Expr || return out
+    if ex.head === :. && length(ex.args) == 2 && ex.args[2] isa QuoteNode && ex.args[2].value isa Symbol
+        p = _dotted_path(ex)
+        p === nothing || push!(out, p)
+    end
+    ex.head === :quote && return out
+    for a in ex.args
+        _dotted_paths!(out, a)
+    end
+    return out
+end
+_dotted_path(x::Symbol) = x
+_dotted_path(ex::Expr) = ex.head === :. && length(ex.args) == 2 && ex.args[2] isa QuoteNode && ex.args[2].value isa Symbol ?
+    (b = _dotted_path(ex.args[1]); b === nothing ? nothing : Symbol(b, ".", ex.args[2].value)) : nothing
+_dotted_path(::Any) = nothing
+
 # Calls in `ex` by a plain name, with the base name of each positional argument (`nothing` when the
 # argument isn't a name or a field/index path off one): what lets a mutated parameter be traced back
 # to the global the caller passed.
@@ -705,6 +722,10 @@ function _infer_bindings_uncached!(cell::Cell)
         isempty(ap) || append!(cell.inputs, sort!(unique!(ap)))
     end
     _collect_observed_binds!(cell.observes, top)
+    # Qualified paths the cell mentions (`Pkg.f` passed as a value), which the dataflow pass records
+    # only when called. No cell writes a dotted name, so these make no edge; they let a source edit
+    # to `Pkg.f` find the cell.
+    _dotted_paths!(cell.reads, top)
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
 
     # `@bind name W(…)` statements: the bound name is a WRITE, the widget call's free

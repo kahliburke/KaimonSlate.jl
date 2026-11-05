@@ -204,6 +204,13 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
         @test paths == Any[:f, :(Base.show), Symbol("@m")]                    # constructors left out
     end
 
+    @testset "qualified paths a cell mentions are reads" begin
+        c = RE.Cell("f", RE.CODE, "f = HotDemo.apply(HotDemo.leaf, 3)"); infer_bindings!(c)
+        @test Symbol("HotDemo.leaf") in c.reads && Symbol("HotDemo.apply") in c.reads
+        c2 = RE.Cell("g", RE.CODE, "y = p.x + 1"); infer_bindings!(c2)
+        @test Symbol("p.x") in c2.reads && :p in c2.reads   # a field path too; it makes no edge
+    end
+
     @testset "soft-scope assignments" begin
         soft(src) = sort!(collect(RE._soft_assigns!(Set{Symbol}(), Meta.parse(src))))
         @test soft("for i in 1:3; s += i; t = i; end") == [:s, :t]
