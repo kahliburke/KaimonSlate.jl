@@ -111,8 +111,12 @@ end
         @test declared[1].kind == :everywhere && declared[1].names == [:bar]
         @test occursin("slate_everywhere", declared[1].stmt_src)
         @test !occursin("a = 1", declared[1].stmt_src) && !occursin("c = 3", declared[1].stmt_src)
-        # The capture also reports what the run bound, as `:defines`.
-        @test only(e.names for e in o2.effects if e.kind == :defines) == [:a, :b, :c]
+        # The capture also reports what the run bound, as `:defines`, which feeds the dependency graph
+        # and is taken out before the cell's effects are shown.
+        rc = parse_report("#%% code id=z\nza = 1\nzb = 2")
+        raw = ReportEngine.eval_capture(InProcessKernel(), rc, rc.cells[1].source, "cell:z")
+        @test only(e.names for e in raw.effects if e.kind == :defines) == [:za, :zb]
+        @test !any(e -> e.kind == :defines, o2.effects)
 
         # A cell that declares nothing harvests nothing; no task-local leak after eval.
         o4 = run1("1 + 1")

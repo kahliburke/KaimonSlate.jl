@@ -1239,7 +1239,9 @@ end
 
 function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
     (out === nothing || isempty(out.effects)) && return nothing
+    seen = ReportEngine.take_defines!(out)          # graph bookkeeping, not a declared effect
     recs = [_effect_record(e) for e in out.effects]
+    isempty(seen) || push!(recs, (; kind = :defines, names = seen, stmt_src = ""))
     for (r, e) in zip(recs, out.effects)
         if r.kind === :everywhere
             :everywhere_declared in c.flags || push!(c.flags, :everywhere_declared)

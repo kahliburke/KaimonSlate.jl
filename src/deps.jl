@@ -1417,16 +1417,25 @@ function note_defines!(report::Report, cell::Cell, names)
     return true
 end
 
-# The `:defines` names in a cell's harvested effects.
-function _defined_by_effects(out)
+_is_defines(e) = (k = e isa AbstractDict ? get(e, :kind, get(e, "kind", nothing)) :
+                     (hasproperty(e, :kind) ? e.kind : nothing); k === :defines || k == "defines")
+
+"""
+    take_defines!(out) -> Vector{Symbol}
+
+Remove the capture's `:defines` records from a run's effects and return the names they carry. They
+feed the dependency graph (`note_defines!`) and are not effects the cell declared, so nothing that
+shows a cell's effects should see them.
+"""
+function take_defines!(out)
     out === nothing && return Symbol[]
     names = Symbol[]
     for e in out.effects
-        k = e isa AbstractDict ? get(e, :kind, get(e, "kind", nothing)) : (hasproperty(e, :kind) ? e.kind : nothing)
-        (k === :defines || k == "defines") || continue
+        _is_defines(e) || continue
         ns = e isa AbstractDict ? get(e, :names, get(e, "names", Any[])) : e.names
         append!(names, Symbol[Symbol(n) for n in ns])
     end
+    isempty(names) || filter!(e -> !_is_defines(e), out.effects)
     return names
 end
 
