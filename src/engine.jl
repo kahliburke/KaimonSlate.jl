@@ -39,14 +39,14 @@ end
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
-export MARKDOWN, CODE, WEB, TOOL, JOB, FRESH, STALE, RUNNING, ERRORED, BLOCKED, STOPPED
+export MARKDOWN, CODE, WEB, TOOL, JOB, FOREIGN, FRESH, STALE, RUNNING, ERRORED, BLOCKED, STOPPED
 export Run, is_running, shown_state
 # Kind predicates, exported alongside the kinds themselves: sibling modules (`ReportRender`,
 # `NotebookServer`) reach the enum by `using ..ReportEngine`, so a helper that is not exported is
 # invisible to exactly the code that classifies cells.
 export KindInfo, kind_info, kind_name, kind_from_name, kind_table, is_prose, interpolates, evaluates,
        runs_automatically, in_dependency_graph, refines_analysis, memoizes, exports_figures, exports_source,
-       profilable, debuggable, takes_run_tags, cell_attrs
+       profilable, debuggable, takes_run_tags, editable, renders, cell_attrs
 export parse_report, serialize_report, serialize_cells, source_text, cell_definitions
 export standalone!
 
@@ -72,7 +72,9 @@ export standalone!
 # Unlike TOOL it is NOT excluded from automatic runs, because evaluating a job cell RECONCILES rather
 # than recomputes: it reads what the work has produced and reports what is there. That is what makes
 # reopening a notebook safe while still letting it pick the monitor back up on work in flight.
-@enum CellKind MARKDOWN CODE WEB TOOL JOB
+# FOREIGN is a cell whose kind this Slate does not know, written by a newer one. It is shown and saved
+# exactly as written, and never run or analysed (see `KIND_INFO`).
+@enum CellKind MARKDOWN CODE WEB TOOL JOB FOREIGN
 # BLOCKED is a WAIT, not a failure: the cell cannot run yet for a reason outside it — a scheduler
 # queue that has not granted a node, a host nobody has signed in to. It is separate from ERRORED
 # because the two need opposite handling. An error is the cell's own, is worth showing in red, and is
@@ -225,6 +227,7 @@ mutable struct Cell
     blocked_region::String        # the region the wait is for. Not necessarily the cell's own: a cell
                                   # whose input is waiting waits for the region that input runs on.
     run::Union{Run,Nothing}       # the computation in flight, if any — see `Run`
+    header::String                # a FOREIGN cell's `#%%` header after the marker, kept verbatim to write back
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -233,7 +236,7 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
                 STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0, "", 0.0, "", "",
-                nothing)
+                nothing, "")
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation
@@ -419,7 +422,14 @@ function _parse_header(rest::AbstractString; format::Int = FORMAT, changes::Vect
     id = nothing
     controls = Vector{String}[]
     tags = Symbol[]
-    for tok in split(strip(rest))
+    toks = split(strip(rest))
+    # From format 2 the kind is the first token. One this Slate does not know makes a FOREIGN cell,
+    # which keeps the whole header as written; only its id is read.
+    if format >= 2 && !isempty(toks) && !occursin('=', toks[1]) && kind_from_name(toks[1]) === nothing
+        for tok in toks; startswith(tok, "id=") && (id = tok[4:end]); end
+        return FOREIGN, id, controls, tags
+    end
+    for tok in toks
         if startswith(tok, "id=")
             id = tok[4:end]
         elseif startswith(tok, "controls=")
@@ -616,6 +626,8 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         end
         sw = _parse_job_footer(@view lines[fi:end]; format)       # Slate.job: per-cell scheduler options
         isempty(sw) || (report.meta["jobopts"] = sw)
+        ff = _foreign_footers(@view lines[fi:end])               # blocks from a newer Slate, kept as written
+        isempty(ff) || (report.meta["foreign_footers"] = ff)
         format < 2 && any(l -> startswith(l, _JOB_MARK_OPEN_V1), @view lines[fi:end]) && push!(changes, "footer")
         lines = lines[1:(fi - 1)]
     end
@@ -641,6 +653,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
     cid::Union{String,Nothing} = nothing
     ctrls = Vector{String}[]              # `controls=` columns of the current explicit cell
     tags = Symbol[]                       # header tag flags of the current explicit cell
+    rawhdr = ""                           # the current header after `#%%`, kept for a FOREIGN cell
     had_header = false                    # current cell came from an explicit header
     body = String[]
     function flush!()
@@ -656,6 +669,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
             id_ = cid === nothing ? _unique_auto_id(kind, src, idx, used_ids) : _unique_explicit_id(cid, used_ids)
             push!(used_ids, id_)
             cell = Cell(id_, kind, src)
+            kind === FOREIGN && (cell.header = rawhdr)
             cell.controls = ctrls
             for t in tags; push!(cell.flags, t); end
             push!(report.cells, cell)
@@ -671,6 +685,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         if m !== nothing                  # explicit header → start a new explicit cell
             flush!()
             kind, cid, ctrls, tags = _parse_header(m.captures[1]; format, changes)
+            rawhdr = String(strip(m.captures[1]))
             had_header = true
         else                              # verbatim body of the current explicit cell
             push!(body, line)
@@ -1000,12 +1015,13 @@ struct KindInfo
     profilable::Bool
     debuggable::Bool
     run_tags::Bool            # takes `trace`, `nocache`, `volatile` and `resource`
+    editable::Bool            # its source, tags and kind can be changed
 end
 _kind(name; prose = false, interpolates = false, evaluates = false, runs_automatically = false,
       dependency_graph = false, refines_analysis = false, memoizes = false, exports_figures = false,
-      exports_source = false, profilable = false, debuggable = false, run_tags = false) =
+      exports_source = false, profilable = false, debuggable = false, run_tags = false, editable = true) =
     KindInfo(name, prose, interpolates, evaluates, runs_automatically, dependency_graph, refines_analysis,
-             memoizes, exports_figures, exports_source, profilable, debuggable, run_tags)
+             memoizes, exports_figures, exports_source, profilable, debuggable, run_tags, editable)
 
 # A tool cell's source is a recorded call that reaches outside the notebook, so it never runs on the
 # reader's behalf and is not analysed: its bindings should not drive reactivity. A job cell reads and
@@ -1021,8 +1037,10 @@ const KIND_INFO = Dict{CellKind,KindInfo}(
     TOOL     => _kind("tool"; evaluates = true, exports_source = true, run_tags = true),
     JOB      => _kind("job"; evaluates = true, runs_automatically = true, dependency_graph = true,
                       exports_figures = true, exports_source = true),
+    FOREIGN  => _kind("foreign"; editable = false),
 )
-const _KIND_BY_NAME = Dict(info.name => k for (k, info) in KIND_INFO)
+# FOREIGN has no word of its own in a file: its header keeps the word the newer Slate wrote.
+const _KIND_BY_NAME = Dict(info.name => k for (k, info) in KIND_INFO if k !== FOREIGN)
 
 kind_info(k::CellKind) = KIND_INFO[k]
 kind_name(k::CellKind) = KIND_INFO[k].name
@@ -1041,6 +1059,9 @@ exports_source(k::CellKind) = KIND_INFO[k].exports_source
 profilable(k::CellKind) = KIND_INFO[k].profilable
 debuggable(k::CellKind) = KIND_INFO[k].debuggable
 takes_run_tags(k::CellKind) = KIND_INFO[k].run_tags
+editable(k::CellKind) = KIND_INFO[k].editable
+"Whether a cell of kind `k` shows anything: prose, or Julia that runs."
+renders(k::CellKind) = is_prose(k) || evaluates(k)
 
 "The kind table as the page reads it: kind name → its capabilities."
 kind_table() = Dict(info.name => Dict(String(f) => getfield(info, f) for f in fieldnames(KindInfo) if f !== :name)
@@ -1052,6 +1073,9 @@ _controls_str(cols) = join((length(col) == 1 ? col[1] : "[" * join(col, ",") * "
 
 "Emit one cell as a header line plus its body."
 function _cell_source(cell::Cell)
+    if cell.kind === FOREIGN
+        return isempty(cell.source) ? "#%% " * cell.header : "#%% " * cell.header * "\n" * cell.source
+    end
     header = "#%% $(kind_name(cell.kind)) id=$(cell.id)"
     isempty(cell.controls) || (header *= " controls=" * _controls_str(cell.controls))
     # Known tags first (stable order), then any free-form ones (sorted); internal flags never emit.
@@ -1094,8 +1118,28 @@ function serialize_report(report::Report)
                               _render_config_footer(report.meta),
                               _render_job_footer(get(report.meta, "jobopts", nothing)),
                               _render_findings_footer(report.meta)])
+    append!(parts, get(report.meta, "foreign_footers", String[]))
     isempty(parts) && return body
     return body * "\n" * join(parts, "\n") * "\n"
+end
+
+# The footer blocks this Slate writes or carries. Any other `Slate.` block was written by a newer one:
+# it is kept as written and goes back after the known footers when the notebook is saved.
+const _KNOWN_FOOTERS = ("env", "config", "findings", "job", "sweep", "bundle", "preview", "memo")
+function _foreign_footers(lines)
+    out = String[]
+    i = 1
+    while i <= length(lines)
+        m = match(r"^# ╔═╡ Slate\.([A-Za-z0-9_]+)", lines[i])
+        if m !== nothing && !(m.captures[1] in _KNOWN_FOOTERS)
+            j = something(findnext(l -> startswith(l, "# ╚═╡"), lines, i + 1), length(lines))
+            push!(out, join(lines[i:j], "\n"))
+            i = j + 1
+        else
+            i += 1
+        end
+    end
+    return out
 end
 
 "Alias kept for callers that think in terms of a cell's raw text."

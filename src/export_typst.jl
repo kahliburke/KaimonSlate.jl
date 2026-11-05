@@ -1741,7 +1741,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                                   theme = theme, code = code, body = body, number = numoverride))
         # Role-tagged metadata (title / abstract) → academic title block spanning full width;
         # the hoisted cells are then dropped from the body.
-        cells = nb.report.cells
+        cells = filter(c -> renders(c.kind), nb.report.cells)   # a cell a newer Slate wrote shows nothing
         fm = report_frontmatter(nb.report)
         figidx = figure_index(nb.report)
         citekeys = Set(e.key for e in bibliography_index(nb.report, dirname(abspath(nb.path))))
@@ -1864,7 +1864,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
         theme == "dark" && write(joinpath(dir, "code-dark.tmTheme"), _CODE_DARK_TMTHEME)
         io = IOBuffer()
         print(io, _typst_preamble_slides(nb.report.title; theme = theme, ratio = ratio, code = code))
-        cells = nb.report.cells
+        cells = filter(c -> renders(c.kind), nb.report.cells)
         # Role-tagged metadata → a dedicated title slide (metablock); hoisted title/abstract cells
         # are dropped from the body slides.
         fm = report_frontmatter(nb.report)

@@ -517,6 +517,8 @@ window.kindOf = k => window.CELL_KINDS.find(x => x.k === k) || window.CELL_KINDS
 // The cell's current kind, as a button. Names itself rather than offering the alternatives, so the
 // header answers "what is this?" at rest and only costs a click when you want to change it.
 function kindButton(c) {
+  if (!kindInfo(c.kind).editable)
+    return `<span class="kindbtn foreign" title="${_esc((c.header || '').split(/\s+/)[0])}">?</span>`;
   const cur = window.kindOf(c.kind);
   return `<button class="kindbtn" onclick="openKindPicker('${c.id}', event)"
     title="cell type: ${_esc(cur.name)} — click to change">${_esc(cur.glyph)}</button>`;
@@ -549,7 +551,7 @@ window.placePop = function (pop, anchor, x, y) {
 window.openKindPicker = function (id, ev) {
   ev && ev.stopPropagation();
   const c = ((window.__slateState || {}).cells || []).find(x => x.id === id);
-  if (!c) return;
+  if (!c || !kindInfo(c.kind).editable) return;
   let pop = document.getElementById('kindpop');
   if (!pop) {
     pop = document.createElement('div');
@@ -748,8 +750,9 @@ function cellHeaderInner(c) {
       // A sweep's SPEC — where it runs and under what limits — is configuration, not code. It gets
       // its own control rather than living in the free-form tag box, because walltime and partition
       // are what you change while a job is queued or after it was killed.
-      `<button class="tagbtn${(c.tags && c.tags.length) ? ' on' : ''}" onclick="openTagEditor('${c.id}', event)" title="cell tags${(c.tags && c.tags.length) ? ': ' + c.tags.join(', ') : ''}">🏷</button>` +
-      editSrc +
+      (kindInfo(c.kind).editable
+        ? `<button class="tagbtn${(c.tags && c.tags.length) ? ' on' : ''}" onclick="openTagEditor('${c.id}', event)" title="cell tags${(c.tags && c.tags.length) ? ': ' + c.tags.join(', ') : ''}">🏷</button>` + editSrc
+        : '') +
       // Move up / down are NOT here — they live on the reorder rail out in the page margin beside
       // the cell (notebook.js `renderCell`), where they cover no content and sit at the end the cell
       // moves towards rather than among a dozen buttons at the opposite corner.
@@ -1523,7 +1526,7 @@ function _onSlide(cell) { return !!cell.closest('#deck'); }
 
 function editSource(id, mode) {
   const cell = document.getElementById('cell-' + id);
-  if (!cell || _onSlide(cell)) return;
+  if (!cell || _onSlide(cell) || !cell.querySelector('.srcedit')) return;   // a foreign cell has no editor
   const d = _disp(cell); if (d) d.style.display = 'none';
   const sed = cell.querySelector('.srcedit'); sed.style.display = '';
   // A prior cell re-render (a live widget/output refresh — e.g. a Mol* viewer streaming frames) can swap

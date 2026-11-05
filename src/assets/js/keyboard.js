@@ -94,7 +94,7 @@ function _srcOpen(id) {
 }
 window.slateSrcOpen = _srcOpen;
 async function enterEdit(id) {
-  const c = _cellById(id); if (!c) return;
+  const c = _cellById(id); if (!c || !kindInfo(c.kind).editable) return;
   // A web cell has an inline editor too (its first pane, registered in editors[id]), so Enter focuses it
   // like a code cell — not the markdown/source overlay.
   if (kindInfo(c.kind).evaluates && !hasBinds(c)) {

@@ -683,11 +683,12 @@ end
 
 @testset "the kind table" begin
     RE_K = ReportEngine
-    # Every kind has a row, and a kind's name reads back to it.
-    for k in instances(RE_K.CellKind)
-        @test haskey(RE_K.KIND_INFO, k)
-        @test RE_K.kind_from_name(RE_K.kind_name(k)) === k
-    end
+    # Every kind has a row, and a kind's name reads back to it. FOREIGN is never read from its name:
+    # its cells keep the word the newer Slate wrote.
+    @test all(k -> haskey(RE_K.KIND_INFO, k), instances(RE_K.CellKind))
+    @test all(k -> RE_K.kind_from_name(RE_K.kind_name(k)) === k,
+              filter(!=(RE_K.FOREIGN), collect(instances(RE_K.CellKind))))
+    @test RE_K.kind_from_name("foreign") === nothing
     @test RE_K.kind_from_name("markdown") === RE_K.MARKDOWN
     @test RE_K.kind_from_name("plot") === nothing
     # The page gets every capability of every kind, by name.
@@ -698,3 +699,29 @@ end
     @test !t["tool"]["runs_automatically"] && t["md"]["runs_automatically"] && t["md"]["prose"]
 end
 
+
+@testset "a cell or footer from a newer Slate is kept as written" begin
+    RE_F = ReportEngine
+    footer = "# ╔═╡ Slate.config · per-notebook settings (Settings panel)\n#   format = 2\n# ╚═╡"
+    newer = "# ╔═╡ Slate.layout\n#   p: hidecode\n# ╚═╡"
+    src = "#%% md id=a\nHi\n\n#%% plot id=p series=x\nerror(\"must not run\")\n\n" * footer * "\n\n" * newer * "\n"
+    r = RE_F.parse_report(src)
+    p = r.cells[2]
+    @test p.kind === RE_F.FOREIGN && p.id == "p" && p.header == "plot id=p series=x"
+    @test !RE_F.renders(p.kind) && !RE_F.editable(p.kind) && !RE_F.evaluates(p.kind)
+    out = RE_F.serialize_report(r)
+    @test occursin("#%% plot id=p series=x\nerror(\"must not run\")", out)   # the cell, as written
+    @test occursin(newer, out)                                                # the footer, as written
+    @test RE_F.serialize_report(RE_F.parse_report(out)) == out                # and stable from then on
+
+    # Never run: an automatic run leaves it alone, and it is fresh, with nothing to compute.
+    RE_F.eval_stale!(r)
+    @test p.state === RE_F.FRESH && p.output === nothing
+
+    # Format 1 reads a header leniently: an unknown word is a tag on a code cell, as it always was.
+    r1 = RE_F.parse_report("#%% plot id=q\n1 + 1\n")
+    @test r1.cells[1].kind === RE_F.CODE && :plot in r1.cells[1].flags
+    # A known kind first, or a key=value first, is read as before in format 2.
+    r2 = RE_F.parse_report("#%% md id=m\nx\n\n#%% id=c\n1\n\n" * footer * "\n")
+    @test r2.cells[1].kind === RE_F.MARKDOWN && r2.cells[2].kind === RE_F.CODE
+end

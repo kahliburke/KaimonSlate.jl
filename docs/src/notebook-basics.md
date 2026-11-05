@@ -243,6 +243,10 @@ current format the next time it is saved.
 | 1 | The original format. |
 | 2 | Sweep cells (`#%% sweep`) and cells running a campaign become job cells (`#%% job`); the `Slate.sweep` scheduler options become `Slate.job`. |
 
+From format 2, a cell kind or footer block this Slate does not know came from a newer one. Such a
+cell is shown as written, marked "Needs a newer Slate", and never runs. It can be moved or deleted
+but not edited. Saving writes it back unchanged, along with any unknown footer block.
+
 ## Quiet cells
 
 A code cell whose last non-comment line ends in `;` suppresses display of the value (stdout

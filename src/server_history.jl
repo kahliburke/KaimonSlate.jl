@@ -1182,6 +1182,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
             d["output"] = "<span class=\"figlabel\">Figure " * string(fignums[c.id]) * ".</span> " * d["output"]
         end
     end
+    c.kind === ReportEngine.FOREIGN && (d["header"] = c.header)   # its `#%%` line as a newer Slate wrote it
     if :bibliography in c.flags                          # bibliography / references
         d["roleBib"] = true
         srcs = bib_sources(c, nbdir)             # the notebook is redrawn via `_bib_link_ctx`'s registration
@@ -1958,6 +1959,7 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
         cells = nb.report.cells
         idx = findfirst(c -> c.id == id, cells)
         idx === nothing && return
+        editable(cells[idx].kind) || return      # a cell a newer Slate wrote stays as written
         # A WEB cell's stored source must be the CANONICAL `@web(...)` skin, because the browser edits it
         # as three panes and reassembles it with `_webSkin` on every keystroke-check. Store a merely
         # equivalent spelling — `js"""x"""` where the skin writes `js"""\nx\n"""`, which is what an

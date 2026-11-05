@@ -1101,6 +1101,12 @@ function build_dependencies!(report::Report)
     pending_reads = Dict{Symbol,String}() # name → FIRST cell to read it top-level with no prior writer
     priorcode = Set{String}()             # ids of earlier CODE cells — the only legal `needs=` targets
     for c in report.cells
+        # A cell that neither evaluates nor renders (one a newer Slate wrote) has nothing to compute,
+        # so it is FRESH and stays out of the graph.
+        if !evaluates(c.kind) && !is_prose(c.kind)
+            c.state == STALE && (c.state = FRESH)
+            continue
+        end
         if interpolates(c.kind)
             # md/web cells depend on the writers of their interpolation vars (+ barrier), but never
             # write, become a barrier, or enter `seen`.

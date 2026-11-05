@@ -1414,6 +1414,12 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
    cell too — insetting the header and double-padding the body. Scope the padding to the body by zeroing
    it on the cell (the `.md` body div keeps its own). */
 .cell.md { padding:0; }
+/* A cell a newer Slate wrote: shown as written, dimmed, never edited or run. */
+.cell.foreign { opacity:.75; }
+.cell.foreign .foreign-note { color:var(--dim); font-size:.8rem; padding:6px 12px 0; }
+.cell.foreign .foreign-src { margin:6px 12px 10px; padding:8px 10px; background:var(--bg3); border-radius:6px;
+  font-family:var(--mono, monospace); font-size:.82rem; color:var(--dim); white-space:pre-wrap; overflow-x:auto; }
+.kindbtn.foreign { cursor:default; color:var(--dim); }
 /* Collapse the first/last block's OWN margin into the padding: a markdown cell that opens with a
    heading/paragraph otherwise stacks that element's default margin on top of the padding, doubling the
    space above (and below) the block — reads as too much air, worst in a reading pass. */

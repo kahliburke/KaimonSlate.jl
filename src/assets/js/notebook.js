@@ -690,7 +690,8 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
   // can mark it without re-implementing the editor mounting.
   // A job cell keeps the `code` class for the same reason a tool cell does — its body IS a code
   // editor — and adds `sweep`, which the chrome uses to mark it as work that runs off this machine.
-  const cls = 'cell ' + (c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web'
+  // A cell a newer Slate wrote is `foreign`: shown as written, never edited or run.
+  const cls = 'cell ' + (!kindInfo(c.kind).editable ? 'foreign' : c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web'
                         : c.kind === 'tool' ? 'code tool' : c.kind === 'job' ? 'code job'
                         : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
@@ -707,7 +708,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
   // Content hosts are empty/stable — Preact preserves them; the effect above fills them.
   let body;
-  if (kindInfo(c.kind).prose) {
+  if (!kindInfo(c.kind).editable) {
+    body = html`<div class="foreign-note">Needs a newer Slate</div><pre class="foreign-src">#%% ${c.header || ''}${c.source ? '\n' + c.source : ''}</pre>`;
+  } else if (kindInfo(c.kind).prose) {
     // Prose reaches the reactive graph through `{{ }}` interpolation, so a markdown cell can be
     // driven by a control and is worth hosting one. The strip sits above the prose, matching where
     // it sits relative to a code cell's output.

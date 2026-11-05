@@ -414,6 +414,7 @@ end
 _agent_push!(nb::LiveNotebook) = (nb.version += 1; _broadcast(nb, string(nb.version)))
 
 _cell_exists(nb, id) = _index_of(nb.report.cells, id) !== nothing
+_cell_editable(nb, id) = (i = _index_of(nb.report.cells, id); i === nothing || editable(nb.report.cells[i].kind))
 
 # Coarse relative age for a history timestamp (no Dates dep).
 function _ago(ts)
@@ -821,6 +822,7 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
                           expected_version::Int = -1,
                           run::Bool = true, background::Bool = false, run_locked::Bool = false)
     _cell_exists(nb, id) || return "(no cell id=$id)"
+    _cell_editable(nb, id) || return "(cell id=$id was written by a newer Slate; it can be moved or deleted, not edited)"
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
@@ -1276,6 +1278,7 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
     lock(nb.lock) do
         i = _index_of(nb.report.cells, id); i === nothing && return nb
         c = nb.report.cells[i]
+        editable(c.kind) || return nb             # its tags are part of a header kept as written
         had_cache = :cache in c.flags
         had_locked = :locked in c.flags
         had_needs = sort!(ReportEngine._manual_needs(c.flags))
@@ -1324,6 +1327,7 @@ end
 function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; source = nothing)
     cells = nb.report.cells
     i = _index_of(cells, id); i === nothing && return nb
+    editable(cells[i].kind) || return nb  # converting would drop what the newer Slate wrote
     lock(nb.lock) do                     # serialize the mutation + persist vs the async runner (reentrant)
         _snapshot!(nb)
         old = cells[i]

@@ -139,6 +139,8 @@ when it is next saved. Once saved by 2.0, a notebook does not open correctly in 
   A notebook whose cells the upgrade changes (a `#%% sweep` cell from a pre-release build becomes a
   job cell) asks first, keeps a copy of the file as it was (`name.format1.<time>.jl`), and rewrites
   it. Notebooks in format 2 do not open correctly in older versions of Slate.
+- A cell kind or footer block from a newer Slate is kept: the cell shows read-only, never runs, and
+  is saved back as written.
 - ☰ → 🪵 Worker log opens the worker dock at its Log tab. The separate log panel is gone.
 - A worker's log records read `Info 18:47:51: …`, level then clock, like a sweep task's.
 

@@ -3086,6 +3086,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             c -> !(:collapsed in c.flags) && !(:docindex in c.flags) && !(c.id in fm.skip) &&
                  !(:bibliography in c.flags) && !(:notes in c.flags))
         for c in nb.report.cells
+            renders(c.kind) || continue           # a cell a newer Slate wrote shows nothing
             # A collapsed (folded ▸) cell is tucked away entirely in the notebook — omit it from
             # the export too (both code and output), for markdown and code alike.
             (:collapsed in c.flags) && continue
@@ -5570,6 +5571,7 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
         isempty(strip(fm.abstract)) ||
             println(io, "> **Abstract.** ", replace(strip(rw(fm.abstract)), "\n" => "\n> "), "\n")
         for c in nb.report.cells
+            renders(c.kind) || continue           # a cell a newer Slate wrote shows nothing
             (:collapsed in c.flags) && continue
             c.id in fm.skip && continue
             (:notes in c.flags) && continue    # speaker notes — presenter-only, same as the HTML export

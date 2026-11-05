@@ -727,7 +727,7 @@ Render an (already-evaluated) `Report` to a self-contained HTML string.
 """
 function render_html(report::Report)
     tmpl = Template(_TEMPLATE; config = Dict("autoescape" => true))
-    cells = [_cell_view(c) for c in report.cells]
+    cells = [_cell_view(c) for c in report.cells if renders(c.kind)]
     title = isempty(report.title) ? report.id : report.title
     return tmpl(init = Dict(:title => title, :cells => cells))
 end
