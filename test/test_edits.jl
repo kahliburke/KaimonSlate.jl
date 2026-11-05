@@ -148,6 +148,10 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
                  "C" => "scale(vv); scale(vv); nothing"),
             "methods split across cells" =>
                 (["F" => "function fe end", "M1" => "fe(x::Int) = x + k1", "K" => "k1 = 1", "C" => "y = fe(1)"], "K" => "k1 = 7"),
+            "loop accumulates into a global (soft scope)" =>
+                (["A" => "s = 0", "B" => "for i in 1:3; s += i; end", "C" => "t = s"], "B" => "for i in 1:5; s += i; end"),
+            "loop assigns a global in a try" =>
+                (["A" => "st = 0", "B" => "for i in 1:3; try; st = i; catch; end; end", "C" => "u = st"], "B" => "for i in 1:7; try; st = i; catch; end; end"),
             "editing a helper doesn't re-run its data" =>
                 (["V" => "w = [1]", "F" => "addw() = push!(w, 2)", "C" => "addw(); nothing", "R" => "n = length(w)"],
                  "F" => "addw() = push!(w, 2, 3)"),
@@ -195,6 +199,16 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
         @test names("Base.show(io::IO, x::S) = print(io, 1)") == Symbol[]      # extends, binds nothing
         paths = RE._defined_function_paths("f(x) = 1\nBase.show(io::IO, x::S) = 1\nmacro m() end\nstruct T; end")
         @test paths == Any[:f, :(Base.show), Symbol("@m")]                    # constructors left out
+    end
+
+    @testset "soft-scope assignments" begin
+        soft(src) = sort!(collect(RE._soft_assigns!(Set{Symbol}(), Meta.parse(src))))
+        @test soft("for i in 1:3; s += i; t = i; end") == [:s, :t]
+        @test soft("for i in 1:3; local q = i; q += 1; end") == Symbol[]    # declared local
+        @test soft("for (a, b) in pairs(x); a = 1; end") == Symbol[]         # loop variables
+        @test soft("for i in 1:3; f = () -> (z = 1); end") == Symbol[]       # a closure is a hard scope
+        @test soft("let; for i in 1:3; w = i; end; end") == Symbol[]         # inside a let: local
+        @test soft("x = 1") == Symbol[]                                     # top level is not soft
     end
 
     @testset "what a restore replays" begin

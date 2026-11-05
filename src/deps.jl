@@ -96,6 +96,41 @@ _param_name(p::Symbol) = p
 _param_name(p::Expr) = p.head in (:(::), :kw, :(=), :(...)) && !isempty(p.args) ? _param_name(p.args[1]) : nothing
 _param_name(::Any) = nothing
 
+# Names assigned inside the soft scopes of a cell's top level: the body of a `for`, `while` or `try`
+# outside any function, `let` or comprehension. Notebook cells evaluate with the REPL's soft-scope
+# rule, so such an assignment updates the global when one exists; the dataflow pass reads it as a
+# local of the loop. Loop variables and `local` declarations are left out.
+function _soft_assigns!(out::Set{Symbol}, ex, insoft::Bool = false, locals::Set{Symbol} = Set{Symbol}())
+    ex isa Expr || return out
+    h = ex.head
+    (_is_deferred_def(ex) || h in (:let, :comprehension, :generator, :(->), :function, :macro, :struct, :module, :quote)) && return out
+    if h === :for || h === :while
+        loc = copy(locals)
+        if h === :for
+            specs = ex.args[1]
+            for sp in (specs isa Expr && specs.head === :block ? specs.args : Any[specs])
+                sp isa Expr && sp.head === :(=) && _loopvars!(loc, sp.args[1])
+            end
+        end
+        for a in ex.args[2:end]; _soft_assigns!(out, a, true, loc); end
+        return out
+    elseif h === :try
+        for a in ex.args; _soft_assigns!(out, a, true, copy(locals)); end
+        return out
+    elseif h === :local
+        for a in ex.args; _loopvars!(locals, a isa Expr && a.head === :(=) ? a.args[1] : a); end
+        return out
+    elseif insoft && (h === :(=) || (_is_update_head(h) && !startswith(string(h), "."))) && ex.args[1] isa Symbol
+        n = ex.args[1]
+        n in locals || push!(out, n)
+    end
+    for a in ex.args; _soft_assigns!(out, a, insoft, locals); end
+    return out
+end
+_loopvars!(s::Set{Symbol}, x::Symbol) = push!(s, x)
+_loopvars!(s::Set{Symbol}, x::Expr) = (for a in x.args; _loopvars!(s, a); end; s)
+_loopvars!(s::Set{Symbol}, ::Any) = s
+
 # The summaries of the functions a cell's deferred definitions define (see `FuncSummary`).
 function _summarize_functions!(cell::Cell, stmts)
     for s in stmts
@@ -564,7 +599,7 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
 const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol},Int,Set{Symbol},
-                                     Dict{Symbol,FuncSummary},Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}}}()
+                                     Dict{Symbol,FuncSummary},Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}},Set{Symbol}}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # Bounded LRU: entries carry a recency tick (`_BIND_TICKS`, bumped on every hit/store) and overflow
 # evicts the least-recently-used ~10% — the old clear-on-full wholesale `empty!` made a long-lived
@@ -604,13 +639,15 @@ function infer_bindings!(cell::Cell)
         empty!(cell.observes); union!(cell.observes, hit[11])   # `bind_observable(:name)` controls
         empty!(cell.funcs); for (k, v) in hit[12]; cell.funcs[k] = copy(v); end   # function summaries
         empty!(cell.topcalls); append!(cell.topcalls, hit[13])
+        empty!(cell.soft_assigns); union!(cell.soft_assigns, hit[14])
         return cell
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && _bind_cache_evict!()
         _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now), gen, copy(cell.observes),
-                                Dict{Symbol,FuncSummary}(k => copy(v) for (k, v) in cell.funcs), copy(cell.topcalls))
+                                Dict{Symbol,FuncSummary}(k => copy(v) for (k, v) in cell.funcs), copy(cell.topcalls),
+                                copy(cell.soft_assigns))
         _BIND_TICKS[cell.id] = (_BIND_TICK[] += 1)
     end
     return cell
@@ -623,7 +660,7 @@ _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_an
 
 function _infer_bindings_uncached!(cell::Cell)
     empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides); empty!(cell.observes)
-    empty!(cell.funcs); empty!(cell.topcalls)
+    empty!(cell.funcs); empty!(cell.topcalls); empty!(cell.soft_assigns)
     delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall)
     if cell.kind == MARKDOWN || cell.kind == WEB
         # A markdown or web cell "reads" the free variables of its `{{ expr }}` blocks, so it joins the
@@ -752,6 +789,7 @@ function _infer_bindings_uncached!(cell::Cell)
                 union!(cell.reads_now, EE.compute_reactive_node(iblk).references)
                 union!(cell.reads_now, _macrocall_arg_refs!(Set{Symbol}(), iblk))
                 _named_calls!(cell.topcalls, iblk)
+                _soft_assigns!(cell.soft_assigns, iblk)
             end
             _summarize_functions!(cell, nonbind)
         catch e
@@ -1020,6 +1058,7 @@ function build_dependencies!(report::Report)
         end
         empty!(c.deps)
     end
+    _apply_soft_scope!(report)             # a loop's assignment to an existing global updates it
     _apply_function_effects!(report)       # callers take on what the notebook functions they reach do
     _scan_imports!(report)                 # notebook-level `@use` import-map declarations → report.meta
     writer = Dict{Symbol,String}()        # name → id of most-recent prior writer
@@ -1215,6 +1254,22 @@ function take_forget!(report::Report)
         end
     end
     return (sort!(collect(String, cells)), names)
+end
+
+# A name a cell assigns inside a top-level loop (`soft_assigns`) that an earlier cell defines is an
+# update of that global: a read and a write, so the cell orders after the definer and its value comes
+# from it.
+function _apply_soft_scope!(report::Report)
+    above = Set{Symbol}()
+    for c in report.cells
+        c.kind == CODE || continue
+        for n in c.soft_assigns
+            (n in above && !(n in c.writes)) || continue
+            push!(c.reads, n); push!(c.reads_now, n); push!(c.writes, n); push!(c.mutates, n)
+        end
+        union!(above, c.writes)
+    end
+    return report
 end
 
 # The notebook's function summaries merged by name (every cell that adds a method contributes) and

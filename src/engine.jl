@@ -174,6 +174,8 @@ mutable struct Cell
     funcs::Dict{Symbol,FuncSummary}   # the notebook functions this cell defines, by name (see FuncSummary)
     topcalls::Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}   # calls its top-level code makes,
                                   # with each positional argument's base name (mutated-parameter mapping)
+    soft_assigns::Set{Symbol}     # names assigned inside a top-level loop or `try` (soft scope): an update
+                                  # of the global when an earlier cell defines it (`build_dependencies!`)
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -182,7 +184,7 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
                 STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0,
-                Dict{Symbol,FuncSummary}(), Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[])
+                Dict{Symbol,FuncSummary}(), Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[], Set{Symbol}())
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation
