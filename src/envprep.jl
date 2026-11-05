@@ -310,6 +310,8 @@ function seed_env_project!(envdir::AbstractString, parent::AbstractString)
     haskey(pt, "extras") && (seed["extras"] = pt["extras"])
     _inherit_workspace!(seed, ppf)
     _require_worker_seb!(seed)
+    prefs = project_preferences(ppf)
+    isempty(prefs) || (seed["preferences"] = prefs)
     open(joinpath(envdir, "Project.toml"), "w") do io; Pkg.TOML.print(io, seed); end
     pmf = parent_manifest(parent)
     if !isempty(pmf)
@@ -318,6 +320,58 @@ function seed_env_project!(envdir::AbstractString, parent::AbstractString)
         _adapt_fork_manifest!(dest, dirname(abspath(pmf)))
     end
     return (haskey(pt, "name") && haskey(pt, "uuid")) ? String(pt["name"]) : ""
+end
+
+"""
+    project_preferences(projectfile) -> Dict
+
+The preferences a project sets for its packages, as Julia reads them: its `Project.toml`
+`[preferences]` with its `JuliaLocalPreferences.toml` or `LocalPreferences.toml` over them.
+"""
+# `over` on top of `base`, table by table, as Julia layers preference files. A table's `__clear__`
+# list removes those keys from `base` first.
+function _merge_prefs(base::AbstractDict, over::AbstractDict)
+    out = Dict{String,Any}(base)
+    clear = get(over, "__clear__", nothing)
+    clear isa AbstractVector && foreach(k -> delete!(out, String(k)), clear)
+    for (k, v) in over
+        k == "__clear__" && continue
+        b = get(out, k, nothing)
+        out[k] = (b isa AbstractDict && v isa AbstractDict) ? _merge_prefs(b, v) : v
+    end
+    return out
+end
+
+function project_preferences(ppf::AbstractString)
+    prefs = get(_toml(ppf), "preferences", Dict{String,Any}())
+    for name in Base.preferences_names
+        f = joinpath(dirname(abspath(ppf)), name)
+        if isfile(f)
+            prefs = _merge_prefs(prefs, _toml(f))
+            break
+        end
+    end
+    return prefs
+end
+
+"""
+    sync_fork_preferences!(envdir, parent) -> Bool
+
+Carry the parent project's preferences into the forked env at `envdir`, as its `Project.toml`
+`[preferences]`. A preference the notebook sets goes to the fork's own `LocalPreferences.toml`,
+which Julia reads over these, so the notebook's value wins. Returns whether the file changed.
+"""
+function sync_fork_preferences!(envdir::AbstractString, parent::AbstractString)
+    isempty(parent) && return false
+    ppf = project_file_in(parent)
+    fpf = joinpath(envdir, "Project.toml")
+    (isempty(ppf) || !isfile(fpf)) && return false
+    want = project_preferences(ppf)
+    t = _toml(fpf)
+    get(t, "preferences", Dict{String,Any}()) == want && return false
+    isempty(want) ? delete!(t, "preferences") : (t["preferences"] = want)
+    open(fpf, "w") do io; Pkg.TOML.print(io, t); end
+    return true
 end
 
 """

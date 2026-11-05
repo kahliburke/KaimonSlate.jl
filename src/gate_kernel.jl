@@ -1539,6 +1539,7 @@ function prepare!(k::GateKernel, report::Report; explicit::Bool = false)
         elseif k.conn === nothing || (k.proc !== nothing && !process_running(k.proc))
             _kill_worker!(k)                      # tear down a dead/old proc before replacing (no leak/orphan)
             fork_refresh(k, report)               # a forked env behind its parent project is re-resolved first
+            _sync_fork_preferences(k)             # and takes up the project's preferences
             _spawn_worker!(k)
             _connect!(k)
             lock(_GATE_SESSION_LOCK) do; _GATE_SESSION[k.conn.name] = report.id; end   # route this worker's stream events back to the notebook
@@ -2306,6 +2307,19 @@ end
 # the worker fails to load a package the parent now needs. The hub installs the rebuild
 # (`_rebuild_notebook_env!`), since it knows the notebook's own packages, which the re-seed from the
 # parent does not.
+# A forked env takes up its project's preferences before a worker starts in it. A failure is logged
+# and the worker starts anyway, on the preferences the fork already has.
+function _sync_fork_preferences(k::GateKernel)
+    _base_mode(k) && return
+    try
+        sync_fork_preferences!(k.envdir, k.parent)
+    catch e
+        _rlog("fork: could not carry the project's preferences into $(basename(k.envdir)) — " *
+              first(sprint(showerror, e), 160))
+    end
+    return
+end
+
 const FORK_REFRESH = Ref{Any}(nothing)
 function fork_refresh(k::GateKernel, report)
     f = FORK_REFRESH[]

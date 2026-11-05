@@ -62,6 +62,46 @@ end
         @test r.seeded["deps"]["Statistics"] == "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
     end
 
+    @testset "a fork takes the project's preferences, and the notebook's own win" begin
+        parent = mktempdir()
+        write(joinpath(parent, "Project.toml"), """
+        [deps]
+        Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+        [preferences.Statistics]
+        a = "project-toml"
+        b = "project-toml"
+        """)
+        write(joinpath(parent, "LocalPreferences.toml"), "[Statistics]\nb = \"local\"\n")
+        @test ReportEngine.project_preferences(joinpath(parent, "Project.toml")) ==
+              Dict("Statistics" => Dict("a" => "project-toml", "b" => "local"))
+        envdir = mktempdir()
+        ReportEngine.seed_env_project!(envdir, parent)
+        fpf = joinpath(envdir, "Project.toml")
+        @test Pkg.TOML.parsefile(fpf)["preferences"]["Statistics"] == Dict("a" => "project-toml", "b" => "local")
+        @test !ReportEngine.sync_fork_preferences!(envdir, parent)      # unchanged: the file is left alone
+
+        write(joinpath(parent, "LocalPreferences.toml"), "[Statistics]\nb = \"changed\"\n")
+        @test ReportEngine.sync_fork_preferences!(envdir, parent)
+        @test Pkg.TOML.parsefile(fpf)["preferences"]["Statistics"]["b"] == "changed"
+        @test haskey(Pkg.TOML.parsefile(fpf), "deps")                    # the rest of the fork's project kept
+
+        # Julia reads the fork's own LocalPreferences.toml over its [preferences], so a value the
+        # notebook sets wins over the project's.
+        write(joinpath(envdir, "LocalPreferences.toml"), "[Statistics]\nb = \"notebook\"\n")
+        uuid = Base.UUID("10745b16-79ce-11e8-11f9-7d13ad32a3b2")
+        saved = copy(LOAD_PATH)
+        try
+            empty!(LOAD_PATH); push!(LOAD_PATH, envdir)
+            @test Base.get_preferences(uuid) == Dict("a" => "project-toml", "b" => "notebook")
+        finally
+            empty!(LOAD_PATH); append!(LOAD_PATH, saved)
+        end
+        rm(joinpath(parent, "LocalPreferences.toml")); write(joinpath(parent, "Project.toml"), "[deps]\n")
+        @test ReportEngine.sync_fork_preferences!(envdir, parent)
+        @test !haskey(Pkg.TOML.parsefile(fpf), "preferences")            # nothing left to carry
+    end
+
     @testset "a fork requires the SlateExtensionsBase the worker runs with" begin
         c = ReportEngine.worker_seb_compat()
         @test !isempty(c)
