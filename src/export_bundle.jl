@@ -510,20 +510,24 @@ can branch & PR; `history=false` ships the tracked SOURCE only — same runnable
 commit history published — the safe default for a PUBLIC web export. Reinflate / run with
 [`expand`](@ref) or the open box.
 """
-# For a self-contained `.jl`, inline any EXTERNAL bibliography file into its `:bibliography` cell
-# (replace the `.bib` path lines with the file's contents) so the reproducible notebook keeps its
-# citations working without depending on a file outside the bundle. Embedded-BibTeX cells and
-# notebooks without an external bib are returned unchanged.
+# For a self-contained `.jl`, inline any EXTERNAL bibliography into its `:bibliography` cell so the
+# reproducible notebook keeps its citations working without a file outside the bundle: a `.bib`
+# file's contents, and of an address's bibliography only the entries the notebook cites (the
+# library is the knowledge base's, behind its sign-in). Embedded-BibTeX cells and notebooks
+# without an external bibliography are returned unchanged.
 function _serialize_cells_inlining_bibs(report, nbdir::AbstractString)
     isext(c) = :bibliography in c.flags && !occursin(r"@\w+\s*\{", c.source)
     any(isext, report.cells) || return ReportEngine.serialize_cells(report)
+    cited = cited_citation_keys(report)
     cells2 = map(report.cells) do c
         isext(c) || return c
         io = IOBuffer()
-        for ln in split(c.source, '\n')
-            p = strip(ln); isempty(p) && continue
-            src = isabspath(p) ? String(p) : joinpath(nbdir, p)
-            isfile(src) ? println(io, rstrip(read(src, String))) : println(io, p)   # keep path if missing
+        for s in bib_sources(c, nbdir)
+            if s.kind == :url
+                println(io, isempty(s.remote.text) ? s.name : _bib_cited_text(s, cited))   # keep the address if no copy
+            else
+                isfile(s.path) ? println(io, rstrip(read(s.path, String))) : println(io, s.name)   # keep path if missing
+            end
         end
         nc = ReportEngine.Cell(c.id, c.kind, rstrip(String(take!(io))))
         union!(nc.flags, c.flags)

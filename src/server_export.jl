@@ -5472,7 +5472,7 @@ _cite_anchor(key::AbstractString) = replace(String(key), r"[^A-Za-z0-9_-]+" => "
 
 # Bibliography ordering + entry formatting shared by the HTML and Markdown References sections.
 _cited_in_order(ctx) = sort([e for e in ctx.bi if haskey(ctx.numbers, e.key)]; by = e -> ctx.numbers[e.key])  # numeric: citation order
-_bib_alpha(ctx) = sort(ctx.bi; by = e -> lowercase(_author_year_label(e.author, e.year)))                    # author-date: alphabetical
+_bib_alpha(ctx) = sort([e for e in ctx.bi if e.key in ctx.cited]; by = e -> lowercase(_author_year_label(e.author, e.year)))  # author-date: cited, alphabetical
 # `author-year-brackets`: the cited entries by surname and year, each keyed by its in-text label.
 _bib_bracketed(ctx) = sort([e for e in ctx.bi if haskey(ctx.numbers, e.key)];
                            by = e -> (lowercase(e.surname), e.year, ctx.label[e.key]))
@@ -5516,7 +5516,7 @@ function _html_references(ctx)
 end
 
 # The "## References" section for markdown export. Numeric styles list cited entries in citation order
-# (`N. Author. Title. Year.`); author-date lists all entries alphabetically (`Author (Year). Title.`).
+# (`N. Author. Title. Year.`); author-date lists the cited entries alphabetically (`Author (Year). Title.`).
 function _md_references(ctx)
     ctx === nothing && return ""
     io = IOBuffer(); println(io, "## References\n")

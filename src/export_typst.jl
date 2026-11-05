@@ -1432,26 +1432,23 @@ function _strip_leading_h1(src::AbstractString)
 end
 
 # Resolve `:bibliography` cells into Typst bib files written into the project dir, returning the
-# project-relative filenames for `#bibliography(...)`. A cell body of BibTeX entries (`@type{…}`)
-# is embedded (written to refs.bib); a body of `.bib` path(s) — one per line — references external
-# files copied in (resolved relative to the notebook's directory). `cmarker` already emits a
-# markdown `@key` as a native Typst reference, so citations resolve against these with no bridge.
-function _bibliography_files!(dir::AbstractString, bibcells, nbdir::AbstractString)
+# project-relative filenames for `#bibliography(...)`. Embedded BibTeX is written to refs.bib; a
+# `.bib` path is copied in; an address contributes only the entries in `cited`, since the whole
+# library is the knowledge base's to publish, not the document's. `cmarker` already emits a markdown
+# `@key` as a native Typst reference, so citations resolve against these with no bridge.
+function _bibliography_files!(dir::AbstractString, bibcells, nbdir::AbstractString; cited = Set{String}())
     files = String[]
     embedded = IOBuffer()
-    for c in bibcells
-        body = c.source
-        if occursin(r"@\w+\s*\{", body)                 # embedded BibTeX entries
-            println(embedded, strip(body))
+    for c in bibcells, s in bib_sources(c, nbdir)
+        if s.kind == :inline
+            println(embedded, strip(c.source))
+        elseif s.kind == :file
+            isfile(s.path) || error("bibliography file not found: $(s.name)")
+            fn = "ext_" * basename(s.path)
+            cp(s.path, joinpath(dir, fn); force = true)
+            fn in files || push!(files, fn)
         else
-            for ln in split(body, '\n')                 # external `.bib` path(s)
-                p = strip(ln); isempty(p) && continue
-                src = isabspath(p) ? String(p) : joinpath(nbdir, p)
-                isfile(src) || error("bibliography file not found: $p")
-                fn = "ext_" * basename(src)
-                cp(src, joinpath(dir, fn); force = true)
-                fn in files || push!(files, fn)
-            end
+            println(embedded, _bib_cited_text(s, cited))
         end
     end
     emb = String(take!(embedded))
@@ -1460,6 +1457,15 @@ function _bibliography_files!(dir::AbstractString, bibcells, nbdir::AbstractStri
         pushfirst!(files, "refs.bib")
     end
     return files
+end
+
+# The cited entries of an address's bibliography, as BibTeX. Throws when the hub has no copy of it.
+function _bib_cited_text(s, cited)
+    r = s.remote
+    isempty(r.text) && error("bibliography at $(s.name) is not available" *
+                             (isempty(r.message) ? " yet" : ": " * r.message))
+    raw = _bibtex_raw_entries(r.text)
+    return join((raw[k] for k in sort!(collect(cited)) if haskey(raw, k)), "\n\n")
 end
 
 # `surname` is the first author's, read before the braces go (`{W7-X Team}` stays whole).
@@ -1614,20 +1620,37 @@ function _author_year_label(author::AbstractString, year::AbstractString)
     return isempty(yr) ? surname : string(surname, ", ", yr)
 end
 
-# All citation entries defined by a report's `:bibliography` cells (embedded + external .bib),
-# resolved relative to `nbdir`. Powers `[@`-autocomplete and the per-cell card.
-function bibliography_index(report, nbdir::AbstractString)
+# The sources one `:bibliography` cell names: its embedded BibTeX, or one per line, each a `.bib`
+# path (resolved against `nbdir`) or an address (see `bib_endpoint`). `nb` is redrawn when an
+# address's fetch brings a change. `remote` is the address's `BibRemote`, else `nothing`.
+function bib_sources(cell, nbdir::AbstractString; nb = nothing)
+    out = NamedTuple{(:kind, :name, :path, :remote, :entries),Tuple{Symbol,String,String,Any,Vector{_BibEntry}}}[]
+    if occursin(r"@\w+\s*\{", cell.source)
+        push!(out, (kind = :inline, name = "", path = "", remote = nothing, entries = _parse_bibtex_entries(cell.source)))
+        return out
+    end
+    for ln in split(cell.source, '\n')
+        p = String(strip(ln)); isempty(p) && continue
+        if _bib_is_url(p)
+            r = bib_remote(bib_endpoint(p); nb)
+            push!(out, (kind = :url, name = p, path = "", remote = r, entries = r.entries))
+        else
+            src = isabspath(p) ? p : joinpath(nbdir, p)
+            push!(out, (kind = :file, name = p, path = src, remote = nothing,
+                        entries = isfile(src) ? _parse_bibtex_entries(read(src, String)) : _BibEntry[]))
+        end
+    end
+    return out
+end
+
+# All citation entries defined by a report's `:bibliography` cells. Powers `[@`-completion, the
+# references card and the citation labels.
+function bibliography_index(report, nbdir::AbstractString; nb = nothing)
     entries = _BibEntry[]
     for c in report.cells
         :bibliography in c.flags || continue
-        if occursin(r"@\w+\s*\{", c.source)
-            append!(entries, _parse_bibtex_entries(c.source))
-        else
-            for ln in split(c.source, '\n')
-                p = strip(ln); isempty(p) && continue
-                src = isabspath(p) ? String(p) : joinpath(nbdir, p)
-                isfile(src) && append!(entries, _parse_bibtex_entries(read(src, String)))
-            end
+        for s in bib_sources(c, nbdir; nb)
+            append!(entries, s.entries)
         end
     end
     return entries
@@ -1665,23 +1688,6 @@ function citation_numbers(report, citekeys)
         _rewrite_citations(first(ReportRender._md_spliced(c.source, c.interp)), citekeys; emit = rec)
     end
     return Dict{String,Int}(k => i for (i, k) in enumerate(order))
-end
-
-# Per-cell bibliography summary for the live card: (external-file-or-"", entry count, entries).
-function bib_cell_info(cell, nbdir::AbstractString)
-    body = cell.source
-    if occursin(r"@\w+\s*\{", body)
-        es = _parse_bibtex_entries(body)
-        return ("", length(es), es)
-    end
-    file = ""; es = _BibEntry[]
-    for ln in split(body, '\n')
-        p = strip(ln); isempty(p) && continue
-        file = String(p)
-        src = isabspath(p) ? String(p) : joinpath(nbdir, p)
-        isfile(src) && append!(es, _parse_bibtex_entries(read(src, String)))
-    end
-    return (file, length(es), es)
 end
 
 # Typst `#bibliography(...)` call for the resolved files, or "" when there are none.
@@ -1801,7 +1807,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             end
         end
         # References — `:bibliography` cells (embedded + external .bib), rendered via Typst's CSL.
-        biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)))
+        biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)); cited = cited_citation_keys(nb.report))
         print(io, _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee"); dir))
         cols == 2 && print(io, "]\n")
         write(joinpath(dir, "media.json"), JSON.json(mediasz))   # always present: the preamble reads it
@@ -1905,7 +1911,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
             print(io, "]\n\n")
         end
         # References slide — `:bibliography` cells rendered via Typst's CSL engine.
-        biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)))
+        biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)); cited = cited_citation_keys(nb.report))
         isempty(biblio) || print(io, "#slide[\n",
             _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee"); dir), "]\n\n")
         if notes

@@ -37,3 +37,19 @@ function updateStaleBadge(state) {
   if (b) { b.textContent = `▶ Run stale (${n})`; b.style.display = (n && !running) ? '' : 'none'; }
 }
 
+
+// The references card's buttons on a bibliography address (`_bib_source_html`): save the site's API
+// token, or fetch the bibliography again. The hub redraws the card when the fetch finishes.
+async function _bibPost(el, path, body) {
+  const url = el.closest('[data-url]').dataset.url;
+  await fetch(`/api/${encodeURIComponent(NB_ID)}/bib/${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, ...body }) });
+}
+async function bibToken(el) {
+  const host = (el.closest('[data-url]').dataset.url.match(/^https?:\/\/([^/?#]+)/i) || ['', ''])[1];
+  const token = await promptDark(`API token for ${host}`, '', { placeholder: 'kbt_…', ok: 'Save' });
+  if (token) await _bibPost(el, 'token', { token });
+}
+function bibRefresh(el) { _bibPost(el, 'refresh', {}); }
+window.bibToken = bibToken;
+window.bibRefresh = bibRefresh;

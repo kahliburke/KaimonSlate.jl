@@ -492,6 +492,7 @@ function _acp_models()
 end
 
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
+include("bib_remote.jl")     # a bibliography named by its address: fetched, cached, revalidated
 include("memostore.jl")      # MemoStore (server-side copy — stateless, root passed explicitly): pack/unpack
 include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl
 
@@ -2737,6 +2738,31 @@ function _make_router(h::Hub)
         end
         (path in declared && isfile(path)) || return HTTP.Response(404, "not found")
         HTTP.Response(200, ["Content-Type" => "text/plain; charset=utf-8"], read(path))
+    end))
+    # `[@` completion (`bib_key_matches`). The library can hold thousands of entries, so the page
+    # asks for the few it shows rather than holding them all.
+    HTTP.register!(router, "GET", "/api/{id}/bibkeys", req -> _withnb(h, req, nb -> begin
+        qp = HTTP.queryparams(HTTP.URI(req.target))
+        n = clamp(something(tryparse(Int, get(qp, "n", "50")), 50), 1, 500)
+        es = bib_key_matches(bibliography_index(nb.report, dirname(abspath(nb.path)); nb), get(qp, "q", ""), n)
+        _json([Dict("key" => e.key, "label" => strip(join(filter(!isempty, [e.author, e.title]), " · "))) for e in es])
+    end))
+    # A bibliography address's token (body {url, token}; an empty token removes it) and a fetch on
+    # demand (body {url}). Only an address the notebook names is accepted.
+    _bib_declared(nb, url) = any(c -> :bibliography in c.flags &&
+        any(s -> s.kind == :url && s.remote.url == url, bib_sources(c, dirname(abspath(nb.path)))), nb.report.cells)
+    HTTP.register!(router, "POST", "/api/{id}/bib/token", req -> _withnb(h, req, nb -> begin
+        b = _body(req); url = String(get(b, "url", ""))
+        _bib_declared(nb, url) || return HTTP.Response(404, "not a bibliography address of this notebook")
+        bib_token_set!(url, String(get(b, "token", "")))
+        _json(Dict("ok" => true))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/bib/refresh", req -> _withnb(h, req, nb -> begin
+        url = String(get(_body(req), "url", ""))
+        _bib_declared(nb, url) || return HTTP.Response(404, "not a bibliography address of this notebook")
+        bib_remote(url; nb, refresh = true)
+        _agent_push!(nb)
+        _json(Dict("ok" => true))
     end))
     HTTP.register!(router, "GET", "/api/{id}/export.pdf", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))

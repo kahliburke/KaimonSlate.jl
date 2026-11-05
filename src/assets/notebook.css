@@ -3530,6 +3530,12 @@ body:not(.zen) #nb .cell.slide-start::before { content: 'slide'; position: absol
 .bibcard-file { margin-top: 4px; color: var(--dim); font-size: .82rem; }
 .bibcard-file a { color: var(--accent); text-decoration: none; }
 .bibcard-file a:hover { text-decoration: underline; }
+.bibcard-remote { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bibcard-warn { color: var(--warn, #e2a63d); }
+.bibcard-dim { color: var(--dim); }
+.bibcard-btn { background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: 5px;
+  padding: 1px 8px; font-size: .8rem; cursor: pointer; }
+.bibcard-btn:hover { border-color: var(--accent); }
 .bibcard-note { color: var(--dim); font-size: .8rem; margin-top: 6px; }
 .bibcard-keys { list-style: none; margin: 8px 0 4px; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 .bibcard-keys li { display: flex; gap: 7px; align-items: baseline; }

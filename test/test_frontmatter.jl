@@ -548,8 +548,8 @@ x = 1
         idx = NS.bibliography_index(r, "/tmp")
         @test [e.key for e in idx] == ["knuth1984", "turing1936"]
         @test idx[1].author == "Knuth" && idx[1].title == "TeX"
-        file, n, es = NS.bib_cell_info(r.cells[1], "/tmp")
-        @test file == "" && n == 2                      # embedded → no external file
+        srcs = NS.bib_sources(r.cells[1], "/tmp")
+        @test length(srcs) == 1 && srcs[1].kind == :inline && length(srcs[1].entries) == 2
         # LaTeX accent macros + case-protecting braces are decoded for the live card / label, and a
         # nested `{c}` doesn't truncate the field (the reported "Ko\\c{c" bug).
         acc = NS._parse_bibtex_entries(
@@ -569,10 +569,10 @@ x = 1
         # keeps as written, the blurb drops.
         @test NS._delatex(raw"$a \div b, \forall x \vartheta, \cdots \foo$") == raw"a ÷ b, ∀ x ϑ, ⋯ \foo"
         @test strip(NS._demath(raw"$a \div b, \forall x \vartheta$")) == "a ÷ b, ∀ x ϑ"
-        # state_json ships the key list for [@-autocomplete; the cell renders a card, not raw BibTeX
+        # state_json says a bibliography exists (`[@` asks the hub for keys); the cell renders a card
         nb = _mknb("#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}}\n")
         sj = NS.state_json(nb)
-        @test haskey(sj, "bibKeys") && sj["bibKeys"][1]["key"] == "knuth1984"
+        @test get(sj, "hasBib", false) === true && !haskey(sj, "bibKeys")
         bib = first(c for c in sj["cells"] if get(c, "roleBib", false))
         @test occursin("bibcard", bib["output"]) && !occursin("@book", bib["output"])
     end
@@ -687,6 +687,84 @@ x = 1
         @test occursin("ext3", ext["output"]) && !occursin("ext5", ext["output"])
         @test occursin("li class=\"cited\"", inl["output"]) && occursin("li class=\"uncited\"", inl["output"])  # small → all, highlighted
         rm(d; recursive = true, force = true)
+    end
+
+    @testset "[@ completion ranks keys, then authors and titles" begin
+        es = NS._parse_bibtex_entries("@article{arXiv:2401.00001, author={Ada Lovelace}, title={Engines}}\n" *
+                                      "@article{smith2020, author={Smith}, title={On arXiv data}}\n" *
+                                      "@article{xarxiv, title={T}}\n@book{knuth1984, author={Knuth}, title={TeX}}\n")
+        @test [e.key for e in NS.bib_key_matches(es, "arx", 10)] == ["arXiv:2401.00001", "xarxiv", "smith2020"]
+        @test [e.key for e in NS.bib_key_matches(es, "lovelace", 10)] == ["arXiv:2401.00001"]
+        @test length(NS.bib_key_matches(es, "", 2)) == 2
+        @test isempty(NS.bib_key_matches(es, "nothing-like-this", 10))
+    end
+
+    @testset "a bibliography named by its address" begin
+        @test NS.bib_endpoint("https://kb.example.org") == "https://kb.example.org/api/bib"
+        @test NS.bib_endpoint("https://kb.example.org/papers/x?y=1") == "https://kb.example.org/api/bib"
+        @test NS.bib_endpoint("http://localhost:8000/") == "http://localhost:8000/api/bib"
+        @test NS.bib_endpoint("https://example.org/refs/lib.bib") == "https://example.org/refs/lib.bib"
+        @test NS.bib_token_ref("https://KB.example.org/api/bib") == "bib:kb.example.org"
+        @test NS.bib_token_ref("http://localhost:8000/api/bib") == "bib:localhost:8000"
+
+        lib = "@article{arXiv:2401.00001, author={Lovelace, Ada}, title={Engines}, year={2024}}\n\n" *
+              "@misc{rec-7, author={Babbage}, title={Notes}, year={2025}}\n"
+        seen = Ref{Any}(nothing)
+        function fake(url, headers)
+            seen[] = Dict(headers)
+            auth = get(seen[], "Authorization", "")
+            auth == "" && return NS.HTTP.Response(401, "{\"error\": \"Sign in.\"}")
+            auth == "Bearer kbt_noread" && return NS.HTTP.Response(403, "{}")
+            get(seen[], "If-None-Match", "") == "\"v1\"" && return NS.HTTP.Response(304)
+            return NS.HTTP.Response(200, ["ETag" => "\"v1\""], lib)
+        end
+        cfg, cache = mktempdir(), mktempdir()
+        old = NS._BIB_GET[]
+        withenv("KAIMONSLATE_CONFIG_HOME" => cfg, "KAIMONSLATE_CACHE_HOME" => cache) do
+            NS._BIB_GET[] = fake
+            try
+                url = NS.bib_endpoint("https://kb.example.org")
+                lock(NS._BIB_REMOTE_LOCK) do; delete!(NS._BIB_REMOTES, url); end
+                r = NS._bib_load_cached(url)
+                @test r.status == :pending && isempty(r.entries)
+                NS._bib_refresh!(r)
+                @test r.status == :signin && r.message == "Needs an API token"
+                NS.publish_secret_set!(NS.bib_token_ref(url), "kbt_noread")
+                NS._bib_refresh!(r)
+                @test r.status == :denied
+                NS.publish_secret_set!(NS.bib_token_ref(url), "kbt_good")
+                NS._bib_refresh!(r)
+                @test r.status == :ok && r.etag == "\"v1\"" && [e.key for e in r.entries] == ["arXiv:2401.00001", "rec-7"]
+                @test seen[]["Authorization"] == "Bearer kbt_good"
+                NS._bib_refresh!(r)                          # revalidated: 304 keeps the copy
+                @test seen[]["If-None-Match"] == "\"v1\"" && r.status == :ok && length(r.entries) == 2
+                @test length(NS._bib_load_cached(url).entries) == 2   # the copy on disk serves a new session
+
+                # The notebook sees the entries; exports carry only the cited one.
+                src = "#%% md id=body\nAs shown [@arXiv:2401.00001].\n\n#%% md id=refs bibliography\nhttps://kb.example.org\n"
+                lock(NS._BIB_REMOTE_LOCK) do; NS._BIB_REMOTES[url] = r; r.checked = time(); end
+                rep = RE.parse_report(src)
+                @test [e.key for e in NS.bibliography_index(rep, "/tmp")] == ["arXiv:2401.00001", "rec-7"]
+                d = mktempdir()
+                files = NS._bibliography_files!(d, [c for c in rep.cells if :bibliography in c.flags], "/tmp";
+                                                cited = NS.cited_citation_keys(rep))
+                bib = read(joinpath(d, "refs.bib"), String)
+                @test files == ["refs.bib"] && occursin("arXiv:2401.00001", bib) && !occursin("rec-7", bib)
+                out = NS._serialize_cells_inlining_bibs(rep, "/tmp")
+                @test occursin("@article{arXiv:2401.00001", out) && !occursin("rec-7", out) && !occursin("kb.example.org", out)
+
+                # The card names the site, and asks for a token while it has none.
+                html = sprint(io -> NS._bib_source_html(io, NS.bib_sources(rep.cells[2], "/tmp")[1], "nb"))
+                @test occursin("kb.example.org", html) && !occursin("Add token", html)
+                r.status, r.message = :signin, "Needs an API token"
+                html = sprint(io -> NS._bib_source_html(io, NS.bib_sources(rep.cells[2], "/tmp")[1], "nb"))
+                @test occursin("Add token", html) && occursin("copy from", html)
+                rm(d; recursive = true, force = true)
+            finally
+                NS._BIB_GET[] = old
+            end
+        end
+        rm(cfg; recursive = true, force = true); rm(cache; recursive = true, force = true)
     end
 
     @testset "standalone export inlines an external bib" begin

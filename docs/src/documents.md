@@ -34,10 +34,11 @@ and the OG social-card metadata.
 
 ## Bibliography
 
-Tag a markdown cell `bibliography`. Its body is **either** embedded BibTeX **or** one-or-more
-**`.bib` file paths** (one per line, resolved relative to the notebook and copied into exports).
-One cell cannot hold both: a cell containing any `@entry{…}` is read as embedded BibTeX and its
-path lines are ignored. To use both, write two bibliography cells.
+Tag a markdown cell `bibliography`. Its body is **either** embedded BibTeX **or** one or more
+sources, one per line: a **`.bib` file path** (resolved relative to the notebook and copied into
+exports) or the **address of a knowledge base** (see below). One cell cannot hold both: a cell
+containing any `@entry{…}` is read as embedded BibTeX and its other lines are ignored. To use both,
+write two bibliography cells.
 
 ```julia
 #%% md id=bib bibliography
@@ -56,6 +57,31 @@ In the live notebook, the bibliography renders an adaptive **references card** l
 entries, with the keys you've actually cited highlighted.
 
 ![The live references card listing bibliography entries, cited keys highlighted](./assets/references-card.png)
+
+### A knowledge base's bibliography
+
+A line holding a site's address takes the bibliography of a [Zemi](https://github.com/kahliburke/Zemi.jl)
+knowledge base: every paper, upload and record you may read there, keyed as Zemi keys them
+(`[@arXiv:2401.01234]`, `[@doc-…]`, `[@rec-…]`).
+
+```julia
+#%% md id=kb bibliography
+https://kb.example.org
+```
+
+The hub fetches it from the site's `api/bib` with your API token, keeps a copy, and checks for a newer
+one when the notebook opens and every few minutes after; the notebook works from the copy, offline
+too. A line ending in `.bib` is fetched as given, so any BibTeX file on the web works the same way.
+
+A Zemi site needs sign-in. Create a token on the site under **Account → API tokens**, with the
+**read** permission (see [Zemi's documentation](https://kahliburke.github.io/Zemi.jl/)); the
+references card then shows **Add token** beside the site, which saves it on the hub
+(`secrets.json` in the config home) for that host. The token is never written into the notebook. A
+Zemi run for one person on this machine takes its local key in the same place.
+
+A library can hold thousands of entries. `[@` asks the hub for the keys matching what you type, and
+the card lists only the cited entries once there are more than a few. A PDF, HTML or Markdown export,
+and a self-contained `.jl`, carry only the entries the notebook cites.
 
 ## Citing in prose
 

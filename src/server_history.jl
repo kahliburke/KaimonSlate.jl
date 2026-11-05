@@ -943,9 +943,37 @@ end
 # a large library shows the count and lists ONLY the cited entries (so a 2000-entry Zotero file
 # doesn't flood the cell). External files get a "view" link (the /bibfile route).
 const _BIB_CARD_LIMIT = 10
-function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::AbstractString, cited,
+# One line per source the cell names: a `.bib` file's "view" link, or an address's site with its
+# state (a token to add, an error, the copy in use) and a refresh button.
+function _bib_source_html(io::IO, s, nbid::AbstractString)
+    esc = _esc
+    if s.kind == :file
+        link = "/api/" * esc(nbid) * "/bibfile?name=" * esc(s.name)
+        print(io, "<div class=\"bibcard-file\">File <a href=\"", link, "\" target=\"_blank\" rel=\"noopener\"><code>",
+              esc(s.name), "</code></a></div>")
+    elseif s.kind == :url
+        r = s.remote
+        site = something(match(r"^https?://[^/?#]+"i, s.name), (match = s.name,)).match
+        print(io, "<div class=\"bibcard-file bibcard-remote\" data-url=\"", esc(r.url), "\"><a href=\"", esc(site),
+              "\" target=\"_blank\" rel=\"noopener\"><code>", esc(replace(site, r"^https?://"i => "")), "</code></a>")
+        if r.status in (:signin, :denied)
+            print(io, "<span class=\"bibcard-warn\">", esc(r.message), "</span>",
+                  "<button class=\"bibcard-btn\" onclick=\"bibToken(this)\">", r.status == :signin ? "Add token" : "Replace token", "</button>")
+        elseif r.status == :error
+            print(io, "<span class=\"bibcard-warn\">", esc(r.message), "</span>")
+        elseif r.status == :pending || r.fetching
+            print(io, "<span class=\"bibcard-dim\">Fetching</span>")
+        end
+        if r.status != :ok && !isempty(r.text)
+            print(io, "<span class=\"bibcard-dim\">copy from ", Dates.format(Dates.unix2datetime(r.fetched), "yyyy-mm-dd HH:MM"), " UTC</span>")
+        end
+        print(io, "<button class=\"bibcard-btn\" title=\"Fetch again\" onclick=\"bibRefresh(this)\">↻</button></div>")
+    end
+end
+function _bib_card_html(sources, entries, nbid::AbstractString, cited,
                         labels::Dict{String,String} = Dict{String,String}(); by = e -> 0)
     esc = _esc   # shared HTML-escape (server_hub) — same &<>" mapping
+    count = length(entries)
     ncited = Base.count(e -> e.key in cited, entries)
     meta(e) = strip(join(filter(!isempty, [String(e.author), String(e.title)]), " · "))
     # Cited entries get their in-text label (`[3]`, `[Sun 2026]`, `(Sun, 2026)`); uncited a hollow marker.
@@ -958,13 +986,9 @@ function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::Abs
     print(io, "<div class=\"bibcard\"><div class=\"bibcard-hd\">📚 <strong>References</strong>",
           "<span class=\"bibcard-n\">", count, count == 1 ? " entry" : " entries",
           ncited > 0 ? " · $(ncited) cited" : "", "</span></div>")
-    if !isempty(file)
-        link = "/api/" * esc(nbid) * "/bibfile?name=" * esc(file)
-        print(io, "<div class=\"bibcard-file\">External file: <a href=\"", link,
-              "\" target=\"_blank\" rel=\"noopener\"><code>", esc(file), "</code></a></div>")
-    end
+    for s in sources; _bib_source_html(io, s, nbid); end
     if count == 0
-        print(io, "<div class=\"bibcard-empty\">No entries found", isempty(file) ? "." : " in this file.", "</div>")
+        print(io, "<div class=\"bibcard-empty\">No entries</div>")
     elseif count < _BIB_CARD_LIMIT
         # Small library: list all, highlighting cited vs uncited.
         print(io, "<ul class=\"bibcard-keys\">")
@@ -1007,7 +1031,7 @@ end
 # per-key in-text label (a number for numeric styles, an author-year string otherwise), the
 # numeric flag, and (numeric only) the card numbers. `nothing` when the notebook has no bibliography.
 function _bib_link_ctx(nb)
-    bi = bibliography_index(nb.report, dirname(abspath(nb.path)))
+    bi = bibliography_index(nb.report, dirname(abspath(nb.path)); nb)
     isempty(bi) && return nothing
     idx = findfirst(c -> :bibliography in c.flags, nb.report.cells)
     anchor = idx === nothing ? "" : nb.report.cells[idx].id
@@ -1018,7 +1042,6 @@ function _bib_link_ctx(nb)
     (; labels, open, close) = _cite_labels(style, bi, numbers)
     return (anchor = anchor, tips = tips, labels = labels, numeric = numeric, numbers = numbers, open = open, close = close)
 end
-_bib_keys_meta(ctx) = ctx === nothing ? nothing : [Dict("key" => k, "label" => v) for (k, v) in ctx.tips]
 
 # A SESSION-BOUND (live) output — one whose HTML is a view onto state that lives in the WORKER, e.g. a
 # WGLMakie scene wired to its own socket — must NOT boot from the STORED output on a page (re)load: it was
@@ -1163,17 +1186,16 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     end
     if :bibliography in c.flags                          # bibliography / references
         d["roleBib"] = true
-        file, n, es = bib_cell_info(c, nbdir)            # external file (or "") + entry count + keys
-        d["bibFile"] = file
-        d["bibCount"] = n
-        d["bibKeys"] = [Dict("key" => e.key, "title" => e.title, "author" => e.author) for e in es]
+        srcs = bib_sources(c, nbdir)             # the notebook is redrawn via `_bib_link_ctx`'s registration
+        es = reduce(vcat, (x.entries for x in srcs); init = _BibEntry[])
+        d["bibCount"] = length(es)
         labs, by = Dict{String,String}(), e -> 0
         if bibctx !== nothing
             labs = Dict{String,String}(k => string(bibctx.open, v, bibctx.close) for (k, v) in bibctx.labels
                                        if haskey(bibctx.numbers, k))
             by = bibctx.numeric ? (e -> get(bibctx.numbers, e.key, typemax(Int))) : (e -> lowercase(get(bibctx.labels, e.key, e.key)))
         end
-        d["output"] = _bib_card_html(file, n, es, nbid, cited, labs; by)  # card instead of raw BibTeX
+        d["output"] = _bib_card_html(srcs, es, nbid, cited, labs; by)  # card instead of raw BibTeX
     end
     # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor. The
     # flags Slate derives itself (`_INTERNAL_FLAGS`) are not tags and are left out. `:opaque` is shipped
@@ -1850,8 +1872,8 @@ function state_json(nb::LiveNotebook)
     meta["workerGen"] = worker_generation(nb)
     # In-memory scratchpad cells (slate.eval) — a separate panel, never part of the document flow.
     isempty(nb.scratch) || (meta["scratch"] = [scratch_cell_json(c) for c in nb.scratch])
-    # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
-    let bk = _bib_keys_meta(bibctx); bk === nothing || (meta["bibKeys"] = bk); end
+    # Whether the notebook has citation keys: `[@` then asks the hub for them (`/api/{id}/bibkeys`).
+    bibctx === nothing || (meta["hasBib"] = true)
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
     # Package-declared front-end scripts (SlateExtensionsBase manifest → `_refresh_extensions!`). The
     # browser injects each `<script>` once (deduped by id) so a package's widget renderer / editor

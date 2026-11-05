@@ -708,15 +708,22 @@
     const before = ctx.state.doc.sliceString(0, ctx.pos);
     return ((before.match(/^[ \t]*(```|~~~)/gm) || []).length % 2) === 1;
   }
-  // `[@key]`-citation completion in markdown — keys come from the notebook's :bibliography cells
-  // (state_json `bibKeys`). Triggers right after `[@`; inserts the chosen key before the `]`.
-  function citeComplete(ctx, match) {
-    const keys = (typeof nbState !== 'undefined' && nbState && nbState.bibKeys) || [];
-    if (!keys.length) return null;
+  // `[@key]`-citation completion in markdown. The hub searches the notebook's bibliography for the
+  // typed prefix (`/api/{id}/bibkeys`), since a library can hold thousands of entries. Triggers
+  // right after `[@`; inserts the chosen key before the `]`.
+  async function citeComplete(ctx, match) {
+    if (!(typeof nbState !== 'undefined' && nbState && nbState.hasBib)) return null;
+    const q = ctx.state.doc.sliceString(match.from + 2, ctx.pos);
+    let keys = [];
+    try {
+      const r = await fetch(`/api/${encodeURIComponent(NB_ID)}/bibkeys?q=${encodeURIComponent(q)}`);
+      if (r.ok) keys = await r.json();
+    } catch (e) { return null; }
+    if (ctx.aborted || !keys.length) return null;
     return {
       from: match.from + 2,                              // after the `[@`
       options: keys.map(k => ({ label: k.key, detail: k.label || 'citation', type: 'constant', apply: k.key })),
-      validFor: /^[\w:.\-]*$/,
+      filter: false,                                     // the hub already matched and ranked them
     };
   }
   // Markdown editor completion: offer citations on `[@`, delegate to Julia ONLY inside a fenced
