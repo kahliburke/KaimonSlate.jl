@@ -54,10 +54,7 @@ the readers of that variable. Async cells can call `slate_refresh(:x)` to restal
 The discriminator is the gate, not the project. A notebook with no enclosing project still gets a
 worker; it just gets its own environment along with it.
 
-The gate worker exposes a small set of internal tools (`__slate_eval`, `__slate_set_bind`,
-`__slate_project_deps`, `__slate_pkg`, …) that the engine calls over the gate. The notebook
-namespace contract is shared between in-process and worker kernels so `@bind` and friends
-behave identically.
+`@bind` and the other cell helpers behave the same on both kernels.
 
 A notebook is not limited to one worker. Cells tagged `region=` run on their own worker, one per
 region, which may be on another machine over SSH. See [Regions](regions.md) and

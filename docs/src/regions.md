@@ -15,11 +15,6 @@ about defining a region, assigning cells to it, and how data crosses the boundar
     and the worker goes on whichever one it is given. That, and submitting batch sweeps to the same
     machine, are in [Clusters](clusters.md).
 
-!!! note "New and evolving (v1)"
-    Regions are a recent addition and still stabilizing. The single-worker path — running a *whole*
-    notebook [on one host](remotes.md#Run-a-notebook-on-a-remote) — is the settled option; per-cell
-    regions add power with the [caveats below](#Current-limits).
-
 ## Assigning a cell to a region
 
 A cell's region is a **cell tag**, so it travels in the `.jl`:
@@ -70,8 +65,8 @@ always match a `region=` tag.
 
 ![The Regions manager focused on a host: a region's config (warm count, transport, sysimage, data root), the New-region editor, and the host's live worker roster with per-worker telemetry and a parked warm worker](./assets/region-focus.png)
 
-!!! note "Advanced, still settling"
-    Two newer per-region knobs: an opt-in **sysimage** (a PackageCompiler image of the region's
+!!! note "Sysimage and curve"
+    Two per-region settings: an opt-in **sysimage** (a PackageCompiler image of the region's
     environment that its workers boot from, built when the region is prepared; see
     [Preparing a machine or a region](clusters.md#Preparing-a-machine-or-a-region)) and a **`curve`** toggle — the region's data channel is
     CURVE-encrypted by default. Turning it off also drops the allow-list, so leave it on unless you
@@ -116,9 +111,7 @@ cell's kernel first, **just in time** — you never move data by hand.
   never leaves it; only a value read across a side boundary transfers.
 - **Content-addressed transfer.** Values cross as content-addressed blobs over the dedicated data
   channel; a `DataFrame` crosses as Arrow IPC (see [Memoization → Arrow](memoization.md#Arrow-tables-and-codecs)).
-  Identical content dedups at every hop, and an unchanged value doesn't re-ship — a per-transfer
-  freshness token (source run + any mutators + the current `@bind` value + the destination worker's
-  generation) collapses a repeat to nothing.
+  Identical content dedups at every hop, and an unchanged value doesn't re-ship.
 - **Progress is visible.** A transfer past a size threshold drives the cell's own progress bar
   (`⇄ <name>: N/M MB ← host`), so a big move never looks like a hang.
 - **Live handles aren't shipped.** A cell that produces a live DB connection / socket / open file
@@ -154,9 +147,9 @@ Restart a single region from its worker controls — it kills that region's work
 stale, and re-runs them, leaving the rest of the notebook untouched. Closing the notebook or
 restarting the main worker tears down region kernels too.
 
-## Current limits
+## Limits
 
-Regions are powerful but still settling. Today:
+Regions have these limits:
 
 - **Keep the main kernel local** while a region is active.
 - **`@bind`-declaring cells stay on the main kernel** — declare controls locally, read them anywhere.
@@ -166,8 +159,8 @@ Regions are powerful but still settling. Today:
   mutates a region value auto-follows its target one hop, but deeper mutation chains aren't
   guaranteed.
 
-Expect this surface to grow; the whole-notebook [remote placement](remotes.md#Run-a-notebook-on-a-remote)
-is the conservative choice when you want everything elsewhere.
+To run everything elsewhere, place the whole notebook on a host with
+[remote placement](remotes.md#Run-a-notebook-on-a-remote).
 
 ## From the agent
 

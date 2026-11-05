@@ -21,9 +21,7 @@ hub = start_hub(; host = "127.0.0.1", port = 8080, app = true)
 open_notebook!(hub, "notebooks/analysis.jl")
 ```
 
-It is deliberately *not* a per-notebook footer flag. A document attribute is something an author
-edits by accident, and "can this request mutate my notebook?" should not depend on a token inside the
-file being served.
+Nothing in the notebook file can turn app mode on or off; only the hub's `app = true` does.
 
 To preview the app view while authoring, append `?app=1` to a notebook URL on an ordinary hub. That
 gives you the same **view** with none of the enforcement — useful for checking layout, not for
@@ -53,10 +51,9 @@ container, or as `nohup ./run.sh &`.
 That first run needs network access. It fetches Slate itself into a shared environment and
 instantiates the notebook's manifest. Once that has happened the app starts offline.
 
-An app is not a separate export format. It **is** the standalone bundle; "app" is a posture the
-launcher takes. Which is also why updating a deployed app is `export_app` again over the same folder
-— the install detects that the bundle beside it has changed and refreshes in place, keeping whatever
-the app accumulated next to it (its `datadir()`, saved results, caches).
+An app folder holds the standalone bundle plus launchers. To update a deployed app, run `export_app`
+again over the same folder — the install detects that the bundle beside it has changed and
+refreshes in place, keeping whatever the app accumulated next to it (its `datadir()`, saved results, caches).
 
 ### What ships
 
@@ -188,11 +185,7 @@ machine, where they could equally well open a REPL.
 
 ## What a visitor cannot do
 
-The lockdown is a server-side **allowlist** of `(method, path)` patterns, not a list of dangerous
-routes to exclude. A denylist over ~130 routes is a standing invitation to a miss: every new
-authoring endpoint would be reachable until someone remembered to exclude it, and the failure would be
-silent. An allowlist fails the other way — a new route is unreachable in app mode until it is
-deliberately added, which is the direction a lockdown should fail in.
+App mode serves only an allowlist of routes. Every other route is refused.
 
 So a visitor cannot edit a cell, install a package, reach the filesystem, talk to the agent, or
 publish, because **those routes are not served at all** — not merely hidden in the UI.

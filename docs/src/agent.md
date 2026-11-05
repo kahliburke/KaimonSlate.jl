@@ -88,8 +88,7 @@ turn is in flight you're asked to confirm before it's interrupted.
 
 ### Codex through ACP
 
-Use a Kaimon release that supports `acp:codex`
-([Kaimon.jl#108](https://github.com/kahliburke/Kaimon.jl/pull/108)). Install the maintained adapter:
+Codex needs Kaimon 2.11.0 or later. Install the maintained adapter:
 
 ```sh
 npm install -g @agentclientprotocol/codex-acp

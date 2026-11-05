@@ -11,12 +11,8 @@ depends on nothing but `Base` and stdlib. Your package depends on SEB, *not* on 
 import Pkg; Pkg.add("SlateExtensionsBase")
 ```
 
-That split is the point. KaimonSlate is a server, a hub, a worker pool and a browser front-end;
-none of it belongs in the dependency tree of a package that only wants to describe a widget. SEB
-is the contract, KaimonSlate is the implementation — the same relationship
-`AbstractPlutoDingetjes` has with Pluto. A `@bind` control is already reduced to
-`(kind, params, default)` by the time it crosses a process boundary, so the contract is all your
-package needs.
+SEB is the contract and KaimonSlate the implementation, as `AbstractPlutoDingetjes` is to Pluto, so
+your package never pulls in the server.
 
 !!! note "No boot cells"
     Everything here registers by **dispatch** (defining a method) or from your module's `__init__`.
@@ -167,9 +163,8 @@ step. If you reflect Slate's value back into your control, guard the echo by com
 Pair this with `hidden(…)` at the `@bind` site so the notebook draws no second copy. See
 [Widgets & @bind](widgets.md#Controls-drawn-somewhere-else).
 
-They are *additive*, so they are available from `SlateExtensionsBase` 0.10.5 without any other
-extension having to move. The compat bound gets you the accessors but cannot force a Slate core new
-enough to populate them — an older core returns `nothing` from every one, which looks just like a
+The accessors need `SlateExtensionsBase` 0.10.5 or later. An older Slate core returns `nothing` from
+every one, which looks just like a
 control that was never declared. Check for the capability once, up front, and name the core version
 you need.
 

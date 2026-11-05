@@ -99,8 +99,8 @@ Placement has a **scope**, so you control how sticky it is:
 A whole-notebook `run_on` **spawns** a fresh worker on the host — a cold boot (provision + start
 Julia + load packages) that can be ~90 s the first time (a later reattach reuses a parked
 connection). To keep workers **pre-booted and ready to adopt** — startup in about a second instead of
-a cold boot — define a **[region](regions.md)** with a `warm` count and route cells to it. Warm
-pooling is now part of the region model: a region with `warm > 0` *is* a warm pool, and its
+a cold boot — define a **[region](regions.md)** with a `warm` count and route cells to it. A region
+with `warm > 0` is a warm pool, and its
 `preload` replicates a project so the adopted worker already has its packages loaded. See
 [Regions → Defining a region](regions.md#Defining-a-region).
 

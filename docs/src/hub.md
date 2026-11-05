@@ -181,8 +181,5 @@ Driving a local model requires Kaimon's Ollama agent backend. Selecting a model 
 | `KAIMON_GATE_OWNER_WAKE` | `=0` → a worker serves its gate with the polling loop instead of the event-driven one. |
 | `KAIMONSLATE_BLOB_CAP_GB` | Size cap for the local cache of remote results read by byte range (default a sixteenth of free disk, between 1 and 8 GB). |
 | `KAIMONSLATE_SCHED_BUDGET` | Scheduler commands per minute to one machine above which the hub warns in its log (default 2). |
-| `KAIMONSLATE_ASSET_BASE` | **Docs build only** — points the site at the docs-assets GitHub Release for generated demo media. Unset locally → served from `public/assets/`. |
 
-The remote-worker timing knobs above each have a `KAIMONSLATE_*` equivalent too, and a number of
-further variables exist for tuning transfers, regions and sysimages. Those are listed beside the
-code that reads them rather than here.
+The remote-worker timing knobs above each have a `KAIMONSLATE_*` equivalent too.

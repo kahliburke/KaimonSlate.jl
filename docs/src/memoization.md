@@ -123,10 +123,6 @@ Elided names show up in `slate_memo_entries` (the `elided` column).
 
 ## Arrow tables and codecs
 
-!!! note "Newer, still settling"
-    The typed codecs below are a recent optimization. Behavior is accurate to the current code but may
-    evolve; the universal fallback always applies, so correctness never depends on them.
-
 A value becomes blob bytes through one of three **codecs**, chosen automatically by type:
 
 | You return | Codec | On restore | External-readable |
@@ -146,8 +142,7 @@ large tabular/array data reopen and transfer far faster.
   downstream **mutates** the value. If you then mutate a zero-copy-restored value you'll get a
   `ReadOnlyMemoryError` — a safe failure; re-running the producer re-stores it mutably.
 - The Arrow blob is a plain Arrow IPC file on disk, so its bytes are readable by external tools
-  (DuckDB, pyarrow). Note this is a property of the stored bytes — KaimonSlate doesn't currently
-  surface the blob path for you.
+  (DuckDB, pyarrow). KaimonSlate does not show the blob's path.
 - **These codecs also power [region boundary transfers](regions.md#How-boundary-values-cross)** — a
   `DataFrame` crosses between kernels as Arrow IPC, moved zero-copy over the data channel.
 

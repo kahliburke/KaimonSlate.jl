@@ -46,11 +46,6 @@ beyond the default registry.
 Note the `app` prefix: an installed app lives in its own environment, so a plain `add KaimonSlate`
 acts on whatever environment is active and won't install the launcher.
 
-!!! note "Upgrading from a pre-release install"
-    Earlier instructions used `app dev` plus a manual `instantiate` of `~/.julia/dev/KaimonSlate`.
-    That still works but pins you to whatever is in that clone. To switch, run `app rm KaimonSlate`
-    in the Pkg REPL, add the registry, then `app add KaimonSlate`. The old clone can be deleted.
-
 #### Upgrading
 
 Two steps in the Pkg REPL, and the second one matters:
@@ -140,8 +135,7 @@ tools and **Kaimon serves your notebooks from its own hub — no extra process**
 again **attaches** to that hub as a live status viewer.
 
 !!! tip "Consented, not automatic"
-    Registration is a one-time prompt you approve — it replaces the old silent auto-register on
-    package load. Nothing wires itself into Kaimon behind your back;
+    Registration is a one-time prompt you approve. Nothing wires itself into Kaimon behind your back;
     `KaimonSlate.register_extension()` registers manually, and `slate` never overwrites a
     registration you removed.
 
@@ -159,7 +153,7 @@ Julia packages built on `SlateExtensionsBase` (see [Writing an Extension](extens
 `add` them to a **notebook's environment**, not to the app.
 
 Packages that live in General install directly. The rest are published through **SlateRegistry**,
-a registry that sits alongside General; add it once per machine:
+a registry that sits alongside General.
 
 The normal way to install one is from inside a notebook, through the
 [🧩 Extensions gallery](extension-gallery.md) or the [📦 Packages panel](packages.md). The first

@@ -31,7 +31,9 @@ If the enclosing project changes later, a forked notebook **auto-resyncs** on op
 from the parent and re-adds your packages, keeping it one consistent environment. Each package is
 re-added the way it was added: a local checkout is developed again from its path and a git package
 added from its URL. A checkout whose path is missing on this machine is named and skipped, and the
-rest still install.
+rest still install. A change to the project's `Project.toml` or `Manifest.toml` while the notebook
+is open (a dependency added to the package under development, say) re-resolves the fork too, and
+brings the environment of any region worker it has up to date.
 
 ## The panel
 
@@ -100,16 +102,3 @@ it rebuilds the environment from the footer (seed from parent, add the pinned pa
 Package management needs a **gate worker** — i.e. the notebook lives inside a Julia project (or
 is detached but gate-capable). For an in-process notebook the panel is read-only and explains
 why: there is no notebook environment to manage.
-
-## Under the hood
-
-The UI calls `GET /api/<id>/packages` (provenance via the set difference *active − parent −
-parent-package*) and `POST /api/<id>/package`
-(`{op: "add"|"rm"|"update", name, target: "notebook"|"project"}`). Operations run
-through worker tools (`__slate_pkg`, `__slate_pkg_parent` for a write to the enclosing project,
-`__slate_registry_add` for installing a registry into the worker's depot, and `__slate_fork` /
-`__slate_reconstruct` for the env lifecycle); on success the notebook restales and re-runs and
-the footer refreshes. A forked env follows its parent project: when the project's `Project.toml` or
-`Manifest.toml` changes (a dependency added to the package under development, say), the hub
-re-resolves the fork, both before a worker starts in it and while the notebook is open, and brings
-the environment of any region worker it has up to date too.

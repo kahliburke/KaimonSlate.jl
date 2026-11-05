@@ -162,10 +162,8 @@ scheme.value === :qam        # ✓
 scheme == :qam               # ✗ always false
 ```
 
-`Choice` deliberately defines no mixed `==` against `Symbol` and no one-argument `hash`: those
-signatures invalidate roughly a thousand already-compiled methods when the package loads, which costs
-seconds on a notebook's first render. `.value` is also the only spelling that ever worked with `===`
-or `isequal`, so it is the one to reach for regardless of value type.
+Use `.value` with `==`, `===` and `isequal`, whatever the value type.
+
 `MultiSelect` and `MultiCheckBox` bind a `Selection`, an ordered read-only map of those pairs.
 `Radio` renders markdown and `$math$` in its labels.
 

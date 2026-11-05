@@ -62,7 +62,7 @@ The helpers you call from inside a cell — `slate_table`, `echart`, `animate`, 
 [Live Updates](live-updates.md) and [Offline Interactivity](replay.md).
 
 Their docstrings are rendered below under **Report engine**, because that is the module they live in.
-Everything else in that section, and the two sections after it, is internal: the serving and
+Everything else in that section, and the sections after it, is internal: the serving and
 rendering layers, listed for contributors and the curious.
 
 ## Sweeps and compute targets

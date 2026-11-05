@@ -407,17 +407,13 @@ is what "Julia source only" looks like. A pane carries no cell id.
 
 ### Styling around a cell
 
-If you ship CSS that reaches outside your own output, two bits of the notebook's structure are worth
-knowing, because both are deliberate and neither is likely to change.
+If you ship CSS that reaches outside your own output, two bits of the notebook's structure matter.
 
 Each cell is wrapped in a `.cellslot`, so `#nb > .cell` does **not** match — use `#nb .cell`, or
 `.cellslot > .cell` when you specifically mean a cell in the document flow. The slot is
 `display: contents`, so it draws no box and a `column=N` cell stays the flex item of its `.cell-row`.
-It exists because present mode moves the real `.cell` node onto the slide: the slot is what stays
-behind in document order, so a re-render cannot drag a presented cell back off the stage.
 
-Prefer descendant selectors generally. They survive a wrapper being introduced between `#nb` and a
-cell, which has now happened once.
+Prefer descendant selectors over child selectors.
 
 ## See also
 
