@@ -2258,6 +2258,9 @@ const _SRC_DEFS = Dict{String,Dict{String,UInt64}}()
 # watcher. Both rehash the Dict, so they need to be serialised. The file PARSE stays outside the
 # lock — it is the slow part, and the worst a concurrent parse costs is doing it twice.
 const _SRC_DEFS_LOCK = ReentrantLock()
+# path → (def-name → names its source mentions): the package's call graph, for `_src_reaching`.
+# Guarded by `_SRC_DEFS_LOCK` alongside `_SRC_DEFS`.
+const _SRC_REFS = Dict{String,Dict{String,Set{String}}}()
 _file_path(pd, rpath) = try; joinpath(pd.info.basedir, String(rpath)); catch; String(rpath); end
 
 # (def-name → body-hash) for one source file, parsed fresh from disk.
@@ -2267,6 +2270,26 @@ function _file_defs(path::AbstractString)
     src = try; read(path, String); catch; return d; end
     top = try; Meta.parseall(src); catch; return d; end
     return _collect_defs!(d, top)
+end
+
+function _file_refs(path::AbstractString)
+    d = Dict{String,Set{String}}()
+    src = try; read(path, String); catch; return d; end
+    top = try; Meta.parseall(src); catch; return d; end
+    return _collect_refs!(d, top)
+end
+
+# The tracked definitions that reach a changed name through the package source, transitively. The
+# compiler's invalidations only cover code that has been compiled in this worker; a cell restored
+# from the cache never ran its calls, and this is what still finds it.
+function _src_reaching(changed)
+    refs = Dict{String,Set{String}}()
+    lock(_SRC_DEFS_LOCK) do
+        for d in values(_SRC_REFS), (k, v) in d
+            union!(get!(Set{String}, refs, k), v)
+        end
+    end
+    return collect(_reaching_defs(refs, changed))
 end
 
 # Baseline the defs of any tracked file we haven't seen yet, WITHOUT reporting — so the first
@@ -2281,8 +2304,10 @@ function _seed_new_src_defs!()
             path = _file_path(pd, rpath)
             lock(_SRC_DEFS_LOCK) do; haskey(_SRC_DEFS, path); end && continue
             defs = _file_defs(path)                      # parsed off the lock
+            refs = _file_refs(path)
             lock(_SRC_DEFS_LOCK) do
                 get!(_SRC_DEFS, path, defs)              # a racing seeder may have won; either is fine
+                get!(_SRC_REFS, path, refs)
             end
         end
     catch
@@ -2311,7 +2336,8 @@ function _changed_names(queue)
                     haskey(newdefs, nm) || push!(changed, nm)
                 end
             end
-            lock(_SRC_DEFS_LOCK) do; _SRC_DEFS[path] = newdefs; end
+            newrefs = _file_refs(path)
+            lock(_SRC_DEFS_LOCK) do; _SRC_DEFS[path] = newdefs; _SRC_REFS[path] = newrefs; end
         catch
         end
     end
@@ -2518,7 +2544,7 @@ function _start_src_watcher()
                 _LAST_SRC_ERR[] = ""
                 names = _changed_names(queue)
                 _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
-                append!(names, _invalidated_names(invs, queue)); unique!(names)
+                append!(names, _src_reaching(names)); append!(names, _invalidated_names(invs, queue)); unique!(names)
                 @info "slate hot-reload: revised" files = length(queue) changed = names
                 isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
                 _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
@@ -2538,7 +2564,7 @@ function __slate_revise()
     invs, _ = _logged_revise(Main.Revise)
     names = _changed_names(queue)
     _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
-    append!(names, _invalidated_names(invs, queue))
+    append!(names, _src_reaching(names)); append!(names, _invalidated_names(invs, queue))
     return unique!(names)
 end
 
