@@ -715,6 +715,7 @@ end
     @test RE_F.serialize_report(RE_F.parse_report(out)) == out                # and stable from then on
 
     # Never run: an automatic run leaves it alone, and it is fresh, with nothing to compute.
+    RE_F.build_dependencies!(r)
     RE_F.eval_stale!(r)
     @test p.state === RE_F.FRESH && p.output === nothing
 
