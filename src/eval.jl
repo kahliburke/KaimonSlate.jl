@@ -1020,7 +1020,8 @@ function _key_poisoned(byid, closure)
         c = byid[id]
         :resource in c.flags && continue
         (:nocache in c.flags || :volatile in c.flags) && return true
-        (:opaque in c.flags && !_is_pure_using(c.source) && !_is_tracked_include(c.source)) && return true
+        (:opaque in c.flags && !_is_pure_using(c.source) && !_is_tracked_include(c.source) &&
+         _full_barrier(c)) && return true
     end
     return false
 end
@@ -1184,6 +1185,7 @@ function _memo_status(report::Report, cell::Cell)
     # Not memoizable — surface WHICH of `_memoizable`'s conditions failed (message only; the decision
     # already happened above, so this can't drift from it). Same order as `_memoizable`.
     :nocache in cell.flags && return ("uncacheable", "opted out with the `nocache` tag")
+    :eval_barrier in cell.flags && return ("uncacheable", "evaluates code at run time (`eval`/`include`)")
     :opaque in cell.flags && return ("uncacheable", "an unresolved `using`/macro barrier — its effects can't be tracked")
     eff = _cell_effect(cell)
     eff == VOLATILE && return ("uncacheable", "non-deterministic (e.g. `rand`/`time`) — a cached value would be stale")
@@ -1225,8 +1227,9 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     out = eval_capture(kernel, report, src, "cell:" * cell.id, memo)
     mark_result!(cell, out)
     cell.binds = out.binds
-    # A global the run bound that the analysis missed gets its edges now, before its readers run.
-    note_defines!(report, cell, take_defines!(out)) && rebuild_precise!(report)
+    # A global the run bound that the analysis missed gets its edges now, before its readers run; an
+    # `eval` cell's first observed run makes its outgoing edges precise.
+    note_run!(report, cell, out) && rebuild_precise!(report)
     _emit_progress(report.id, cell)   # announce: finished (the result/error can light up immediately)
     return cell
 end

@@ -51,10 +51,14 @@ The goal is that what a cell shows is what a fresh run of the notebook would sho
   edited signature doesn't leave the old method behind.
 - **What a run actually binds.** A global a cell binds in a way the analysis can't see, such as a
   helper that `eval`s into the notebook, is noticed when the cell runs and gets its edges from then on.
+- **`eval` and `include` cells.** Until such a cell has run, every cell below it depends on it and
+  none of them can be cached. Once a run has shown what it binds, only the cells that read those names
+  depend on it, and the rest cache normally. This is kept across sessions. Editing the cell brings
+  the barrier back until it runs again.
 
 What it doesn't follow: a mutation inside a package function without a `!` in its name, two names
-bound to the same object (`ys = xs; push!(ys, 1)` changes `xs`), and a method defined below a cell
-that calls it. Use the [`mutates=`](cell-tags.md) or [`needs=`](dag.md#Manual-edges) tags for those.
+bound to the same object (`ys = xs; push!(ys, 1)` changes `xs`), code an `eval` cell runs that
+changes an existing value in place, and a method defined below a cell that calls it. Use the [`mutates=`](cell-tags.md) or [`needs=`](dag.md#Manual-edges) tags for those.
 
 ## Cell states
 

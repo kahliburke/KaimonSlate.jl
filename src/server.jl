@@ -1238,36 +1238,36 @@ function _apply_pick_effect!(nb::LiveNotebook, c::Cell, r, e)
 end
 
 function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
-    (out === nothing || isempty(out.effects)) && return nothing
+    out === nothing && return nothing
     seen = ReportEngine.take_defines!(out)          # graph bookkeeping, not a declared effect
     recs = [_effect_record(e) for e in out.effects]
-    isempty(seen) || push!(recs, (; kind = :defines, names = seen, stmt_src = ""))
     for (r, e) in zip(recs, out.effects)
         if r.kind === :everywhere
             :everywhere_declared in c.flags || push!(c.flags, :everywhere_declared)
         elseif r.kind === :pick
             _apply_pick_effect!(nb, c, r, e)
-        elseif r.kind === :defines
-            # handled below, merged with what earlier runs of this source were seen to bind
         elseif r.kind !== nothing
             ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
         end
     end
     # Globals the run bound (`:defines`). Only the ones the analysis didn't predict are kept: they join the
     # cell's observed writes (and its edges), and the durable record for this source. That record is a
-    # union, since a run that rebinds a name to an identical value doesn't report it. A run that bound
-    # nothing new leaves the store alone, which is nearly every run.
-    defs = Set{Symbol}()
-    for r in recs; r.kind === :defines && union!(defs, r.names); end
-    recs = [r for r in recs if r.kind !== :defines]
-    if ReportEngine.note_defines!(nb.report, c, defs)
+    # union, since a run that rebinds a name to an identical value doesn't report it.
+    was_complete = c.observed_complete
+    learned = ReportEngine.note_run!(nb.report, c, (; effects = Any[(; kind = :defines, names = seen)],
+                                                    exception = out.exception, memo = out.memo))
+    if learned && !isempty(seen)
         prior = try; EffectStore.load(SlateHome.effects_dir(), string(c.src_hash)); catch; nothing; end
         prior === nothing || for r in prior; r.kind === :defines && ReportEngine.note_defines!(nb.report, c, r.names); end
-        ReportEngine.rebuild_precise!(nb.report)
-    elseif isempty(recs)
-        return nothing
     end
-    isempty(c.observed) || push!(recs, (; kind = :defines, names = sort!(collect(c.observed)), stmt_src = ""))
+    learned && ReportEngine.rebuild_precise!(nb.report)
+    # An `eval` cell's first observed run is worth keeping even when it bound nothing new: the record says
+    # its run has been seen, which is what lets it stop being a barrier at the next open, before it runs.
+    # Any other run that learned nothing and declared nothing leaves the store alone (nearly every run).
+    first_eval_run = !was_complete && c.observed_complete && :eval_barrier in c.flags
+    (isempty(recs) && !learned && !first_eval_run) && return nothing
+    (isempty(c.observed) && !(:eval_barrier in c.flags && c.observed_complete)) ||
+        push!(recs, (; kind = :defines, names = sort!(collect(c.observed)), stmt_src = ""))
     # Persist DURABLY, keyed by the cell's own source digest — so the classification + statement-scoped
     # records survive a reload / fresh region worker WITHOUT this cell running on main again (see
     # `_reestablish_effects!`). Best-effort; off the hot path but cheap (one small TOML).
@@ -1290,7 +1290,9 @@ function _reestablish_effects!(report)
         any(r -> r.kind === :everywhere, recs) &&
             (:everywhere_declared in c.flags || push!(c.flags, :everywhere_declared))
         for r in recs
-            r.kind === :defines && ReportEngine.note_defines!(report, c, r.names)
+            r.kind === :defines || continue
+            ReportEngine.note_defines!(report, c, r.names)
+            c.observed_complete = true                 # a run of this source was seen, so what it binds is known
         end
     end
     return nothing

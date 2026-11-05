@@ -204,6 +204,31 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
         @test paths == Any[:f, :(Base.show), Symbol("@m")]                    # constructors left out
     end
 
+    @testset "an eval cell stops being a barrier once its run is seen" begin
+        cells = ["data" => "raw = collect(1:10)", "gen" => "for n in (:fa, :fb); @eval \$n(x) = x + 1; end",
+                 "use" => "y = fa(1)", "other" => "z = 42"]
+        r = parse_report(_nbsrc(cells); id = "evbarrier"); build_dependencies!(r)
+        gen, use, other = r.cells[2], r.cells[3], r.cells[4]
+        @test :eval_barrier in gen.flags
+        @test "gen" in other.deps                         # before it has run, everything below waits on it
+        _drain!(r)
+        @test gen.observed_complete
+        @test "gen" in use.deps && !("gen" in other.deps) # after: only the reader of what it bound
+        @test "data" in gen.deps                          # and it still depends on everything above
+        @test !isempty(RE._memo_key(r, other))            # the cells below can be cached again
+        @test !isempty(RE._memo_key(r, use))
+        # Editing it brings the barrier back until the new source has run.
+        update_source!(r, _nbsrc([k == "gen" ? k => "for n in (:fa, :fb); @eval \$n(x) = x + 2; end" : k => v for (k, v) in cells]))
+        @test "gen" in r.cells[4].deps
+        # Edits around it still match a fresh run.
+        cases = [
+            "eval cell edited" => (cells, "gen" => "for n in (:fa, :fb); @eval \$n(x) = x + 5; end"),
+            "cell above an eval cell edited" => (cells, "data" => "raw = collect(1:20)"),
+            "unrelated cell below edited" => (cells, "other" => "z = 43"),
+        ]
+        @test isempty(failing(cases))
+    end
+
     @testset "qualified paths a cell mentions are reads" begin
         c = RE.Cell("f", RE.CODE, "f = HotDemo.apply(HotDemo.leaf, 3)"); infer_bindings!(c)
         @test Symbol("HotDemo.leaf") in c.reads && Symbol("HotDemo.apply") in c.reads

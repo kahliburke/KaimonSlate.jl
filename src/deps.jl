@@ -616,7 +616,7 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
 const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol},Int,Set{Symbol},
-                                     Dict{Symbol,FuncSummary},Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}},Set{Symbol}}}()
+                                     Dict{Symbol,FuncSummary},Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}},Set{Symbol},Bool}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # Bounded LRU: entries carry a recency tick (`_BIND_TICKS`, bumped on every hit/store) and overflow
 # evicts the least-recently-used ~10% — the old clear-on-full wholesale `empty!` made a long-lived
@@ -657,6 +657,7 @@ function infer_bindings!(cell::Cell)
         empty!(cell.funcs); for (k, v) in hit[12]; cell.funcs[k] = copy(v); end   # function summaries
         empty!(cell.topcalls); append!(cell.topcalls, hit[13])
         empty!(cell.soft_assigns); union!(cell.soft_assigns, hit[14])
+        hit[15] ? push!(cell.flags, :eval_barrier) : delete!(cell.flags, :eval_barrier)
         return cell
     end
     _infer_bindings_uncached!(cell)
@@ -664,7 +665,7 @@ function infer_bindings!(cell::Cell)
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && _bind_cache_evict!()
         _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now), gen, copy(cell.observes),
                                 Dict{Symbol,FuncSummary}(k => copy(v) for (k, v) in cell.funcs), copy(cell.topcalls),
-                                copy(cell.soft_assigns))
+                                copy(cell.soft_assigns), :eval_barrier in cell.flags)
         _BIND_TICKS[cell.id] = (_BIND_TICK[] += 1)
     end
     return cell
@@ -678,7 +679,7 @@ _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_an
 function _infer_bindings_uncached!(cell::Cell)
     empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides); empty!(cell.observes)
     empty!(cell.funcs); empty!(cell.topcalls); empty!(cell.soft_assigns)
-    delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall)
+    delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall); delete!(cell.flags, :eval_barrier)
     if cell.kind == MARKDOWN || cell.kind == WEB
         # A markdown or web cell "reads" the free variables of its `{{ expr }}` blocks, so it joins the
         # reactive graph and re-renders when they change. (A web cell's source is a `@web(...)` macrocall;
@@ -818,7 +819,12 @@ function _infer_bindings_uncached!(cell::Cell)
             push!(cell.flags, :opaque)
         end
     end
-    _is_barrier_expr(top) && push!(cell.flags, :opaque)
+    # A cell that is a barrier only because of `eval`/`include` can stop being one for the cells below it
+    # once a run has shown what it binds (`_full_barrier`).
+    if _is_barrier_expr(top)
+        :opaque in cell.flags || push!(cell.flags, :eval_barrier)
+        push!(cell.flags, :opaque)
+    end
     # Makie's global theme is process state no notebook binding carries, so a theme-setting cell
     # writes nothing a plot cell reads — without help, editing the theme re-runs it ALONE and every
     # figure keeps the old theme (dead reactivity). Wire it through the ordinary dataflow: theme
@@ -1129,7 +1135,7 @@ function build_dependencies!(report::Report)
         for w in c.writes
             writer[w] = c.id
         end
-        :opaque in c.flags && (barrier = c.id)
+        _full_barrier(c) && (barrier = c.id)
         # `seen` feeds ONLY the opaque-union above. A contentless cell (no reads, no writes, not a
         # barrier) contributes nothing to the namespace, so no opaque cell truly depends on it —
         # keeping it out means inserting a BLANK cell above an opaque cell doesn't perturb that
@@ -1370,6 +1376,13 @@ function _apply_function_effects!(report::Report)
     return report
 end
 
+# Whether the cells below an opaque cell all depend on it. Not for an `eval`/`include` cell whose run
+# has been observed: what it binds is then known (`writes ∪ observed`), so a later cell depends on it
+# only by reading one of those names, like any other. It still depends on everything above it, since
+# the code it evaluates can read anything. What observation can't see is that code mutating an
+# existing value in place.
+_full_barrier(c::Cell) = :opaque in c.flags && !(:eval_barrier in c.flags && c.observed_complete)
+
 # Names a cell changes in place rather than defines: what it mutates, plus what it both reads and
 # rebinds (`acc += 1`, `df = clean(df)`). Running such a cell a second time applies its change to its
 # own previous result.
@@ -1440,6 +1453,24 @@ end
 
 _is_defines(e) = (k = e isa AbstractDict ? get(e, :kind, get(e, "kind", nothing)) :
                      (hasproperty(e, :kind) ? e.kind : nothing); k === :defines || k == "defines")
+
+"""
+    note_run!(report, cell, out) -> Bool
+
+Record what a run of `cell` showed: the globals it bound that the analysis missed (`note_defines!`),
+and that a clean run of this source has now been observed (`observed_complete`). Returns true when
+the graph needs rebuilding. A restore from the cache ran nothing, so it shows nothing.
+"""
+function note_run!(report::Report, cell::Cell, out)
+    learned = note_defines!(report, cell, take_defines!(out))
+    out === nothing && return learned
+    ran = out.exception === nothing && out.memo != "restored"
+    if ran && !cell.observed_complete
+        cell.observed_complete = true
+        learned |= :eval_barrier in cell.flags
+    end
+    return learned
+end
 
 """
     take_defines!(out) -> Vector{Symbol}
@@ -1537,6 +1568,7 @@ function update_source!(report::Report, new_source::AbstractString)
             nc.binds = oc.binds           # preserve live widget values
             nc.interp = oc.interp         # carry resolved md interpolations forward
             nc.observed = oc.observed     # what runs of this unchanged source were seen to bind
+            nc.observed_complete = oc.observed_complete
         else
             nc.state = STALE
             push!(changed, nc.id)         # new or edited
