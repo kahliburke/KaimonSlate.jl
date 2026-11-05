@@ -51,14 +51,30 @@ Set these with the 🏷 tag editor or a `#%%` header token — see [Cell Tags](c
 
 ![The tag editor popover over a cell header, with the Caching & execution group offering cache, nocache, resource, locked and trace](./assets/tag-editor.png)
 
-Never cached: markdown cells, `using`/`import` barriers, notebook-local function definitions,
-[`resource`](cell-tags.md) cells (live DB/file/socket handles), cells that declare a `reactive` or
+Never cached: markdown cells, `using`/`import` barriers, functions a cell defines in a way that can't
+be replayed (see below), [`resource`](cell-tags.md) cells (live DB/file/socket handles), cells that declare a `reactive` or
 carry [`@replay`](replay.md) (both create live session state by running), and cells the engine
 classifies as non-deterministic (`rand`, wall-clock). The cell's cache badge names the specific
 reason.
 
 `@replay` in particular is excluded because restoring a memoized cell skips its body, which would
 bring the figure back with no sweep registered.
+
+### Cells that define functions
+
+A cell can define helpers next to the slow work that uses them. Its cache entry stores the computed
+values and leaves the definitions out: on restore they are evaluated again from the cell's source,
+which is cheap, and cells below can call them as usual. This covers functions (plain, docstring'd or
+`@inline`), structs and other types, macros, `const`s bound to a literal, a global bound to an
+anonymous function, definitions inside a top-level `begin`, and a top-level `let` that only names
+literal or global values and defines functions.
+
+A cell still doesn't cache when one of its functions comes from somewhere a replay can't reach: a
+`let` that computes something (`let k = rand()`), an `@eval` loop, or a function returned from a
+computation. Its cache badge says which function. Moving the definitions to their own cell, or the
+computation out of the `let`, makes it cacheable.
+
+Values of a type the notebook defines restore like any other value.
 
 ## Cache keys — what invalidates a result
 

@@ -31,6 +31,31 @@ document order.
 Source files are reactive inputs too: saving a file in the project the notebook runs against restales
 the cells that use what you changed. See [Editing project source](hot-reload.md).
 
+### What the analysis follows
+
+The goal is that what a cell shows is what a fresh run of the notebook would show.
+
+- **Functions.** A function body reads and changes globals when the function is called, so those
+  effects belong to the cells that call it. `f() = a + 1` in one cell and `y = f()` in another makes
+  `y` depend on `a`, wherever `a` is defined above the caller. A helper that mutates its argument
+  (`put!(x) = (x[1] = 0)`) makes the caller a writer of whatever it passes in, through any number of
+  calls between notebook functions.
+- **In-place updates.** `push!(v, 1)`, `v[i] = …`, `v .*= 2`, `c[] += 1` and `acc += 1` change a value
+  rather than define it. Re-running such a cell runs the cell that defines the value first, so the
+  update applies to a fresh value instead of stacking on its previous result.
+- **Loops at the top of a cell.** `for i in 1:n; total += i; end` updates the global `total` that an
+  earlier cell defines.
+- **Deletions.** Deleting or renaming a definition removes it from the namespace: its methods are
+  deleted, and a global no cell defines any more is removed, so a cell still reading it fails the way
+  a fresh run would. Re-running a cell first removes the methods its previous run defined, so an
+  edited signature doesn't leave the old method behind.
+- **What a run actually binds.** A global a cell binds in a way the analysis can't see, such as a
+  helper that `eval`s into the notebook, is noticed when the cell runs and gets its edges from then on.
+
+What it doesn't follow: a mutation inside a package function without a `!` in its name, two names
+bound to the same object (`ys = xs; push!(ys, 1)` changes `xs`), and a method defined below a cell
+that calls it. Use the [`mutates=`](cell-tags.md) or [`needs=`](dag.md#Manual-edges) tags for those.
+
 ## Cell states
 
 The left border and badge show each cell's state:
