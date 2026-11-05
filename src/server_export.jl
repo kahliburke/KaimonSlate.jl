@@ -2725,12 +2725,15 @@ end
 #
 # Detection is exact rather than heuristic, because a false negative is a broken page: ECharts is needed
 # iff a cell emits an echart spec (`_echarts_specs`) or an interactive table (the enhancer draws sparkline
-# columns through it); dagre iff something on the page actually references it — a package-vendored widget
-# script or a web cell. KaTeX is always included: math appears in ordinary prose, detecting it means
+# columns through it), or front-end code calls the `echarts` global itself; dagre iff something on the page
+# actually references it. Both libraries can be used directly from a package-vendored widget script or a
+# web cell. KaTeX is always included: math appears in ordinary prose, detecting it means
 # parsing markdown for delimiters, and at ~0.3 MB it is not what makes these files big.
 function _page_libs(nb::LiveNotebook)
     ec = any(c -> c.kind == CODE && (!isempty(_echarts_specs(c)) || !isempty(_table_specs(c))),
-             nb.report.cells)
+             nb.report.cells) ||
+         any(e -> occursin("echarts", e.js), _frontend_scripts(nb)) ||
+         any(c -> occursin("echarts", c.source), nb.report.cells)
     dg = any(e -> occursin("dagre", e.js), _frontend_scripts(nb)) ||
          any(c -> occursin("dagre", c.source), nb.report.cells)
     return (echarts = ec, dagre = dg)
