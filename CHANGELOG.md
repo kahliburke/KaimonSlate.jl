@@ -12,6 +12,9 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+This is 2.0 for the size of the release. Code written for 1.x keeps working. The one compatibility
+note is the notebook format (see Changed): notebooks saved by 2.0 do not open correctly in 1.x.
+
 ### Added
 
 - **Job cells and sweeps.** A new cell kind, `#%% job`, runs its body over a parameter grid
