@@ -152,6 +152,9 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
                 (["A" => "s = 0", "B" => "for i in 1:3; s += i; end", "C" => "t = s"], "B" => "for i in 1:5; s += i; end"),
             "loop assigns a global in a try" =>
                 (["A" => "st = 0", "B" => "for i in 1:3; try; st = i; catch; end; end", "C" => "u = st"], "B" => "for i in 1:7; try; st = i; catch; end; end"),
+            "helper evals a global into the notebook" =>
+                (["D" => "define!(n, v) = Core.eval(@__MODULE__, :(\$n = \$v))", "C" => "define!(:foo, 1)", "R" => "r = foo + 1"],
+                 "C" => "define!(:foo, 2)"),
             "editing a helper doesn't re-run its data" =>
                 (["V" => "w = [1]", "F" => "addw() = push!(w, 2)", "C" => "addw(); nothing", "R" => "n = length(w)"],
                  "F" => "addw() = push!(w, 2, 3)"),

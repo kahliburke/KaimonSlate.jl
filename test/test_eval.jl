@@ -106,10 +106,13 @@ end
 
         # Per-statement attribution: the effect is tied to the statement that declared it, NOT the whole cell.
         o2 = run1("a = 1\nb = 2\nslate_everywhere(:bar)\nc = 3")
-        @test length(o2.effects) == 1
-        @test o2.effects[1].kind == :everywhere && o2.effects[1].names == [:bar]
-        @test occursin("slate_everywhere", o2.effects[1].stmt_src)
-        @test !occursin("a = 1", o2.effects[1].stmt_src) && !occursin("c = 3", o2.effects[1].stmt_src)
+        declared = [e for e in o2.effects if e.kind != :defines]
+        @test length(declared) == 1
+        @test declared[1].kind == :everywhere && declared[1].names == [:bar]
+        @test occursin("slate_everywhere", declared[1].stmt_src)
+        @test !occursin("a = 1", declared[1].stmt_src) && !occursin("c = 3", declared[1].stmt_src)
+        # The capture also reports what the run bound, as `:defines`.
+        @test only(e.names for e in o2.effects if e.kind == :defines) == [:a, :b, :c]
 
         # A cell that declares nothing harvests nothing; no task-local leak after eval.
         o4 = run1("1 + 1")

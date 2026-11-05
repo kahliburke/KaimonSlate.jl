@@ -176,6 +176,8 @@ mutable struct Cell
                                   # with each positional argument's base name (mutated-parameter mapping)
     soft_assigns::Set{Symbol}     # names assigned inside a top-level loop or `try` (soft scope): an update
                                   # of the global when an earlier cell defines it (`build_dependencies!`)
+    observed::Set{Symbol}         # globals a run of this source was SEEN to bind that the analysis didn't
+                                  # predict (`note_defines!`), kept for the source they were seen with
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -184,7 +186,7 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
                 STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0,
-                Dict{Symbol,FuncSummary}(), Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[], Set{Symbol}())
+                Dict{Symbol,FuncSummary}(), Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[], Set{Symbol}(), Set{Symbol}())
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation

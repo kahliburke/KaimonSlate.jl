@@ -1225,6 +1225,8 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     out = eval_capture(kernel, report, src, "cell:" * cell.id, memo)
     mark_result!(cell, out)
     cell.binds = out.binds
+    # A global the run bound that the analysis missed gets its edges now, before its readers run.
+    note_defines!(report, cell, _defined_by_effects(out)) && rebuild_precise!(report)
     _emit_progress(report.id, cell)   # announce: finished (the result/error can light up immediately)
     return cell
 end

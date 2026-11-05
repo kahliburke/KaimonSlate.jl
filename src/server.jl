@@ -459,8 +459,8 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # override, so _select_kernel boots the worker on that host directly (no wasteful local-then-remote).
     # Only overrides the FOOTER value when explicitly given; an empty runon leaves the file's own choice.
     isempty(strip(String(runon))) || (r.meta["runon"] = String(strip(String(runon))))
+    _reestablish_effects!(r)   # durable declared-effects (EVERYWHERE marks, observed writes) before the graph and any run
     build_dependencies!(r)
-    _reestablish_effects!(r)   # durable declared-effects: re-mark EVERYWHERE cells before any run (cold-start safe)
     _note_server_write!(rid, hash(serialize_report(r)))   # the as-opened state is OURS — a watcher
                                                           # tick reading it must not "revert" to it
     # Any self-contained `.jl`: open INSTANTLY and reconstruct + run the env in the BACKGROUND
@@ -1245,10 +1245,27 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
             :everywhere_declared in c.flags || push!(c.flags, :everywhere_declared)
         elseif r.kind === :pick
             _apply_pick_effect!(nb, c, r, e)
+        elseif r.kind === :defines
+            # handled below, merged with what earlier runs of this source were seen to bind
         elseif r.kind !== nothing
             ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
         end
     end
+    # Globals the run bound (`:defines`). Only the ones the analysis didn't predict are kept: they join the
+    # cell's observed writes (and its edges), and the durable record for this source. That record is a
+    # union, since a run that rebinds a name to an identical value doesn't report it. A run that bound
+    # nothing new leaves the store alone, which is nearly every run.
+    defs = Set{Symbol}()
+    for r in recs; r.kind === :defines && union!(defs, r.names); end
+    recs = [r for r in recs if r.kind !== :defines]
+    if ReportEngine.note_defines!(nb.report, c, defs)
+        prior = try; EffectStore.load(SlateHome.effects_dir(), string(c.src_hash)); catch; nothing; end
+        prior === nothing || for r in prior; r.kind === :defines && ReportEngine.note_defines!(nb.report, c, r.names); end
+        ReportEngine.rebuild_precise!(nb.report)
+    elseif isempty(recs)
+        return nothing
+    end
+    isempty(c.observed) || push!(recs, (; kind = :defines, names = sort!(collect(c.observed)), stmt_src = ""))
     # Persist DURABLY, keyed by the cell's own source digest — so the classification + statement-scoped
     # records survive a reload / fresh region worker WITHOUT this cell running on main again (see
     # `_reestablish_effects!`). Best-effort; off the hot path but cheap (one small TOML).
@@ -1270,6 +1287,9 @@ function _reestablish_effects!(report)
         recs === nothing && continue
         any(r -> r.kind === :everywhere, recs) &&
             (:everywhere_declared in c.flags || push!(c.flags, :everywhere_declared))
+        for r in recs
+            r.kind === :defines && ReportEngine.note_defines!(report, c, r.names)
+        end
     end
     return nothing
 end

@@ -1049,6 +1049,9 @@ function build_dependencies!(report::Report)
             end
             rec === nothing || (union!(c.reads, rec[1]); union!(c.writes, rec[2]))
         end
+        # Writes seen at run time that the analysis missed (`note_defines!`): a global bound by a
+        # function that evals into the notebook, a macro that couldn't be expanded.
+        union!(c.writes, c.observed)
         # `mutates=` declarations: assert the in-place effects analysis can't see (f!(x) through a
         # call, aliases). Mirrors the native analysis invariant `mutates ⊆ writes`: a mutator IS a
         # writer, so later readers chain off it (ordering + restale), and it's also a READ (ordered
@@ -1366,6 +1369,41 @@ function _value_origin(report::Report, idx::Int, n::Symbol)
 end
 
 """
+    note_defines!(report, cell, names) -> Bool
+
+Record globals a run of `cell` was seen to bind (`:defines`, reported by the capture). The ones its
+analysis didn't predict join `cell.observed`, which the next graph build adds to its writes, so a
+reader of a global the cell binds in a way the analysis can't see (a helper that evals into the
+notebook, an unexpandable macro) gets an edge to it. Returns true when something new was learned and
+the graph needs rebuilding.
+"""
+function note_defines!(report::Report, cell::Cell, names)
+    cell.kind == CODE || return false
+    new = Symbol[]
+    for n in names
+        s = Symbol(n)
+        (s in cell.writes || s in cell.observed) && continue
+        push!(new, s)
+    end
+    isempty(new) && return false
+    union!(cell.observed, new)
+    return true
+end
+
+# The `:defines` names in a cell's harvested effects.
+function _defined_by_effects(out)
+    out === nothing && return Symbol[]
+    names = Symbol[]
+    for e in out.effects
+        k = e isa AbstractDict ? get(e, :kind, get(e, "kind", nothing)) : (hasproperty(e, :kind) ? e.kind : nothing)
+        (k === :defines || k == "defines") || continue
+        ns = e isa AbstractDict ? get(e, :names, get(e, "names", Any[])) : e.names
+        append!(names, Symbol[Symbol(n) for n in ns])
+    end
+    return names
+end
+
+"""
     close_staleness!(report)
 
 Bring the stale set to the closure the current graph implies, after any rebuild: everything
@@ -1441,6 +1479,7 @@ function update_source!(report::Report, new_source::AbstractString)
             nc.deps = oc.deps
             nc.binds = oc.binds           # preserve live widget values
             nc.interp = oc.interp         # carry resolved md interpolations forward
+            nc.observed = oc.observed     # what runs of this unchanged source were seen to bind
         else
             nc.state = STALE
             push!(changed, nc.id)         # new or edited
