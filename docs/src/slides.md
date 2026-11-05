@@ -34,12 +34,16 @@ second step (`?deck=3.end` at its last), and `?deck=sheet` lays out every slide 
 one page. An agent looks at slides the same way, with `slide_view(notebook; slide, step)`, which
 captures that page in a headless Chrome (`slide = 0` for the sheet).
 
+![The contact sheet: every slide of a deck at its last step, on one page](./assets/present-sheet.png)
+
 ### The presenter window
 
 Press `s` (or the 🪞 button, or *Open presenter window* in the palette) for a second window showing
 live previews of the current position and the next click, a timer, and the **speaker notes** from
 your `notes` cells. Arrow keys in either window drive the deck. On a video call, share only the
 deck window and keep the presenter window to yourself.
+
+![The presenter window: the current slide, the next step, a timer, and the speaker notes](./assets/presenter.png)
 
 ### Rehearsal and autoplay
 
@@ -117,6 +121,8 @@ Right takes the rest
 
 Cells tagged `column=2` still sit beside the cell before them, on a slide as in the notebook.
 
+![A slide with an equation and a list in the left column and a chart from a `column=2` cell on the right](./assets/present-columns.png)
+
 ### Builds
 
 A slide can bring its content in a piece at a time. `→` walks the steps, then moves to the next
@@ -167,6 +173,8 @@ ordinary coloured math in the notebook, and print unwraps them to the plain equa
 
 Outside math, `::: {.step .focus}` spotlights a block the same way; whatever arrives on that step (a
 caption, say) stays lit with it.
+
+![An equation on its second step: braces label the inertia and friction terms, each in its term's colour](./assets/present-math.png)
 
 Terms take colours in the order they first appear in the notebook, so give each quantity one name and
 use it in prose, in every equation, and as the name of the chart series that plots it: the series wears

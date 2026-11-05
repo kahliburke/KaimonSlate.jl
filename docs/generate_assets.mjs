@@ -25,7 +25,7 @@ const PORT = Number(process.env.SLATE_DOCS_PORT || 8799)
 const BASE = `http://127.0.0.1:${PORT}`
 const SCALE = 2
 const FIRST = 'demo'                                          // serve_notebook opens this one
-const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables', 'hero', 'app', 'live', 'web', 'profile', 'debug'] // opened over /api/open
+const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables', 'hero', 'app', 'live', 'web', 'profile', 'debug', 'slides'] // opened over /api/open
 
 mkdirSync(OUT, { recursive: true })
 const VIDTMP = mkdtempSync(join(tmpdir(), 'slate-vid-'))
@@ -878,6 +878,41 @@ async function webShots(browser) {
   } catch (e) { log('! web shots skipped:', e.message.split('\n')[0]) }
 }
 
+// The slide deck (docs/screenshots/slides.jl): a slide with prose beside its chart, an equation
+// mid-build, the contact sheet, and the presenter window. `?deck=S.K` presents slide S at step K and
+// marks <html data-deck-shot="ready"> once it is in; the presenter window follows the deck tab over a
+// BroadcastChannel, so it opens in the same browser context.
+async function slideShots(browser) {
+  const ctx = await newContext(browser, { viewport: { width: 1280, height: 720 } })   // 16:9, the slide's own shape
+  try {
+    const page = await ctx.newPage()
+    await runNotebook(page, 'slides')
+    // A data attribute rather than waitForSelector, which also waits for <html> to count as visible.
+    const deckReady = (p) => p.waitForFunction(() => document.documentElement.dataset.deckShot === 'ready', null, { timeout: 30_000 })
+    const deck = async (at, name, opts = async () => ({})) => {
+      await page.goto(`${BASE}/n/slides?deck=${at}&shot=1`, { waitUntil: 'domcontentloaded' })
+      await deckReady(page)
+      await sleep(900)
+      await page.screenshot({ path: join(OUT, name), ...(await opts()) }); log(`✓ ${name}`)
+    }
+    await deck('2.end', 'present-columns.png')
+    await deck('3.2', 'present-math.png')
+    await deck('sheet', 'present-sheet.png', async () => {
+      // The sheet fills the window; crop it to the rows of slides.
+      const bottom = await page.evaluate(() => Math.max(...[...document.querySelectorAll('.deck-sheet-cell')].map(c => c.getBoundingClientRect().bottom)))
+      return { clip: { x: 0, y: 0, width: 1280, height: Math.ceil(bottom) + 14 } }
+    })
+    await page.goto(`${BASE}/n/slides?deck=2.1`, { waitUntil: 'domcontentloaded' })
+    await deckReady(page)
+    const presenter = await ctx.newPage()
+    await presenter.setViewportSize({ width: 1180, height: 760 })
+    await presenter.goto(`${BASE}/n/slides?present=1`, { waitUntil: 'domcontentloaded' })
+    await sleep(2500)
+    await presenter.screenshot({ path: join(OUT, 'presenter.png') }); log('✓ presenter.png')
+  } catch (e) { log('! slide shots skipped:', e.message.split('\n')[0]) }
+  await ctx.close()
+}
+
 // The profiler and the debugger, on the hub's own kernel. Both run for real: the profile notebook's
 // cell is profiled slow, then fast, so the second shot is a genuine comparison; the debug notebook is
 // stopped by a conditional breakpoint partway through its loop.
@@ -949,6 +984,7 @@ async function main() {
     if (process.env.SLATE_WEB_ONLY === '1') { await webShots(browser); log('done (web-only)'); return }
     if (process.env.SLATE_SETTINGS_ONLY === '1') { await settingsShots(browser); log('done (settings-only)'); return }
     if (process.env.SLATE_TOOLS_ONLY === '1') { await toolShots(browser); log('done (tools-only)'); return }
+    if (process.env.SLATE_SLIDES_ONLY === '1') { await slideShots(browser); log('done (slides-only)'); return }
     // All of the above in one server boot, for iterating on the newer groups together.
     if (process.env.SLATE_NEW_ONLY === '1') {
       await appShots(browser); await filesShots(browser); await bannerShots(browser)
@@ -1201,6 +1237,7 @@ async function main() {
     await liveShots(browser)
     await webShots(browser)
     await toolShots(browser)
+    await slideShots(browser)
 
     // ── webm: drag the slider → the chart re-renders live (reactivity) ───────────────────────
     // Frame the slider AND the chart together (slider is the cell right above the chart) so the
