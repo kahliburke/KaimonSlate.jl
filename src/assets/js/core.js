@@ -1573,7 +1573,11 @@ function typeset(el) {
 // responsive while editors/math fill in behind it. Work is keyed + de-duped (newest fn wins).
 const _hydQ = new Map();
 let _hydPumping = false;
-const _ric = window.requestIdleCallback || (f => setTimeout(() => f({ timeRemaining: () => 10 }), 16));
+// A hidden tab never goes idle, so an idle callback alone would leave the queue waiting until the
+// tab is shown — and a notebook changes most often while its tab is in the background (the file
+// edited in another window). The timeout runs it anyway.
+const _ric = window.requestIdleCallback ? (f => window.requestIdleCallback(f, { timeout: 500 }))
+                                        : (f => setTimeout(() => f({ timeRemaining: () => 10 }), 16));
 function _pumpHyd(deadline) {
   const budget = 14, t0 = performance.now();        // ≤14ms/chunk keeps each task well under a frame
   for (const [k, fn] of _hydQ) {
@@ -1588,6 +1592,11 @@ function _pumpHyd(deadline) {
 window.hydrateSoon = (key, fn) => { _hydQ.set(key, fn); if (!_hydPumping) { _hydPumping = true; _ric(_pumpHyd); } };
 // Run a queued task NOW, jumping the idle queue — for a cell the user is about to interact with.
 window.hydrateNow = key => { const fn = _hydQ.get(key); if (fn) { _hydQ.delete(key); try { fn(); } catch (_) {} return true; } return false; };
+// Run the queued tasks whose key starts with `prefix`, now: the math still waiting to be typeset
+// (`'ts:'`) before the page is captured for an inspect raster or an export, which must show it.
+window.hydrateAll = (prefix = '') => {
+  for (const [k, fn] of _hydQ) if (k.startsWith(prefix)) { _hydQ.delete(k); try { fn(); } catch (_) {} }
+};
 // Typeset KaTeX off the critical path (text paints first; math fills in a tick later).
 window.typesetSoon = (el, key) => { if (el) window.hydrateSoon('ts:' + (key || ''), () => typeset(el)); };
 // Work after an output swap — typesetting its math, clamping a tall text block — runs in one

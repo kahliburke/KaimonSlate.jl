@@ -61,6 +61,7 @@ window._slateSanitizeColors = _sanitizeColors;
 // Answer one inspect request: capture cell `cellId` and POST it back under `reqid`.
 async function _slateInspect(reqid, cellId) {
   const out = { reqid, cell: cellId, html: '', console: (window.__diag || []).slice(-40), png: '' };
+  try { window.hydrateAll && window.hydrateAll('ts:'); } catch (_) {}   // math still queued is typeset first
   try {
     const el = document.getElementById('cell-' + cellId);
     if (el) {
@@ -114,6 +115,7 @@ async function _slateInspectMany(reqid, cellIds, theme) {
     else doc.documentElement.dataset.slateTheme = theme;
   };
   let captured = 0;
+  try { window.hydrateAll && window.hydrateAll('ts:'); } catch (_) {}   // math still queued is typeset first
   for (const cellId of (cellIds || [])) {
     try {
       const el = document.getElementById('cell-' + cellId);
