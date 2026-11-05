@@ -88,31 +88,32 @@ function hideControlPicker() { document.getElementById('ctlpop').classList.remov
 // The `#%%` header isn't editable in the browser, so tags are set here: known behaviour tags as
 // checkboxes + free-form custom tags as chips. Each change POSTs the full tag set to /api/tags/<id>.
 // #tagpop lives outside #nb so it survives renderAll and stays open across edits.
-// Behaviour tags, grouped and scoped to the cell kinds they actually do something on (a code cell
-// never offers `title`; an md cell never offers `resource`). [group, tag, description, kinds].
+// Behaviour tags, grouped, each offered only on a kind that has the capability it needs (`kindInfo`):
+// prose never offers `resource`, code never offers `title`. [group, tag, description, capability or
+// null for every kind].
 const TAG_DEFS = [
-  ['Caching & execution', 'cache',    'always persist — restore until an input changes', ['code']],
-  ['Caching & execution', 'nocache',  'never cache (impure / side-effecting)', ['code']],
-  ['Caching & execution', 'resource', 'external handle (DB / file) — re-inits each run, but keeps everything downstream cacheable', ['code']],
-  ['Caching & execution', 'locked',   'freeze the result — never re-runs from upstream/reload, only ▶ · guarantees its memo is kept', ['code']],
-  ['Caching & execution', 'trace',    'inspect every value (re-runs the cell)', ['code']],
-  ['Display',  'collapsed', 'fold the whole cell', ['code', 'md']],
-  ['Display',  'hidecode',  'hide the editor — show output only', ['code']],
-  ['Document', 'title',       'the document title (front matter)', ['md']],
-  ['Document', 'abstract',    'the document abstract / summary', ['md']],
-  ['Document', 'caption',     'figure caption for the output above', ['md']],
-  ['Document', 'bibliography','render the reference list here', ['md']],
-  ['Site',     'home',     "this notebook is the published site's front page", ['md']],
-  ['Site',     'docindex', 'where the document listing is injected', ['md']],
-  ['Slides',   'slide', 'start a new slide here', ['code', 'md']],
-  ['Slides',   'notes', 'speaker notes (presenter-only)', ['code', 'md']],
+  ['Caching & execution', 'cache',    'always persist — restore until an input changes', 'run_tags'],
+  ['Caching & execution', 'nocache',  'never cache (impure / side-effecting)', 'run_tags'],
+  ['Caching & execution', 'resource', 'external handle (DB / file) — re-inits each run, but keeps everything downstream cacheable', 'run_tags'],
+  ['Caching & execution', 'locked',   'freeze the result — never re-runs from upstream/reload, only ▶ · guarantees its memo is kept', 'memoizes'],
+  ['Caching & execution', 'trace',    'inspect every value (re-runs the cell)', 'run_tags'],
+  ['Display',  'collapsed', 'fold the whole cell', null],
+  ['Display',  'hidecode',  'hide the editor — show output only', 'evaluates'],
+  ['Document', 'title',       'the document title (front matter)', 'prose'],
+  ['Document', 'abstract',    'the document abstract / summary', 'prose'],
+  ['Document', 'caption',     'figure caption for the output above', 'prose'],
+  ['Document', 'bibliography','render the reference list here', 'prose'],
+  ['Site',     'home',     "this notebook is the published site's front page", 'prose'],
+  ['Site',     'docindex', 'where the document listing is injected', 'prose'],
+  ['Slides',   'slide', 'start a new slide here', null],
+  ['Slides',   'notes', 'speaker notes (presenter-only)', null],
 ];
 function _curTags(id) { const c = _cellById(id); return (c && c.tags) ? c.tags.slice() : []; }
-function _tagKind(id) { const c = _cellById(id); return (c && c.kind === 'md') ? 'md' : 'code'; }
+function _tagApplies(id, cap) { const c = _cellById(id); return cap === null || !!(c && kindInfo(c.kind)[cap]); }
 function _knownTagSet() { return new Set(TAG_DEFS.map(d => d[1])); }
 
 function renderTagPop(pop, id) {
-  const tags = new Set(_curTags(id)), known = _knownTagSet(), kind = _tagKind(id);
+  const tags = new Set(_curTags(id)), known = _knownTagSet();
   // Region tags (`remote` / `region=…`) are owned by the "Run on" radio above, `needs=` edges by
   // the DAG, and `lockedkey=` is `locked`'s own bookkeeping — don't also show them as free-form
   // chips (applyTagChecks preserves them either way).
@@ -123,8 +124,8 @@ function renderTagPop(pop, id) {
     `<span><span class="tagname">${n}</span><span class="tagdesc">${_escc(desc)}</span></span></label>`;
   // Group the kind-relevant tags under their section subheads, in definition order.
   let groups = '', lastGroup = null;
-  for (const [group, tag, desc, kinds] of TAG_DEFS) {
-    if (!kinds.includes(kind)) continue;
+  for (const [group, tag, desc, cap] of TAG_DEFS) {
+    if (!_tagApplies(id, cap)) continue;
     if (group !== lastGroup) { groups += `<div class="ctlsub">${group}</div>`; lastGroup = group; }
     groups += row(tag, desc);
   }
@@ -205,7 +206,7 @@ async function toggleTrace(id) {
 }
 // Does this code cell render a plot? An ECharts spec, or a figure (img/svg/canvas) in its output.
 function _cellHasPlot(c) {
-  if (!c || c.kind !== 'code') return false;
+  if (!c || !kindInfo(c.kind).exports_figures) return false;
   if (Array.isArray(c.echarts) && c.echarts.length) return true;
   const el = document.getElementById('cell-' + c.id), out = el && el.querySelector('.output');
   return !!(out && out.querySelector('img, svg, canvas'));

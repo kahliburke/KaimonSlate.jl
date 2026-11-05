@@ -310,7 +310,7 @@ end
 function _used_packages(report::Report)
     pkgs = String[]
     for c in report.cells
-        c.kind == CODE || continue
+        refines_analysis(c.kind) || continue
         top = try; Meta.parseall(c.source); catch; continue; end
         for s in (top isa Expr && top.head === :toplevel ? top.args : Any[top])
             (s isa Expr && (s.head === :using || s.head === :import)) || continue

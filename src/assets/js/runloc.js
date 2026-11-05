@@ -53,7 +53,7 @@ function renderRunLoc(state) {
   // connected. It goes amber and pulses with "· starting…"/"· reconnecting…" so a slow remote respawn
   // is visible here (this is the pill people watch), not just on the small worker dot.
   const w = (state && state.worker) || {};
-  const runnable = ((state && state.cells) || []).some(c => c.kind === 'code');
+  const runnable = ((state && state.cells) || []).some(c => kindInfo(c.kind).evaluates);
   const busy = !!(state && state.hydrating) || (w.kind === 'gate' && !w.connected && runnable);
   const suffix = busy ? (state.hydrating ? ' · starting…' : ' · reconnecting…') : '';
   document.getElementById('runloclabel').textContent = (host || 'local') + suffix;

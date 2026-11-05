@@ -98,8 +98,8 @@ function _applyRestore(id, mine) {
   // hook (notebook.js) applies it. Either way, stash the pending value first.
   window._pendingRestore[id] = mine;
   const cell = _cellOf(id);
-  if (cell && window.editSource && (cell.kind === 'md' || (cell.binds && cell.binds.length))) {
-    window.editSource(id, cell.kind === 'md' ? 'markdown' : 'julia');   // opens + applies pending
+  if (cell && window.editSource && (kindInfo(cell.kind).prose || (cell.binds && cell.binds.length))) {
+    window.editSource(id, kindInfo(cell.kind).prose ? 'markdown' : 'julia');   // opens + applies pending
     return !window._pendingRestore[id];
   }
   return false;

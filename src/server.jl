@@ -1015,7 +1015,7 @@ function _self_heal_locked!(nb::LiveNotebook)
     # cell, same as `_run_loop!`'s own `target = lock(nb.lock) do … end` before its `_eval_mutex` step.
     targets = lock(nb.lock) do
         [c for c in nb.report.cells
-         if c.kind == CODE && c.state == STALE && c.run === nothing && :locked in c.flags &&
+         if memoizes(c.kind) && c.state == STALE && c.run === nothing && :locked in c.flags &&
             !isempty(ReportEngine._locked_key(c))]
     end
     for c in targets
@@ -1032,10 +1032,10 @@ end
 # A cell with a run in flight is not next, whatever its state: it runs again when that run ends.
 function _next_stale_cell(report)
     for c in report.cells
-        c.kind == MARKDOWN && c.state == STALE && c.run === nothing && isempty(c.reads) && return c
+        is_prose(c.kind) && c.state == STALE && c.run === nothing && isempty(c.reads) && return c
     end
     for c in report.cells
-        c.state == STALE && c.run === nothing && return c
+        c.state == STALE && c.run === nothing && runs_automatically(c.kind) && return c
     end
     return nothing
 end
@@ -1892,7 +1892,7 @@ end
 function _reestablish_effects!(report)
     root = SlateHome.effects_dir()
     for c in report.cells
-        c.kind == CODE || continue
+        refines_analysis(c.kind) || continue
         recs = try; EffectStore.load(root, string(c.src_hash)); catch; nothing; end
         recs === nothing && continue
         any(r -> r.kind === :everywhere, recs) &&
@@ -1956,7 +1956,7 @@ end
 # runs, so this can never disagree with what would be rendered (a language mentioned in prose, or a
 # fence nested inside another, doesn't count; only a block that really became an interpolation).
 function _cell_fence_langs(c::Cell)
-    c.kind == MARKDOWN || return String[]
+    is_prose(c.kind) || return String[]
     out = String[]
     for e in ReportEngine._md_interp_exprs(c.source)
         f = ReportEngine._fence_call(e)
@@ -2854,7 +2854,7 @@ function _restale_side!(nb::LiveNotebook, side::AbstractString; binds = Tuple{Sy
     ids = String[]
     lock(nb.lock) do
         for c in nb.report.cells
-            (c.kind !== MARKDOWN && ReportEngine.runs_automatically(c.kind) && _cell_side(nb, c) == side) || continue
+            (evaluates(c.kind) && runs_automatically(c.kind) && _cell_side(nb, c) == side) || continue
             append!(binds, ((b.name, b.value) for b in c.binds))
             c.state == STOPPED && continue
             ReportEngine.force_stale!(c)
@@ -4233,7 +4233,7 @@ function _watchdog_scan!(nb::LiveNotebook)
     nb.kernel isa ReportEngine.GateKernel || return nothing   # in-process kernels have no worker to watch
     now = time()
     alerts = Any[]
-    code = Set(c.id for c in nb.report.cells if is_running(c) && c.kind == CODE)
+    code = Set(c.id for c in nb.report.cells if is_running(c) && evaluates(c.kind))
     for (side, latest, hist) in _nb_kernel_stats(nb)
         append!(alerts, _kernel_alerts(side, hist; now, quiet_cells = [id for id in latest.running if id in code]))
     end
@@ -5088,7 +5088,7 @@ function _eval_one_run!(nb::LiveNotebook, cid::AbstractString, run::ReportEngine
     cell === nothing && return nothing
     # Code that does not parse fails now, with the parser's message. Its analysis is opaque, so it
     # waits on every cell above it, and a wait there would hide the one thing wrong with it.
-    if cell.kind == CODE && :opaque in cell.flags
+    if in_dependency_graph(cell.kind) && :opaque in cell.flags
         msg = ReportEngine.parse_error_text(cell.source)
         isempty(msg) || return _settle!(c -> ReportEngine.mark_errored!(c, msg), nb, cid, run)
     end
@@ -5133,7 +5133,7 @@ function _eval_one_run!(nb::LiveNotebook, cid::AbstractString, run::ReportEngine
     waits && return nothing
     # A locked cell computes only on its own ▶. Any other run restores the result it froze on, and only
     # where its worker is already up: it does not start one, since a region worker can mean a queue wait.
-    cell.kind == CODE && _restore_only(nb, cell) && !_side_up(nb, _cell_region(cell)) &&
+    memoizes(cell.kind) && _restore_only(nb, cell) && !_side_up(nb, _cell_region(cell)) &&
         return _hold_locked!(nb, cid, run)
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
@@ -5159,7 +5159,7 @@ function _eval_one_run!(nb::LiveNotebook, cid::AbstractString, run::ReportEngine
         return nothing
     end
     lock(nb.lock) do; run.side = String(side); end
-    if cell.kind == MARKDOWN
+    if is_prose(cell.kind)
         # Tagged markdown interpolates on its region (bring the kernel up first, like a code cell); an
         # untagged md (side=="") stays on main. Presync pulls any cross-boundary names it interpolates.
         _prepare_region_for_cell!(nb, cell, run, kernel, side) || return nothing
@@ -5350,7 +5350,7 @@ function _keep_result!(nb::LiveNotebook, id::AbstractString)
     spec = lock(nb.lock) do
         i = _index_of(nb.report.cells, id); i === nothing && return nothing
         c = nb.report.cells[i]
-        (c.kind == CODE && c.state == FRESH) || return nothing
+        (memoizes(c.kind) && c.state == FRESH) || return nothing
         side = _cell_side(nb, c)
         k = isempty(side) ? nb.kernel : lock(() -> get(_REGION_KERNELS, (nb.id, side), nothing), _REGION_LOCK)
         (; kernel = k, memo = _memo_spec(nb, c), src = c.src_hash)
@@ -5476,7 +5476,7 @@ end
 # (in-flight source); the cancels are sent from a task of their own, since a worker round-trip must
 # never be made under nb.lock.
 _preempt_victims(cells) = [c for c in cells
-                           if c.kind !== MARKDOWN && c.run !== nothing && c.run.phase === :dispatched &&
+                           if evaluates(c.kind) && c.run !== nothing && c.run.phase === :dispatched &&
                               !_cell_defines(c) && !_uses_shared_graphics(c.source)]
 function _preempt_superseded!(nb::LiveNotebook, cells)
     victims = _preempt_victims(cells)
@@ -5513,8 +5513,8 @@ end
 # MARKDOWN is excluded because the serial path renders it (static prose first, interpolating prose
 # after its deps); TOOL because it never runs automatically, so deferring its readers would strand
 # them rather than order them.
-_batch_cells(cells) = [c for c in cells if c.state == STALE && c.run === nothing && c.kind !== MARKDOWN &&
-                       ReportEngine.runs_automatically(c.kind)]
+_batch_cells(cells) = [c for c in cells if c.state == STALE && c.run === nothing && evaluates(c.kind) &&
+                       runs_automatically(c.kind)]
 
 # Build the parallel-batch scheduler specs for the cells about to run (document order). Plotting cells share
 # Makie's non-thread-safe globals (theme / current-figure / display stack), invisible to dataflow
@@ -5585,12 +5585,12 @@ end
 # the notebook the reader is already looking at. A tool the document has not mentioned yet has no
 # such place, and the tail is the only honest answer for it.
 #
-# Only code and tool cells count: prose that happens to NAME a tool is not a call site.
+# Only cells whose source runs count: prose that happens to NAME a tool is not a call site.
 function _toolcall_slot(cells, name::AbstractString)
     needles = ("@tool " * name * "(", "slate_tool(\"" * name * "\"")
     slot = length(cells) + 1
     for (i, c) in enumerate(cells)
-        (c.kind === ReportEngine.CODE || c.kind === ReportEngine.TOOL) || continue
+        evaluates(c.kind) || continue
         any(n -> occursin(n, c.source), needles) && (slot = i + 1)
     end
     return slot

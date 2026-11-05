@@ -1042,7 +1042,7 @@ end
 # inputs. Excluded: markdown, `using`/`import` barriers (:opaque — namespace effects not captured by
 # `writes`), control-DECLARING cells (their value comes from the UI), and explicit opt-outs.
 function _memoizable(cell::Cell)
-    cell.kind == CODE || return false
+    memoizes(cell.kind) || return false
     # `:opaque` (unresolved `using` / macro barrier) and `:nocache` (explicit opt-out) are memo-specific.
     (:opaque in cell.flags || :nocache in cell.flags) && return false
     # A `@replay` cell registers its sweep BY RUNNING — the mark hands the export a closure, and a
@@ -1381,7 +1381,7 @@ end
 # whether the cell truly caches; it only ADDS the reason text. A RUNTIME verdict (restored/stored/
 # handle from the run wire) takes precedence over this static view where present.
 function _memo_status(report::Report, cell::Cell)
-    cell.kind == CODE || return ("", "")
+    memoizes(cell.kind) || return ("", "")
     # A pure `using`/`import` cell is namespace plumbing, not a caching STAGE — no badge (it's
     # transiently `:opaque` before macro refinement, so it would otherwise flip to a noisy reason).
     _is_pure_using(cell.source) && return ("", "")
@@ -1408,13 +1408,14 @@ function _memo_status(report::Report, cell::Cell)
 end
 
 function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel())
-    if cell.kind == MARKDOWN
+    if is_prose(cell.kind)
         exprs = _md_interp_exprs(cell.source)
         cell.interp = isempty(exprs) ? CellOutput[] : interpolate(kernel, report, exprs)
         mark_fresh!(cell)
         _emit_progress(report.id, cell)   # md renders instantly → patch it live (don't leave it "stale")
         return cell
     end
+    evaluates(cell.kind) || return cell
     # Bind cells are ordinary code now: `@bind x W(…)` runs, assigns `x`, and reports
     # its control through the capture channel (`output.binds`). No special path.
     # A caller that already started the run (the hub's runner) ends it; otherwise this call owns it.

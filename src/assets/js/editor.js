@@ -1281,7 +1281,7 @@
     const cells = (typeof nbState !== 'undefined' && nbState && nbState.cells) || [];
     if (!cells.length) return false;
     const idx = cells.findIndex(c => c.id === fromCellId);
-    const has = c => c.kind === 'code' && Array.isArray(c.defs) && c.defs.includes(name);
+    const has = c => kindInfo(c.kind).dependency_graph && Array.isArray(c.defs) && c.defs.includes(name);
     let tgt = null;
     for (let i = (idx < 0 ? cells.length - 1 : idx); i >= 0; i--) if (has(cells[i])) { tgt = cells[i]; break; }
     if (!tgt) for (let i = (idx < 0 ? 0 : idx + 1); i < cells.length; i++) if (has(cells[i])) { tgt = cells[i]; break; }

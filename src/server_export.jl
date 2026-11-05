@@ -334,7 +334,7 @@ const _CHAIN_REFUSED_MACROS = ("@bind", "@replay", "@onclick", "@trace", "@md", 
 const _CHAIN_MAX_POSITIONS = 512
 
 function _replay_chain_blocker(c)
-    c.kind == ReportEngine.CODE || return "is not a code cell"
+    memoizes(c.kind) || return "is not a code cell"
     eff = ReportEngine._cell_effect(c)
     eff == ReportEngine.PURE || return string("is ", lowercase(string(eff)), " — it would run once per position")
     # The SOURCE decides this, not `provides`: an UNRESOLVED `using` (a package this process has not
@@ -404,7 +404,7 @@ function _chain_sweep_plan(cells)
 
     out = NamedTuple[]
     for c in cells
-        c.kind == ReportEngine.CODE || continue
+        memoizes(c.kind) || continue
         specs = _table_specs(c)
         isempty(specs) && continue
         up = _replay_chain_upstream(byid, c.id)
@@ -476,7 +476,7 @@ function _prose_sweep_plan(cells)
 
     out = NamedTuple[]
     for c in cells
-        c.kind == ReportEngine.MARKDOWN || continue
+        is_prose(c.kind) || continue
         exprs = try; ReportEngine._md_interp_exprs(c.source); catch; String[]; end
         isempty(exprs) && continue
         reach = sort!([v for v in keys(ctls) if c.id in cones[v]]; by = v -> (ctls[v][2], String(v)))
@@ -1172,7 +1172,7 @@ _is_web_cell(c) = occursin(r"^\s*@web\b", c.source)
 function _page_save_assets(nb::LiveNotebook)
     out = Tuple{Dict{String,Any},Vector{UInt8}}[]
     for c in nb.report.cells
-        (c.kind == CODE && c.output !== nothing) || continue
+        (exports_figures(c.kind) && c.output !== nothing) || continue
         for a in c.output.assets
             bytes = _asset_bytes(a)
             push!(out, (_asset_common(a, bytes, c.id), bytes))
@@ -1276,7 +1276,7 @@ end
 function _referenced_page_assets(nb::LiveNotebook; imports::Symbol = :cdn)
     files = _import_page_files(nb, imports)   # module graph → `imports/<hash>.mjs` siblings (`:sibling` only)
     for c in nb.report.cells
-        c.kind == CODE || continue
+        exports_figures(c.kind) || continue
         for spec in _echarts_specs(c), (_, url) in _spec_geomaps(spec)     # geo maps → vendored file
             p = _geo_map_file(url)
             p === nothing || (files[_geo_asset_path(url)] = p)
@@ -2614,7 +2614,7 @@ end
 # script or a web cell. KaTeX is always included: math appears in ordinary prose, detecting it means
 # parsing markdown for delimiters, and at ~0.3 MB it is not what makes these files big.
 function _page_libs(nb::LiveNotebook)
-    ec = any(c -> c.kind == CODE && (!isempty(_echarts_specs(c)) || !isempty(_table_specs(c))),
+    ec = any(c -> exports_figures(c.kind) && (!isempty(_echarts_specs(c)) || !isempty(_table_specs(c))),
              nb.report.cells)
     dg = any(e -> occursin("dagre", e.js), _frontend_scripts(nb)) ||
          any(c -> occursin("dagre", c.source), nb.report.cells)
@@ -2976,7 +2976,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # added after the page has already been told what shipped. The markdown is rendered a second
         # time for this, which is cheap and only happens for a cell that actually carries a prose mark.
         for c in nb.report.cells
-            c.kind == MARKDOWN || continue
+            is_prose(c.kind) || continue
             pm = get(chain_marks, string("prose:", c.id), nothing)
             pm isa AbstractDict || continue
             sw = get(replay_table, String(get(pm, "id", "")), nothing)
@@ -3102,7 +3102,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             # ordinary prose. Omitted rather than hidden in CSS — `display:none` still ships the text.
             (:notes in c.flags) && continue
             haskey(rowopen, c.id) && print(io, "<div class=\"exp-row\">")   # open a side-by-side row
-            if c.kind == MARKDOWN
+            if is_prose(c.kind)
                 # citations/refs + hoisted H1. Dropping the H1 drops whatever interpolations sat in it,
                 # and `markdown_html` pairs the remaining ones positionally, so `c.interp` has to be
                 # advanced by the same amount or the body renders the title's values.
@@ -3366,7 +3366,7 @@ end
 
 function _first_figure_png(nb::LiveNotebook)
     for c in nb.report.cells
-        c.kind == CODE || continue
+        exports_figures(c.kind) || continue
         (:collapsed in c.flags) && continue
         _cell_has_og_figure(c) || continue     # skip text/value cells — only real figures qualify
         img = cell_image(nb, c.id)
@@ -3379,7 +3379,7 @@ end
 # og:image, whatever it renders — the author's manual choice wins over the automatic figure pick.
 function _tagged_thumbnail_png(nb::LiveNotebook)
     for c in nb.report.cells
-        c.kind == CODE || continue
+        exports_figures(c.kind) || continue
         (:thumbnail in c.flags || :og in c.flags) || continue
         img = cell_image(nb, c.id)
         img === nothing || return img
@@ -4479,7 +4479,7 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
     write(joinpath(docdir, "index.html"), html)
     m = _doc_meta(nb)
     cs = nb.report.cells
-    md = count(c -> c.kind == MARKDOWN, cs)
+    md = count(c -> is_prose(c.kind), cs)
     # Packages come from the notebook's reproducibility footer (report.meta["env"] — a sorted
     # Vector of {name, version, uuid}); readily available, no extra I/O.
     env = get(nb.report.meta, "env", nothing)
@@ -4496,7 +4496,7 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
     entry = Dict{String,Any}("slug" => slug, "title" => m.title, "description" => m.description,
                              "image" => isempty(ogpath) ? "" : "$slug/og-image.png",
                              "runnable" => bundle, "date" => today, "updated" => today,
-                             "cells" => length(cs), "code" => length(cs) - md, "md" => md,
+                             "cells" => length(cs), "code" => count(c -> evaluates(c.kind), cs), "md" => md,
                              "binds" => sum(c -> length(c.binds), cs; init = 0),
                              "packages" => pkgs)
     isempty(series) || (entry["series"] = String(series))
@@ -5576,7 +5576,7 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
             if :bibliography in c.flags        # rendered as the References section below, not raw BibTeX
                 continue
             end
-            if c.kind == MARKDOWN
+            if is_prose(c.kind)
                 s = strip(rw(c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source))
                 isempty(s) && continue
                 haskey(figidx.numbers, c.id) ? println(io, "**Figure ", figidx.numbers[c.id], ".** ", s, "\n") :
@@ -5646,9 +5646,9 @@ function _mention_context(nb::LiveNotebook, text::AbstractString)
     print(io, "══ REFERENCED CELLS — the user mentioned these by @id; here is each one's source and current result. ══")
     for id in refs
         c = byid[id]
-        kind = c.kind == MARKDOWN ? "md" : "code"
+        kind = kind_name(c.kind)
         print(io, "\n\n--- @", id, " [", kind, "] ---\n", rstrip(c.source))
-        c.kind == CODE && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
+        evaluates(c.kind) && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
     end
     return String(take!(io))
 end

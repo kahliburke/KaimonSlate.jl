@@ -142,7 +142,7 @@ function _workbook_cell_allowed(nb::LiveNotebook, id::AbstractString)::Bool
     idx = findfirst(c -> c.id == id, cells)
     idx === nothing && return false
     cell = cells[idx]
-    ReportEngine.is_code_kind(cell.kind) || return false
+    evaluates(cell.kind) || return false
     return :workbook in cell.flags
 end
 
@@ -327,6 +327,11 @@ function _app_preview(target::AbstractString)
     on = get(q, "app", "") in ("1", "true", "yes")
     return (app = on, workbook = on && get(q, "workbook", "") in ("1", "true", "yes"))
 end
+
+# The kind table (`kind_table`), stamped into the page before its first paint: cells render from it
+# straight away, before the notebook's state arrives.
+_inject_kinds(html::AbstractString) =
+    replace(String(html), "window.__SLATE_KINDS__=null;" => "window.__SLATE_KINDS__=" * JSON.json(kind_table()) * ";"; count = 1)
 
 function _inject_app(html::AbstractString, h::Hub, nb = nothing; preview = (app = false, workbook = false))
     app = h.app || preview.app

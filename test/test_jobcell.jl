@@ -58,9 +58,9 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 
     @testset "is evaluated, and participates in the graph, exactly like code" begin
         # This is what buys full DAG integration for free: deps, capture, staleness, memoization.
-        @test RE.is_code_kind(RE.JOB)
-        @test RE.is_code_kind(RE.CODE)
-        @test !RE.is_code_kind(RE.MARKDOWN)
+        @test RE.evaluates(RE.JOB)
+        @test RE.evaluates(RE.CODE)
+        @test !RE.evaluates(RE.MARKDOWN)
     end
 
     @testset "runs automatically, unlike a tool call" begin

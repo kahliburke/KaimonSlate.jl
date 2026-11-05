@@ -355,7 +355,7 @@ function _notebookHome() {
 function _cellRunLoc(c) {
   const rg = cellAssignedRegion(c);
   if (rg) return { key: 'r:' + rg, name: rg, local: false };
-  if (c.kind === 'md') return null;
+  if (!kindInfo(c.kind).evaluates) return null;
   return _notebookHome();
 }
 // The distinct set of run-locations across the notebook's cells.
@@ -682,7 +682,7 @@ function _effectBadge(c) {
   return `<span class="effectbadge" title="${_esc(tip)}">⚙ ${_esc(label + shown)}</span>`;
 }
 function cellHeaderInner(c) {
-  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool' || c.kind === 'job') && !hasBinds(c);   // web/tool/job cells run too (▶)
+  const isCode = kindInfo(c.kind).evaluates && !hasBinds(c);   // web/tool/job cells run too (▶)
   // ✎ edit source — on EVERY cell. md/@bind hide their source behind a rendered view, so it reveals the
   // source overlay; code/web edit inline, so it just focuses the editor (see editCellSource). NOT </> —
   // that's the "convert to web cell" glyph below, and both show on a @bind cell, so a shared icon would
@@ -725,7 +725,7 @@ function cellHeaderInner(c) {
       const cs = (window.__slateState || {}).cells || [];
       const idx = id => cs.findIndex(x => x.id === id);
       const me = idx(c.id);
-      const bad = c.needs.filter(n => { const j = idx(n); return j < 0 || j >= me || cs[j].kind !== 'code'; });
+      const bad = c.needs.filter(n => { const j = idx(n); return j < 0 || j >= me || !kindInfo(cs[j].kind).dependency_graph; });
       return bad.length
         ? `<span class="dupwarn" title="needs= names no earlier code cell (deleted, moved below, or markdown) — this manual edge is inert">🔗⚠ ${bad.map(_esc).join(', ')}</span>` : '';
     })()) +
@@ -733,17 +733,17 @@ function cellHeaderInner(c) {
     '<span class="cellhdr-trail">' +
     '<span class="cellacts">' +
       `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
-      (c.kind === 'code' ? `<button onclick="toggleDeps('${c.id}')" title="focus: show only this cell's dependency chain (Esc to exit)">🔗</button>` : '') + autoctl +
+      (kindInfo(c.kind).dependency_graph ? `<button onclick="toggleDeps('${c.id}')" title="focus: show only this cell's dependency chain (Esc to exit)">🔗</button>` : '') + autoctl +
       (isCode ? `<button class="trace${c.trace ? ' on' : ''}" onclick="toggleTrace('${c.id}')" title="${c.trace ? 'open the trace inspector' : 'trace this cell — inspect each value in a popup'}">🔍</button>` : '') +
       // Step this cell line by line, on whichever kernel it runs on. Re-clicking the cell that
       // HAS the session ends it, so the button is the whole control for "am I debugging this".
-      // Plain code cells only — that is where the strip mounts, and a web or tool cell has no
-      // Julia top level to walk.
-      ((isCode && c.kind === 'code') ? (() => {
+      // Only kinds the table marks debuggable or profilable: a web or tool cell has no Julia top level
+      // to walk, and a job's body runs once per unit.
+      ((isCode && kindInfo(c.kind).debuggable) ? (() => {
         const on = window.slateDebugActive && window.slateDebugActive(c.id);
-        return `<button class="dbgcell${on ? ' on' : ''}" onclick="window.slateDebugCell && window.slateDebugCell('${c.id}')" title="${on ? 'stop stepping this cell' : 'step this cell line by line'}">🐞</button>` +
-          `<button class="profcell" onclick="window.slateProfileCell && window.slateProfileCell('${c.id}')" title="profile this cell">🔥</button>`;
+        return `<button class="dbgcell${on ? ' on' : ''}" onclick="window.slateDebugCell && window.slateDebugCell('${c.id}')" title="${on ? 'stop stepping this cell' : 'step this cell line by line'}">🐞</button>`;
       })() : '') +
+      ((isCode && kindInfo(c.kind).profilable) ? `<button class="profcell" onclick="window.slateProfileCell && window.slateProfileCell('${c.id}')" title="profile this cell">🔥</button>` : '') +
       (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
       // A sweep's SPEC — where it runs and under what limits — is configuration, not code. It gets
       // its own control rather than living in the free-form tag box, because walltime and partition
@@ -1511,7 +1511,7 @@ function toggleSource(id, mode) {
 // inline (no overlay) → just focus it, un-hiding the code first if it was hidden via 🙈.
 async function editCellSource(id, kind) {
   const cell = document.getElementById('cell-' + id); if (!cell || _onSlide(cell)) return;
-  if (cell.querySelector('.srcedit')) { toggleSource(id, kind === 'md' ? 'markdown' : 'julia'); return; }
+  if (cell.querySelector('.srcedit')) { toggleSource(id, kindInfo(kind).prose ? 'markdown' : 'julia'); return; }
   if (cell.classList.contains('codehidden')) await toggleHideCode(id);   // reveal hidden code before focusing
   if (window.ensureEditor) window.ensureEditor(id);                // mount if it hasn't lazily yet
   if (window.edFocus) window.edFocus(id);
@@ -1656,7 +1656,7 @@ function markBlank(el, c) {
   const has = sel => !!el.querySelector(sel);
   const blank = c
     ? !(el.classList.contains('workbook')
-        || c.kind === 'md'
+        || kindInfo(c.kind).prose
         || /<\w/.test(c.output || '')
         || (c.echarts || []).length
         || (c.tables || []).length
@@ -1854,7 +1854,7 @@ function updateChrome(state) {
     // kernel OR the gate worker still BOOTING (hydrating), red = a genuine disconnect of a RUNNABLE
     // notebook only. So a not-yet-connected gate worker shows a "starting" blue pulse during hydration,
     // and an md-only notebook shows green (not the alarming red) — the tooltip says there's no worker.
-    const hasCode = (state.cells || []).some(c => c.kind === 'code');
+    const hasCode = (state.cells || []).some(c => kindInfo(c.kind).evaluates);
     const cls = state.inactive ? 'inproc'    // dormant BY DESIGN — a calm (blue) dot, never the alarming red
               : w.kind === 'inproc' ? 'inproc'
               : w.connected ? 'up'

@@ -126,7 +126,7 @@ escaped and embedded. Used by the live notebook server to update a cell in place
 function output_html(cell::Cell)
     # A web cell renders like a code cell — its `@web(...)` evaluates to a `WebPage`, captured as an
     # HTML display chunk — so the same output pipeline (display/stdout/error) applies.
-    is_code_kind(cell.kind) || return ""
+    evaluates(cell.kind) || return ""
     o = cell.output
     o === nothing && return ""
     io = IOBuffer()
@@ -703,7 +703,7 @@ end
 # field access never errors). Markdown → pre-rendered HTML; code → raw text the
 # template autoescapes; rich output → trusted HTML via `display`.
 function _cell_view(cell::Cell)
-    if cell.kind == MARKDOWN
+    if is_prose(cell.kind)
         return (kind = "md", state = "", source = "", stdout = "", value = "",
                 error = "", display = "", html = _md_html(cell.source, cell.interp))
     end

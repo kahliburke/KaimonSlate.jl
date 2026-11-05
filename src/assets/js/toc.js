@@ -18,7 +18,7 @@ import { cells } from './store.js';
 const headings = computed(() => {
   const out = [];
   for (const c of cells.value) {
-    if (c.kind !== 'md' || typeof c.source !== 'string') continue;
+    if (!kindInfo(c.kind).prose || typeof c.source !== 'string') continue;
     // A `notes` cell is presenter-only, and the TOC is a reader-facing panel in an app — a heading
     // listed here would show its text and scroll to a cell the reading view hides.
     if (c.notes) continue;

@@ -60,7 +60,7 @@
     for (const c of cells) {
       if (c.collapsed) continue;
       if (c.notes) { cur.notes.push(c.id); continue; }
-      const d = c.kind === 'md' ? _firstHeadingDepth(c.source) : null;
+      const d = kindInfo(c.kind).prose ? _firstHeadingDepth(c.source) : null;
       const starts = c.slide || (d != null && d <= level);
       if (starts) flush();
       cur.ids.push(c.id);
@@ -74,7 +74,7 @@
     const cells = (nbState && nbState.cells) || [];
     for (const id of (slide ? slide.ids : [])) {
       const c = cells.find(x => x.id === id);
-      if (c && c.kind === 'md') { const m = (c.source || '').match(/^\s*#{1,6}\s+(.+?)\s*#*$/m); if (m) return m[1].trim(); }
+      if (c && kindInfo(c.kind).prose) { const m = (c.source || '').match(/^\s*#{1,6}\s+(.+?)\s*#*$/m); if (m) return m[1].trim(); }
     }
     return null;
   }

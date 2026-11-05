@@ -59,8 +59,8 @@ function _notebooks_json(h::Hub)
         cs = report.cells
         Dict("id" => nb.id, "title" => report.title, "path" => abspath(nb.path),
              "cells" => length(cs),
-             "code" => count(c -> c.kind == CODE, cs),
-             "md" => count(c -> c.kind == MARKDOWN, cs),
+             "code" => count(c -> evaluates(c.kind), cs),
+             "md" => count(c -> is_prose(c.kind), cs),
              "errors" => count(c -> c.state == ERRORED, cs),
              "stale" => count(c -> c.state == STALE, cs),
              "running" => count(is_running, cs),

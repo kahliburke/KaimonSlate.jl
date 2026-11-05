@@ -463,7 +463,7 @@ function start_debug!(nb::LiveNotebook, cid::AbstractString; source::AbstractStr
     i = findfirst(c -> c.id == cid, nb.report.cells)
     i === nothing && return _debug_json(nb, ReportEngine._error_state(cid, "there is no cell '$cid' to step"), "")
     cell = nb.report.cells[i]
-    ReportEngine.is_code_kind(cell.kind) ||
+    debuggable(cell.kind) ||
         return _debug_json(nb, ReportEngine._error_state(cid, "only a code cell can be stepped"), "")
     src = isempty(source) ? cell.source : String(source)
     # Starting is not gated: anyone may open a session, and an agent deciding to start one is

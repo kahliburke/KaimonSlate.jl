@@ -126,7 +126,7 @@ function Editor({ cell }) {
         // the Cell effect wrote to `srcMap` and the placeholder precisely BECAUSE no editor existed
         // yet. Seeding from the closure re-opened the cell at its old text.
         doc: (window.srcMap && window.srcMap[cell.id] != null) ? window.srcMap[cell.id] : cell.source,
-        cellId: cell.id, markdown: cell.kind === 'md',
+        cellId: cell.id, markdown: !!kindInfo(cell.kind).prose,
         // Compare against the LIVE server source (srcMap), NOT the mount-time `cell.source` closure —
         // else applying an agent/external edit via edSetText (which fires this) would look like a USER
         // edit, falsely marking the cell `edited` + backing it up, which later pops phantom reconcile
@@ -578,7 +578,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // Markdown renders its prose and nothing else — but the strip above is built first, because
     // `{{ }}` interpolation puts prose in the reactive graph, so a markdown cell can host a
     // control that drives what it says.
-    if (c.kind === 'md') {
+    if (kindInfo(c.kind).prose) {
       const md = el.querySelector('.md'); const h = window.mdHtml(c);
       if (md && h !== last.current.out) {
         // Dispose any inline `{{ echart }}` instances before the innerHTML swap orphans their nodes
@@ -707,7 +707,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
   // Content hosts are empty/stable — Preact preserves them; the effect above fills them.
   let body;
-  if (c.kind === 'md') {
+  if (kindInfo(c.kind).prose) {
     // Prose reaches the reactive graph through `{{ }}` interpolation, so a markdown cell can be
     // driven by a control and is worth hosting one. The strip sits above the prose, matching where
     // it sits relative to a code cell's output.

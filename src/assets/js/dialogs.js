@@ -163,7 +163,7 @@ async function rerunAll(){ updateStates(await api('POST', '/api/rerun-all', {}))
 async function runCellAndBelow(id){
   if (!id) return;
   const ids = cellIds(); const i = ids.indexOf(id); if (i < 0) return;
-  for (let j = i; j < ids.length; j++) { const c = _cellById(ids[j]); if (c && c.kind === 'code') await runCell(ids[j], true); }
+  for (let j = i; j < ids.length; j++) { const c = _cellById(ids[j]); if (c && kindInfo(c.kind).evaluates && kindInfo(c.kind).runs_automatically) await runCell(ids[j], true); }
 }
 async function restartWorker(){
   if (!await confirmDark("Restart this notebook's worker? Its process is killed and cells re-run from a fresh namespace.", 'Restart')) return;

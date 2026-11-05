@@ -512,7 +512,7 @@ end
 function _scan_imports!(report::Report)
     d = Dict{String,String}()
     for c in report.cells
-        c.kind == CODE || continue
+        refines_analysis(c.kind) || continue
         top = try; Meta.parseall(c.source); catch; continue; end
         _collect_use_imports!(d, top)
     end
@@ -588,12 +588,12 @@ _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_an
 function _infer_bindings_uncached!(cell::Cell)
     empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides); empty!(cell.observes)
     delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall)
-    if cell.kind == MARKDOWN || cell.kind == WEB
+    if interpolates(cell.kind)
         # A markdown or web cell "reads" the free variables of its `{{ expr }}` blocks, so it joins the
         # reactive graph and re-renders when they change. (A web cell's source is a `@web(...)` macrocall;
         # its interpolations live inside string sections, so harvest them here rather than via the CODE
         # path, which would only see an opaque unknown macro.) Web cells define nothing → no writes.
-        exprs = cell.kind == MARKDOWN ? _md_interp_exprs(cell.source) : _web_interp_exprs(cell.source)
+        exprs = is_prose(cell.kind) ? _md_interp_exprs(cell.source) : _web_interp_exprs(cell.source)
         for e in exprs
             ast = try; Meta.parse(e); catch; nothing; end
             ast === nothing && continue
@@ -611,7 +611,7 @@ function _infer_bindings_uncached!(cell::Cell)
         union!(cell.reads_now, cell.reads)   # interpolations render immediately → all top-level
         return cell
     end
-    analyzes_like_code(cell.kind) || return cell
+    in_dependency_graph(cell.kind) || return cell
 
     top = try
         Meta.parseall(cell.source)
@@ -1032,7 +1032,7 @@ end
 # VOLATILE transfers but isn't cached, RESOURCE re-runs but isn't cached — hence a taxonomy, not a flag).
 @enum CellEffect PURE EVERYWHERE RESOURCE VOLATILE IMPURE
 function _cell_effect(cell)::CellEffect
-    cell.kind == CODE || return PURE
+    refines_analysis(cell.kind) || return PURE
     :resource in cell.flags && return RESOURCE
     # The author's tag, and its runtime twin: `:volatile_declared` is set by a library that read live
     # state during the run (`slate_effect(:volatile)` — e.g. asking a host whether it is signed in) and
@@ -1101,7 +1101,7 @@ function build_dependencies!(report::Report)
     pending_reads = Dict{Symbol,String}() # name → FIRST cell to read it top-level with no prior writer
     priorcode = Set{String}()             # ids of earlier CODE cells — the only legal `needs=` targets
     for c in report.cells
-        if c.kind == MARKDOWN || c.kind == WEB
+        if interpolates(c.kind)
             # md/web cells depend on the writers of their interpolation vars (+ barrier), but never
             # write, become a barrier, or enter `seen`.
             for r in c.reads
@@ -1120,10 +1120,10 @@ function build_dependencies!(report::Report)
             # on open and from sitting stale behind code cells during a run (it never has to wait).
             # A web cell is exempt: even with no interpolations it must EVALUATE its `@web(...)` to
             # produce the `WebPage`, so it stays STALE until run (like code).
-            c.kind == MARKDOWN && isempty(c.reads) && c.state == STALE && (c.state = FRESH)
+            is_prose(c.kind) && isempty(c.reads) && c.state == STALE && (c.state = FRESH)
             continue
         end
-        analyzes_like_code(c.kind) || continue
+        in_dependency_graph(c.kind) || continue
         for r in c.reads
             haskey(writer, r) && push!(c.deps, writer[r])
         end
@@ -1180,7 +1180,7 @@ function build_dependencies!(report::Report)
     # `using` source is safe to replay. Doc-order sweep (sibling of the multidef sweep above).
     provided_upstream = Set{Symbol}()
     for c in report.cells
-        c.kind == CODE || continue
+        refines_analysis(c.kind) || continue
         delete!(c.flags, :using_redundant); delete!(c.flags, :import_scaffold)
         if !isempty(c.provides)
             push!(c.flags, :import_scaffold)
@@ -1348,10 +1348,10 @@ function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
     # Otherwise it sits STALE behind slow code cells for the whole run — prose looks "unrun" until the
     # end, which reads as broken now that runs stream cell-by-cell.
     for c in report.cells
-        c.kind == MARKDOWN && c.state == STALE && isempty(c.reads) && eval_cell!(report, c, kernel)
+        is_prose(c.kind) && c.state == STALE && isempty(c.reads) && eval_cell!(report, c, kernel)
     end
     for c in report.cells
-        if c.kind == MARKDOWN
+        if is_prose(c.kind)
             c.state == STALE && eval_cell!(report, c, kernel)   # interpolating md → after its deps ran
         elseif auto(c)
             eval_cell!(report, c, kernel)
@@ -1397,7 +1397,7 @@ function refine_usings!(report::Report, kernel::Kernel = InProcessKernel(); rebu
     for c in report.cells
         # Only cells that ran cleanly — an errored `using` (package didn't load) can't be resolved,
         # and leaving it un-tried lets a later successful run refine it.
-        (c.kind == CODE && c.state == FRESH && :opaque in c.flags) || continue
+        (refines_analysis(c.kind) && c.state == FRESH && :opaque in c.flags) || continue
         top = try; Meta.parseall(c.source); catch; continue; end
         stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
         for s in stmts
@@ -1453,7 +1453,7 @@ end
 function unresolved_using_paths(report::Report)
     pending = String[]
     for c in report.cells
-        (c.kind == CODE && :opaque in c.flags) || continue
+        (refines_analysis(c.kind) && :opaque in c.flags) || continue
         top = try; Meta.parseall(c.source); catch; continue; end
         stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
         for s in stmts
@@ -1471,7 +1471,7 @@ end
 function unresolved_using_paths_by_side(report::Report, side)
     by = Dict{String,Vector{String}}()
     for c in report.cells
-        (c.kind == CODE && :opaque in c.flags) || continue
+        (refines_analysis(c.kind) && :opaque in c.flags) || continue
         top = try; Meta.parseall(c.source); catch; continue; end
         stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
         for s in stmts
@@ -1571,7 +1571,7 @@ function pending_macro_cells(report::Report)
         binds = get(_MACRO_BINDS, report.id, nothing)
         tried = get(_MACRO_TRIED, report.id, nothing)
         for c in report.cells
-            (c.kind == CODE && :macrocall in c.flags) || continue
+            (refines_analysis(c.kind) && :macrocall in c.flags) || continue
             binds !== nothing && haskey(binds, c.src_hash) && continue
             tried !== nothing && c.src_hash in tried && continue
             push!(out, c)

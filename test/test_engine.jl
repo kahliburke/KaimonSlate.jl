@@ -680,3 +680,21 @@ end
     @test ReportEngine.figure_vector("figv") === nothing
     @test ReportEngine.figure_vector("never-ran") === nothing
 end
+
+@testset "the kind table" begin
+    RE_K = ReportEngine
+    # Every kind has a row, and a kind's name reads back to it.
+    for k in instances(RE_K.CellKind)
+        @test haskey(RE_K.KIND_INFO, k)
+        @test RE_K.kind_from_name(RE_K.kind_name(k)) === k
+    end
+    @test RE_K.kind_from_name("markdown") === RE_K.MARKDOWN
+    @test RE_K.kind_from_name("plot") === nothing
+    # The page gets every capability of every kind, by name.
+    t = RE_K.kind_table()
+    @test Set(keys(t)) == Set(RE_K.kind_name(k) for k in instances(RE_K.CellKind))
+    @test t["job"]["dependency_graph"] && !t["job"]["debuggable"] && !t["job"]["run_tags"]
+    @test !t["web"]["debuggable"] && t["web"]["exports_figures"] && t["web"]["interpolates"]
+    @test !t["tool"]["runs_automatically"] && t["md"]["runs_automatically"] && t["md"]["prose"]
+end
+

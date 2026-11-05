@@ -23,6 +23,11 @@ const charts = {};            // cell id -> [echarts instances]
 const tableState = {};        // cell id -> [{sort,filter,page,pageSize} per table] (view prefs, sticky)
 const srcMap = {};            // cell id -> raw source (for markdown editing)
 let nbState = null;           // latest notebook state (drives the controls palette)
+// What a kind of cell does, from the kind table the hub stamps into the page (`kind_table` in
+// engine.jl): `kindInfo(c.kind).evaluates`. A kind the table does not name can do nothing.
+const _NO_KIND = Object.freeze({});
+function kindInfo(kind) { return (window.__SLATE_KINDS__ || {})[kind] || _NO_KIND; }
+window.kindInfo = kindInfo;
 // Min delay (ms) between live recomputes while dragging a control. Persisted.
 let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '200', 10) || 0);
 let lastVersion = -1;

@@ -97,7 +97,7 @@ async function enterEdit(id) {
   const c = _cellById(id); if (!c) return;
   // A web cell has an inline editor too (its first pane, registered in editors[id]), so Enter focuses it
   // like a code cell — not the markdown/source overlay.
-  if ((c.kind === 'code' || c.kind === 'web' || c.kind === 'tool') && !hasBinds(c)) {
+  if (kindInfo(c.kind).evaluates && !hasBinds(c)) {
     // A hidden or collapsed editor is not rendered and cannot take focus: show it first.
     if (c.codeHidden) await toggleHideCode(id);
     if (c.collapsed) await toggleCollapse(id);
@@ -106,7 +106,7 @@ async function enterEdit(id) {
     // Enter means "edit this", so vim starts in insert (no-op when vim is off).
     window.slateVimEnterInsert && window.slateVimEnterInsert(id);
   }
-  else editSource(id, c.kind === 'md' ? 'markdown' : 'julia');
+  else editSource(id, kindInfo(c.kind).prose ? 'markdown' : 'julia');
 }
 // Click selects (mousedown precedes editor focus); double-click the id label renames it.
 // Shift-click extends a range from the anchor; ⌘/Ctrl-click toggles one cell — both suppress

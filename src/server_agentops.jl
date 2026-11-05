@@ -76,9 +76,8 @@ end
 
 _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
-# Cell-kind token ("md"/"web"/"tool"/"job"/"code") → CellKind, shared by cell creation and kind-conversion.
-_cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : k == "tool" ? TOOL :
-                               k == "job" ? JOB : CODE
+# A kind word from a tool or the page ("md", "web", "tool", "job", "code") → CellKind; code when unrecognised.
+_cellkind(k::AbstractString) = something(kind_from_name(k), CODE)
 
 # A new cell starts empty, except where the KIND itself implies a shape. A job cell's whole point
 # is the `@sweep` call — starting it blank would make the reader work out the skeleton from docs
@@ -304,7 +303,7 @@ const _READTOK = Dict{String,Tuple{Vector{String},Dict{String,String}}}()   # "n
 const _READTOK_LOCK = ReentrantLock()
 # A cell's content hash for delta detection — source AND result/state, so a re-run (new output) counts.
 _cell_state_hash(c::Cell) = string(hash((c.kind, c.source,
-                                         c.kind == CODE ? _cell_result_text(c) : "", shown_state(c))); base = 16)
+                                         evaluates(c.kind) ? _cell_result_text(c) : "", shown_state(c))); base = 16)
 function _read_token!(nbid, order, hashes)
     tok = string(hash(join((string(id, ':', hashes[id]) for id in order), '\n')); base = 16)[1:12]
     lock(_READTOK_LOCK) do
@@ -319,21 +318,21 @@ _trunc(s, n::Int) = (t = String(s); length(t) <= n ? t : first(t, n) * "…")
 
 # FULL content of a cell — source + result.
 function _print_cell!(io::IO, c::Cell)
-    print(io, "\n\n### id=", c.id, "  [", ReportEngine._kind_token(c.kind), ", ",
+    print(io, "\n\n### id=", c.id, "  [", kind_name(c.kind), ", ",
           lowercase(string(shown_state(c))), "]\n")
     print(io, rstrip(c.source))
-    ReportEngine.is_code_kind(c.kind) &&
+    evaluates(c.kind) &&
         print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
 end
 
 # ONE compact line per cell — the high-signal map (id, kind, state, defined names, a 1-line result /
 # the md heading). Keeps a big notebook's read small; the agent drills into specific cells from here.
 function _outline_cell!(io::IO, c::Cell)
-    print(io, "\nid=", rpad(c.id, 16), " [", ReportEngine._kind_token(c.kind), ",",
+    print(io, "\nid=", rpad(c.id, 16), " [", kind_name(c.kind), ",",
           lowercase(string(shown_state(c))), "]")
     tags = sort!(String[string(f) for f in c.flags if f !== :opaque])   # user tags (not the inferred :opaque)
     isempty(tags) || print(io, " {", join(tags, " "), "}")
-    if c.kind == MARKDOWN
+    if is_prose(c.kind)
         # The heading (first non-blank line) plus, when that's a heading, the first body sentence —
         # a touch more context than a bare title.
         head = ""; body = ""
@@ -456,10 +455,10 @@ function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
         idx === nothing && return nothing
         c = nb.report.cells[idx]
         io = IOBuffer()
-        println(io, "Cell '", c.id, "' in '", nb.id, "' — ", ReportEngine._kind_token(c.kind), ", ",
+        println(io, "Cell '", c.id, "' in '", nb.id, "' — ", kind_name(c.kind), ", ",
                 lowercase(string(shown_state(c))),
                 " — position ", idx, "/", length(nb.report.cells), " — v", nb.version)
-        if ReportEngine.is_code_kind(c.kind)
+        if in_dependency_graph(c.kind)
             isempty(c.reads)  || println(io, "reads:    ", join(sort(string.(collect(c.reads))), ", "))
             let defs = cell_definitions(c)
                 isempty(defs)      || println(io, "writes:   ", join(sort(string.(collect(defs))), ", "))
@@ -471,7 +470,7 @@ function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
         end
         isempty(c.flags) || println(io, "flags:    ", join(sort(string.(collect(c.flags))), ", "))
         println(io, "\n--- source ---\n", rstrip(c.source))
-        c.kind == CODE && println(io, "\n--- result ---\n", _cell_result_text(c))
+        evaluates(c.kind) && println(io, "\n--- result ---\n", _cell_result_text(c))
         h = _cell_history(nbdoc(nb), cellid)
         isempty(h) || println(io, "\n--- history (newest first) ---\n", join(h, "\n"))
         return String(take!(io))
@@ -811,7 +810,7 @@ at a time is the DEFAULT, and wanting the result back sooner is not a reason to 
 function _parse_note(nb::LiveNotebook, id::AbstractString)
     src = lock(nb.lock) do
         i = findfirst(c -> c.id == id, nb.report.cells)
-        (i === nothing || nb.report.cells[i].kind != CODE) ? "" : nb.report.cells[i].source
+        (i === nothing || !in_dependency_graph(nb.report.cells[i].kind)) ? "" : nb.report.cells[i].source
     end
     msg = isempty(src) ? "" : ReportEngine.parse_error_text(src)
     return isempty(msg) ? "" : "\n⚠ id=$id does not parse:\n$msg"
@@ -1191,11 +1190,11 @@ flag_reruns(flag::Symbol) = flag in _EVAL_FLAGS
 # code-only. Returns true when the flag should be SKIPPED for this kind.
 function _flag_skips(flag::Symbol, kind::CellKind)
     flag === :collapsed && return false
-    flag === :hidecode  && return !ReportEngine.is_code_kind(kind)
+    flag === :hidecode  && return !evaluates(kind)
     # `:workbook` marks a cell a reader may rewrite when the hub serves the document as a workbook
     # (see server_app.jl). It carries no meaning for a markdown cell, which has no code to run.
-    flag === :workbook  && return !ReportEngine.is_code_kind(kind)
-    return !(kind == CODE || kind == ReportEngine.TOOL)
+    flag === :workbook  && return !evaluates(kind)
+    return !takes_run_tags(kind)
 end
 
 # Set (`value=true`) or clear a single flag across one or many cells in ONE persist. `ids === nothing`

@@ -25,7 +25,7 @@ function _profile_cell(nb::LiveNotebook, cid::AbstractString)
     i = findfirst(c -> c.id == cid, nb.report.cells)
     i === nothing && return nothing
     c = nb.report.cells[i]
-    return c.kind == CODE ? c : nothing
+    return profilable(c.kind) ? c : nothing
 end
 
 # The cell's kernel, or why there is none to profile on. A region with no worker is not started

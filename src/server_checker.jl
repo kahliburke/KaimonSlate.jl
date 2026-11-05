@@ -245,7 +245,7 @@ function _checker_task(nb::LiveNotebook, changed::Vector{String})
     cells = nb.report.cells
     println(io, "Cells, newest state: ", length(cells), " total.")
     for c in cells
-        c.kind == CODE || continue
+        evaluates(c.kind) || continue
         err = c.output !== nothing && c.output.exception !== nothing
         println(io, "  ", c.id, err ? "  [ERRORED]" : "", "  ", first(replace(strip(c.source), '\n' => " ⏎ "), 90))
     end

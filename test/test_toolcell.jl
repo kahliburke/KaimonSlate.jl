@@ -33,17 +33,17 @@ const RE_T = ReportEngine
     @testset "the kind survives every token mapping" begin
         # Three agent-facing surfaces collapsed everything non-markdown to "code", so a tool cell
         # read back as an ordinary code cell and the kind looked like it had not been applied.
-        @test RE_T._kind_token(RE_T.TOOL) == "tool"
-        @test RE_T._kind_token(RE_T.WEB) == "web"
-        @test RE_T._kind_token(RE_T.MARKDOWN) == "md"
-        @test RE_T._kind_token(RE_T.CODE) == "code"
+        @test RE_T.kind_name(RE_T.TOOL) == "tool"
+        @test RE_T.kind_name(RE_T.WEB) == "web"
+        @test RE_T.kind_name(RE_T.MARKDOWN) == "md"
+        @test RE_T.kind_name(RE_T.CODE) == "code"
     end
 
     @testset "a tool cell is code for evaluation purposes" begin
-        @test RE_T.is_code_kind(RE_T.TOOL)
-        @test RE_T.is_code_kind(RE_T.CODE)
-        @test RE_T.is_code_kind(RE_T.WEB)
-        @test !RE_T.is_code_kind(RE_T.MARKDOWN)
+        @test RE_T.evaluates(RE_T.TOOL)
+        @test RE_T.evaluates(RE_T.CODE)
+        @test RE_T.evaluates(RE_T.WEB)
+        @test !RE_T.evaluates(RE_T.MARKDOWN)
     end
 
     @testset "a tool cell is excluded from automatic runs" begin

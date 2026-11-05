@@ -401,7 +401,7 @@ function worker_log(nb::LiveNotebook; maxbytes::Int = 100_000)
     println(io, "# the extension. Open it inside a project dir for a separate gate worker + raw log.\n")
     ran = false
     for c in nb.report.cells
-        c.kind == CODE || continue
+        evaluates(c.kind) || continue
         o = c.output; o === nothing && continue
         ran = true
         println(io, "[$(c.id)]  $(lowercase(string(shown_state(c))))  ·  $(round(o.duration_ms; digits = 1))ms")
@@ -2167,8 +2167,8 @@ function _make_router(h::Hub)
         # posture + presentation defaults into the shell, so the page knows which UI to build
         # before its first paint (a page that painted the authoring chrome and then tore it down
         # would flash every control app mode exists to hide).
-        _html(_inject_app(_inject_imports(read(_ASSET, String), _effective_imports(nb)), h, nb;
-                          preview = _app_preview(req.target)))
+        _html(_inject_kinds(_inject_app(_inject_imports(read(_ASSET, String), _effective_imports(nb)), h, nb;
+                                        preview = _app_preview(req.target))))
     end)
     # A job cell's scheduler options, read and written as a MAP rather than as header tags: half of
     # what a scheduler accepts cannot survive a header (`--licenses=ansys@srv` loses its `=` to the

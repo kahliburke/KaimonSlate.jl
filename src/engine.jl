@@ -44,7 +44,9 @@ export Run, is_running, shown_state
 # Kind predicates, exported alongside the kinds themselves: sibling modules (`ReportRender`,
 # `NotebookServer`) reach the enum by `using ..ReportEngine`, so a helper that is not exported is
 # invisible to exactly the code that classifies cells.
-export is_code_kind, runs_automatically, analyzes_like_code, cell_attrs
+export KindInfo, kind_info, kind_name, kind_from_name, kind_table, is_prose, interpolates, evaluates,
+       runs_automatically, in_dependency_graph, refines_analysis, memoizes, exports_figures, exports_source,
+       profilable, debuggable, takes_run_tags, cell_attrs
 export parse_report, serialize_report, serialize_cells, source_text, cell_definitions
 export standalone!
 
@@ -422,20 +424,12 @@ function _parse_header(rest::AbstractString; format::Int = FORMAT, changes::Vect
             id = tok[4:end]
         elseif startswith(tok, "controls=")
             controls = _parse_controls(tok[10:end])
-        elseif tok == "md" || tok == "markdown"
-            kind = MARKDOWN
-        elseif tok == "web"
-            kind = WEB
-        elseif tok == "job"
-            kind = JOB
         elseif tok == "sweep" && format < 2
             # Format 1 called the job kind `sweep`.
             kind = JOB
             push!(changes, "sweep")
-        elseif tok == "tool"
-            kind = TOOL
-        elseif tok == "code"
-            kind = CODE
+        elseif (k = kind_from_name(tok)) !== nothing
+            kind = k
         else
             push!(tags, Symbol(tok))        # collapsed | hidecode | trace | nocache | <free-form>
         end
@@ -545,7 +539,7 @@ function _append_implicit_cells!(report::Report, lines, used_ids::Set{String})
         trimmed = _strip_blank_edges(body)
         isempty(trimmed) && return
         src = join(trimmed, "\n")
-        kind === MARKDOWN && (src = _unwrap_md(src))
+        is_prose(kind) && (src = _unwrap_md(src))
         id_ = _unique_auto_id(kind, src, length(report.cells) + 1, used_ids)
         push!(used_ids, id_)
         push!(report.cells, Cell(id_, kind, src))
@@ -654,7 +648,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         if !isempty(trimmed) || had_header   # keep explicit cells even when empty
             idx = length(report.cells) + 1
             src = join(trimmed, "\n")
-            kind === MARKDOWN && (src = _unwrap_md(src))   # strip the `@md\"\"\"…\"\"\"` runnable skin, if present
+            is_prose(kind) && (src = _unwrap_md(src))   # strip the `@md\"\"\"…\"\"\"` runnable skin, if present
             # Format 1 ran a campaign in a code cell; it is a job, as a sweep is.
             if format < 2 && kind === CODE && occursin(r"@campaign\b", src)
                 kind = JOB; push!(changes, "campaign")
@@ -988,26 +982,69 @@ end
 
 # ── Serialization ────────────────────────────────────────────────────────────
 
-_kind_token(k::CellKind) = k === MARKDOWN ? "md" : k === WEB ? "web" :
-                           k === TOOL ? "tool" : k === JOB ? "job" : "code"
+# ── Cell kinds ──────────────────────────────────────────────────────────────────────────────────
+# What each kind of cell does, in one place. Code asks a kind for a capability (`evaluates(k)`), never
+# for its identity, so a kind's behaviour is its row here and a new kind is one more row. The page gets
+# the same table (`kind_table`), so the browser asks the same questions.
+struct KindInfo
+    name::String              # its word in a `#%%` header, on the page and in the tools
+    prose::Bool               # rendered as markdown
+    interpolates::Bool        # `{{ }}` values join the graph and re-render
+    evaluates::Bool           # Julia the engine runs: ▶, the run commands, a result, the checker
+    runs_automatically::Bool  # brought up to date without being asked: on open, when restaled
+    dependency_graph::Bool    # its source is analysed for reads and writes: a `needs=` target, a graph node
+    refines_analysis::Bool    # `using`, macro and effect refinements of that analysis
+    memoizes::Bool            # its results are cached, kept and lockable
+    exports_figures::Bool     # its output counts as a figure, chart or asset in exports
+    exports_source::Bool      # its source appears in exports as a code listing
+    profilable::Bool
+    debuggable::Bool
+    run_tags::Bool            # takes `trace`, `nocache`, `volatile` and `resource`
+end
+_kind(name; prose = false, interpolates = false, evaluates = false, runs_automatically = false,
+      dependency_graph = false, refines_analysis = false, memoizes = false, exports_figures = false,
+      exports_source = false, profilable = false, debuggable = false, run_tags = false) =
+    KindInfo(name, prose, interpolates, evaluates, runs_automatically, dependency_graph, refines_analysis,
+             memoizes, exports_figures, exports_source, profilable, debuggable, run_tags)
 
-"""A cell whose source is Julia the engine evaluates. TOOL and JOB join CODE here: everything
-about evaluation, dependencies and capture is identical, and only presentation, WHEN it runs, and
-(for JOB) how long its value takes to arrive differ."""
-is_code_kind(k::CellKind) = k === CODE || k === WEB || k === TOOL || k === JOB
+# A tool cell's source is a recorded call that reaches outside the notebook, so it never runs on the
+# reader's behalf and is not analysed: its bindings should not drive reactivity. A job cell reads and
+# writes like a code cell, so it joins the graph, but its body runs once per unit, often on a cluster,
+# so it is not memoized, profiled, debugged or tagged. A web cell's Julia is its `{{ }}` values.
+const KIND_INFO = Dict{CellKind,KindInfo}(
+    MARKDOWN => _kind("md"; prose = true, interpolates = true, runs_automatically = true),
+    CODE     => _kind("code"; evaluates = true, runs_automatically = true, dependency_graph = true,
+                      refines_analysis = true, memoizes = true, exports_figures = true, exports_source = true,
+                      profilable = true, debuggable = true, run_tags = true),
+    WEB      => _kind("web"; interpolates = true, evaluates = true, runs_automatically = true,
+                      exports_figures = true),
+    TOOL     => _kind("tool"; evaluates = true, exports_source = true, run_tags = true),
+    JOB      => _kind("job"; evaluates = true, runs_automatically = true, dependency_graph = true,
+                      exports_figures = true, exports_source = true),
+)
+const _KIND_BY_NAME = Dict(info.name => k for (k, info) in KIND_INFO)
 
-"""Whether a cell's source is analyzed for reads/writes and joins the dependency graph.
+kind_info(k::CellKind) = KIND_INFO[k]
+kind_name(k::CellKind) = KIND_INFO[k].name
+"The kind a word names (`md`, `markdown`, `code`, …), or `nothing`."
+kind_from_name(s::AbstractString) = s == "markdown" ? MARKDOWN : get(_KIND_BY_NAME, s, nothing)
 
-NOT the same question as `is_code_kind`, which is about EVALUATION. `deps.jl` gates its analysis on
-this: a WEB cell contributes only its `{{ }}` interpolations, and a TOOL cell is deliberately opaque
-(its source is a recorded call, not something whose bindings should drive reactivity). JOB joins
-CODE because a job cell reads its inputs and writes its result like any other cell — being able to
-say "this plot depends on that sweep" is most of the point of it being a cell at all."""
-analyzes_like_code(k::CellKind) = k === CODE || k === JOB
+is_prose(k::CellKind) = KIND_INFO[k].prose
+interpolates(k::CellKind) = KIND_INFO[k].interpolates
+evaluates(k::CellKind) = KIND_INFO[k].evaluates
+runs_automatically(k::CellKind) = KIND_INFO[k].runs_automatically
+in_dependency_graph(k::CellKind) = KIND_INFO[k].dependency_graph
+refines_analysis(k::CellKind) = KIND_INFO[k].refines_analysis
+memoizes(k::CellKind) = KIND_INFO[k].memoizes
+exports_figures(k::CellKind) = KIND_INFO[k].exports_figures
+exports_source(k::CellKind) = KIND_INFO[k].exports_source
+profilable(k::CellKind) = KIND_INFO[k].profilable
+debuggable(k::CellKind) = KIND_INFO[k].debuggable
+takes_run_tags(k::CellKind) = KIND_INFO[k].run_tags
 
-"""Kinds excluded from automatic runs. A tool call reaches outside the notebook, so opening a
-document, or recomputing a stale neighbour, must never fire one on the reader's behalf."""
-runs_automatically(k::CellKind) = k !== TOOL
+"The kind table as the page reads it: kind name → its capabilities."
+kind_table() = Dict(info.name => Dict(String(f) => getfield(info, f) for f in fieldnames(KindInfo) if f !== :name)
+                    for info in values(KIND_INFO))
 
 # Serialize control-strip columns back to the header grammar: single-control
 # columns as bare names, multi-control columns as `[a,b,…]`, columns joined by `,`.
@@ -1015,7 +1052,7 @@ _controls_str(cols) = join((length(col) == 1 ? col[1] : "[" * join(col, ",") * "
 
 "Emit one cell as a header line plus its body."
 function _cell_source(cell::Cell)
-    header = "#%% $(_kind_token(cell.kind)) id=$(cell.id)"
+    header = "#%% $(kind_name(cell.kind)) id=$(cell.id)"
     isempty(cell.controls) || (header *= " controls=" * _controls_str(cell.controls))
     # Known tags first (stable order), then any free-form ones (sorted); internal flags never emit.
     for t in _KNOWN_TAGS; (t in cell.flags) && (header *= " " * string(t)); end
@@ -1027,7 +1064,7 @@ function _cell_source(cell::Cell)
     # (which would break the triple-quoted literal) — that rare cell falls back to the bare form,
     # which still parses in the engine (just not standalone-runnable). `_unwrap_md` reads both.
     # Prose carrying LaTeX takes the `raw` variant so the file stays valid Julia (`_md_needs_raw`).
-    if cell.kind === MARKDOWN && !occursin("\"\"\"", body)
+    if is_prose(cell.kind) && !occursin("\"\"\"", body)
         # A raw literal cannot END with a backslash — the trailing newline we add keeps it off the
         # closing quotes, so only a body that is entirely a backslash could still bite. Guard it.
         kw = (_md_needs_raw(body) && !endswith(body, '\\')) ? " raw" : ""

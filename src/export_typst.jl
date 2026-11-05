@@ -51,7 +51,7 @@ _has_component(o) = o !== nothing && any(ch -> ch.mime == _COMPONENT_MIME, o.dis
 # component-valued interpolation, in order (`_render_chunks`), so the two enumerations agree by
 # construction rather than by a shared counter.
 function _component_slots(c::Cell)
-    c.kind == MARKDOWN || return _has_component(c.output) ? [(0, 0)] : Tuple{Int,Int}[]
+    is_prose(c.kind) || return _has_component(c.output) ? [(0, 0)] : Tuple{Int,Int}[]
     return [(s - 1, i) for (s, i) in enumerate(findall(_has_component, c.interp))]
 end
 
@@ -87,7 +87,7 @@ _raster_only(c::Cell) = c.output !== nothing &&
 
 function _warm_vector_figs!(nb::LiveNotebook, figs::_CompFigs; progress = nothing)
     targets = lock(nb.lock) do
-        [(c.id, _cell_region(c)) for c in nb.report.cells if c.kind == CODE && _raster_only(c)]
+        [(c.id, _cell_region(c)) for c in nb.report.cells if exports_figures(c.kind) && _raster_only(c)]
     end
     for (cid, region) in targets
         k = _running_kernel(nb, region)
@@ -214,7 +214,7 @@ function _manual_heading_numbers(cells)
     num  = r"^(\d+([.)]\s*\d+)*[.):·\-]|\d+\s|(section|part|chapter|appendix)\b)"i
     total = 0; numbered = 0
     for c in cells
-        c.kind == MARKDOWN || continue
+        is_prose(c.kind) || continue
         infence = false
         for ln in split(String(c.source), '\n')
             occursin(r"^\s*(```|~~~)", ln) && (infence = !infence; continue)
@@ -1261,9 +1261,9 @@ function _slide_segments(cells; level::Integer = 2)
         if :notes in c.flags
             push!(notes, c); continue
         end
-        d = c.kind == MARKDOWN ? _first_heading_depth(c.source) : nothing
+        d = is_prose(c.kind) ? _first_heading_depth(c.source) : nothing
         starts = (:slide in c.flags) || (d !== nothing && d <= level)
-        if c.kind == MARKDOWN && length(_split_md_rules(c.source)) > 1
+        if is_prose(c.kind) && length(_split_md_rules(c.source)) > 1
             base = 0                                  # interpolations consumed by the chunks so far
             for (j, part) in enumerate(_split_md_rules(c.source))
                 ((j == 1 && starts) || j > 1) && flush!()
@@ -1329,7 +1329,7 @@ function report_frontmatter(report)
         # content in the body, but its leading H1 is stripped (via `titlecell`) so the title doesn't
         # render twice — once hoisted, once as a body heading.
         for c in cells
-            c.kind == MARKDOWN || continue
+            is_prose(c.kind) || continue
             m = match(r"(?m)^#[ \t]+(.+?)[ \t]*#*$", c.source)
             m === nothing && continue
             title = strip(m.captures[1]); titlecell = c.id; break
@@ -1368,7 +1368,7 @@ end
 # a caption that follows it means it. Feeds `figure_index` only; the social-preview picker has its
 # own predicate (`_cell_has_og_figure`, server_export.jl), which still wants real raster bytes.
 function _cell_has_figure(c::Cell)
-    c.kind == CODE || return false
+    exports_figures(c.kind) || return false
     o = c.output
     o === nothing && return false
     return any(ch -> startswith(ch.mime, "image/"), o.display) || _has_component(o) ||
@@ -1390,7 +1390,7 @@ function figure_index(report)
     lastfig = ""; n = 0
     for c in report.cells
         _cell_has_figure(c) && (lastfig = c.id)
-        (c.kind == MARKDOWN && :caption in c.flags) || continue
+        (is_prose(c.kind) && :caption in c.flags) || continue
         n += 1; numbers[c.id] = n
         forid = _flag_attr(c, "for"); forid = isempty(forid) ? lastfig : forid
         capfor[c.id] = forid
@@ -1662,7 +1662,7 @@ end
 function cited_citation_keys(report)
     keys = Set{String}()
     for c in report.cells
-        c.kind == MARKDOWN || continue
+        is_prose(c.kind) || continue
         :bibliography in c.flags && continue
         infence = false
         for ln in split(first(ReportRender._md_spliced(c.source, c.interp)), '\n')   # spliced prose too
@@ -1684,7 +1684,7 @@ function citation_numbers(report, citekeys)
     # Only a key in the bibliography takes a number: `[@fig:…]` and unknown keys reach `emit` too.
     rec = (key, _sup, _form) -> (k = String(key); (k in citekeys && !(k in seen)) && (push!(order, k); push!(seen, k)); "")
     for c in report.cells
-        (c.kind == MARKDOWN && !(:bibliography in c.flags)) || continue
+        (is_prose(c.kind) && !(:bibliography in c.flags)) || continue
         _rewrite_citations(first(ReportRender._md_spliced(c.source, c.interp)), citekeys; emit = rec)
     end
     return Dict{String,Int}(k => i for (i, k) in enumerate(order))
@@ -1770,7 +1770,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             haskey(rowopen, c.id) &&                  # first cell of a multi-cell row → open the grid
                 print(io, "#grid(columns: (", join(fill("1fr", rowopen[c.id]), ", "), "), column-gutter: 1.2em, align: top,\n")
             inrow && print(io, "[")                   # each row cell is one grid slot
-            if c.kind == MARKDOWN
+            if is_prose(c.kind)
                 # hoisted H1 → not in body, and the interpolations it held come off the front too
                 src, ibase = c.id == fm.titlecell ? _body_after_hoisted_h1(c) : (c.source, 0)
                 md = _md_for_typst(c, src; citekeys = citekeys, figrefs = figidx.labels,
@@ -1823,7 +1823,7 @@ end
 # that builds one inline rather than pushing it through a `Vector{SlideFrag}`.
 function _emit_slide_frag!(io::IO, dir, base, nb, frag::NamedTuple; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all", sizes = nothing, compfigs::_CompFigs = _NO_COMPFIGS)
     c, srcoverride = frag.cell, frag.src     # `frag.src` is a per-frag SOURCE override (String/nothing), NOT the themed-render Bool `override`
-    if c.kind == MARKDOWN
+    if is_prose(c.kind)
         md = _md_for_typst(c, srcoverride === nothing ? c.source : srcoverride; citekeys = citekeys,
                            compfig = _compfig_stager(c, dir, base, compfigs, sizes),
                            interpbase = frag.interpbase)

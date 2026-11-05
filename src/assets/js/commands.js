@@ -155,7 +155,7 @@ R({ id: 'nb.reload', label: 'Reload from disk', group: 'Run', ctx: ['command'],
 
 // Is this a cell `runCell` can actually run? (A `@bind` cell's value comes from its controls.)
 function _runnable(c) {
-  return !!(c && c.kind === 'code' && !(window.hasBinds && window.hasBinds(c)));
+  return !!(c && kindInfo(c.kind).evaluates && !(window.hasBinds && window.hasBinds(c)));
 }
 // Move the selection one cell down — what ⇧⏎ does on a cell with nothing to execute.
 function _advance(id) {
@@ -263,7 +263,7 @@ R({ id: 'cell.dismiss', label: 'Close source overlay / collapse the selection', 
     ctx: ['command'], keys: ['Escape'], hidden: true, soft: true,
     run: _onSel(t => {
       if (window.slateSrcOpen && window.slateSrcOpen(t.id)) {
-        _fn('toggleSource', t.id, t.cell && t.cell.kind === 'md' ? 'markdown' : 'julia');
+        _fn('toggleSource', t.id, t.cell && kindInfo(t.cell.kind).prose ? 'markdown' : 'julia');
         return true;
       }
       if (t.ids.length > 1) { _fn('selectCell', t.id); return true; }

@@ -55,7 +55,7 @@ const _DAG_KINDS = {
 };
 function _dagKind(c) {
   if (c.binds && c.binds.length) return 'control';
-  if (c.kind === 'md') return 'prose';
+  if (kindInfo(c.kind).prose) return 'prose';
   if (/^\s*(using|import)\b/m.test(c.source || '')) return 'setup';
   if ((c.echarts && c.echarts.length) || (c.animations && c.animations.length)) return 'chart';
   if (c.tables && c.tables.length) return 'table';
@@ -95,7 +95,7 @@ function _dagModel(cells) {
   const docIdx = {}; cells.forEach((c, i) => { docIdx[c.id] = i; });   // document order = topo order
   const touched = new Set();
   cells.forEach(c => (c.deps || []).forEach(d => { if (byId[d]) { touched.add(c.id); touched.add(d); } }));
-  let nodes = cells.filter(c => c.kind === 'code' || touched.has(c.id));
+  let nodes = cells.filter(c => kindInfo(c.kind).dependency_graph || touched.has(c.id));
   // Setup cells (using/import) are edge HUBS — nearly every cell depends on them, and those
   // edges aren't lineage: they'd blow one giant rank wide open (and even drawn faint, they
   // stretch the fit window). HIDDEN by default; the 📦 toggle brings them back as an aside
@@ -2386,7 +2386,7 @@ function _dagLinkPreview(id) {
   const di = _dagCtx.m.docIdx;
   const [s0, t0] = (di[a.c.id] ?? 0) < (di[b.c.id] ?? 0) ? [a, b] : [b, a];
   const sc = _dagCtx.m.byId[s0.c.id];
-  const legal = sc && sc.kind === 'code';
+  const legal = sc && kindInfo(sc.kind).dependency_graph;
   if (legal && (_dagCtx.m.byId[t0.c.id].needs || []).includes(s0.c.id)) {
     drop();                                                // linked pair → highlight the REAL edge
     const li = _dagCtx.L.links.findIndex(l => l.manual && l.s === s0.c.id && l.t === t0.c.id);
@@ -2425,7 +2425,7 @@ function _dagLinkClick(id) {
   const di = _dagCtx.m.docIdx;
   const [src, tgt] = (di[a] ?? 0) < (di[id] ?? 0) ? [a, id] : [id, a];
   const sc = _dagCtx.m.byId[src];
-  if (!sc || sc.kind !== 'code') {                        // only a code cell computes anything to wait for
+  if (!sc || !kindInfo(sc.kind).dependency_graph) {       // only a cell in the graph computes anything to wait for
     _dagLinkHint('only a code cell can be a dependency');
     setTimeout(() => _dagLinkMode && _dagLinkHint(_DAG_LINK_BASE), 2500);
     return;

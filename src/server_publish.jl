@@ -472,7 +472,7 @@ function _set_notebook_home!(nb::LiveNotebook, on::Bool)
     changed = false
     if on
         if !any(c -> :home in c.flags, nb.report.cells) && !isempty(nb.report.cells)
-            idx = findfirst(c -> c.kind == MARKDOWN, nb.report.cells)
+            idx = findfirst(c -> is_prose(c.kind), nb.report.cells)
             idx === nothing && (idx = firstindex(nb.report.cells))
             push!(nb.report.cells[idx].flags, :home); changed = true
         end

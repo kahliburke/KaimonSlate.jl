@@ -53,6 +53,17 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         end
     end
 
+    @testset "the serial runner never picks a tool cell" begin
+        # A tool cell read from disk starts stale. The serial runner takes the next stale cell, so a
+        # missing kind check there would fire the recorded call when the notebook opens.
+        r = RE.parse_report("#%% tool id=t\n@tool deploy()\n\n#%% code id=a\nx = 1\n\n#%% md id=m\nText\n")
+        @test NS._next_stale_cell(r).id == "m"            # static prose first
+        r.cells[3].state = RE.FRESH
+        @test NS._next_stale_cell(r).id == "a"            # then code, skipping the tool cell above it
+        r.cells[2].state = RE.FRESH
+        @test NS._next_stale_cell(r) === nothing          # the stale tool cell is never next
+    end
+
     @testset "the batch holds every cell the drain will run" begin
         # `par_blockers` scopes both its safety nets to the batch, so a producer left out imposes no
         # ordering on its readers at all. Selecting only CODE ran a plot BEFORE the sweep it reads —
@@ -92,7 +103,7 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         r = RE.parse_report(src)
         for c in r.cells; c.state = RE.FRESH; end
         for c in r.cells
-            (c.kind !== RE.MARKDOWN && RE.runs_automatically(c.kind)) && RE.restale!(c)
+            (RE.evaluates(c.kind) && RE.runs_automatically(c.kind)) && RE.restale!(c)
         end
         st = Dict(c.id => c.state for c in r.cells)
         @test st["a"] == RE.STALE && st["w"] == RE.STALE && st["s"] == RE.STALE

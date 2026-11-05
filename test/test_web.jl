@@ -32,7 +32,7 @@ end
         @test r.cells[1].id == "hero"
         # A web cell's source is stored verbatim (the runnable @web skin) — no unwrapping, unlike md.
         @test occursin("@web(html", r.cells[1].source)
-        @test RE._kind_token(WEB) == "web"
+        @test RE.kind_name(WEB) == "web"
     end
 
     @testset "serialize round-trips source + kind" begin

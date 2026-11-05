@@ -97,7 +97,7 @@ end
 # makes a no-op capture free, so this is safe to call liberally (every op, every
 # sync, the periodic draft net). Per-cell digests let the UI attribute + recover
 # individual cells. Never throws into the caller.
-_cells_of(report) = [(c.id, c.kind == MARKDOWN ? "md" : "code", c.source) for c in report.cells]
+_cells_of(report) = [(c.id, kind_name(c.kind), c.source) for c in report.cells]
 function _history!(nb::LiveNotebook; source::AbstractString = "browser", kind::AbstractString = "checkpoint",
                    label::AbstractString = "")
     try
@@ -267,7 +267,7 @@ function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractSt
     end
     if get(r, "ok", false) === true                  # env changed → re-run so `using` cells pick it up
         @report_op nb report begin
-            for c in report.cells; c.kind == CODE && c.state != STOPPED && ReportEngine.force_stale!(c); end
+            for c in report.cells; evaluates(c.kind) && c.state != STOPPED && ReportEngine.force_stale!(c); end
         end
         _eval!(nb)                                   # non-blocking; the runner drains the restaled cells
         _refresh_env_meta!(nb)                       # sync the .jl footer (itself round-trips off-lock)
@@ -1080,23 +1080,21 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # Markdown citations → links to the bibliography cell (per bibstyle), and `[@fig:label]` → a live
     # "Figure N" link that jumps to the figure. Skips bibliography/caption cells' own bodies.
     # The same applies to prose a `{{ }}` splices in, which the source does not yet contain.
-    cites = c.kind == MARKDOWN && !(:bibliography in c.flags) && (bibctx !== nothing || !isempty(figrefs))
+    cites = is_prose(c.kind) && !(:bibliography in c.flags) && (bibctx !== nothing || !isempty(figrefs))
     _cite_rw(s) = _rewrite_citations(s, bibctx === nothing ? Set{String}() : Set(keys(bibctx.tips));
                                      emit = bibctx === nothing ? _cite_literal : _cite_link_emit(bibctx),
                                      figrefs = figrefs, figemit = _fig_link_emit)
     _mdsrc = cites ? _cite_rw(c.source) : c.source
     # A relative image path names a file in the project; the page loads it through this notebook's
     # asset route (`_local_media`).
-    c.kind == MARKDOWN && report !== nothing &&
+    is_prose(c.kind) && report !== nothing &&
         (_mdsrc = _local_media(_mdsrc, nbid, String(get(report.meta, "assetbase", ""))))
     d = Dict{String,Any}(
         "id"      => c.id,
         # How recent this payload is. The same cell reaches the browser over two transports, and
         # without this the client can only apply whichever lands last (see `bump_rev!`).
         "rev"     => c.rev,
-        "kind"    => c.kind == MARKDOWN ? "md" : c.kind == WEB ? "web" :
-                     c.kind == ReportEngine.TOOL ? "tool" :
-                     c.kind == ReportEngine.JOB ? "job" : "code",
+        "kind"    => kind_name(c.kind),
         "source"  => c.source,
         # Canonical per-cell content hash (the SAME SHA the history uses) — a version token the browser
         # keys reconcile off, instead of a fuzzy string comparison that can drift.
@@ -1109,23 +1107,23 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "blocked" => c.blocked,
         "blockedHost" => c.blocked_host,
         "blockedAt" => c.blocked_at,
-        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? _asset_srcs(nbid, markdown_html(_mdsrc, c.interp; prose = cites ? _cite_rw : identity)) :
+        "output"  => _externalize_blobs(nbid, is_prose(c.kind) ? _asset_srcs(nbid, markdown_html(_mdsrc, c.interp; prose = cites ? _cite_rw : identity)) :
                         (live_placeholder && _is_live(c) ? _live_output_placeholder() : output_html(c))),
         # How the browser should treat this output's session-boundness (see `_live_output_placeholder`):
         # "render" = the real, live-for-THIS-session thing; "placeholder" = a stand-in awaiting the connect
         # hook's re-render; "" = an ordinary self-contained output. The front end needs the distinction
         # because a full-state payload (which every mutating API call returns) carries the placeholder,
         # and it must not overwrite a live output the page has already booted.
-        "live"    => c.kind == MARKDOWN || !_is_live(c) ? "" : (live_placeholder ? "placeholder" : "render"),
-        "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
-        "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
-        "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
-        "assets" => c.kind == MARKDOWN ? _md_interp_assets(c, nbid) : _asset_specs(c, nbid),
+        "live"    => is_prose(c.kind) || !_is_live(c) ? "" : (live_placeholder ? "placeholder" : "render"),
+        "echarts" => is_prose(c.kind) ? _md_interp_echarts(c) : _echarts_specs(c),
+        "tables" => is_prose(c.kind) ? _md_interp_tables(c) : _table_specs(c),
+        "animations" => is_prose(c.kind) ? Any[] : _animation_specs(c, nbid),
+        "assets" => is_prose(c.kind) ? _md_interp_assets(c, nbid) : _asset_specs(c, nbid),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
         # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor. A name the
         # cell only MUTATES (`prog[] = …`) isn't defined here, so it's excluded (go-to-def lands on the definer).
-        "defs"    => ReportEngine.is_code_kind(c.kind) ?
+        "defs"    => in_dependency_graph(c.kind) ?
                      sort!(String[string(w) for w in cell_definitions(c)]) : String[],
     )
     # A web cell ships its three panes (split from the `@web(...)` source) so the editor can mount a
@@ -1142,7 +1140,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # itself. "cacheable"/"" ⇒ no badge. Drives the cell cache badge + the run-status restore counter
     # (a fast restore burst otherwise reads as a glitch), mirroring the DAG's cache indicator.
     memostate = ""; memowhy = ""    # computed once, shared by the cell badge (here) AND the DAG stats card (below)
-    if ReportEngine.is_code_kind(c.kind)
+    if evaluates(c.kind)
         o = c.output
         rt = o === nothing ? "" : o.memo
         memostate, memowhy = rt in ("restored", "stored", "handle", "uncacheable") ? (rt, o.memo_why) :
@@ -1248,7 +1246,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     end
     # Names this cell defines that are ALSO defined by another cell — a silent footgun in a shared
     # namespace (last-writer-wins). The UI flags it so collisions don't masquerade as dead reactivity.
-    if ReportEngine.is_code_kind(c.kind) && !isempty(multidef)
+    if in_dependency_graph(c.kind) && !isempty(multidef)
         dup = sort!(String[string(w) for w in cell_definitions(c) if string(w) in multidef])
         isempty(dup) || (d["dupdefs"] = dup)
     end
@@ -1264,7 +1262,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     nd = ReportEngine._manual_needs(c.flags)
     isempty(nd) || (d["needs"] = nd)
     # Truncated outputs → append an access bar (open ↗ / editor / download) to the rendered output.
-    if ReportEngine.is_code_kind(c.kind) && c.output !== nothing && !isempty(c.output.overflow)
+    if evaluates(c.kind) && c.output !== nothing && !isempty(c.output.overflow)
         bar = _overflow_bar(nbid, c.output.overflow)
         isempty(bar) || (d["output"] = String(d["output"]) * bar)
     end

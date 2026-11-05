@@ -29,7 +29,7 @@ function collapseOutputs(root) {
 })();
 
 function updateStaleBadge(state) {
-  const n = ((state && state.cells) || []).filter(c => c.kind === 'code' && (c.state === 'stale' || c.state === 'edited')).length;
+  const n = ((state && state.cells) || []).filter(c => kindInfo(c.kind).evaluates && kindInfo(c.kind).runs_automatically && (c.state === 'stale' || c.state === 'edited')).length;
   const b = document.getElementById('runstale');
   // Contextual: only when work is pending AND no run is in flight — during a run the pill shows the
   // status, and "Run stale" would be a no-op you shouldn't click, so hide it until the run settles.
