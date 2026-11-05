@@ -124,10 +124,16 @@ end
 """
     deps_digest(projectfile, exclude = ()) -> UInt
 
-Hash of the direct deps of `projectfile` (its `[deps]` minus the names in `exclude`), each paired
-with the version and `git-tree-sha1` that its resolving manifest (`_manifest_for`) records. A
-workspace member thus reads the shared manifest at the workspace root. `UInt(0)` when there is no
+Hash of every package the notebook's environment loads, as its resolving manifest (`_manifest_for`)
+records them, plus the Julia version. It starts from `projectfile`'s direct `[deps]` minus the names
+in `exclude` (Slate's own worker packages) and follows each entry's `deps` through the manifest, so
+a package reached only through another one counts, and a package only Slate's worker brings doesn't.
+Each entry contributes its name, UUID, version, `git-tree-sha1` and any `path`/`repo-url`/`repo-rev`.
+A workspace member reads the shared manifest at the workspace root. `UInt(0)` when there is no
 manifest or a file does not parse.
+
+This is what lets the memo key change when the code a cached result came from changes outside the
+notebook's own source: an upgrade of a dependency of a dependency, or a new Julia.
 """
 function deps_digest(projectfile::AbstractString, exclude = ())
     try
@@ -135,12 +141,28 @@ function deps_digest(projectfile::AbstractString, exclude = ())
         pdeps = sort!([d for d in keys(get(Pkg.TOML.parsefile(projectfile), "deps", Dict{String,Any}()))
                        if !(d in exclude)])
         mdeps = get(Pkg.TOML.parsefile(man), "deps", Dict{String,Any}())   # format 2: "deps" → name → [entry]
-        h = UInt(0x4d616e00)
-        for dn in pdeps
-            e = get(mdeps, dn, nothing)
-            ver = (e isa Vector && !isempty(e) && e[1] isa AbstractDict) ?
-                  string(get(e[1], "version", ""), get(e[1], "git-tree-sha1", "")) : ""
-            h = hash((dn, ver), h)
+        seen = Set{String}()
+        todo = copy(pdeps)
+        while !isempty(todo)
+            dn = pop!(todo)
+            dn in seen && continue
+            push!(seen, dn)
+            entries = get(mdeps, dn, nothing)
+            entries isa Vector || continue
+            for e in entries
+                e isa AbstractDict || continue
+                d = get(e, "deps", nothing)
+                d isa AbstractVector && append!(todo, String[String(x) for x in d])
+                d isa AbstractDict && append!(todo, String[String(k) for k in keys(d)])
+            end
+        end
+        h = hash(string(VERSION), UInt(0x4d616e00))
+        for dn in sort!(collect(seen))
+            entries = get(mdeps, dn, nothing)
+            sig = entries isa Vector ? sort!([join((get(e, k, "") for k in
+                                              ("uuid", "version", "git-tree-sha1", "path", "repo-url", "repo-rev")), "|")
+                                              for e in entries if e isa AbstractDict]) : String[]
+            h = hash((dn, sig), h)
         end
         return h
     catch; return UInt(0); end
