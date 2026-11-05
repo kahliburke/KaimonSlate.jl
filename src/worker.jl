@@ -2535,10 +2535,69 @@ end
 function __slate_revise()
     isdefined(Main, :Revise) || return String[]
     queue = try; collect(Main.Revise.revision_queue); catch; Tuple[]; end
-    try; Main.Revise.revise(); catch; end
+    # Julia logs the compiled code a method change invalidates: every caller inference linked to a
+    # replaced method, transitively. That is the set of functions whose behaviour the edit can change.
+    invs = ccall(:jl_debug_method_invalidation, Any, (Cint,), 1)
+    try
+        try; Main.Revise.revise(); catch; end
+    finally
+        ccall(:jl_debug_method_invalidation, Any, (Cint,), 0)
+    end
     names = _changed_names(queue)
     _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
-    return names
+    append!(names, _invalidated_names(invs, queue))
+    return unique!(names)
+end
+
+# Functions a show/print method shapes the output of: a change to one changes how values of the types
+# in its signature display, in cells that never call anything that changed.
+const _DISPLAY_FNS = (:show, :print, :display, :repr, :string, :summary, :showerror, :show_default)
+
+# From the invalidation log of a revise pass: the names of the functions whose compiled code it
+# invalidated, limited to the revised packages and the notebook (an edited `show` method also
+# invalidates Base's `repr` and `print`, which would otherwise mark every cell that prints); for a
+# replaced display method, the type names in its signature, and `=name` for each notebook global whose
+# value has one of those types, since the cell that made it shows it.
+function _invalidated_names(invs, queue)
+    roots = Set{Module}()
+    for item in queue
+        try
+            m = get(Base.loaded_modules, item[1].info.id, nothing)
+            m isa Module && push!(roots, m)
+        catch
+        end
+    end
+    ns = _NS[]
+    out = String[]
+    types = Set{Symbol}()
+    for x in invs
+        if x isa Core.MethodInstance && x.def isa Method
+            m = x.def
+            (m.module === ns || Base.moduleroot(m.module) in roots) || continue
+            s = String(m.name)
+            startswith(s, '#') || push!(out, s)
+        elseif x isa Method && x.name in _DISPLAY_FNS
+            sig = Base.unwrap_unionall(x.sig)
+            for P in sig.parameters[2:end]
+                P = Base.unwrap_unionall(P)
+                (P isa DataType && (P.name.module === ns || Base.moduleroot(P.name.module) in roots)) &&
+                    push!(types, nameof(P))
+            end
+        end
+    end
+    for t in types
+        push!(out, String(t))
+    end
+    if !isempty(types)
+        mentions(T) = T isa DataType && (nameof(T) in types || any(mentions, T.parameters))
+        for n in Base.invokelatest(names, ns; all = true, imported = false)
+            Base.invokelatest(isdefinedglobal, ns, n) || continue
+            v = Base.invokelatest(getglobal, ns, n)
+            (v isa Type || v isa Function || v isa Module) && continue
+            mentions(typeof(v)) && push!(out, "=" * String(n))
+        end
+    end
+    return out
 end
 
 # GateTools exposed to the KaimonSlate server.

@@ -3533,19 +3533,12 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
         return
     end
     isempty(names) && return
-    syms = Set{Symbol}(Symbol(n) for n in names)
-    # A cell rarely reads the EXACT edited def — it calls a higher-level function that uses it (a cell
-    # calls `f`, which internally calls the edited `g`). But editing any def in a package
-    # changes the whole project's src digest, so every cell USING that package is affected — and would
-    # recompute on rerun anyway (the memo key folds the src digest). So expand the changed set with all
-    # names PROVIDED by a cell that provides one of the changed names — i.e. the `using <Pkg>` cell's
-    # in-scope exports — turning "one exported name changed" into "everything using that package is stale".
-    lock(nb.lock) do
-        for c in nb.report.cells
-            (isempty(c.provides) || !any(p -> p in syms, c.provides)) && continue
-            union!(syms, c.provides)
-        end
-    end
+    # The worker reports the changed definitions plus every function whose compiled code the edit
+    # invalidated (the callers of a changed method, transitively), so a cell calling `f`, which calls
+    # the edited `g`, matches on `f`. A `=name` entry is a global whose value's display a changed show
+    # method alters: the cells that define or read it re-run.
+    syms = Set{Symbol}(Symbol(n) for n in names if !startswith(n, "="))
+    shown = Set{Symbol}(Symbol(chopprefix(n, "=")) for n in names if startswith(n, "="))
     # A cell reads a CHANGED def if a read matches a changed name directly, OR the read is a
     # QUALIFIED path (`SlateTest.Sub.greet`) whose leaf (`greet`) changed — reads record the
     # whole dotted path, while the worker reports the leaf def-name.
@@ -3560,7 +3553,7 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
         for c in nb.report.cells
             # Both code AND markdown join the reactive graph via `reads` (md from its {{ }}
             # free vars), and eval_stale! re-renders stale md — so include both.
-            _reads_changed(c) || continue
+            (_reads_changed(c) || !isdisjoint(c.writes, shown) || !isdisjoint(c.reads, shown)) || continue
             ReportEngine.restale!(c) && (push!(seed, c.id); push!(staled, c.id))
         end
         isempty(seed) && return
