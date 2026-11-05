@@ -269,6 +269,7 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
         @test plan("let k = 3\n global scaled(x) = k * x\n global kk = k\nend\nt = scaled(2)") == ([1], [:kk, :scaled])
         @test plan("let c = 1\n global h\n function h(x) x + c end\nend") == ([1], [:h])
         @test plan("g = let s = 2; x -> x * s; end") == ([1], [:g])
+        @test plan("ga = function (x)\n  x + 1\nend") == ([1], [:ga])
         # a block that computes would replay to different captured values: not replayed
         @test plan("let k = rand()\n global rk(x) = k * x\nend") == (Int[], Symbol[])
         @test plan("let k = 3\n global m = fit(data)\n global mk(x) = k * x\nend") == (Int[], Symbol[])

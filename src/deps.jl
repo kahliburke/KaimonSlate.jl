@@ -56,7 +56,7 @@ function _is_deferred_def(s)
     (s.head === :function || s.head === :macro) && return true
     s.head === :(=) && length(s.args) == 2 || return false
     s.args[1] isa Expr && s.args[1].head in (:call, :where, :(::)) && return _def_signature(s) !== nothing
-    return s.args[1] isa Symbol && s.args[2] isa Expr && s.args[2].head === :(->)
+    return s.args[1] isa Symbol && s.args[2] isa Expr && s.args[2].head in (:(->), :function)
 end
 
 function _dotted_paths!(out::Set{Symbol}, ex)
@@ -97,7 +97,7 @@ end
 function _function_parts(s)
     d = _unwrap_definition(s)
     d isa Expr || return nothing
-    if d.head === :(=) && d.args[1] isa Symbol && d.args[2] isa Expr && d.args[2].head === :(->)
+    if d.head === :(=) && d.args[1] isa Symbol && d.args[2] isa Expr && d.args[2].head in (:(->), :function)
         a = d.args[2].args[1]
         ps = a isa Expr && a.head === :tuple ? a.args : Any[a]
         return (d.args[1], Union{Symbol,Nothing}[_param_name(p) for p in ps if !(p isa Expr && p.head === :parameters)],
@@ -1029,7 +1029,8 @@ end
 #             (never shipped) and primes at connect (`_prime_namespace!`); memo replays its source.
 #   RESOURCE  a live handle (DB/socket/file) opened FROM data deps → re-run per side but only once its
 #             inputs are staged, so it REPLAYS at read (`_ensure_resource_on!`); never cached.
-#   VOLATILE  non-deterministic (`rand`/`now`) → region: TRANSFER (so both sides agree); never cached.
+#   VOLATILE  tagged `volatile` (non-deterministic: `rand`/`now`; never inferred) → region: TRANSFER (so
+#             both sides agree); never cached.
 #   IMPURE    marked mutating external/shared state → run where its state lives; not cacheable.
 # Order matters: an explicit tag (`resource`/`volatile`) wins over the inferred using/scaffold/theme
 # shape. This is the classifier; each consumer maps a category to its own policy (region ≠ memo axis:

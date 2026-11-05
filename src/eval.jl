@@ -891,7 +891,8 @@ function _memoizable(cell::Cell)
     # drift (the theme regression). RESOURCE — a live DB/socket/file handle that can't/shouldn't be
     # serialized (re-inits cheaply every open, like `:nocache`); its downstream is unlocked separately
     # in `_memo_key`, where a `:resource` upstream is key-transparent, not a purity barrier. VOLATILE —
-    # non-deterministic (`rand`/`now`); a cached value would be a lie.
+    # tagged non-deterministic (`volatile`, set by the author: nothing infers it from `rand`/`now`); a
+    # cached value would be a lie.
     _cell_effect(cell) in (RESOURCE, VOLATILE, IMPURE) && return false
     # A cell that PROVIDES names (`using`/`import`) is memoizable via IMPORT SCAFFOLD: cache its
     # genuinely-defined values (writes ∖ provides) and, on restore, replay just its `using`/`import`
@@ -1188,7 +1189,7 @@ function _memo_status(report::Report, cell::Cell)
     :eval_barrier in cell.flags && return ("uncacheable", "evaluates code at run time (`eval`/`include`)")
     :opaque in cell.flags && return ("uncacheable", "an unresolved `using`/macro barrier — its effects can't be tracked")
     eff = _cell_effect(cell)
-    eff == VOLATILE && return ("uncacheable", "non-deterministic (e.g. `rand`/`time`) — a cached value would be stale")
+    eff == VOLATILE && return ("uncacheable", "tagged `volatile`")
     eff == RESOURCE && return ("uncacheable", "opens a live handle (DB/socket/file) — tag it `resource`; it re-opens each run")
     return ("uncacheable", "not a pure function of its source and inputs")
 end

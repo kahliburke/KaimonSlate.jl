@@ -52,8 +52,9 @@ function _is_definition_stmt(s)
     s.head in (:function, :macro, :struct, :abstract, :primitive) && return true
     if s.head === :(=) && length(s.args) == 2
         _def_signature(s) === nothing || return true
-        # `name = (args) -> body`: the global holds a function the way a named definition does
-        s.args[1] isa Symbol && s.args[2] isa Expr && s.args[2].head === :(->) && return true
+        # `name = (args) -> body` or `name = function (args) … end`: the global holds a function the way
+        # a named definition does
+        s.args[1] isa Symbol && _is_function_value(s.args[2]) && return true
         return false
     end
     if s.head === :const && length(s.args) == 1 && s.args[1] isa Expr && s.args[1].head === :(=)
