@@ -12,8 +12,9 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
-This is 2.0 for the size of the release. Code written for 1.x keeps working. The one compatibility
-note is the notebook format (see Changed): notebooks saved by 2.0 do not open correctly in 1.x.
+This is 2.0 for the size of the release. Code written for 1.x keeps working, and notebooks are
+upgraded automatically: one made with 1.x opens as before and is written in the new notebook format
+when it is next saved. Once saved by 2.0, a notebook does not open correctly in 1.x (see Changed).
 
 ### Added
 
@@ -133,9 +134,11 @@ note is the notebook format (see Changed): notebooks saved by 2.0 do not open co
 
 ### Changed
 
-- **Notebook format 2.** The lifecycle cell is a job: `#%% job` and a `Slate.job` footer. Opening an
-  older notebook asks first, keeps a copy of the file as it was (`name.format1.<time>.jl`), and
-  rewrites it. Notebooks in format 2 do not open correctly in older versions of Slate.
+- **Notebook format 2.** The lifecycle cell is a job: `#%% job` and a `Slate.job` footer. A notebook
+  from 1.x is upgraded automatically: it opens as before and is written in format 2 when next saved.
+  A notebook whose cells the upgrade changes (a `#%% sweep` cell from a pre-release build becomes a
+  job cell) asks first, keeps a copy of the file as it was (`name.format1.<time>.jl`), and rewrites
+  it. Notebooks in format 2 do not open correctly in older versions of Slate.
 - ☰ → 🪵 Worker log opens the worker dock at its Log tab. The separate log panel is gone.
 - A worker's log records read `Info 18:47:51: …`, level then clock, like a sweep task's.
 
