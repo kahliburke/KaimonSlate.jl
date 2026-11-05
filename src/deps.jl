@@ -1049,9 +1049,6 @@ function build_dependencies!(report::Report)
             end
             rec === nothing || (union!(c.reads, rec[1]); union!(c.writes, rec[2]))
         end
-        # Writes seen at run time that the analysis missed (`note_defines!`): a global bound by a
-        # function that evals into the notebook, a macro that couldn't be expanded.
-        union!(c.writes, c.observed)
         # `mutates=` declarations: assert the in-place effects analysis can't see (f!(x) through a
         # call, aliases). Mirrors the native analysis invariant `mutates ⊆ writes`: a mutator IS a
         # writer, so later readers chain off it (ordering + restale), and it's also a READ (ordered
@@ -1061,6 +1058,7 @@ function build_dependencies!(report::Report)
         end
         empty!(c.deps)
     end
+    _apply_observed_writes!(report)        # globals runs were seen to bind that the analysis missed
     _apply_soft_scope!(report)             # a loop's assignment to an existing global updates it
     _apply_function_effects!(report)       # callers take on what the notebook functions they reach do
     _scan_imports!(report)                 # notebook-level `@use` import-map declarations → report.meta
@@ -1368,6 +1366,34 @@ function _value_origin(report::Report, idx::Int, n::Symbol)
     return nothing
 end
 
+# The names some code cell writes by the analysis alone, each with how many cells write it.
+function _static_writers(report::Report)
+    n = Dict{Symbol,Int}()
+    for c in report.cells
+        c.kind == CODE || continue
+        for w in c.writes
+            w in c.observed && continue
+            n[w] = get(n, w, 0) + 1
+        end
+    end
+    return n
+end
+
+# Writes seen at run time that the analysis missed (`note_defines!`): a global bound by a function that
+# evals into the notebook, a macro that couldn't be expanded. Only names no cell writes by the analysis
+# count. Cells in a parallel batch share the namespace, so a run's observation also contains what
+# the cells beside it bound, and those cells' writes are known.
+function _apply_observed_writes!(report::Report)
+    static = _static_writers(report)
+    for c in report.cells
+        c.kind == CODE || continue
+        for n in c.observed
+            haskey(static, n) || push!(c.writes, n)
+        end
+    end
+    return report
+end
+
 """
     note_defines!(report, cell, names) -> Bool
 
@@ -1379,10 +1405,11 @@ the graph needs rebuilding.
 """
 function note_defines!(report::Report, cell::Cell, names)
     cell.kind == CODE || return false
+    static = _static_writers(report)
     new = Symbol[]
     for n in names
         s = Symbol(n)
-        (s in cell.writes || s in cell.observed) && continue
+        (s in cell.writes || s in cell.observed || haskey(static, s)) && continue
         push!(new, s)
     end
     isempty(new) && return false

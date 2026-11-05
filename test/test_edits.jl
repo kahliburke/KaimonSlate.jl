@@ -214,6 +214,21 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
         @test soft("x = 1") == Symbol[]                                     # top level is not soft
     end
 
+    @testset "what a run is seen to bind" begin
+        r = parse_report("#%% code id=a\nx1 = 1\n#%% code id=b\ny1 = 2\n#%% code id=c\nz = w1 + y1\n")
+        build_dependencies!(r)
+        a, b, c = r.cells
+        # Cells in a parallel batch share the namespace, so a's observation can contain b's `y1`: a
+        # name another cell defines by the analysis is never taken as an observed write.
+        @test !RE.note_defines!(r, a, [:x1, :y1])
+        @test RE.note_defines!(r, a, [:w1]) && a.observed == Set([:w1])
+        build_dependencies!(r)
+        @test "a" in c.deps                                  # the reader of w1 now depends on a
+        # A stored observation that names another cell's write is ignored at build time too.
+        push!(b.observed, :x1); build_dependencies!(r)
+        @test !(:x1 in b.writes)
+    end
+
     @testset "what a restore replays" begin
         plan(src) = (p = RE._replay_plan(src); (p.idx, sort!(collect(p.names))))
         # a `begin` opens no scope: its definitions are top-level definitions, its compute is not
