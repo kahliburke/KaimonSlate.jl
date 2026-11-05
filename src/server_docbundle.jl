@@ -326,8 +326,8 @@ end
 """
     doc_bundle_name(nb) -> String
 
-The name a docs page uses for this notebook's bundle (```` ```@slate <name> ````): the notebook's file
-name without `.jl`.
+The name a docs page gives a `@slate` block to show this notebook's bundle: the notebook's file name
+without `.jl`.
 """
 doc_bundle_name(nb::LiveNotebook) = splitext(basename(nb.path))[1]
 
