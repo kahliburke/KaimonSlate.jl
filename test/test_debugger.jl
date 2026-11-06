@@ -547,3 +547,27 @@ end
         @test ji.compiled_modules == saved
     end
 end
+
+# Without Revise the stepper imports JuliaInterpreter on the first start, in a world newer than the
+# tasks serving requests, which keep the world they started in. This process imported it up front,
+# so the case runs in a fresh one, through a request loop started before the import.
+@testset "debugger: a start that loads the interpreter can step" begin
+    code = """
+    using KaimonSlate
+    const RE = KaimonSlate.ReportEngine
+    const PROBE = Module(:Probe)
+    serve(req, res) = for (verb, kw) in req
+        put!(res, verb === :start ? RE.debug_start!(PROBE; kw...) : RE.debug_step!(; kw...))
+    end
+    req, res = Channel{Any}(), Channel{Any}()
+    loaded = any(k -> k.name == "JuliaInterpreter", keys(Base.loaded_modules))
+    errormonitor(@async serve(req, res)); yield()
+    put!(req, (:start, (cell = "c", source = "x = 1\ny = x + 1\n"))); st = take!(res)
+    put!(req, (:step, (mode = "next",))); nx = take!(res)
+    print(loaded, " ", st.error === nothing, " ", nx.error === nothing)
+    """
+    sep = Sys.iswindows() ? ';' : ':'
+    cmd = addenv(`$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`,
+                 "JULIA_LOAD_PATH" => join(Base.load_path(), sep))
+    @test read(cmd, String) == "false true true"
+end

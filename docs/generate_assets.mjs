@@ -68,7 +68,7 @@ function startServer() {
   log(`starting serve_notebook on :${PORT}`)
   const jl = `using KaimonSlate; KaimonSlate.serve_notebook(raw"${join(SHOTDIR, FIRST + '.jl')}"; port=${PORT})`
   // KAIMONSLATE_NO_OPEN: don't pop the system browser (Safari) — the captures run in headless Chromium.
-  const proc = spawn('julia', [`--project=${DOCS}`, '--color=no', '-e', jl],
+  const proc = spawn('julia', [`--project=${DOCS}`, '--startup-file=no', '--color=no', '-e', jl],
     { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, KAIMONSLATE_NO_OPEN: '1' } })
   proc.stdout.on('data', (d) => process.stdout.write(`[server] ${d}`))
   proc.stderr.on('data', (d) => process.stderr.write(`[server] ${d}`))

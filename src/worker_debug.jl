@@ -337,7 +337,7 @@ Publish the paused frame's locals into the namespace and answer which names are 
 Called before a live watch runs, so the watch's generated `let` binds names that exist. A name
 that has gone out of scope simply stops being offered rather than becoming a stale value.
 """
-function debug_frame_locals!()
+function _debug_frame_locals!()
     s = _DEBUG[]
     s === nothing && return String[]
     d = _frame_local_values(s.frame)
@@ -792,7 +792,7 @@ _watches_from(files::Vector{String}, lines::Vector{Int}, exprs::Vector{String}) 
 Replace the watched expressions. Existing traces for an expression that is still watched are kept,
 so adding a second watch mid-run does not discard what the first has already collected.
 """
-function debug_watch!(; watch_files::Vector{String} = String[],
+function _debug_watch!(; watch_files::Vector{String} = String[],
                         watch_lines::Vector{Int} = Int[],
                         watch_exprs::Vector{String} = String[])::DebugState
     s = _DEBUG[]
@@ -808,7 +808,7 @@ function debug_watch!(; watch_files::Vector{String} = String[],
 end
 
 "The samples each watched expression has collected so far — the full series, for plotting."
-debug_traces() = (s = _DEBUG[]; s === nothing ? Dict{String,Vector{Float64}}() : deepcopy(s.traces))
+_debug_traces() = (s = _DEBUG[]; s === nothing ? Dict{String,Vector{Float64}}() : deepcopy(s.traces))
 
 "Per-watch summaries for a state payload, in the order the watches were declared."
 function _trace_summaries(s::_DebugSession)
@@ -943,7 +943,7 @@ Build a frame for the cell's code without running it. Returns the state before
 the first line executes, so the caller sees the starting point rather than a
 result.
 """
-function debug_start!(ns::Module; cell::String = "", source::String = "",
+function _debug_start!(ns::Module; cell::String = "", source::String = "",
                       mark_files::Vector{String} = String[],
                       mark_lines::Vector{Int} = Int[],
                       mark_conds::Vector{String} = String[],
@@ -951,6 +951,11 @@ function debug_start!(ns::Module; cell::String = "", source::String = "",
                       watch_files::Vector{String} = String[],
                       watch_lines::Vector{Int} = Int[],
                       watch_exprs::Vector{String} = String[])::DebugState
+    # Without Revise, the first start imports JuliaInterpreter, in a world newer than this call;
+    # its methods are callable only from a call entered after the import.
+    _JI[] === nothing && (_ji();
+        return Base.invokelatest(debug_start!, ns; cell, source, mark_files, mark_lines, mark_conds,
+                                 mark_enabled, watch_files, watch_lines, watch_exprs))
     debug_stop!()
     ji = _ji()
     ex = try
@@ -997,7 +1002,7 @@ end
 `next` stays in this frame, `into` descends into an interpreted call, `out`
 finishes the current frame, `continue` runs the rest of the cell.
 """
-function debug_step!(; mode::String = "next")::DebugState
+function _debug_step!(; mode::String = "next")::DebugState
     s = _DEBUG[]
     s === nothing && return _error_state("", "no debug session — call start first")
     s.finished && return _state(s)
@@ -1086,7 +1091,7 @@ The calls the line under the cursor still has to make, in the order it will make
 Only the statements from the current position on, since a call already evaluated cannot be
 stepped into. `Core` and the builtins are left out; a lowered line is full of them.
 """
-function debug_into_targets()::Vector{DebugTarget}
+function _debug_into_targets()::Vector{DebugTarget}
     s = _DEBUG[]
     (s === nothing || s.frame === nothing) && return DebugTarget[]
     ji = _ji()
@@ -1143,7 +1148,7 @@ session was running compiled. It holds until `debug_interpret!` drops it, and th
 Reaching the chosen call means running the ones before it. Those run COMPILED whatever the
 interpret set says, or picking the second call on a line would land in the first.
 """
-function debug_into!(; pc::Int = 0, admit::String = "")::DebugState
+function _debug_into!(; pc::Int = 0, admit::String = "")::DebugState
     s = _DEBUG[]
     s === nothing && return _error_state("", "no debug session")
     s.finished && return _state(s)
@@ -1199,7 +1204,7 @@ steps while it is in the set, which is slow and fills the call stack with that m
 
 The cell's own namespace cannot be dropped. It is the code being stepped.
 """
-function debug_interpret!(; admit::String = "", drop::String = "")::DebugState
+function _debug_interpret!(; admit::String = "", drop::String = "")::DebugState
     s = _DEBUG[]
     s === nothing && return _error_state("", "no debug session")
     if !isempty(strip(drop))
@@ -1218,7 +1223,7 @@ function debug_interpret!(; admit::String = "", drop::String = "")::DebugState
 end
 
 "Current state without advancing."
-function debug_frame()::DebugState
+function _debug_frame()::DebugState
     s = _DEBUG[]
     s === nothing && return _error_state("", "no debug session")
     return _state(s)
@@ -1230,7 +1235,7 @@ end
 Evaluate an expression in the paused frame's scope. The frame's locals are bound
 first, so a probe sees exactly what the code sees at that line.
 """
-function debug_eval_expr(; expr::String = "")::DebugEval
+function _debug_eval_expr(; expr::String = "")::DebugEval
     s = _DEBUG[]
     s === nothing && return (ok = false, value = nothing, error = "no debug session")
     s.frame === nothing && return (ok = false, value = nothing, error = "session has finished")
@@ -1248,7 +1253,7 @@ end
 Replace the session's breakpoints with exactly this set, without advancing. Answers
 with the current state so a caller gets one shape back from every verb.
 """
-function debug_marks!(; mark_files::Vector{String} = String[],
+function _debug_marks!(; mark_files::Vector{String} = String[],
                         mark_lines::Vector{Int} = Int[],
                         mark_conds::Vector{String} = String[],
                         mark_enabled::Vector{Bool} = Bool[])::DebugState
@@ -1262,7 +1267,7 @@ function debug_marks!(; mark_files::Vector{String} = String[],
 end
 
 "Abandon the session and put the interpreter's scope and breakpoint list back the way they were."
-function debug_stop!()
+function _debug_stop!()
     s = _DEBUG[]
     s === nothing && return (stopped = false, steps = 0)
     # Watches are process-global breakpoints like marks, so a session disarms what it armed —
@@ -1271,4 +1276,13 @@ function debug_stop!()
     try; _restore_interpreter!(s.saved_compiled); catch; end
     _DEBUG[] = nothing
     return (stopped = true, steps = s.steps)
+end
+
+# The verbs, each entering the latest world. Without Revise, JuliaInterpreter is imported on the
+# first start, after the tasks that serve these requests began; a call made from one of them would
+# not see the interpreter's methods. Each `_debug_*` above is the implementation.
+for f in (:debug_frame_locals!, :debug_watch!, :debug_traces, :debug_start!, :debug_step!,
+          :debug_into_targets, :debug_into!, :debug_interpret!, :debug_frame, :debug_eval_expr,
+          :debug_marks!, :debug_stop!)
+    @eval $f(args...; kw...) = Base.invokelatest($(Symbol(:_, f)), args...; kw...)
 end
