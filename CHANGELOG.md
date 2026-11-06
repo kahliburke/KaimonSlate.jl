@@ -12,6 +12,8 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-05
+
 This is 2.0 for the size of the release. Code written for 1.x keeps working, and notebooks are
 upgraded automatically: one made with 1.x opens as before and is written in the new notebook format
 when it is next saved. Once saved by 2.0, a notebook does not open correctly in 1.x (see Changed).
@@ -1009,7 +1011,10 @@ First release in General.
 - `KAIMONSLATE_PORT` is read at run time rather than captured at precompile time, so a launcher can
   pin the hub port (#6).
 
-[Unreleased]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.11.1...HEAD
+[Unreleased]: https://github.com/kahliburke/KaimonSlate.jl/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.12.1...v2.0.0
+[1.12.1]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.12.0...v1.12.1
+[1.12.0]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.11.1...v1.12.0
 [1.11.1]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.10.0...v1.11.0
 [1.10.0]: https://github.com/kahliburke/KaimonSlate.jl/compare/v1.9.0...v1.10.0
