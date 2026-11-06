@@ -28,6 +28,8 @@ notebook that uses it carries only its name.
 submits to, and what a region runs its workers on when it names one. The list shows each machine as
 ⎈ with its kind and host; **＋ New machine** opens an empty form.
 
+![The Machines tab: a SLURM machine with its login host, the scheduler it reports, the partition menu, the per-job resources, its readiness and its scheduler use](./assets/machines.png)
+
 | Field | What it is |
 | --- | --- |
 | **Name** | What a cell writes as `cluster=…`. A plain identifier, since it goes in a cell header. |
@@ -69,6 +71,8 @@ sent it. Nothing here asks the cluster.
 
 The **Scheduler use** row reads `N in the last minute · N in 10 min · N in the hour · budget B/min`,
 refreshed every 15 seconds. It turns amber when the last minute went over the budget.
+
+![The scheduler-use dashboard: counts against the budget, commands per minute over a day, and the commands by the function that sent them](./assets/sched-use.png)
 
 **Details** opens a dashboard for the host:
 
@@ -233,6 +237,8 @@ notebook open. A cluster nobody is signed in to waits until someone signs in.
 
 ### The sweep card
 
+![A sweep card while its units land: the counts, the rate and the time left, the chart filling in, and the unit grid](./assets/sweep-running.png)
+
 The card shows only the buttons that apply to the sweep's state:
 
 | Button | When | What it does |
@@ -253,6 +259,8 @@ when nothing has finished for a while.
 Pointing at a tile shows its parameters, how long it took, the node it ran on, when it landed, and
 the error of a failed unit (up to three for a tile that holds several). Clicking a tile opens the log
 of the chunk that ran it.
+
+![The same card once the sweep is complete](./assets/sweep-card.png)
 
 **The chart** plots each unit's recorded value (or its `summary`) as units land. When the value has
 several numeric fields, a menu above the chart picks the one it shows.
@@ -435,6 +443,8 @@ scheduler has accepted an extension for that job. Most sites refuse, and then th
 shown. Each notice shows the region, the node, the login host it is reached through, and the
 walltime left.
 
+![The notice before an idle node is released, with its countdown, Extend, Release now and Keep](./assets/alloc-notice.png)
+
 ## Authenticating once
 
 Many production clusters refuse public keys. You get a password and a second factor, and that is the
@@ -461,6 +471,8 @@ opening its own connection.
 Opening a notebook, reconciling a sweep and polling a roster all run against a session that already
 exists and say "not signed in" otherwise. So a dialog never appears because a background poll
 reached the host first.
+
+![The sign-in dialog asking for a one-time code, with the server's own prompt below the field](./assets/ssh-signin.png)
 
 The panel lists **hosts**, not clusters, because wanting a password is a property of the host's sshd:
 a cluster can take keys and a plain remote can demand 2FA. Each row shows what uses it (which
@@ -549,6 +561,8 @@ lists every earlier run with how it ended; click one to read its steps and log. 
 **Prepare** and **Later** before a first run, **Hide** while one runs, and **Prepare again** and
 **Close** after.
 
+![The prepare dialog during a run: the finished steps with what each found, the step running now, and the activity log](./assets/prepare-dialog.png)
+
 ### What a region's sysimage holds
 
 The region decides what its image holds. The list starts as the preparing notebook's registered
@@ -599,6 +613,8 @@ when the node lands, along with anything downstream of it. The region's pill rep
 the duration. Once the node is granted, the bring-up shows on the
 [worker pill and in the worker dock](workers.md): a cold region installs the notebook's whole
 environment on the far side, and the pill shows each step.
+
+![A region cell waiting for its node, with the panel shown when pointing at its chip: what was asked for, how long it has waited, when it should start, and the cluster's free capacity](./assets/region-blocked.png)
 
 The allocation is found by job name, so reopening the notebook attaches to the node it was already
 using instead of queueing for a second one.
@@ -704,6 +720,8 @@ the logger emits.
 The costliest failures leave **no manifest** (an OOM kill, a walltime cut, a prologue that failed),
 so `results.errors` is empty and the only account of what happened is what the job printed.
 **Logs** on a sweep card opens it, and so does clicking a tile in the unit grid.
+
+![The job output viewer: the sweep's log files by job, task and node, and one file's records with level filters and search](./assets/sweep-logs.png)
 
 The viewer holds a window onto a file rather than the whole file, so a job that printed a gigabyte
 opens as fast as one that printed a line. The menu in its header switches to another sweep in the

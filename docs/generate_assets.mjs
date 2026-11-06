@@ -12,7 +12,7 @@
 
 import { chromium } from 'playwright'
 import { spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,10 +25,15 @@ const PORT = Number(process.env.SLATE_DOCS_PORT || 8799)
 const BASE = `http://127.0.0.1:${PORT}`
 const SCALE = 2
 const FIRST = 'demo'                                          // serve_notebook opens this one
-const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables', 'hero', 'app', 'live', 'web', 'profile', 'debug', 'slides'] // opened over /api/open
+const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables', 'hero', 'app', 'live', 'web', 'profile', 'debug', 'slides', 'sweep'] // opened over /api/open
 
 mkdirSync(OUT, { recursive: true })
 const VIDTMP = mkdtempSync(join(tmpdir(), 'slate-vid-'))
+// The hub's own home, so its machines, regions and sweep stores are the ones defined here and not the
+// machine's. `lab` has no scheduler and no host: its sweeps run as processes on this machine.
+const HOME = mkdtempSync(join(tmpdir(), 'slate-docs-home-'))
+mkdirSync(join(HOME, 'config'), { recursive: true })
+writeFileSync(join(HOME, 'config', 'clusters.json'), JSON.stringify([{ name: 'lab', kind: 'exec', procs: '4', root: join(HOME, 'sweeps') }]))
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const log = (...a) => console.log('[assets]', ...a)
@@ -69,7 +74,7 @@ function startServer() {
   const jl = `using KaimonSlate; KaimonSlate.serve_notebook(raw"${join(SHOTDIR, FIRST + '.jl')}"; port=${PORT})`
   // KAIMONSLATE_NO_OPEN: don't pop the system browser (Safari) — the captures run in headless Chromium.
   const proc = spawn('julia', [`--project=${DOCS}`, '--startup-file=no', '--color=no', '-e', jl],
-    { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, KAIMONSLATE_NO_OPEN: '1' } })
+    { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, KAIMONSLATE_NO_OPEN: '1', KAIMONSLATE_HOME: HOME } })
   proc.stdout.on('data', (d) => process.stdout.write(`[server] ${d}`))
   proc.stderr.on('data', (d) => process.stderr.write(`[server] ${d}`))
   return proc
@@ -696,6 +701,205 @@ async function regionShots(browser) {
   } catch (e) { log('! home region shots skipped:', e.message.split('\n')[0]) }
 }
 
+// ── job cells and sweeps ──────────────────────────────────────────────────────────────────────
+// A real sweep on the `lab` machine (processes on this one): submitted from its card, captured while
+// units land, then settled, with its job log open.
+async function sweepShots(browser) {
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await runNotebook(page, 'sweep')
+    const card = '.cell[data-cid="scan"] [data-sweep]'
+    await page.waitForSelector(`${card} [data-sw-do="submit"]`, { timeout: 60_000 })
+    await page.click(`${card} [data-sw-do="submit"]`)
+    await page.getByRole('button', { name: 'Submit', exact: true }).click({ timeout: 5000 })   // the confirmation
+    // The card renders in the output's shadow root, which Playwright's locators reach and a page-side
+    // querySelector does not.
+    const count = page.locator(`${card} [data-sw="count"]`).first()
+    const landed = async (frac) => {
+      for (const end = Date.now() + 300_000; Date.now() < end; await sleep(250)) {
+        const [d, n] = ((await count.textContent().catch(() => '')) || '').split('/').map((x) => parseInt(x))
+        if (n > 0 && d >= n * frac) return
+      }
+      throw new Error('the sweep did not reach ' + Math.round(frac * 100) + '%')
+    }
+    await landed(0.35)
+    await cellShot(page, 'scan', 'sweep-running.png')
+    await landed(1)
+    await sleep(2500)                                       // the settled render and its chart
+    await cellShot(page, 'scan', 'sweep-card.png')
+    try {
+      await page.click(`${card} [data-sw-do="logs"]`)
+      await sleep(2000)
+      await elShot(page, '.logv-bg .logv', 'sweep-logs.png')
+    } catch (e) { log('! sweep-logs skipped:', e.message.split('\n')[0]) }
+    await page.context().close()
+  } catch (e) { log('! sweep shots skipped:', e.message.split('\n')[0]) }
+}
+
+// ── a SLURM machine (synthetic, like the regions above) ────────────────────────────────────────
+// `hpc` exists only in these routes: no host is contacted. The machine, its scheduler, what preparing
+// it found, the commands sent to it, a sign-in prompt, and a region cell waiting for its node.
+const HPC_HOST = 'login.hpc.example.edu'
+const HPC = { name: 'hpc', kind: 'slurm', host: HPC_HOST, root_remote: '/scratch/ada/slate', partition: 'cpu',
+              walltime: '02:00:00', cpus: '8', mem: '16G', options: {} }
+const HPC_SCHED = { kinds: ['slurm'], suggested: 'slurm', versions: { slurm: '24.05.4' },
+  partitions: { slurm: [
+    { name: 'cpu', gpus: '', maxtime: '2-00:00:00', up: true },
+    { name: 'gpu', gpus: '4× A100', maxtime: '1-00:00:00', up: true },
+    { name: 'debug', gpus: '', maxtime: '00:30:00', up: true },
+    { name: 'bigmem', gpus: '', maxtime: '7-00:00:00', up: false }] } }
+function hpcView() {
+  const now = Date.now() / 1000
+  return { ok: true, name: 'hpc', host: HPC_HOST, depot: '/scratch/ada/.julia', key: 'machine_hpc', preparing: null,
+    site: { prepared_at: now - 3 * 3600, facts: { julia: 'Julia 1.12.1' } },
+    tests: [
+      { key: 'damping', project: '/home/ada/damping', node_type: 'cpu', by: 'scan', load_s: 14.2, tested_at: now - 3 * 3600, status: 'ok', changed: false },
+      { key: 'vision', project: '/home/ada/vision', node_type: 'gpu', by: 'gpu', load_s: 41.8, tested_at: now - 26 * 3600, status: 'ok', changed: false,
+        cuda: { functional: 'true' } }] }
+}
+// The prepare dialog mid-run: the machine's steps, then the notebook's packages on a node.
+function hpcPrepare() {
+  const now = Date.now() / 1000
+  const steps = [
+    { step: 'Sign in to ' + HPC_HOST, status: 'ok', secs: 2, detail: 'password and one-time code' },
+    { step: 'Julia on ' + HPC_HOST, status: 'ok', secs: 1, detail: 'Julia 1.12.1 (juliaup)' },
+    { step: 'Read the site', status: 'ok', secs: 4, detail: '128 cores per node · scratch at /scratch · CUDA 12.4 on gpu' },
+    { step: 'Depot', status: 'ok', secs: 1, detail: '/scratch/ada/.julia' },
+    { step: 'Build the environment on a node', status: 'running', started: now - 74 }]
+  const t = (s) => '[' + new Date((now - s) * 1000).toISOString().replace('T', ' ').replace('Z', '') + '] '
+  const log = [t(80) + 'sign in: ' + HPC_HOST + ' (keyboard-interactive)', t(78) + 'julia: 1.12.1 at ~/.juliaup/bin/julia',
+    t(74) + '⟨instantiate on c0412⟩ srun --partition=debug --time=00:30:00 --cpus-per-task=8',
+    t(60) + '⟨instantiate on c0412⟩    Updating registry at `/scratch/ada/.julia/registries/General.toml`',
+    t(40) + '⟨instantiate on c0412⟩  Installing 46 packages',
+    t(12) + '⟨instantiate on c0412⟩ Precompiling packages...', t(3) + '⟨instantiate on c0412⟩   31 of 46 complete']
+  return { ok: true, preparing: { running: true, started: now - 80, now, last_output: now - 3, steps, log } }
+}
+function hpcSchedCalls(hours) {
+  const nowMin = Math.floor(Date.now() / 60000), n = Math.round(hours * 60)
+  const series = Array.from({ length: n }, (_, i) => {
+    const m = nowMin - n + i, busy = i > n * 0.55 && i < n * 0.8
+    return [m * 60000, Math.max(0, Math.round((busy ? 11 : 3) + 3 * Math.sin(i / 7) + (i % 4)))]
+  })
+  const total = series.reduce((a, [, v]) => a + v, 0)
+  const by = [['squeue', 'poll_jobs!', 0.62], ['sacct', 'reconcile!', 0.21], ['sbatch', 'submit!', 0.09],
+              ['sinfo', 'region_load', 0.06], ['scancel', 'cancel!', 0.02]]
+    .map(([command, caller, f]) => ({ command, caller, n: Math.round(total * f) }))
+  return { ok: true, host: HPC_HOST, budget: 30, hours, last_minute: 4, last_10: 37, since_start: 2814,
+           in_window: total, peak: Math.max(...series.map(([, v]) => v)), over: 0, series, by }
+}
+const HPC_LOAD = { ok: true, ask: '1 node · 8 cpus · 16G · gpu:1 · 02:00:00', gpus: '1', partition: 'gpu',
+  queues: [
+    { name: 'gpu', cpus_free: 0, cpus_total: 4096, nodes_free: 0, nodes_total: 32, queued: 214, down: 1, eta: '14 min' },
+    { name: 'cpu', cpus_free: 3712, cpus_total: 32768, nodes_free: 29, nodes_total: 256 },
+    { name: 'debug', cpus_free: 512, cpus_total: 1024, nodes_free: 4, nodes_total: 8 }] }
+async function mockHpc(page, { prompt = null } = {}) {
+  const J = (o) => ({ contentType: 'application/json', body: JSON.stringify(o) })
+  // The hub's facts, plus a session for the cluster and, when asked, a sign-in prompt it is waiting on.
+  const facts = async (r) => {
+    const hub = await r.fetch({ url: BASE + '/api/facts' }).then((x) => x.json()).catch(() => ({}))
+    const set = { ...(hub.set || {}) }
+    set['session/' + HPC_HOST] = { host: HPC_HOST, usedBy: ['machine hpc'], nbs: [], connected: !prompt, opening: !!prompt,
+                                   auth: 'interactive', error: '', asks: ['Password', 'Verification code'] }
+    if (prompt) set['sshauth/a1'] = { id: 'a1', host: HPC_HOST, prompt, secret: true, at: Date.now() / 1000 }
+    return { t: 'facts', full: true, rev: hub.rev || 1, now: Date.now() / 1000, set }
+  }
+  await page.route('**/api/facts', async (r) => r.fulfill(J(await facts(r))))
+  await page.route('**/api/facts/events', async (r) =>
+    r.fulfill({ contentType: 'text/event-stream', body: 'data: ' + JSON.stringify(await facts(r)) + '\n\n' }))
+  await page.route('**/api/clusters', async (r) => {
+    if (r.request().method() !== 'GET') return r.continue()
+    const hub = await (await r.fetch()).json()
+    r.fulfill(J({ ...hub, clusters: [HPC, ...(hub.clusters || [])] }))
+  })
+  await page.route('**/api/scheduler?*', (r) => r.fulfill(J(HPC_SCHED)))
+  await page.route('**/api/machines/view?*', (r) => new URL(r.request().url()).searchParams.get('name') === 'hpc' ? r.fulfill(J(hpcView())) : r.continue())
+  await page.route('**/api/regions/prepare?*', (r) => r.fulfill(J(hpcPrepare())))
+  await page.route('**/api/regions/prepare/reports?*', (r) => r.fulfill(J({ reports: [] })))
+  await page.route('**/api/sched-calls?*', (r) => r.fulfill(J(hpcSchedCalls(+new URL(r.request().url()).searchParams.get('hours') || 24))))
+  await page.route('**/api/region-load?*', (r) => r.fulfill(J(HPC_LOAD)))
+}
+// A notebook whose training cell waits for a GPU node on `hpc`.
+const HPC_NBSTATE = {
+  title: 'vision', path: '/vision.jl', version: 3, hydrating: false,
+  worker: { kind: 'gate', connected: true, port: 9100 }, runLocation: 'local',
+  regions: [{ name: 'gpu', host: HPC_HOST, machine: 'hpc', transport: 'tunnel', warm: 0, base_port: 0, data_root: '',
+              preload: '', sysimage: false, defined: true, status: { ok: true, msg: 'waiting for a node' } }],
+  workers: [{ side: '', host: '', port: 9100, status: 'ok', connected: true, transport: 'local', note: '', stats: mkStats({ cpu: 4, rss: 310 * MB, evals: 2 }) }],
+  cells: [
+    { id: 'intro', kind: 'markdown', state: 'fresh', source: '# Training on the cluster\nData prepared here, the model trained on a GPU node.', deps: [], needs: [], defs: [], tags: [] },
+    { id: 'data', kind: 'code', state: 'fresh', source: 'images = load_images("train/")', deps: [], needs: [], defs: ['images'], tags: [], stats: { ranOn: 'local', total_ms: 820, last_ms: 820, evals: 1 } },
+    { id: 'train', kind: 'code', state: 'blocked', blocked: 'queued', blockedAt: Math.floor(Date.now() / 1000) - 260, blockedHost: HPC_HOST,
+      source: 'model = train(images; epochs = 40)', deps: ['data'], needs: [], defs: ['model'], tags: ['region=gpu'] },
+    { id: 'score', kind: 'code', state: 'stale', source: 'accuracy(model, images)', deps: ['train'], needs: [], defs: [], tags: [] },
+  ],
+  multidefCells: {}, backrefCells: {},
+}
+async function clusterShots(browser) {
+  // The Machines tab: the cluster, what its host reports, readiness and scheduler use.
+  try {
+    const page = await (await newContext(browser, { viewport: { width: 1280, height: 1000 } })).newPage()
+    await mockHpc(page)
+    await page.goto(`${BASE}/#clusters`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('#remotesbg .mchrow:not(.new)', { timeout: 10_000 })
+    await sleep(1500)                                        // the scheduler, the view and the counts
+    await elShot(page, '#remotesbg .rtmodal, #remotesbg > div', 'machines.png')
+    try {
+      await page.getByText('Details', { exact: true }).last().click({ timeout: 3000 })
+      await page.waitForSelector('.sc-card .tm-tiles', { timeout: 6000 })
+      await sleep(1500)                                      // the chart lays out
+      await elShot(page, '.sc-card', 'sched-use.png')
+      await page.click('.sc-card .tm-x')                     // Escape would close the Machines modal too
+    } catch (e) { log('! sched-use skipped:', e.message.split('\n')[0]) }
+    try {
+      await page.locator('#remotesbg .rppprep button', { hasText: 'Details' }).click({ timeout: 3000 })
+      await page.waitForSelector('#prepdialogbg .rpcard .rppprepstep', { timeout: 6000 })
+      await sleep(800)
+      await elShot(page, '#prepdialogbg .rpcard', 'prepare-dialog.png')
+    } catch (e) { log('! prepare-dialog skipped:', e.message.split('\n')[0]) }
+    await page.context().close()
+  } catch (e) { log('! machine shots skipped:', e.message.split('\n')[0]) }
+  // A sign-in prompt: the cluster asks for a one-time code after the password.
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await mockHpc(page, { prompt: '(ada@' + HPC_HOST + ') Verification code: ' })
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('.sshauth', { timeout: 10_000 })
+    await sleep(500)
+    await elShot(page, '.sshauth', 'ssh-signin.png')
+    await page.context().close()
+  } catch (e) { log('! ssh-signin skipped:', e.message.split('\n')[0]) }
+  // A cell waiting for its node, with the cluster's load, and the notice before an idle node goes.
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await mockHpc(page)
+    await page.goto(`${BASE}/n/demo`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('.cell', { timeout: 30_000 })
+    await page.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
+    await page.evaluate((st) => { window.renderAll(st) }, HPC_NBSTATE)
+    await sleep(800)
+    await page.hover('.cell[data-cid="train"] .cregion.blocked')
+    await page.waitForSelector('.blkpanel.on .blkqt', { timeout: 6000 })
+    await sleep(400)
+    const clip = await page.evaluate(() => {
+      const a = document.querySelector('.cell[data-cid="train"]').getBoundingClientRect()
+      const b = document.querySelector('.blkpanel.on').getBoundingClientRect()
+      const x = Math.min(a.left, b.left) - 8, y = a.top - 8
+      return { x, y, width: Math.max(a.right, b.right) - x + 8, height: Math.max(a.bottom, b.bottom) - y + 8 }
+    })
+    await page.screenshot({ path: join(OUT, 'region-blocked.png'), clip }); log('✓ region-blocked.png')
+    await page.mouse.move(0, 0)
+    try {
+      await page.evaluate(() => window.onAllocNotice && window.onAllocNotice({
+        kind: 'idle', region: 'gpu', node: 'g0117', host: 'login.hpc.example.edu', walltime_left: 5400,
+        seconds_left: 240, idle_release: 1800, extendable: true }))
+      await page.waitForSelector('.ancard', { timeout: 5000 })
+      await sleep(500)
+      await elShot(page, '.ancard', 'alloc-notice.png')
+    } catch (e) { log('! alloc-notice skipped:', e.message.split('\n')[0]) }
+    await page.context().close()
+  } catch (e) { log('! region-blocked skipped:', e.message.split('\n')[0]) }
+}
+
 // The Extensions gallery, in the four states the docs need to explain it: the browse grid, a rich
 // detail card, the Installed/Updates views, and an entry with an update pending. Driven off the
 // mocked catalog, so no package is installed and no registry is touched.
@@ -984,6 +1188,8 @@ async function main() {
     if (process.env.SLATE_WEB_ONLY === '1') { await webShots(browser); log('done (web-only)'); return }
     if (process.env.SLATE_SETTINGS_ONLY === '1') { await settingsShots(browser); log('done (settings-only)'); return }
     if (process.env.SLATE_TOOLS_ONLY === '1') { await toolShots(browser); log('done (tools-only)'); return }
+    if (process.env.SLATE_SWEEP_ONLY === '1') { await sweepShots(browser); log('done (sweep-only)'); return }
+    if (process.env.SLATE_CLUSTER_ONLY === '1') { await clusterShots(browser); log('done (cluster-only)'); return }
     if (process.env.SLATE_SLIDES_ONLY === '1') { await slideShots(browser); log('done (slides-only)'); return }
     // All of the above in one server boot, for iterating on the newer groups together.
     if (process.env.SLATE_NEW_ONLY === '1') {
@@ -1237,6 +1443,8 @@ async function main() {
     await liveShots(browser)
     await webShots(browser)
     await toolShots(browser)
+    await sweepShots(browser)
+    await clusterShots(browser)
     await slideShots(browser)
 
     // ── webm: drag the slider → the chart re-renders live (reactivity) ───────────────────────
