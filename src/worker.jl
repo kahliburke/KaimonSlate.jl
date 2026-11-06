@@ -56,7 +56,7 @@ _env_stamp_now() = isempty(ENV_STAMP_FILE[]) ? "" :
 struct EChart
     option::Any
 end
-echart(option::AbstractDict) = EChart(Dict{String,Any}(string(k) => v for (k, v) in option))
+echart(option::AbstractDict) = EChart(_mark_option_replays!(Dict{String,Any}(string(k) => v for (k, v) in option)))
 
 include(joinpath(@__DIR__, "echarts_dsl.jl")) # echart(:line,…)/series DSL (shared with the engine)
 include(joinpath(@__DIR__, "slate_look.jl")) # slate_theme()/use_slate_theme! — shared ECharts/Makie palette
@@ -118,6 +118,7 @@ include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor
 include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
 include(joinpath(@__DIR__, "gpustats.jl"))  # gpu_sample — the GPUs' load from NVML, for the telemetry sample
 include(joinpath(@__DIR__, "sysstats.jl"))  # sys_sample! — host, process and job figures from /proc and the cgroup
+include(joinpath(@__DIR__, "celldefs.jl"))  # what a cell defines, and taking it back (engine + worker)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "pkg_ops.jl"))   # _pkg_apply — package add/update/rm (shared with the engine)
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
@@ -238,6 +239,14 @@ end
 # like a helper that simply does not exist, with nothing to point at.
 const _NS = Ref{Module}()
 
+# The namespace is `Module(:NB)`, whose full name is `Main.NB`, and that is the path a stored value
+# records for a type a cell defined: the raw codec writes the element type as `Main.NB.Sample`, and jls
+# resolves the type's module by the same path. Binding the live namespace there is what lets such a
+# value decode. Done at run time only (`__init__`, a reset, an adopt): an image build can't write into
+# `Main`.
+_bind_ns!(m::Module) = (Base.invokelatest(Core.eval, Main, :(global $(nameof(m)) = $m)); m)
+_set_ns!(m::Module) = (_NS[] = m; _bind_ns!(m))
+
 # ── Capture tools (invoked by the server via synchronous :tool_call) ───────────
 # Each returns a serialization-friendly value that rides back binary in the gate
 # response's `value` field.
@@ -309,7 +318,7 @@ function __init__()
     _LAST_HUB_REQ[] = time()
     _LAST_EVAL_AT[] = time_ns()
     _load_libcrypto!()
-    _NS[] = _new_ns()
+    _set_ns!(_new_ns())               # bound at `Main.NB`, so a value of a type a cell defined decodes
     _PROF_OTHER_TASKS[] = _running_task_ids
 end
 const _MEMO_DIR = Ref{String}("")
@@ -796,14 +805,40 @@ end
 # functions of (source, environment), so replaying reproduces the real run. Returns false if any
 # replay throws (→ caller distrusts the restore and recomputes) — e.g. a `set_theme!(local_var)`
 # referencing a cell-local, or a package that stored fine but won't `using` now (a real env change).
-function _replay_scaffold!(m::Module, source::AbstractString)
-    top = try; Meta.parseall(String(source)); catch; return true; end   # unparseable → nothing to replay
+# Evaluate the type definitions among a cell's replayed statements (structs, abstract and primitive
+# types, `@kwdef` structs). Failures are left to the restore, which then misses and runs the cell.
+function _replay_types!(m::Module, source::AbstractString, cid::AbstractString)
+    plan = _replay_plan(source)
+    fname = Symbol(isempty(cid) ? "none" : "cell:" * cid)
+    for i in plan.idx
+        ln, s = plan.stmts[i]
+        d = _unwrap_definition(s)
+        (d isa Expr && d.head in (:struct, :abstract, :primitive)) || continue
+        try; Base.invokelatest(Core.eval, m, Expr(:toplevel, LineNumberNode(ln.line, fname), s))
+        catch e; @debug "slate memo: type replay before decode failed" cell = cid exception = e; end
+    end
+    return nothing
+end
+
+function _replay_scaffold!(m::Module, source::AbstractString; cid::AbstractString = "")
+    fname = isempty(cid) ? "none" : "cell:" * cid
+    top = try; Meta.parseall(String(source); filename = fname); catch; return true; end   # unparseable → nothing to replay
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
     for s in stmts                                   # top-level using/import — bring names into scope
         s isa LineNumberNode && continue
         (s isa Expr && s.head in (:using, :import)) || continue
         try; Base.invokelatest(Core.eval, m, s)
         catch e; @info "slate memo: import replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
+    end
+    # The statements that re-establish the cell's definitions (`_replay_plan`): the entry stores none of
+    # the names they bind (see `_eval_one`), so they run again here, in source order. Each carries a line
+    # node naming this cell's `cell:<id>` file, the tag that later removes the methods it defines.
+    isempty(cid) || _redefine_cell!(m, cid, source)
+    plan = _replay_plan(source)
+    for i in plan.idx
+        ln, s = plan.stmts[i]
+        try; Base.invokelatest(Core.eval, m, Expr(:toplevel, LineNumberNode(ln.line, Symbol(fname)), s))
+        catch e; @info "slate memo: definition replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
     end
     for s in stmts                                   # top-level `@bind name W(…)` — RE-REGISTER the widget
         s isa LineNumberNode && continue             # (assign the control global) without running the cell's
@@ -979,6 +1014,11 @@ function _eval_one(source::String, filename::String, memo_key::String,
                    memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[];
                    memo_restore_only::Bool = false, slate_ctx = nothing)
     cid = replace(filename, r"^cell:" => "")
+    # What the cell's top-level definitions bind is re-established from source on restore
+    # (`_replay_scaffold!`), so the entry stores only the rest. A function value can't be stored
+    # faithfully, and this is what lets a cell that defines helpers beside an expensive result cache.
+    defs = _definition_names(source)
+    store_names = isempty(defs) ? memo_names : String[n for n in memo_names if !(Symbol(n) in defs)]
     # The decision record for this eval (see _MEMO_TRACE): filled in as the memo layer acts,
     # committed at every exit — `slate.memo_trace` reads it back.
     tr = Dict{String,Any}("srckey" => memo_key)
@@ -991,7 +1031,11 @@ function _eval_one(source::String, filename::String, memo_key::String,
     if !isempty(memo_key) && !memo_force
         # `memo_names` = the cell's declared writes; the restore needs them to reject an entry that
         # would define none of them (see `_memo_restore`).
-        w = _memo_restore(memo_key; unread = memo_unread, writes = memo_names, trace = tr)
+        # A stored value of a type this cell defines decodes only once the type exists, so the cell's
+        # type definitions run first. On a miss the cell runs anyway, and an unchanged struct
+        # definition evaluates as a no-op.
+        _replay_types!(_NS[], source, cid)
+        w = _memo_restore(memo_key; unread = memo_unread, writes = store_names, trace = tr)
         # A restored cell is memoized WITHOUT running its source, so its cheap global side effects —
         # `using X` (a provider's imported names) and `set_theme!` (the ambient Makie theme) — are
         # replayed here so any downstream cell that later re-runs sees the right scope + theme. A
@@ -1004,7 +1048,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
         # stores its output under the key of the wrong value.
         if w !== nothing
             sink = task_local_storage(_BIND_SINK_KEY, NamedTuple[])
-            replayed = try; _replay_scaffold!(_NS[], source)
+            replayed = try; _replay_scaffold!(_NS[], source; cid = cid)
                        finally; delete!(task_local_storage(), _BIND_SINK_KEY); end
             if replayed
                 @info "slate memo: restored (no recompute)" cell = cid
@@ -1051,7 +1095,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # the serialize cost).
     if !isempty(memo_key) && r.exception === nothing &&
        (memo_always || (memo_threshold > 0 && r.duration_ms >= memo_threshold))
-        if _memo_store(memo_key, memo_names, r; unread = memo_unread, safe = memo_safe, trace = tr)
+        if _memo_store(memo_key, store_names, r; unread = memo_unread, safe = memo_safe, trace = tr)
             @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
             tr["action"] = "stored"; tr["ms"] = round(r.duration_ms; digits = 1)
             _trace_commit!(cid, tr)
@@ -1226,7 +1270,7 @@ end
 
 "Discard the namespace (full rebuild). Fire the outgoing namespace's per-cell cleanups first so a live
 resource it holds (a Bonito `Session`) is released rather than orphaned in the discarded module."
-__slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _run_all_cleanups!(_NS[]); _NS[] = _new_ns(); true)
+__slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _run_all_cleanups!(_NS[]); _set_ns!(_new_ns()); true)
 
 "Run the given cells' `slate_on_cleanup` callbacks in the warm namespace — deleted-cell teardown, driven
 by the server (`run_cleanups!` → this) when `update_source!` detects removed cells. Unknown ids no-op."
@@ -1240,6 +1284,19 @@ function __slate_cleanup_cells(; ids::Vector = Any[])
     end
     n > 0 && @info "slate: ran cleanups for deleted cells" count = n
     return n
+end
+
+"Take back what no cell defines any more: delete the methods the removed `cells` defined, and remove the
+global `names` no cell writes now (`forget!` on the hub). Returns the names actually removed."
+function __slate_forget(; cells::Vector = Any[], names::Vector = Any[])
+    m = _NS[]
+    nm = 0
+    for id in cells
+        nm += _forget_cell!(m, String(id))
+    end
+    gone = _unbind_globals!(m, Symbol[Symbol(n) for n in names])
+    (nm > 0 || !isempty(gone)) && @info "slate: removed deleted definitions" methods = nm globals = gone
+    return String[String(g) for g in gone]
 end
 
 "Encode the namespace global `name` into this worker's content-addressed store and return its
@@ -1779,7 +1836,7 @@ function __slate_adopt(parent::String; datadir::AbstractString = "", nbdir::Abst
         ENV["KAIMONSLATE_DATADIR"] = String(datadir)
     end
     _run_all_cleanups!(_NS[])   # release the prior namespace's live per-cell resources before rebuild
-    _NS[] = _new_ns()
+    _set_ns!(_new_ns())
     @info "slate: adopted by a notebook" parent = parent datadir = datadir
     return true
 end
@@ -2309,11 +2366,49 @@ const _SRC_DEFS = Dict{String,Dict{String,UInt64}}()
 # watcher. Both rehash the Dict, so they need to be serialised. The file PARSE stays outside the
 # lock — it is the slow part, and the worst a concurrent parse costs is doing it twice.
 const _SRC_DEFS_LOCK = ReentrantLock()
+# path → (def-name → names its source mentions): the package's call graph, for `_src_reaching`.
+# Guarded by `_SRC_DEFS_LOCK` alongside `_SRC_DEFS`.
+const _SRC_REFS = Dict{String,Dict{String,Set{String}}}()
 _file_path(pd, rpath) = try; joinpath(pd.info.basedir, String(rpath)); catch; String(rpath); end
 
 # (def-name → body-hash) for one source file — `file_defs` in defname.jl, alongside the extractor
 # it is built on and the tree digest that shares it.
 const _file_defs = file_defs
+
+function _file_refs(path::AbstractString)
+    d = Dict{String,Set{String}}()
+    src = try; read(path, String); catch; return d; end
+    top = try; Meta.parseall(src); catch; return d; end
+    return _collect_refs!(d, top)
+end
+
+# The tracked definitions that reach a changed name through the package source, transitively. The
+# compiler's invalidations only cover code that has been compiled in this worker; a cell restored
+# from the cache never ran its calls, and this is what still finds it.
+function _src_reaching(changed, queue)
+    # Only the packages this pass revised: names are matched bare, and across every tracked package
+    # an edit's names would run into unrelated code that happens to share them.
+    paths = Set{String}()
+    for item in queue
+        try
+            pd = item[1]
+            for rpath in pd.info.files
+                push!(paths, _file_path(pd, rpath))
+            end
+        catch
+        end
+    end
+    refs = Dict{String,Set{String}}()
+    lock(_SRC_DEFS_LOCK) do
+        for path in paths
+            d = get(_SRC_REFS, path, nothing); d === nothing && continue
+            for (k, v) in d
+                union!(get!(Set{String}, refs, k), v)
+            end
+        end
+    end
+    return collect(_reaching_defs(refs, changed))
+end
 
 # Baseline the defs of any tracked file we haven't seen yet, WITHOUT reporting — so the first
 # edit diffs against a real snapshot. Idempotent (only fills missing keys), so it's safe to run
@@ -2327,8 +2422,10 @@ function _seed_new_src_defs!()
             path = _file_path(pd, rpath)
             lock(_SRC_DEFS_LOCK) do; haskey(_SRC_DEFS, path); end && continue
             defs = _file_defs(path)                      # parsed off the lock
+            refs = _file_refs(path)
             lock(_SRC_DEFS_LOCK) do
                 get!(_SRC_DEFS, path, defs)              # a racing seeder may have won; either is fine
+                get!(_SRC_REFS, path, refs)
             end
         end
     catch
@@ -2357,7 +2454,8 @@ function _changed_names(queue)
                     haskey(newdefs, nm) || push!(changed, nm)
                 end
             end
-            lock(_SRC_DEFS_LOCK) do; _SRC_DEFS[path] = newdefs; end
+            newrefs = _file_refs(path)
+            lock(_SRC_DEFS_LOCK) do; _SRC_DEFS[path] = newdefs; _SRC_REFS[path] = newrefs; end
         catch
         end
     end
@@ -2566,8 +2664,7 @@ function _apply_revisions!()
         (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || return nothing
         queue = collect(R.revision_queue)
         before = _qe_keys(R)
-        thrown = nothing
-        try; R.revise(); catch e; thrown = e; end
+        invs, thrown = _logged_revise(R)
         emsg = _revise_error_msg(R, thrown, before)
         if !isempty(emsg)
             @warn "slate hot-reload: revise error" error = emsg
@@ -2579,6 +2676,7 @@ function _apply_revisions!()
             _LAST_SRC_ERR[] = ""
             names = _changed_names(queue)
             _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
+            append!(names, _src_reaching(names, queue)); append!(names, _invalidated_names(invs, queue)); unique!(names)
             @info "slate hot-reload: revised" files = length(queue) changed = names
             isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
             _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
@@ -2624,10 +2722,76 @@ end
 function __slate_revise()
     isdefined(Main, :Revise) || return String[]
     queue = try; collect(Main.Revise.revision_queue); catch; Tuple[]; end
-    try; Main.Revise.revise(); catch; end
+    invs, _ = _logged_revise(Main.Revise)
     names = _changed_names(queue)
     _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
-    return names
+    append!(names, _src_reaching(names, queue)); append!(names, _invalidated_names(invs, queue))
+    return unique!(names)
+end
+
+# Run a Revise pass with Julia's invalidation log on. The log lists the compiled code a method change
+# invalidates: every caller inference linked to a replaced method, transitively, which is the set of
+# functions whose behaviour the edit can change. Returns `(log, error)`.
+function _logged_revise(R)
+    invs = ccall(:jl_debug_method_invalidation, Any, (Cint,), 1)
+    thrown = nothing
+    try
+        try; R.revise(); catch e; thrown = e; end
+    finally
+        ccall(:jl_debug_method_invalidation, Any, (Cint,), 0)
+    end
+    return invs, thrown
+end
+
+# Functions a show/print method shapes the output of: a change to one changes how values of the types
+# in its signature display, in cells that never call anything that changed.
+const _DISPLAY_FNS = (:show, :print, :display, :repr, :string, :summary, :showerror, :show_default)
+
+# From the invalidation log of a revise pass: the names of the functions whose compiled code it
+# invalidated, limited to the revised packages and the notebook (an edited `show` method also
+# invalidates Base's `repr` and `print`, which would otherwise mark every cell that prints); for a
+# replaced display method, the type names in its signature, and `=name` for each notebook global whose
+# value has one of those types, since the cell that made it shows it.
+function _invalidated_names(invs, queue)
+    roots = Set{Module}()
+    for item in queue
+        try
+            m = get(Base.loaded_modules, item[1].info.id, nothing)
+            m isa Module && push!(roots, m)
+        catch
+        end
+    end
+    ns = _NS[]
+    out = String[]
+    types = Set{Symbol}()
+    for x in invs
+        if x isa Core.MethodInstance && x.def isa Method
+            m = x.def
+            (m.module === ns || Base.moduleroot(m.module) in roots) || continue
+            s = String(m.name)
+            startswith(s, '#') || push!(out, s)
+        elseif x isa Method && x.name in _DISPLAY_FNS
+            sig = Base.unwrap_unionall(x.sig)
+            for P in sig.parameters[2:end]
+                P = Base.unwrap_unionall(P)
+                (P isa DataType && (P.name.module === ns || Base.moduleroot(P.name.module) in roots)) &&
+                    push!(types, nameof(P))
+            end
+        end
+    end
+    for t in types
+        push!(out, String(t))
+    end
+    if !isempty(types)
+        mentions(T) = T isa DataType && (nameof(T) in types || any(mentions, T.parameters))
+        for n in Base.invokelatest(names, ns; all = true, imported = false)
+            Base.invokelatest(isdefinedglobal, ns, n) || continue
+            v = Base.invokelatest(getglobal, ns, n)
+            (v isa Type || v isa Function || v isa Module) && continue
+            mentions(typeof(v)) && push!(out, "=" * String(n))
+        end
+    end
+    return out
 end
 
 # GateTools exposed to the KaimonSlate server.
@@ -2875,6 +3039,7 @@ function tools()
         KaimonGate.GateTool("__slate_sshop_reply", __slate_sshop_reply),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_cleanup_cells", __slate_cleanup_cells),
+        KaimonGate.GateTool("__slate_forget", __slate_forget),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
         # Cell debugger. Verbs ride this same RPC path, so they reach a remote

@@ -1926,6 +1926,29 @@ Base.show(io::IO, ::MIME"text/markdown", p::_MdProse) = print(io, p.text)
     @test KaimonSlate.ReportRender._markdown_output(n) === nothing && occursin("ival", KaimonSlate.ReportRender._md_html("{{ x }}", [n]))
 end
 
+# Prose dollar amounts are not math, on screen or in print. KaTeX's auto-render pairs any two `$` in
+# one text node, so a prose `$` goes out in its own element.
+@testset "prose dollars stay prose" begin
+    seg = KaimonSlate.ReportRender._md_segments
+    kinds(s) = [k for (k, _) in seg(s)]
+    @test :math ∉ kinds("it cost \$5 and \$10")
+    @test :math ∉ kinds("\$100k–\$750k per award")          # closing `$` before a digit
+    @test :math ∉ kinds(raw"escaped \$x\$ stays text")
+    @test seg("area \$a^2\$ here")[2] == (:math => "\$a^2\$")
+    @test seg("code `\$x\$` here")[2] == (:code => "`\$x\$`")
+    @test count(==(:dollar), kinds("from \$5 to \$10")) == 2
+
+    h = KaimonSlate.ReportRender._md_html("up to \$750k, then \$15M; math \$x^2\$.\n")
+    @test count("<span class=\"dollar\">\$</span>", h) == 2
+    @test occursin(raw"$x^2$", h)
+    @test !occursin("xslatedollarx", h)
+    h = KaimonSlate.ReportRender._md_html("<a title=\"\$5\">link</a> for \$5\n")
+    @test occursin("title=\"\$5\"", h)                     # bare inside a tag
+
+    f = NS._normalize_math_delims
+    @test f("from \$100k–\$750k and \\(z\\)") == raw"from \$100k–\$750k and $z$"
+end
+
 # ── PDF export: admonitions ───────────────────────────────────────────────────────────────────────
 # `cmarker` (the Typst markdown renderer) is plain CommonMark and has no `!!!` rule, so the marker
 # would print literally and the four-space body would typeset as a CODE BLOCK. `_admonitions_to_quotes`
@@ -1989,7 +2012,7 @@ end
     @test NS._comp_fig_width_pct(Vector{UInt8}(codeunits("<svg></svg>")), "svg") === nothing
     @test NS._comp_fig_width_pct(svg(640), "png") === nothing   # a raster has no intrinsic column
 
-    # ── the html2canvas rescue covers BOTH HTML output flavours ──
+    # ── the DOM-raster rescue covers BOTH HTML output flavours ──
     hc = _RE.parse_report("#%% code id=h\n1\n").cells[end]
     hc.output = out([_RE.MimeChunk("application/vnd.kaimonslate.html+html", Vector{UInt8}("<b>x</b>"))])
     @test NS._has_html_output(hc)                            # `html_fragment`, not just `text/html`

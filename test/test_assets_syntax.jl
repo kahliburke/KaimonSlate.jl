@@ -74,13 +74,17 @@ end
         NS = KaimonSlate.NotebookServer
         # Each is a complete script the export writes into a <script> tag of its own.
         blobs = [(name, getfield(NS, name)) for name in
-                 (:_EXPORT_TABLE_JS, :_EXPORT_TABLE_REPLAY_JS, :_EXPORT_MEDIA_JS,
-                  :_EXPORT_ECHARTS_THEME_JS, :_EXPORT_CHART_RUNTIME_JS)
+                 (:_EXPORT_TABLE_JS, :_EXPORT_TABLE_REPLAY_JS, :_EXPORT_PROSE_REPLAY_JS, :_EXPORT_MEDIA_JS,
+                  :_EXPORT_ECHARTS_THEME_JS, :_EXPORT_CHART_RUNTIME_JS, :_EXPORT_CHART_BOOT_JS,
+                  :_EXPORT_COMPONENT_MOUNT_JS)
                  if isdefined(NS, name)]
         # The asset runtime is composed (generated dtype table + body), so check what actually ships:
         # this also proves the emitted `window.__SLATE_DTYPES` is syntactically valid JS.
         push!(blobs, (:_export_asset_js, NS._export_asset_js()))
-        @test length(blobs) == 6          # a renamed constant must fail loudly, not silently skip
+        # The docs embed runtime is assembled from all of the above plus `slate-embed.js` inside one
+        # closure; a name the element relies on that only existed as a page global breaks it here.
+        push!(blobs, (:_embed_runtime_js, NS._embed_runtime_js()))
+        @test length(blobs) == 10         # a renamed constant must fail loudly, not silently skip
         bad = String[]
         dir = mktempdir()
         for (name, src) in blobs
@@ -127,4 +131,24 @@ end
     @test occursin("confirmDark", src)
     @test !occursin(r"(?<!Dark)\bwindow\.confirm\(", src)
     @test !occursin(r"(?<!Dark)\bwindow\.alert\(", src)
+end
+
+# A tooltip template's `{@[n]}` / `{@name}` are filled by the page, since ECharts leaves them as
+# written in tooltips. Run through node against the export runtime that ships them.
+@testset "tooltip templates fill a data item's dimensions" begin
+    node = Sys.which("node")
+    if node === nothing
+        @info "node not found — skipping the tooltip template check"
+        @test true
+    else
+        js = KaimonSlate.NotebookServer._EXPORT_MODE_JS * """
+        var o = _slateTipTemplates({tooltip: {trigger: 'item', formatter: 'row {@[1]}, {@crop} <b>{a}</b>: {@[2]}'},
+                                    series: [{name: 'Grape', data: []}]});
+        var one = o.tooltip.formatter({value: ['3', '5', 1.5, 'wheat'], dimensionNames: ['x', 'y', 'v', 'crop'], seriesName: 'A<B'});
+        var plain = _slateTipTemplates({tooltip: {formatter: '{a}: {c}'}});
+        console.log(JSON.stringify([one, typeof plain.tooltip.formatter]));
+        """
+        tmp = joinpath(mktempdir(), "tip.js"); write(tmp, js)
+        @test strip(read(`$node $tmp`, String)) == "[\"row 5, wheat <b>A&lt;B</b>: 1.5\",\"string\"]"
+    end
 end

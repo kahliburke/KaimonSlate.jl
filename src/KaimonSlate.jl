@@ -53,10 +53,12 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       acquire_floor!, release_floor!, floor_status,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       request_live_eval, export_standalone, export_pdf, expand,
-    export_app, app_defaults
+    export_app, app_defaults, export_doc_bundle, render_doc_bundle_inprocess,
+    doc_bundle_key, doc_bundle_inputs
 
 export serve_notebook, LiveNotebook, expand, standalone!, register_extension
 export export_app, app_defaults
+export export_doc_bundle, render_doc_bundle, doc_bundle_key, doc_bundle_inputs
 
 # ── Auto-registration as a Kaimon extension ───────────────────────────────────
 # The intended path is zero-setup: install KaimonSlate, and if Kaimon is present on
@@ -3639,6 +3641,40 @@ function create_tools(GateTool::Type)
     end
 
     """
+        export_docs(notebook, dir="") -> String
+
+    Write this notebook as a **doc bundle** for a Documenter / DocumenterVitepress site that uses the
+    DocumenterSlate plugin, from its current live state (outputs as they stand; run it first if cells
+    are stale). `@replay` controls are swept, so they stay interactive on the docs page.
+
+    `dir` is where the bundle goes; relative paths resolve against the notebook's project. Empty →
+    `docs/slate/<notebook>` under the nearest directory whose `docs/` has a `make.jl`. The folder's
+    name is what a docs page calls the notebook: ```` ```@slate <name> ```` places the whole
+    notebook (prose as the page's markdown, code as code blocks, outputs live), and
+    ```` ```@slate <name> <cell> ```` one cell. Commit the folder with the docs.
+    """
+    function export_docs_tool(notebook::String; dir::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        NS = NotebookServer
+        d = strip(expanduser(dir))
+        dest = isempty(d) ? NS.doc_bundle_default_dir(nb) : isabspath(d) ? d :
+               joinpath((r = NS._proj_root(nb); isempty(r) ? dirname(abspath(nb.path)) : r), d)
+        man = try
+            NS.export_doc_bundle(nb, normpath(dest); render_info = Dict{String,Any}("via" => "agent"))
+        catch e
+            return "Docs export failed: " * sprint(showerror, e)
+        end
+        name = basename(normpath(dest))
+        withoutput = count(c -> get(c, "output", false) === true, man["cells"])
+        errs = man["rendered"]["errors"]
+        return string("Wrote the doc bundle → ", normpath(dest), "\n  ", withoutput, " cells with output, ",
+                      length(man["replays"]), " replay sweep(s)",
+                      isempty(errs) ? "" : string("\n  cells with errors (their error output is bundled): ", join(errs, ", ")),
+                      "\n\nIn a docs page:  ```@slate ", name, "```  (whole notebook)  or  ```@slate ", name,
+                      " <cell>```  (one cell).")
+    end
+
+    """
         pkg(notebook; op="list", name="") -> String
 
     View or manage THIS NOTEBOOK's own package dependencies — the packages it adds on top of its
@@ -4235,6 +4271,7 @@ function create_tools(GateTool::Type)
         GateTool("eval_js", eval_js),
         GateTool("export_pdf", export_pdf_tool; timeout_ms = RENDER_MS),
         GateTool("export_app", export_app_tool; timeout_ms = DEPLOY_MS),
+        GateTool("export_docs", export_docs_tool; timeout_ms = DEPLOY_MS),
         GateTool("index_docs", index_docs; timeout_ms = RENDER_MS),
         GateTool("search_docs", search_docs_tool),
         GateTool("pkg", pkg; timeout_ms = DEPLOY_MS),
@@ -4380,6 +4417,7 @@ function on_event(channel, data, session_name)
 end
 
 include("embedded_kaimon.jl")   # `slate --ai`: an isolated headless Kaimon host (compute gate + MCP)
+include("docbundle_render.jl") # render doc bundles through a hub (a running one, or an embedded host started for it)
 include("app.jl")   # the `slate` Pkg-app entrypoint + Tachikoma status TUI
 
 """

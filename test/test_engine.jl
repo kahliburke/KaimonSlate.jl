@@ -470,7 +470,7 @@ end
     S = id -> ReportEngine._memo_status(r, r.cells[findfirst(c -> c.id == id, r.cells)])
     @test S("cheap")[1] == "cacheable"                                    # pure, keyable → cacheable (no badge)
     @test S("nc")[1] == "uncacheable" && occursin("nocache", S("nc")[2])  # explicit opt-out
-    @test S("vol")[1] == "uncacheable" && occursin("deterministic", S("vol")[2])   # volatile
+    @test S("vol")[1] == "uncacheable" && occursin("volatile", S("vol")[2])      # volatile
     @test S("downvol")[1] == "uncacheable" && occursin("upstream", S("downvol")[2]) # impure upstream poisons the key
     @test S("uses") == ("", "")                                          # pure `using` → not a badge target
     @test S("note") == ("", "")                                          # markdown → not a badge target
@@ -726,3 +726,14 @@ end
     r2 = RE_F.parse_report("#%% md id=m\nx\n\n#%% id=c\n1\n\n" * footer * "\n")
     @test r2.cells[1].kind === RE_F.MARKDOWN && r2.cells[2].kind === RE_F.CODE
 end
+
+# Slate writes its footer blocks last, but a cell appended after them (by hand, or by a tool that
+# edits the file) is content like any other and must survive a parse.
+@testset "a cell after a footer block is kept, and the footer still read" begin
+    src = "#%% code id=a\n1\n\n# ╔═╡ Slate.config · per-notebook settings\n#   docid = abc\n# ╚═╡\n\n#%% md id=after\nhello\n"
+    r = parse_report(src)
+    @test [c.id for c in r.cells] == ["a", "after"]
+    @test get(r.meta, "docid", nothing) == "abc"
+    @test !any(c -> occursin("Slate.config", c.source), r.cells)
+end
+

@@ -204,3 +204,46 @@ function src_tree_digest(dirs)
     end
     return h
 end
+
+# Every name a definition's source mentions, leaf names for qualified ones (`Mod.f` → "f"). An
+# over-approximation of what the definition calls: a local that shares a function's name counts too,
+# which can only mark an extra cell on a /src edit.
+_refs!(s::Set{String}, x::Symbol) = push!(s, string(x))
+_refs!(s::Set{String}, x::QuoteNode) = _refs!(s, x.value)
+_refs!(s::Set{String}, x::Expr) = (for a in x.args; _refs!(s, a); end; s)
+_refs!(s::Set{String}, ::Any) = s
+
+# Walk a parsed file into (def-name → names its source mentions), the same way `_collect_defs!` walks
+# it: the call graph of the package's own source, which says what a definition reaches whether or not
+# anything has compiled it.
+function _collect_refs!(d::Dict{String,Set{String}}, ex)
+    ex isa Expr || return d
+    if ex.head === :toplevel || ex.head === :block
+        for a in ex.args; _collect_refs!(d, a); end
+    elseif ex.head === :module
+        _collect_refs!(d, ex.args[3])
+    else
+        nm = _def_name(ex)
+        if nm !== nothing
+            s = get!(Set{String}, d, nm)
+            _refs!(s, ex)
+            delete!(s, nm)
+        end
+    end
+    return d
+end
+
+# The definitions that reach one of `changed` through the source call graph `refs`, transitively,
+# not counting `changed` itself.
+function _reaching_defs(refs::Dict{String,Set{String}}, changed)
+    out = Set{String}(changed)
+    grew = true
+    while grew
+        grew = false
+        for (g, rs) in refs
+            (g in out || isdisjoint(rs, out)) && continue
+            push!(out, g); grew = true
+        end
+    end
+    return setdiff!(out, changed)
+end

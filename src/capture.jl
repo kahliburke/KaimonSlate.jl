@@ -887,6 +887,31 @@ function _harvest_effects(raw, srcs::AbstractVector)
     return out
 end
 
+# The globals a run bound, observed rather than predicted: every name that is new in the namespace or
+# now holds a different object. `objectid` keeps no reference, so a value the cell replaces can still be
+# collected while it runs. Compiler-generated names and Slate's own are left out. A name rebound to an
+# identical value doesn't show; the hub merges each run's report with what it already knows.
+function _ns_snapshot(mod::Module)
+    snap = Dict{Symbol,UInt}()
+    for n in names(mod; all = true, imported = false)
+        _ns_observable(n) || continue
+        isdefinedglobal(mod, n) || continue
+        snap[n] = objectid(getglobal(mod, n))
+    end
+    return snap
+end
+function _ns_bound_since(mod::Module, snap::Dict{Symbol,UInt})
+    out = Symbol[]
+    for n in names(mod; all = true, imported = false)
+        _ns_observable(n) || continue
+        isdefinedglobal(mod, n) || continue
+        get(snap, n, nothing) == objectid(getglobal(mod, n)) || push!(out, n)
+    end
+    return sort!(out)
+end
+_ns_observable(n::Symbol) = (s = String(n); !startswith(s, '#') && !startswith(s, "__slate") && !occursin("##", s) &&
+                             !(n in (:eval, :include)))
+
 # Run + clear the cleanup callbacks a cell registered (see the notebook namespace's `__slate_cleanups`).
 # Clears FIRST so a callback that itself re-registers targets the imminent new run, and isolates each
 # callback so one bad cleanup can't block the others (or the re-eval about to follow). Fired on re-eval
@@ -1145,6 +1170,8 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     task_local_storage(:slate_cell, cid)
     _figure_forget!(cid)            # this run's first figure replaces the last run's
     _ns_defined(mod, :__slate_cleanups) && _run_cell_cleanups!(_ns_read(mod, :__slate_cleanups), cid)
+    # …and take back the methods its last run defined, so an edited signature doesn't leave the old one.
+    startswith(filename, "cell:") && _redefine_cell!(mod, cid, source)
     # Clear this cell's `@replay` marks, so that this run registers the full set again (see `_do_replay`).
     _ns_defined(mod, :__slate_replay_forget) && _ns_read(mod, :__slate_replay_forget)(cid)
 
@@ -1270,6 +1297,9 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     skey = something(stop_key, String(get(task_local_storage(), :slate_run_id, cid)))
     stop = Threads.Atomic{Bool}(false)
     isempty(skey) || lock(() -> (_CELL_STOPS[skey] = stop), _CELL_STOPS_LOCK)
+    # What the namespace holds before the cell runs, to report afterwards what the run bound (`:defines`).
+    observing = startswith(filename, "cell:") && !occursin('#', cid)
+    nssnap = observing ? Base.invokelatest(_ns_snapshot, mod) : nothing
     t0 = time_ns()
     try
         # ConsoleLogger on the captured stderr (`_logio`), so @warn/@info/@error land in this cell's
@@ -1302,6 +1332,10 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # (the replay unit), dedup by (kind, names, stmt_src). Then clear the eval-scoped task-local keys.
     effects = _harvest_effects(get(task_local_storage(), :slate_effects, nothing),
                                get(task_local_storage(), :slate_stmt_srcs, String[]))
+    if nssnap !== nothing
+        bound = Base.invokelatest(_ns_bound_since, mod, nssnap)
+        isempty(bound) || push!(effects, (; kind = :defines, names = bound, stmt_src = "", data = nothing))
+    end
     for k in (:slate_effects, :slate_stmt, :slate_stmt_srcs)
         haskey(task_local_storage(), k) && delete!(task_local_storage(), k)
     end

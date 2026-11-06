@@ -154,11 +154,80 @@ function _ensureMaps(spec) {
     return _mapRegistry[r.name];
   }));
 }
+// ── `__light` / `__dark`: per-mode option overrides ─────────────────────────────────────────────
+// A chart's theme already follows the page, but a colour the chart sets itself is fixed. A chart
+// that needs its own colours per mode puts them under `__light` and `__dark`; the one for the mode
+// it is drawn in is merged over the option. The mode is read from the surface the chart sits on (the
+// lightness of the `--bg` it inherits), so a live notebook, an exported page and a docs site that
+// toggles light and dark all decide it the same way. Objects merge key by key, arrays of objects
+// merge by index (so `series: [{…}]` reaches series 0), and anything else is replaced.
+function _slateDarkSurface(el) {
+  const v = getComputedStyle(el || document.documentElement).getPropertyValue('--bg').trim();
+  let r, g, b, m;
+  if ((m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(v))) {
+    const h = m[1].length === 3 ? m[1].split('').map(c => c + c).join('') : m[1];
+    r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16);
+  } else if ((m = /rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/i.exec(v))) {
+    r = +m[1]; g = +m[2]; b = +m[3];
+  } else return false;
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+}
+function _slateDeepMerge(a, b) {
+  const isObj = x => x !== null && typeof x === 'object' && !Array.isArray(x);
+  if (Array.isArray(a) && Array.isArray(b) && b.length && b.every(isObj))
+    return a.map((x, i) => i < b.length ? _slateDeepMerge(x, b[i]) : x).concat(b.slice(a.length));
+  if (isObj(a) && isObj(b)) {
+    const r = Object.assign({}, a);
+    for (const k in b) r[k] = (k in a) ? _slateDeepMerge(a[k], b[k]) : b[k];
+    return r;
+  }
+  return b;
+}
+function _slateForMode(o, dark) {
+  if (!o || (!o.__light && !o.__dark)) return o;
+  const over = dark ? o.__dark : o.__light;
+  const c = Object.assign({}, o);
+  delete c.__light; delete c.__dark;
+  return over ? _slateDeepMerge(c, over) : c;
+}
+
+// ECharts fills `{@[n]}` and `{@name}` (a data item's dimensions) in label templates but not in
+// tooltip ones, and a spec written in Julia cannot pass a function. A tooltip `formatter` string that
+// uses them becomes a function here that fills them in, along with `{a}`, `{b}` and `{c}` as ECharts
+// defines them. The mirror for exported pages is `_EXPORT_MODE_JS`.
+function _slateFillTip(tpl, p) {
+  const v = Array.isArray(p.value) ? p.value : [p.value];
+  const dims = p.dimensionNames || [];
+  const esc = x => String(x == null ? '' : x).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
+  return tpl.replace(/\{@\[(\d+)\]\}/g, (_, i) => esc(v[+i]))
+    .replace(/\{@([^}]+)\}/g, (_, n) => { const i = dims.indexOf(n); return i < 0 ? '' : esc(v[i]); })
+    .replace(/\{a\}/g, () => esc(p.seriesName)).replace(/\{b\}/g, () => esc(p.name))
+    .replace(/\{c\}/g, () => esc(Array.isArray(p.value) ? p.value.join(', ') : p.value));
+}
+const _slateHasTipTpl = t => !!t && typeof t === 'object' && typeof t.formatter === 'string' && t.formatter.indexOf('{@') >= 0;
+function _slateTipTemplate(t) {
+  if (!_slateHasTipTpl(t)) return t;
+  const tpl = t.formatter;
+  return Object.assign({}, t, { formatter: ps => (Array.isArray(ps) ? ps : [ps]).map(p => _slateFillTip(tpl, p)).join('<br/>') });
+}
+function _slateTipTemplates(o) {
+  if (!o) return o;
+  const series = Array.isArray(o.series) ? o.series : null;
+  const top = Array.isArray(o.tooltip) ? o.tooltip.some(_slateHasTipTpl) : _slateHasTipTpl(o.tooltip);
+  if (!top && !(series && series.some(s => s && _slateHasTipTpl(s.tooltip)))) return o;
+  const c = Object.assign({}, o);
+  if (top) c.tooltip = Array.isArray(o.tooltip) ? o.tooltip.map(_slateTipTemplate) : _slateTipTemplate(o.tooltip);
+  if (series) c.series = series.map(s => s && _slateHasTipTpl(s.tooltip) ? Object.assign({}, s, { tooltip: _slateTipTemplate(s.tooltip) }) : s);
+  return c;
+}
+
 // Strip the keys that ride ALONG on a spec but are not ECharts options — sizing, script prereqs, map
 // registrations, and the per-series `@replay` mark. ECharts carries an unknown key into its option
 // model rather than rejecting it, so they come off at the one place every setOption goes through.
+// The per-mode overrides are resolved here too, against the page the notebook is shown on.
 function _sansMaps(s) {
   if (!s) return s;
+  s = _slateTipTemplates(_slateForMode(s, _slateDarkSurface(document.documentElement)));
   const marked = Array.isArray(s.series) && s.series.some(x => x && (x.__replay || x.__valuefmt));
   if (!s.registerMap && !s.__size && !s.requireScripts && !s.__valuefmt && !s.__select && !s.__renderer && !marked) return s;
   const c = Object.assign({}, s);
@@ -1700,7 +1769,11 @@ function typeset(el) {
 // responsive while editors/math fill in behind it. Work is keyed + de-duped (newest fn wins).
 const _hydQ = new Map();
 let _hydPumping = false;
-const _ric = window.requestIdleCallback || (f => setTimeout(() => f({ timeRemaining: () => 10 }), 16));
+// A hidden tab never goes idle, so an idle callback alone would leave the queue waiting until the
+// tab is shown — and a notebook changes most often while its tab is in the background (the file
+// edited in another window). The timeout runs it anyway.
+const _ric = window.requestIdleCallback ? (f => window.requestIdleCallback(f, { timeout: 500 }))
+                                        : (f => setTimeout(() => f({ timeRemaining: () => 10 }), 16));
 function _pumpHyd(deadline) {
   const budget = 14, t0 = performance.now();        // ≤14ms/chunk keeps each task well under a frame
   for (const [k, fn] of _hydQ) {
@@ -1715,6 +1788,11 @@ function _pumpHyd(deadline) {
 window.hydrateSoon = (key, fn) => { _hydQ.set(key, fn); if (!_hydPumping) { _hydPumping = true; _ric(_pumpHyd); } };
 // Run a queued task NOW, jumping the idle queue — for a cell the user is about to interact with.
 window.hydrateNow = key => { const fn = _hydQ.get(key); if (fn) { _hydQ.delete(key); try { fn(); } catch (_) {} return true; } return false; };
+// Run the queued tasks whose key starts with `prefix`, now: the math still waiting to be typeset
+// (`'ts:'`) before the page is captured for an inspect raster or an export, which must show it.
+window.hydrateAll = (prefix = '') => {
+  for (const [k, fn] of _hydQ) if (k.startsWith(prefix)) { _hydQ.delete(k); try { fn(); } catch (_) {} }
+};
 // Typeset KaTeX off the critical path (text paints first; math fills in a tick later).
 window.typesetSoon = (el, key) => { if (el) window.hydrateSoon('ts:' + (key || ''), () => typeset(el)); };
 // Work after an output swap — typesetting its math, clamping a tall text block — runs in one

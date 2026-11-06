@@ -19,12 +19,6 @@
       "preact/index.module.js": "sha384-nuDht3SdxF7bbNOrOpIAVPw6aY3958/pop1FqpEl26WVUvdVDx4l/G6et/QCIJQY"
     }
   },
-  "html2canvas": {
-    "version": "1.4.1",
-    "files": {
-      "html2canvas.min.js": "sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H"
-    }
-  },
   "katex": {
     "version": "0.19.1",
     "files": {
@@ -55,6 +49,12 @@
       "fonts/KaTeX_Typewriter-Regular.woff2": "sha384-EwGF1si4JOX2592vVUMe7CnToRBlq2lo+w+8tVWLrJW5ZiwBuSry7Ozgs+cGHjmB",
       "katex.min.css": "sha384-WwGtaC6ywCHxA5cstpj/3+xIZvTez8dq2IcBQaXRkenHZ7FVVq1ZROtURwfbtTlG",
       "katex.min.js": "sha384-a1WQdjRj162i159OYq041X6I4K8NenkrI09LlPmiHg0YOb7CR+wJOraXwK9abpnE"
+    }
+  },
+  "modern-screenshot": {
+    "version": "4.7.0",
+    "files": {
+      "index.js": "sha384-5Ua3TI0kiMYH8QdNy+vc5IWS3MTa2DzQEm/uKFDQ+/biJctek9hiSP6moIm2PVog"
     }
   },
   "preact": {

@@ -12,7 +12,7 @@ struct EChart
 end
 
 "Build an interactive ECharts chart from an option dict."
-echart(option::AbstractDict) = EChart(Dict{String,Any}(string(k) => v for (k, v) in option))
+echart(option::AbstractDict) = EChart(_mark_option_replays!(Dict{String,Any}(string(k) => v for (k, v) in option)))
 
 Base.showable(::MIME"application/x-echarts", ::EChart) = true
 Base.show(io::IO, ::MIME"application/x-echarts", c::EChart) = JSON.print(io, c.option)

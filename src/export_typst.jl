@@ -38,7 +38,7 @@ end
 # `_warm_chart_svgs!` uses for a client-rendered chart. Both surfaces a component reaches are
 # covered: a cell that RETURNED one, and a markdown fence an extension claimed (```mermaid → that
 # package's value). A component can render itself for print via the module's `exportFigure`
-# (slate-widget.js); without one the mount's own SVG, or an html2canvas raster, is captured.
+# (slate-widget.js); without one the mount's own SVG, or a DOM raster of it, is captured.
 const _COMPONENT_MIME = "application/vnd.kaimonslate.component+json"
 const _CompFigs = Dict{Tuple{String,Int},Tuple{Vector{UInt8},String}}
 const _NO_COMPFIGS = _CompFigs()
@@ -614,26 +614,26 @@ end
 # KaTeX is configured (core.js) for FOUR spellings — `$…$`, `$$…$$`, `\(…\)`, `\[…\]` — but cmarker's
 # math hook only fires on the dollar forms, so the LaTeX-bracket ones used to reach the PDF as literal
 # text with the backslashes eaten (`\(a^2\)` printed as "(a^2)"). Prose that looked right on screen
-# quietly came out as garbage in print. Normalize to the spelling cmarker understands.
+# quietly came out as garbage in print. Normalize to the spelling cmarker understands, and escape a
+# prose `$` so cmarker cannot pair two of them into math the screen shows as text.
 #
 # Code is left alone: a fenced block or an inline span may legitimately SHOW `\[…\]` (a LaTeX sample),
 # and rewriting it there would corrupt the listing rather than typeset anything — cmarker's math hook
 # doesn't fire inside code in the first place.
-const _MATH_BRACKET_DISPLAY = r"\\\[(.+?)\\\]"s
-const _MATH_BRACKET_INLINE = r"\\\((.+?)\\\)"s
-const _MD_CODE_SPAN = r"^(?:```|~~~)[^\n]*\n.*?(?:^(?:```|~~~)[^\n]*$|\z)|`[^`\n]+`"ms
 function _normalize_math_delims(src::AbstractString)
-    out = IOBuffer(); last = 1
-    for m in eachmatch(_MD_CODE_SPAN, String(src))
-        print(out, _rewrite_bracket_math(SubString(src, last, prevind(String(src), m.offset))))
-        print(out, m.match)                       # code verbatim
-        last = m.offset + ncodeunits(m.match)
+    out = IOBuffer()
+    for (kind, t) in ReportRender._md_segments(src)
+        if kind === :math
+            tex, display = ReportRender._math_parts(t)
+            print(out, display ? "\$\$" : "\$", tex, display ? "\$\$" : "\$")
+        elseif kind === :dollar
+            print(out, "\\\$")
+        else
+            print(out, t)
+        end
     end
-    print(out, _rewrite_bracket_math(SubString(String(src), last)))
     return String(take!(out))
 end
-_rewrite_bracket_math(s) =
-    replace(replace(String(s), _MATH_BRACKET_DISPLAY => s"$$\1$$"), _MATH_BRACKET_INLINE => s"$\1$")
 
 # Markdown source with `{{ expr }}` interpolations resolved (scalars, a text/latex value's TeX, or a
 # component's captured figure), math delimiters normalized, admonitions lowered to blockquotes, and
@@ -1010,7 +1010,7 @@ end
 
 # True if the cell's output includes an HTML chunk (a custom card Typst can't render) — either a
 # hand-rolled `text/html` show method or `slate_render`'s `html_fragment` escape hatch. Both are
-# arbitrary DOM with no figure bytes behind them, so both want the same html2canvas rescue; matching
+# arbitrary DOM with no figure bytes behind them, so both want the same DOM-raster rescue; matching
 # only `text/html` left every `html_fragment` output (a WGLMakie figure among them) out of the PDF.
 _has_html_output(c::Cell) = c.output !== nothing &&
     any(ch -> ch.mime in ("text/html", "application/vnd.kaimonslate.html+html"), c.output.display)
@@ -1085,7 +1085,7 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
                              compfigs = compfigs)   # vector (pdf/svg) preferred, else raster png
     # An HTML output (a custom `text/html` card, e.g. the grading `check(...)` cells) can't be
     # rendered by Typst and isn't an embeddable figure — so rasterize the rendered card via the open
-    # tab (html2canvas, same round-trip slate.inspect uses) and embed that image. Needs a live tab;
+    # tab (the same round-trip slate.inspect uses) and embed that image. Needs a live tab;
     # falls back to nothing (just the code) if none is open or the capture times out.
     # A `slide_figure` carries its states as PNGs; print shows the finished one, no tab needed.
     fig === nothing && (sf = _slidefig_final_png(o); sf === nothing || (fig = (sf, "png")))

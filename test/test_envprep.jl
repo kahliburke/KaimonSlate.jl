@@ -473,4 +473,38 @@ end
         @test ReportEngine.deps_digest(pf) != d0
     end
 
+    @testset "the memo deps digest follows the whole closure, not Slate's own packages" begin
+        d = mktempdir()
+        write(joinpath(d, "Project.toml"), """
+            [deps]
+            A = "11111111-1111-1111-1111-111111111111"
+            KaimonGate = "22222222-2222-2222-2222-222222222222"
+            """)
+        man(bver, gver) = write(joinpath(d, "Manifest.toml"), """
+            manifest_format = "2.0"
+            [[deps.A]]
+            uuid = "11111111-1111-1111-1111-111111111111"
+            version = "1.0.0"
+            deps = ["B"]
+            [[deps.B]]
+            uuid = "33333333-3333-3333-3333-333333333333"
+            version = "$bver"
+            [[deps.KaimonGate]]
+            uuid = "22222222-2222-2222-2222-222222222222"
+            version = "1.0.0"
+            deps = ["G"]
+            [[deps.G]]
+            uuid = "44444444-4444-4444-4444-444444444444"
+            version = "$gver"
+            """)
+        pf = joinpath(d, "Project.toml")
+        man("2.0.0", "1.0.0"); d0 = ReportEngine.deps_digest(pf, ("KaimonGate",))
+        @test d0 != 0
+        man("2.1.0", "1.0.0")                      # a dependency of a dependency moved
+        @test ReportEngine.deps_digest(pf, ("KaimonGate",)) != d0
+        d1 = ReportEngine.deps_digest(pf, ("KaimonGate",))
+        man("2.1.0", "9.9.9")                      # only Slate's worker package's dependency moved
+        @test ReportEngine.deps_digest(pf, ("KaimonGate",)) == d1
+    end
+
 end

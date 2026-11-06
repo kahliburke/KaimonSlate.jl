@@ -178,6 +178,26 @@ CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backt
     CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects, assets, false)
 
 """
+What one notebook function does when it is CALLED, as seen in its body: the globals it reads
+(`refs`), assigns through `global` (`writes`) and mutates (`mut_g`), which positional parameters it
+mutates (`mut_p`), and the calls it makes with each argument's base name (`calls`). A cell that calls
+the function takes these on (`build_dependencies!`); the cell that defines it does not, since
+defining a function runs none of its body.
+"""
+mutable struct FuncSummary
+    params::Vector{Union{Symbol,Nothing}}
+    refs::Set{Symbol}
+    writes::Set{Symbol}
+    mut_g::Set{Symbol}
+    mut_p::Set{Int}
+    calls::Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}
+end
+FuncSummary(params) = FuncSummary(params, Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Int}(),
+                                  Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[])
+Base.copy(f::FuncSummary) = FuncSummary(copy(f.params), copy(f.refs), copy(f.writes), copy(f.mut_g),
+                                        copy(f.mut_p), copy(f.calls))
+
+"""
 A single report cell. `id` is the persistent identity (survives edits/moves);
 `src_hash` answers "did the source change". Inference/eval fields are populated
 later by the dependency + eval passes.
@@ -228,6 +248,15 @@ mutable struct Cell
                                   # whose input is waiting waits for the region that input runs on.
     run::Union{Run,Nothing}       # the computation in flight, if any — see `Run`
     header::String                # a FOREIGN cell's `#%%` header after the marker, kept verbatim to write back
+    funcs::Dict{Symbol,FuncSummary}   # the notebook functions this cell defines, by name (see FuncSummary)
+    topcalls::Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}}   # calls its top-level code makes,
+                                  # with each positional argument's base name (mutated-parameter mapping)
+    soft_assigns::Set{Symbol}     # names assigned inside a top-level loop or `try` (soft scope): an update
+                                  # of the global when an earlier cell defines it (`build_dependencies!`)
+    observed::Set{Symbol}         # globals a run of this source was SEEN to bind that the analysis didn't
+                                  # predict (`note_defines!`), kept for the source they were seen with
+    observed_complete::Bool       # a clean run of this source was observed, so `writes ∪ observed` is all it
+                                  # binds: an `eval` cell then stops being a barrier for the cells below
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -236,7 +265,8 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
                 STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0, "", 0.0, "", "",
-                nothing, "")
+                nothing, "",
+                Dict{Symbol,FuncSummary}(), Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[], Set{Symbol}(), Set{Symbol}(), false)
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation
@@ -607,29 +637,45 @@ implicit content after a header is taken as that explicit cell's verbatim body.)
 """
 function parse_report(text::AbstractString; id::AbstractString = "r", title::AbstractString = "")
     report = Report(id, title)
-    lines = split(text, '\n')
+    # Lift out Slate's footer blocks (`# ╔═╡ Slate.<kind>` … `# ╚═╡`) before cell parsing, so their
+    # comment lines aren't taken for a markdown cell. Slate writes them last, but each block is removed
+    # wherever it sits and every other line is kept: an edit that appends a cell after them, by hand or
+    # by a tool, would otherwise lose that cell without a word. The next save writes the footers last
+    # again. An unclosed block runs to the end of the file.
+    raw = split(text, '\n')
+    body = empty(raw)
+    footer = empty(raw)
+    infooter = false
+    for l in raw
+        if !infooter && startswith(l, "# ╔═╡ Slate.")
+            infooter = true
+        end
+        if infooter
+            push!(footer, l)
+            startswith(l, "# ╚═╡") && (infooter = false)
+        else
+            push!(body, l)
+        end
+    end
+    lines = body
     # The file's format decides how its headers and footers read; what an update to the current
     # format would change is gathered as they are read (`format_changes`).
-    format = _file_format(lines)
+    format = _file_format(footer)
     report.meta["format"] = format
     changes = String[]
-    # Split off any Slate footer block (always terminal: the `env` delta and/or a standalone
-    # `bundle`) before cell parsing, so their comment lines aren't taken for a markdown cell.
-    fi = findfirst(l -> startswith(l, "# ╔═╡ Slate."), lines)
-    if fi !== nothing
-        env = _parse_env_footer(@view lines[fi:end])   # picks up the Slate.env block if present
+    if !isempty(footer)
+        env = _parse_env_footer(footer)                # picks up the Slate.env block if present
         isempty(env) || (report.meta["env"] = env)
-        fnd = _parse_findings_footer(@view lines[fi:end])        # Slate.findings: shared conclusions
+        fnd = _parse_findings_footer(footer)     # Slate.findings: shared conclusions
         isempty(fnd) || (report.meta["findings_incoming"] = fnd)
-        for (k, v) in _parse_config_footer(@view lines[fi:end])   # Slate.config: per-notebook settings
+        for (k, v) in _parse_config_footer(footer)     # Slate.config: per-notebook settings
             report.meta[k] = v
         end
-        sw = _parse_job_footer(@view lines[fi:end]; format)       # Slate.job: per-cell scheduler options
+        sw = _parse_job_footer(footer; format)       # Slate.job: per-cell scheduler options
         isempty(sw) || (report.meta["jobopts"] = sw)
-        ff = _foreign_footers(@view lines[fi:end])               # blocks from a newer Slate, kept as written
+        ff = _foreign_footers(footer)               # blocks from a newer Slate, kept as written
         isempty(ff) || (report.meta["foreign_footers"] = ff)
-        format < 2 && any(l -> startswith(l, _JOB_MARK_OPEN_V1), @view lines[fi:end]) && push!(changes, "footer")
-        lines = lines[1:(fi - 1)]
+        format < 2 && any(l -> startswith(l, _JOB_MARK_OPEN_V1), footer) && push!(changes, "footer")
     end
 
     # Drop the standalone preamble (a leading `KaimonSlate.standalone!(…)` line): the engine injects
@@ -1163,6 +1209,7 @@ include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest for sema
 include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
 include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
 include(joinpath(@__DIR__, "record_source.jl")) # record_field_range — where a record field came from in the cell source
+include(joinpath(@__DIR__, "celldefs.jl"))  # what a cell defines, and taking it back (engine + worker)
 include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worker)
 include(joinpath(@__DIR__, "pkg_ops.jl"))   # shared package add/update/rm specs (engine + worker)
 include(joinpath(@__DIR__, "format.jl"))    # _format_cell — server-side table cell renderer (JS mirror: fmtCell)

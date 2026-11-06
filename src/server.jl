@@ -38,6 +38,7 @@ include("peer_owner.jl")  # module PeerOwner — which local account opened a lo
 
 export serve_notebook, start_server, stop_server, LiveNotebook
 export export_app, app_defaults          # deploy a notebook as an application (server_app.jl / server_export.jl)
+export export_doc_bundle, render_doc_bundle_inprocess   # a rendered notebook for a Documenter site (server_docbundle.jl)
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
 export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_scratch_eval_bg!, scratch_check, agent_surface_controls!
 export cell_image, set_snapshot!
@@ -294,6 +295,22 @@ function _cleanup_deleted_cells(nb::LiveNotebook, ids)
         end
     catch e
         @debug "slate: deleted-cell cleanup failed" exception = e
+    end
+    return nothing
+end
+
+# Take back removed definitions (`ReportEngine.forget!`) on every kernel a cell may have run on: the
+# main kernel and each active region kernel, as for cleanups above. Called by the runner before a cell
+# evaluates, OFF nb.lock (a worker round-trip); only the queue is read under the lock.
+function _flush_forget!(nb::LiveNotebook)
+    cells, names = lock(nb.lock) do; ReportEngine.take_forget!(nb.report); end
+    (isempty(cells) && isempty(names)) && return nothing
+    ReportEngine.forget!(nb.kernel, nb.report, cells, names)
+    regionks = lock(_REGION_LOCK) do
+        Any[k for ((rid, _name), k) in _REGION_KERNELS if rid == nb.id]
+    end
+    for k in regionks
+        try; ReportEngine.forget!(k, nb.report, cells, names); catch; end
     end
     return nothing
 end
@@ -585,8 +602,8 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # override, so _select_kernel boots the worker on that host directly (no wasteful local-then-remote).
     # Only overrides the FOOTER value when explicitly given; an empty runon leaves the file's own choice.
     isempty(strip(String(runon))) || (r.meta["runon"] = String(strip(String(runon))))
+    _reestablish_effects!(r)   # durable declared-effects (EVERYWHERE marks, observed writes) before the graph and any run
     build_dependencies!(r)
-    _reestablish_effects!(r)   # durable declared-effects: re-mark EVERYWHERE cells before any run (cold-start safe)
     _note_server_write!(rid, hash(serialize_report(r)))   # the as-opened state is OURS — a watcher
                                                           # tick reading it must not "revert" to it
     # Any self-contained `.jl`: open INSTANTLY and reconstruct + run the env in the BACKGROUND
@@ -1837,7 +1854,8 @@ function _apply_pick_effect!(nb::LiveNotebook, c::Cell, r, e)
 end
 
 function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
-    (out === nothing || isempty(out.effects)) && return nothing
+    out === nothing && return nothing
+    seen = ReportEngine.take_defines!(out)          # graph bookkeeping, not a declared effect
     recs = [_effect_record(e) for e in out.effects]
     # A cell that declares an identity for its value (a sweep, whose value is what has landed in its
     # store) is tracked, not volatile. The `:volatile` its run picked up on the way (the sweep's own
@@ -1870,6 +1888,24 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
             ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
         end
     end
+    # Globals the run bound (`:defines`). Only the ones the analysis didn't predict are kept: they join the
+    # cell's observed writes (and its edges), and the durable record for this source. That record is a
+    # union, since a run that rebinds a name to an identical value doesn't report it.
+    was_complete = c.observed_complete
+    learned = ReportEngine.note_run!(nb.report, c, (; effects = Any[(; kind = :defines, names = seen)],
+                                                    exception = out.exception, memo = out.memo))
+    if learned && !isempty(seen)
+        prior = try; EffectStore.load(SlateHome.effects_dir(), string(c.src_hash)); catch; nothing; end
+        prior === nothing || for r in prior; r.kind === :defines && ReportEngine.note_defines!(nb.report, c, r.names); end
+    end
+    learned && ReportEngine.rebuild_precise!(nb.report)
+    # An `eval` cell's first observed run is worth keeping even when it bound nothing new: the record says
+    # its run has been seen, which is what lets it stop being a barrier at the next open, before it runs.
+    # Any other run that learned nothing and declared nothing leaves the store alone (nearly every run).
+    first_eval_run = !was_complete && c.observed_complete && :eval_barrier in c.flags
+    (isempty(recs) && !learned && !first_eval_run) && return nothing
+    (isempty(c.observed) && !(:eval_barrier in c.flags && c.observed_complete)) ||
+        push!(recs, (; kind = :defines, names = sort!(collect(c.observed)), stmt_src = ""))
     # Persist DURABLY, keyed by the cell's own source digest — so the classification + statement-scoped
     # records survive a reload / fresh region worker WITHOUT this cell running on main again (see
     # `_reestablish_effects!`). Best-effort; off the hot path but cheap (one small TOML).
@@ -1901,6 +1937,11 @@ function _reestablish_effects!(report)
         # uncacheable from t=0 this one, so a run-all asks again instead of restoring the old answer.
         any(r -> r.kind === :volatile, recs) &&
             (:volatile_declared in c.flags || push!(c.flags, :volatile_declared))
+        for r in recs
+            r.kind === :defines || continue
+            ReportEngine.note_defines!(report, c, r.names)
+            c.observed_complete = true                 # a run of this source was seen, so what it binds is known
+        end
     end
     return nothing
 end
@@ -5135,6 +5176,7 @@ function _eval_one_run!(nb::LiveNotebook, cid::AbstractString, run::ReportEngine
     # where its worker is already up: it does not start one, since a region worker can mean a queue wait.
     memoizes(cell.kind) && _restore_only(nb, cell) && !_side_up(nb, _cell_region(cell)) &&
         return _hold_locked!(nb, cid, run)
+    _flush_forget!(nb)   # a removed definition leaves the namespace before this cell can read it
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
     #
@@ -5541,6 +5583,7 @@ end
 # path, so it renders running→done and merges version-guarded the INSTANT it finishes (true per-cell
 # streaming). Returns true if a batch (≥2 cells) ran; false for the 0/1-cell case or a non-gate kernel.
 function _run_code_batch!(nb::LiveNotebook)
+    _flush_forget!(nb)
     nb.kernel isa ReportEngine.GateKernel || return false
     # A notebook with an active region runs SERIALLY (v1): the batch hands all cells to ONE
     # worker, but region cells belong to another kernel and boundary values must cross between
@@ -5994,19 +6037,12 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
         return
     end
     isempty(names) && return
-    syms = Set{Symbol}(Symbol(n) for n in names)
-    # A cell rarely reads the EXACT edited def — it calls a higher-level function that uses it (a cell
-    # calls `f`, which internally calls the edited `g`). But editing any def in a package
-    # changes the whole project's src digest, so every cell USING that package is affected — and would
-    # recompute on rerun anyway (the memo key folds the src digest). So expand the changed set with all
-    # names PROVIDED by a cell that provides one of the changed names — i.e. the `using <Pkg>` cell's
-    # in-scope exports — turning "one exported name changed" into "everything using that package is stale".
-    lock(nb.lock) do
-        for c in nb.report.cells
-            (isempty(c.provides) || !any(p -> p in syms, c.provides)) && continue
-            union!(syms, c.provides)
-        end
-    end
+    # The worker reports the changed definitions plus every function whose compiled code the edit
+    # invalidated (the callers of a changed method, transitively), so a cell calling `f`, which calls
+    # the edited `g`, matches on `f`. A `=name` entry is a global whose value's display a changed show
+    # method alters: the cells that define or read it re-run.
+    syms = Set{Symbol}(Symbol(n) for n in names if !startswith(n, "="))
+    shown = Set{Symbol}(Symbol(chopprefix(n, "=")) for n in names if startswith(n, "="))
     # A cell reads a CHANGED def if a read matches a changed name directly, OR the read is a
     # QUALIFIED path (`SlateTest.Sub.greet`) whose leaf (`greet`) changed — reads record the
     # whole dotted path, while the worker reports the leaf def-name.
@@ -6021,7 +6057,7 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
         for c in nb.report.cells
             # Both code AND markdown join the reactive graph via `reads` (md from its {{ }}
             # free vars), and eval_stale! re-renders stale md — so include both.
-            _reads_changed(c) || continue
+            (_reads_changed(c) || !isdisjoint(c.writes, shown) || !isdisjoint(c.reads, shown)) || continue
             ReportEngine.restale!(c) && (push!(seed, c.id); push!(staled, c.id))
         end
         isempty(seed) && return
@@ -6117,6 +6153,7 @@ include("server_catalog.jl")   # extension catalog: the published artifact, its 
 include("slate_api.jl")        # Slate notebook-API registry (SSOT for the api tool, search, prompt)
 include("echarts_docs.jl")     # curated ECharts option reference, mapped to the DSL, indexed for search
 include("server_export.jl")
+include("server_docbundle.jl")   # doc bundles: a rendered notebook for a Documenter site + the <slate-cell> runtime
 include("publish_targets.jl")  # PublishTarget adapters (github-pages, generic-upload) + multi-target fan-out
 include("publish_zenodo.jl")   # Zenodo archival target — versioned citable DOI
 include("server_vendor.jl")    # third-party front-end assets: pinned, hash-checked, cached

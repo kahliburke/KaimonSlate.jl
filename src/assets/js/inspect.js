@@ -1,19 +1,30 @@
 // Live cell-inspect capture. On an `inspect:` SSE event (the server's slate.inspect tool asking to
-// SEE a rendered cell), grab the cell's cleaned DOM + this tab's console buffer + an html2canvas
-// raster and POST them back, keyed by the request id. html2canvas is vendored and lazy-loaded ONLY
-// here, so it stays off the boot path. Best-effort: any single failure still posts what we have.
-let _h2cPromise = null;
-function _loadHtml2Canvas() {
-  if (window.html2canvas) return Promise.resolve(window.html2canvas);
-  if (_h2cPromise) return _h2cPromise;
-  _h2cPromise = new Promise((res, rej) => {
+// SEE a rendered cell), grab the cell's cleaned DOM + this tab's console buffer + a raster and POST
+// them back, keyed by the request id. Rasters come from modern-screenshot, which copies the element
+// with its computed styles and the web fonts it uses into an SVG <foreignObject> and has the browser
+// draw that, so the picture is the browser's own rendering (KaTeX's stretched SVG delimiters
+// included). It is vendored and lazy-loaded ONLY here, so it stays off the boot path. Best-effort:
+// any single failure still posts what we have.
+let _shotPromise = null;
+function _loadScreenshot() {
+  if (window.modernScreenshot) return Promise.resolve(window.modernScreenshot);
+  if (_shotPromise) return _shotPromise;
+  _shotPromise = new Promise((res, rej) => {
     const s = document.createElement('script');
-    s.src = '/assets/vendor/html2canvas/html2canvas.min.js';
-    s.onload = () => res(window.html2canvas);
-    s.onerror = () => { _h2cPromise = null; rej(new Error('html2canvas failed to load')); };
+    s.src = '/assets/vendor/modern-screenshot/index.js';
+    s.onload = () => window.modernScreenshot ? res(window.modernScreenshot)
+                                              : (_shotPromise = null, rej(new Error('modern-screenshot did not load')));
+    s.onerror = () => { _shotPromise = null; rej(new Error('modern-screenshot failed to load')); };
     document.head.appendChild(s);
   });
-  return _h2cPromise;
+  return _shotPromise;
+}
+// `el` as base64 PNG (no data-URL prefix). `backgroundColor: null` leaves the background transparent.
+// A media load is bounded well inside the server's wait, so one slow image costs that image only.
+async function _rasterize(el, { backgroundColor = null, scale = 1 } = {}) {
+  const shot = await _loadScreenshot();
+  const url = await shot.domToPng(el, { backgroundColor, scale, timeout: 3000 });
+  return (url && url.split(',')[1]) || '';
 }
 // The cell's rendered DOM minus noise the agent can't use: CodeMirror internals (huge, irrelevant to
 // OUTPUT) and inline data URIs. Capped so a giant cell can't blow the payload.
@@ -28,50 +39,82 @@ function _cleanCellHtml(el) {
   if (html.length > 20000) html = html.slice(0, 20000) + '\n<!-- …truncated… -->';
   return html;
 }
-// html2canvas parses colours itself and rejects the `color(srgb …)` form a browser computes for
-// `color-mix()`, throwing on the first one it meets — which abandons the raster for the WHOLE cell,
-// not just the element wearing it. The stylesheet uses `color-mix` freely, including on `.output
-// .err` and `.output .warn`, so every cell that raised an error had no image for `slate.view` at
-// all. Rewrite the computed value to `rgb()/rgba()` on html2canvas's own clone, where overriding
-// inline styles costs the live page nothing.
-const _SRGB_FN = /^color\(srgb\s+([\d.eE+-]+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)(?:\s*\/\s*([\d.eE+-]+))?\s*\)$/;
-const _COLOR_PROPS = ['backgroundColor', 'color', 'borderTopColor', 'borderRightColor',
-                      'borderBottomColor', 'borderLeftColor', 'outlineColor', 'textDecorationColor'];
-const _SANITIZE_CAP = 4000;   // a pathological cell walks its own DOM, not the agent's patience
-function _plainColor(v) {
-  const m = _SRGB_FN.exec(v || '');
-  if (!m) return null;
-  const ch = i => Math.round(Math.min(1, Math.max(0, parseFloat(m[i]) || 0)) * 255);
-  const a = m[4] === undefined ? 1 : parseFloat(m[4]);
-  return a >= 1 ? `rgb(${ch(1)}, ${ch(2)}, ${ch(3)})` : `rgba(${ch(1)}, ${ch(2)}, ${ch(3)}, ${a})`;
+// The part of a cell worth a picture: its rendered CONTENT (markdown / output / table), not the
+// cell's button chrome.
+const _captureTarget = el => el.querySelector('.md, .output, .tables') || el;
+
+// The page as it would look under Slate palette `theme`, for capturing cells in a theme the reader
+// is not looking at. The document is copied into a same-origin iframe kept off-screen and the theme
+// set on the copy, so the live page never changes and nobody watching sees it flicker. Returns
+// `{ find(cellId), dispose() }`, or `null` when `theme` is already the live one. `find` gives the
+// copy's capture target for a cell, or `null` when the copy can't stand in for it (a canvas or an
+// embedded frame, whose content a DOM copy doesn't carry), so the caller captures the live cell.
+const _COPY_FRAME = 'data-slate-capture-copy';
+async function _themedPage(theme) {
+  const live = document.documentElement.dataset.slateTheme || 'midnight';
+  if (!theme || theme === live) return null;
+  const frame = document.createElement('iframe');
+  const w = document.documentElement.clientWidth;
+  frame.setAttribute(_COPY_FRAME, '');
+  frame.setAttribute('aria-hidden', 'true');
+  frame.tabIndex = -1;
+  frame.style.cssText = `position:fixed;top:0;left:${-w - 64}px;width:${w}px;height:${window.innerHeight}px;` +
+                        'border:0;pointer-events:none;';
+  document.body.appendChild(frame);
+  const dispose = () => frame.remove();
+  try {
+    const doc = frame.contentDocument;
+    const root = doc.importNode(document.documentElement, true);
+    root.querySelectorAll(`script, [${_COPY_FRAME}]`).forEach(n => n.remove());
+    // a copied frame would load its page again (and run it): the copy only needs its box
+    root.querySelectorAll('iframe').forEach(f => { f.removeAttribute('src'); f.removeAttribute('srcdoc'); });
+    // the page's own <style> elements may hold rules added through the CSSOM, which a copy of the
+    // element doesn't carry: copy their rules as text
+    const liveStyles = document.querySelectorAll('style'), copyStyles = root.querySelectorAll('style');
+    liveStyles.forEach((st, i) => {
+      try { if (copyStyles[i] && st.sheet) copyStyles[i].textContent = Array.from(st.sheet.cssRules, r => r.cssText).join('\n'); } catch (_) {}
+    });
+    if (theme === 'midnight') delete root.dataset.slateTheme;
+    else root.dataset.slateTheme = theme;
+    doc.replaceChild(root, doc.documentElement);
+    try {   // constructed stylesheets (CodeMirror's, for one) are not elements at all
+      const W = frame.contentWindow;
+      doc.adoptedStyleSheets = (document.adoptedStyleSheets || []).map(sh => {
+        const c = new W.CSSStyleSheet();
+        c.replaceSync(Array.from(sh.cssRules, r => r.cssText).join('\n'));
+        return c;
+      });
+    } catch (_) {}
+    // linked stylesheets load again in the copy (from cache); wait for them, then for the fonts the
+    // laid-out copy asks for, so line breaks and math sizes match the page
+    await Promise.all(Array.from(doc.querySelectorAll('link[rel~="stylesheet"]'), l =>
+      l.sheet ? null : new Promise(r => { l.onload = l.onerror = r; setTimeout(r, 3000); })));
+    void doc.body.offsetHeight;
+    await Promise.race([doc.fonts.ready, new Promise(r => setTimeout(r, 3000))]);
+    const find = cellId => {
+      const live = document.getElementById('cell-' + cellId);
+      const copy = doc.getElementById('cell-' + cellId);
+      if (!live || !copy || live.querySelector('canvas, iframe')) return null;
+      return _captureTarget(copy);
+    };
+    return { find, dispose };
+  } catch (e) { dispose(); throw e; }
 }
-function _sanitizeColors(root) {
-  if (!root) return;
-  const els = [root].concat(Array.prototype.slice.call(root.querySelectorAll('*'), 0, _SANITIZE_CAP));
-  for (const el of els) {
-    let cs; try { cs = getComputedStyle(el); } catch (_) { continue; }
-    for (const p of _COLOR_PROPS) {
-      const fixed = _plainColor(cs[p]);
-      if (fixed) el.style[p] = fixed;
-    }
-  }
-}
-window._slateSanitizeColors = _sanitizeColors;
 
 // Answer one inspect request: capture cell `cellId` and POST it back under `reqid`.
 async function _slateInspect(reqid, cellId) {
   const out = { reqid, cell: cellId, html: '', console: (window.__diag || []).slice(-40), png: '' };
+  try { window.hydrateAll && window.hydrateAll('ts:'); } catch (_) {}   // math still queued is typeset first
   try {
     const el = document.getElementById('cell-' + cellId);
     if (el) {
       try { out.html = _cleanCellHtml(el); } catch (_) {}
-      // Only html2canvas a cell that has NO native figure. ECharts (canvas) and CairoMakie
+      // Only rasterise a cell that has NO native figure. ECharts (canvas) and CairoMakie
       // (server-rendered <img>) are already captured at higher fidelity for slate.view via the
       // snapshot path — overwriting that store with a whole-cell screenshot is strictly worse.
       // So the raster only fills in for non-figure cells (markdown / tables / plain values).
       const hasNativeFig = !!el.querySelector('.echarts canvas, .echart canvas, .output img');
-      // A cell-mounted CLIENT-CANVAS widget (the neuro/DAG canvas, …) can't be captured by html2canvas
-      // — it can't read arbitrary canvas pixels, so the widget comes out black. Grab it DIRECTLY: a widget
+      // A cell-mounted CLIENT-CANVAS widget is better captured DIRECTLY than through a DOM raster: a widget
       // may register a settled-render provider at window.__slateSnapshot[cellId] (force-renders its final
       // state, then returns base64 PNG); otherwise read the cell's own <canvas>. POSTed back under reqid
       // here (NOT the 20k-capped eval-result path), so a full-size PNG survives.
@@ -82,14 +125,8 @@ async function _slateInspect(reqid, cellId) {
       } catch (_) {}
       if (!out.png && !hasNativeFig) {
         try {
-          const h2c = await _loadHtml2Canvas();
           const bg = (getComputedStyle(document.body).backgroundColor) || '#12141c';
-          // Raster the rendered CONTENT (markdown / output / table), not the cell's button chrome —
-          // so a markdown-layout inspect shows the math/text as laid out, nothing wasteful.
-          const target = el.querySelector('.md, .output, .tables') || el;
-          const canvas = await h2c(target, { backgroundColor: bg, scale: 1, logging: false, useCORS: true,
-                                             onclone: (_doc, el) => { try { _sanitizeColors(el); } catch (_) {} } });
-          out.png = (canvas.toDataURL('image/png').split(',')[1]) || '';
+          out.png = await _rasterize(_captureTarget(el), { backgroundColor: bg });
         } catch (_) {}
       }
     }
@@ -105,36 +142,34 @@ window._slateInspect = _slateInspect;
 // the batch: a missing picture degrades that one cell, a thrown batch loses every picture.
 async function _slateInspectMany(reqid, cellIds, theme) {
   // Rasterise UNDER the export's palette rather than the reader's. The picture is of the live page,
-  // so a light PDF would otherwise embed dark cards on white paper. Applied to html2canvas's clone
-  // (`onclone` hands us the cloned document), so the page itself never changes and nobody watching
-  // the export sees it flicker. `midnight` is the bare default and carries no attribute.
-  const dressClone = doc => {
-    if (!theme || !doc || !doc.documentElement) return;
-    if (theme === 'midnight') delete doc.documentElement.dataset.slateTheme;
-    else doc.documentElement.dataset.slateTheme = theme;
-  };
+  // so a light PDF would otherwise embed dark cards on white paper. A cell is captured from a themed
+  // copy of the page (`_themedPage`), made once, when the first cell needs a raster.
+  let copy;   // undefined: not made yet; null: the live page is already in `theme`
   let captured = 0;
-  for (const cellId of (cellIds || [])) {
-    try {
-      const el = document.getElementById('cell-' + cellId);
-      if (!el) continue;
-      if (el.querySelector('.echarts canvas, .echart canvas, .output img')) continue;  // native figure already captured
-      let png = '';
-      const prov = window.__slateSnapshot && window.__slateSnapshot[cellId];
-      if (typeof prov === 'function') png = prov() || '';
-      if (!png) {
-        const h2c = await _loadHtml2Canvas();
-        const target = el.querySelector('.md, .output, .tables') || el;
-        // Transparent, so the PDF page shows through instead of each picture carrying a rectangle
-        // of the live page's background — which matches neither a light nor a dark page exactly.
-        const canvas = await h2c(target, { backgroundColor: null, scale: 1, logging: false, useCORS: true,
-          onclone: (doc, e) => { try { dressClone(doc); _sanitizeColors(e); } catch (_) {} } });
-        png = (canvas.toDataURL('image/png').split(',')[1]) || '';
-      }
-      if (!png) continue;
-      await api('POST', '/api/inspect-result', { reqid: '', cell: cellId, png });   // store-only
-      captured++;
-    } catch (_) { /* this cell has no picture; the rest still do */ }
+  try { window.hydrateAll && window.hydrateAll('ts:'); } catch (_) {}   // math still queued is typeset first
+  try {
+    for (const cellId of (cellIds || [])) {
+      try {
+        const el = document.getElementById('cell-' + cellId);
+        if (!el) continue;
+        if (el.querySelector('.echarts canvas, .echart canvas, .output img')) continue;  // native figure already captured
+        let png = '';
+        const prov = window.__slateSnapshot && window.__slateSnapshot[cellId];
+        if (typeof prov === 'function') png = prov() || '';
+        if (!png) {
+          if (copy === undefined) { try { copy = await _themedPage(theme); } catch (_) { copy = null; } }
+          const target = (copy && copy.find(cellId)) || _captureTarget(el);
+          // Transparent, so the PDF page shows through instead of each picture carrying a rectangle
+          // of the live page's background — which matches neither a light nor a dark page exactly.
+          png = await _rasterize(target, { backgroundColor: null });
+        }
+        if (!png) continue;
+        await api('POST', '/api/inspect-result', { reqid: '', cell: cellId, png });   // store-only
+        captured++;
+      } catch (_) { /* this cell has no picture; the rest still do */ }
+    }
+  } finally {
+    if (copy) copy.dispose();
   }
   try { await api('POST', '/api/inspect-result', { reqid, captured }); } catch (_) {}
 }
@@ -194,7 +229,7 @@ window._slateEvalJs = _slateEvalJs;
 // Vector wherever possible: an SVG embeds into Typst as real paths and text, a raster does not.
 // Order is therefore: the component's own `exportFigure` (it knows how to render itself for
 // print — see registerComponent, slate-widget.js), then the mount's own lone <svg>, then
-// html2canvas as the format-agnostic floor.
+// a DOM raster as the format-agnostic floor.
 
 // Serialise a live <svg> as a standalone document. Width/height are dropped in favour of the
 // viewBox: a mount is laid out with `width: 100%`, which means nothing to a file, while the
@@ -242,10 +277,8 @@ async function _slateComponentFig(reqid, cellId, slot, theme) {
       const svgs = el.querySelectorAll('svg');
       if (svgs.length === 1) out.svg = _standaloneSvg(svgs[0]);
       else {
-        const h2c = await _loadHtml2Canvas();
         const bg = (getComputedStyle(document.body).backgroundColor) || '#12141c';
-        const canvas = await h2c(el, { backgroundColor: bg, scale: 2, logging: false, useCORS: true });
-        out.png = (canvas.toDataURL('image/png').split(',')[1]) || '';
+        out.png = await _rasterize(el, { backgroundColor: bg, scale: 2 });
       }
     }
     out.ok = !!(out.svg || out.png);
@@ -254,14 +287,13 @@ async function _slateComponentFig(reqid, cellId, slot, theme) {
 }
 window._slateComponentFig = _slateComponentFig;
 
-// Warm html2canvas at idle so the FIRST inspect doesn't blow its server-side timeout on a cold
-// load (CDN fetch + parse). Kept off the boot path — fires ~2s after load, best-effort.
+// Warm the capture library at idle so the FIRST inspect doesn't blow its server-side timeout on a
+// cold load. Kept off the boot path — fires ~2s after load, best-effort.
 //
 // Skipped on an app: rendered-DOM inspection is something an AGENT asks for, and an app has no
-// agent — so this would be a third-party CDN request on every load, made on behalf of a feature
-// that can't be invoked. It also breaks the deployment story an app is supposed to have: a lab
-// machine may have no route off its own network, and this is the one thing on the page that
-// reaches outside it.
+// agent — so this would be a request on every load, made on behalf of a feature that can't be
+// invoked. It also breaks the deployment story an app is supposed to have: a lab machine may have
+// no route off its own network, and the vendored file may have to come from the CDN.
 if (!(window.__SLATE_APP__ && window.__SLATE_APP__.on)) {
-  setTimeout(() => { _loadHtml2Canvas().catch(() => {}); }, 2000);
+  setTimeout(() => { _loadScreenshot().catch(() => {}); }, 2000);
 }

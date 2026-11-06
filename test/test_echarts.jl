@@ -211,6 +211,54 @@ const RE = ReportEngine
         @test m["comp"] == 2 && m["rank"] == 2
     end
 
+    # A hand-written option carries its `@replay` wherever the author put it. A series' `data` is marked
+    # to be replaced wholesale; a value anywhere else is reported, since no page could apply it.
+    @testset "echart(Dict) marks a series whose data is a @replay" begin
+        mk(v) = RE.ReplayArray(v, "cell:x", "x", 1, Any[1, 2])
+        o = RE.echart(Dict("xAxis" => Dict("type" => "category", "data" => ["a", "b"]),
+                           "series" => [Dict("type" => "line", "data" => mk([1.0, 2.0]))])).option
+        m = o["series"][1]["__replay"]
+        @test m["comp"] === nothing && m["control"] == "x" && m["id"] == "cell:x"
+        # points: the page gets the matrix back as rows, so the mark is still wholesale
+        pts = RE.echart(Dict("series" => [Dict("type" => "line", "data" => mk([[0.0, 1.0], [1.0, 2.0]]))])).option
+        @test pts["series"][1]["__replay"]["comp"] === nothing
+        # a narrowly typed series Dict is widened so the mark can be written
+        narrow = Dict{String,RE.ReplayArray}("data" => mk([1.0, 2.0]))
+        @test haskey(RE.echart(Dict("series" => [narrow])).option["series"][1], "__replay")
+        # an ordinary option is untouched and says nothing
+        @test_logs RE.echart(Dict("series" => [Dict("type" => "line", "data" => [1, 2])]))
+        # a @replay outside any series' data warns, naming the control
+        @test_logs (:warn, r"`@replay` value.*for x") RE.echart(Dict("xAxis" => Dict("data" => mk([1.0, 2.0])),
+                                                                     "series" => [Dict("type" => "line")]))
+    end
+
+    # Per-mode overrides ride on the OPTION (the front end merges the one for the page's mode), so the
+    # DSL must not mistake them for series keywords.
+    @testset "__light/__dark reach the option, not the series" begin
+        o = RE.echart(:line, [1.0, 2.0], [3.0, 4.0]; __dark = (color = ["#3987e5"],), __light = (color = ["#2a78d6"],)).option
+        @test o["__dark"]["color"] == ["#3987e5"] && o["__light"]["color"] == ["#2a78d6"]
+        @test !haskey(o["series"][1], "__dark")
+    end
+
+    @testset "echart(; …) keeps and marks a @replay in a series' data" begin
+        mk(v) = RE.ReplayArray(v, "cell:x", "x", 1, Any[1, 2])
+        o = RE.echart(; series = [(type = :heatmap, data = mk([[0, 0, 1.0], [1, 0, 2.0]]))], height = 300).option
+        @test o["series"][1]["__replay"]["id"] == "cell:x"
+        @test o["__size"]["height"] == 300
+    end
+
+    @testset "a point series stacks as a matrix per position" begin
+        @test RE._replay_points_matrix([[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]) == [0.0 1.0; 2.0 3.0; 4.0 5.0]
+        @test RE._replay_points_matrix([(0, 1), (2, 3)]) == [0 1; 2 3]
+        @test RE._replay_points_matrix([1.0, 2.0]) == [1.0, 2.0]                 # flat: unchanged
+        @test RE._replay_points_matrix([[0.0, 1.0], [2.0]]) == [[0.0, 1.0], [2.0]] # ragged: left for the stacker to refuse
+        # A text coordinate (a category name, a date string) cannot ship; the error says what to give.
+        err = try; RE._replay_points_matrix([["1950-51", 6.5], ["1951-52", 6.2]]); nothing; catch e; e; end
+        @test err isa ArgumentError && occursin("category's index", err.msg) && occursin("\"1950-51\"", err.msg)
+        stacked = RE.replay_stack(map(RE._replay_points_matrix, [[[0.0, 1.0], [1.0, 2.0]], [[0.0, 3.0], [1.0, 4.0]]]))
+        @test size(stacked) == (2, 2, 2) && stacked[:, :, 2] == [0.0 3.0; 1.0 4.0]
+    end
+
     # `zoom` — ECharts declares no zoom by default, and the bare `inside` component is invisible
     # and irreversible. `zoom=true` is the one-word form that also supplies the affordances.
     @testset "zoom: expands to dataZoom (+ toolbox), never clobbering an explicit one" begin

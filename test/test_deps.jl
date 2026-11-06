@@ -656,7 +656,9 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
                          "#%% code id=u\nfoo2 = KwOpt(x = 2)")
         r.meta["macroexpand"] = false
         build_dependencies!(r); eval_stale!(r)
-        @test :KwOpt ∉ findcell(r, "s").writes              # no recovery when opted out
+        s = findcell(r, "s")
+        @test :KwOpt ∉ setdiff(s.writes, s.observed)        # no expansion-recovered write when opted out…
+        @test :KwOpt in s.observed                          # …though the run is still seen to bind it
         @test isempty(ReportEngine.pending_macro_cells(r))  # and no round-trips queued
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
     end

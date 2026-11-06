@@ -175,4 +175,26 @@ defs(src) = _collect_defs!(Dict{String,UInt64}(), Meta.parseall(src))
         @test all(defs(v)["f"] != a["f"] for v in (first, mid, last_))   # every method is tracked
         @test all(defs(v)["g"] == a["g"] for v in (first, mid, last_))   # and nothing else moves
     end
+
+    @testset "source call graph" begin
+        src = """
+        module P
+        const F = 2
+        leaf(x) = x * F
+        mid(x) = leaf(x) + 1
+        top(x) = mid(x) * 10
+        scale(v) = v .* leaf(1)
+        lonely(x) = x + 1
+        module Inner
+        import ..P: leaf
+        deep(x) = leaf(x) - 1
+        end
+        end
+        """
+        refs = _collect_refs!(Dict{String,Set{String}}(), Meta.parseall(src))
+        @test "leaf" in refs["mid"] && "mid" in refs["top"] && !("top" in refs["top"])
+        @test sort!(collect(_reaching_defs(refs, ["leaf"]))) == ["deep", "mid", "scale", "top"]
+        @test isempty(_reaching_defs(refs, ["lonely"]))
+        @test sort!(collect(_reaching_defs(refs, ["F"]))) == ["deep", "leaf", "mid", "scale", "top"]
+    end
 end

@@ -45,7 +45,8 @@ that a later cell reads back. Assert those yourself so the engine keeps the two 
 - **`needs=id1,id2`** header tag — set it with the **🏷 tag editor** or directly in the cell header.
   It names the earlier code cells this one depends on.
 - **`mutates=name1,name2`** header tag — declare that this cell changes those existing values in
-  place, when it does so through a call or an alias the analyzer cannot follow (`update!(df)`). The
+  place, when it does so through a call or an alias the analyzer cannot follow (a package function
+  without a `!` that modifies its argument, or `ys = xs; push!(ys, 1)`). The
   cell then counts as a writer of those names, so later readers chain off it and restale, and its
   cached result snapshots the post-mutation value. Declare it at a [region](regions.md) boundary in
   particular: an undeclared hidden mutation there forks the two copies rather than just going stale.

@@ -45,6 +45,7 @@ module SlateLook; include("test_slate_look.jl"); end
 module Engine;    include("test_engine.jl");    end
 module Eval;      include("test_eval.jl");      end
 module Deps;      include("test_deps.jl");      end
+module Edits;     include("test_edits.jl");     end
 module Envprep;   include("test_envprep.jl");   end
 module Gateauth;  include("test_gateauth.jl"); end
 module PeerOwnerT; include("test_peer_owner.jl"); end
@@ -74,6 +75,7 @@ module Slides;    include("test_slides.jl");    end
 module Recording; include("test_recording.jl"); end
 module Frontmatter; include("test_frontmatter.jl"); end
 module Export;    include("test_export.jl");    end
+module DocBundle; include("test_docbundle.jl"); end
 module Bootfail;  include("test_bootfail.jl");  end
 module Publishing; include("test_publishing.jl"); end
 module App;       include("test_app.jl");       end
@@ -99,10 +101,10 @@ module Confine;   include("test_confine.jl");   end
 const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memostore, Slatetask,
                    Batchsweep, Transfer, SyncDictT, Dataset, TablesInc, Jobcell, FormatT, Effectstore,
                    Blobchannel, RemotePool, Regions, Machines, SlateDiagT, Parallel, Animation, Echarts, SlateLook,
-                   Engine, Eval, Deps, Envprep, Gateauth, PeerOwnerT, SshTransportT, Tools, Registry, Toolcell, Web,
+                   Engine, Eval, Deps, Edits, Envprep, Gateauth, PeerOwnerT, SshTransportT, Tools, Registry, Toolcell, Web,
                    Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, RunRecord, History, SlateApi,
                    Agentops, Repro, Slides, Recording, Debugger, Profiler, Specialist, Findings, ToolDocs, AppRender,
-                   Frontmatter, Export, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, FramePoolT, EmitChannelT, WsOrder, BindObs, RecordDisplay, MatrixDisplay, Confine)
+                   Frontmatter, Export, DocBundle, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, FramePoolT, EmitChannelT, WsOrder, BindObs, RecordDisplay, MatrixDisplay, Confine)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
 # ReTest matches a plain String LITERALLY (regex metacharacters escaped), so "deps|eval" would match
