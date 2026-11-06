@@ -7,7 +7,6 @@ on:
   pull_request:
     branches:
       - main
-      - feat/hpc-cluster
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
