@@ -14,6 +14,15 @@ Two things to know about the published GitHub releases for this package:
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-11-05
+
+### Added
+
+`@pkg_asset` returns a `PkgAsset`, a string that keeps the path it was read from. The front-end
+registry (`provide_frontend!` and the widget forms) re-reads that file when its modification time
+changes, so an edited extension script reaches the page on the next reload without restarting the
+worker. A file that goes missing keeps its last text.
+
 ## [0.11.2] - 2026-10-12
 
 ### Added
@@ -205,7 +214,10 @@ server.
 - **Served byte assets, the live-render trait, and a reset hook.**
 - Front-end registries are guarded against concurrent binds.
 
-[Unreleased]: https://github.com/kahliburke/KaimonSlate.jl/compare/SlateExtensionsBase-v0.11.0...HEAD
+[Unreleased]: https://github.com/kahliburke/KaimonSlate.jl/compare/SlateExtensionsBase-v0.11.3...HEAD
+[0.11.3]: https://github.com/kahliburke/KaimonSlate.jl/compare/SlateExtensionsBase-v0.11.2...SlateExtensionsBase-v0.11.3
+[0.11.2]: https://github.com/kahliburke/KaimonSlate.jl/compare/SlateExtensionsBase-v0.11.1...SlateExtensionsBase-v0.11.2
+[0.11.1]: https://github.com/kahliburke/KaimonSlate.jl/compare/SlateExtensionsBase-v0.11.0...SlateExtensionsBase-v0.11.1
 [0.11.0]: https://github.com/kahliburke/KaimonSlate.jl/compare/SlateExtensionsBase-v0.10.6...SlateExtensionsBase-v0.11.0
 [0.10.6]: https://github.com/kahliburke/KaimonSlate.jl/compare/SlateExtensionsBase-v0.10.5...SlateExtensionsBase-v0.10.6
 [0.10.5]: https://github.com/kahliburke/KaimonSlate.jl/compare/SlateExtensionsBase-v0.10.4...SlateExtensionsBase-v0.10.5
