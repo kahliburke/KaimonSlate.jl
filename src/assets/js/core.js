@@ -198,7 +198,7 @@ function _slateForMode(o, dark) {
 function _slateFillTip(tpl, p) {
   const v = Array.isArray(p.value) ? p.value : [p.value];
   const dims = p.dimensionNames || [];
-  const esc = x => String(x == null ? '' : x).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
+  const esc = window.slateEscHtml;
   return tpl.replace(/\{@\[(\d+)\]\}/g, (_, i) => esc(v[+i]))
     .replace(/\{@([^}]+)\}/g, (_, n) => { const i = dims.indexOf(n); return i < 0 ? '' : esc(v[i]); })
     .replace(/\{a\}/g, () => esc(p.seriesName)).replace(/\{b\}/g, () => esc(p.name))
