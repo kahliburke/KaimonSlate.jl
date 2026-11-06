@@ -217,8 +217,8 @@ store for `cell_image` to read. Returns how many came back.
 
 `theme` names the Slate palette to rasterise UNDER — the capture is a picture of the live page, so
 without it a light PDF embeds whatever the reader happens to be looking at, which is usually dark
-cards on white paper. The theme is applied to html2canvas's own clone, so the page does not flicker
-and a reader watching the export sees nothing change.
+cards on white paper. The cells are captured from a copy of the page in an off-screen frame with the
+theme applied, so the page does not flicker and a reader watching the export sees nothing change.
 
 One request, not one per cell. Asking cell by cell costs a push and a wait EACH, so a notebook with
 a dozen HTML outputs spends a dozen timeouts in series and any single slow raster quietly drops

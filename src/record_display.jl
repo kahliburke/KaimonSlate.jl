@@ -237,7 +237,7 @@ end
 # structure, not its area. This adds only the one thing slate_matrix has no form of: a STATIC
 # picture. Its own renderings are an ECharts instance or KaTeX, and a record field can host
 # neither, so the grid is painted as an inline SVG that needs nothing to boot and survives
-# export, PDF and html2canvas. Clicking the field asks for the real `slate_matrix` rendering.
+# export, PDF and DOM rasters. Clicking the field asks for the real `slate_matrix` rendering.
 const _MAT_MINI_CELLS = 18 * 18   # `max_cells` for the field-sized thumbnail
 const _MAT_FULL_CELLS = 64 * 64   # …and for the expanded view behind a click
 const _MAT_LEVELS = 24            # ramp steps — quantised so equal neighbours merge into one rect

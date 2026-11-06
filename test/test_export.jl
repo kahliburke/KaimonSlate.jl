@@ -1952,7 +1952,7 @@ end
     @test NS._comp_fig_width_pct(Vector{UInt8}(codeunits("<svg></svg>")), "svg") === nothing
     @test NS._comp_fig_width_pct(svg(640), "png") === nothing   # a raster has no intrinsic column
 
-    # ── the html2canvas rescue covers BOTH HTML output flavours ──
+    # ── the DOM-raster rescue covers BOTH HTML output flavours ──
     hc = _RE.parse_report("#%% code id=h\n1\n").cells[end]
     hc.output = out([_RE.MimeChunk("application/vnd.kaimonslate.html+html", Vector{UInt8}("<b>x</b>"))])
     @test NS._has_html_output(hc)                            # `html_fragment`, not just `text/html`

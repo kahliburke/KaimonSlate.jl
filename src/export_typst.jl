@@ -38,7 +38,7 @@ end
 # `_warm_chart_svgs!` uses for a client-rendered chart. Both surfaces a component reaches are
 # covered: a cell that RETURNED one, and a markdown fence an extension claimed (```mermaid → that
 # package's value). A component can render itself for print via the module's `exportFigure`
-# (slate-widget.js); without one the mount's own SVG, or an html2canvas raster, is captured.
+# (slate-widget.js); without one the mount's own SVG, or a DOM raster of it, is captured.
 const _COMPONENT_MIME = "application/vnd.kaimonslate.component+json"
 const _CompFigs = Dict{Tuple{String,Int},Tuple{Vector{UInt8},String}}
 const _NO_COMPFIGS = _CompFigs()
@@ -902,7 +902,7 @@ end
 
 # True if the cell's output includes an HTML chunk (a custom card Typst can't render) — either a
 # hand-rolled `text/html` show method or `slate_render`'s `html_fragment` escape hatch. Both are
-# arbitrary DOM with no figure bytes behind them, so both want the same html2canvas rescue; matching
+# arbitrary DOM with no figure bytes behind them, so both want the same DOM-raster rescue; matching
 # only `text/html` left every `html_fragment` output (a WGLMakie figure among them) out of the PDF.
 _has_html_output(c::Cell) = c.output !== nothing &&
     any(ch -> ch.mime in ("text/html", "application/vnd.kaimonslate.html+html"), c.output.display)
@@ -950,7 +950,7 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
                              compfigs = compfigs)   # vector (pdf/svg) preferred, else raster png
     # An HTML output (a custom `text/html` card, e.g. the grading `check(...)` cells) can't be
     # rendered by Typst and isn't an embeddable figure — so rasterize the rendered card via the open
-    # tab (html2canvas, same round-trip slate.inspect uses) and embed that image. Needs a live tab;
+    # tab (the same round-trip slate.inspect uses) and embed that image. Needs a live tab;
     # falls back to nothing (just the code) if none is open or the capture times out.
     if fig === nothing && _has_html_output(c)
         # `cell_image`, not `cell_image_fresh`: `_warm_html_rasters!` already asked the tab for

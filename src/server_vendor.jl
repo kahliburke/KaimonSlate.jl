@@ -1,5 +1,5 @@
 # ── Front-end vendor cache (offline support) ──────────────────────────────────
-# Third-party assets (KaTeX, ECharts, Preact/signals/htm, dagre, html2canvas) are pinned in
+# Third-party assets (KaTeX, ECharts, Preact/signals/htm, dagre, modern-screenshot) are pinned in
 # assets/vendor.json (package → version, base URL, and the files used) and served from
 # /assets/vendor/<pkg>@<version>/<sub>. Each file is fetched from `<base><sub>`, checked against the
 # SHA-384 recorded for it in assets/vendor.lock.json, cached OUTSIDE the repo, and served from disk
