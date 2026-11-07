@@ -85,18 +85,6 @@ end
 GenericUploadTarget(; name, kind::Symbol, dest::AbstractString, url = "", endpoint = "", delete::Bool = true) =
     GenericUploadTarget(String(name), kind, String(dest), String(url), String(endpoint), delete)
 
-function publish(t::GenericUploadTarget, nb::LiveNotebook; slug = "", bundle = false, base_url = "", kwargs...)
-    dir = mktempdir()
-    try
-        build_site!(dir, nb; site_url = isempty(base_url) ? t.url : base_url, slug = slug,
-                    bundle = bundle, kwargs...)
-        ok, log = _upload_dir(t, dir)
-        return PublishResult(; ok = ok, url = t.url, log = ok ? log : log)
-    finally
-        rm(dir; recursive = true, force = true)
-    end
-end
-
 # Run the upload CLI for the target's kind over a built dir; returns (ok, combined-output).
 function _upload_dir(t::GenericUploadTarget, dir::AbstractString)
     # A dest beginning `-` would be read as a CLI flag by aws/rsync (argument injection).
@@ -224,16 +212,6 @@ function deploy_dir(t::RsyncServeTarget, dir::AbstractString)
     return PublishResult(; ok = true, url = t.url, log = String(take!(io)))
 end
 
-function publish(t::RsyncServeTarget, nb::LiveNotebook; slug = "", bundle = false, base_url = "", kwargs...)
-    dir = mktempdir()
-    try
-        build_site!(dir, nb; site_url = isempty(base_url) ? t.url : base_url, slug = slug, bundle = bundle, kwargs...)
-        return deploy_dir(t, dir)
-    finally
-        rm(dir; recursive = true, force = true)
-    end
-end
-
 function preflight(t::RsyncServeTarget)
     warnings = String[]
     for tool in ("rsync", "ssh", "scp")
@@ -345,24 +323,6 @@ CloudflarePagesTarget(; name = "cloudflare-pages", project, account_id = "", tok
     CloudflarePagesTarget(String(name), String(project), String(account_id), String(token),
                           isempty(url) ? "https://$(project).pages.dev/" : String(url), String(branch))
 
-function publish(t::CloudflarePagesTarget, nb::LiveNotebook; slug = "", bundle = false, base_url = "", kwargs...)
-    dir = mktempdir()
-    try
-        build_site!(dir, nb; site_url = isempty(base_url) ? t.url : base_url, slug = slug, bundle = bundle, kwargs...)
-        wr = Sys.which("wrangler")
-        cmd = wr === nothing ? `npx --yes wrangler pages deploy $dir --project-name $(t.project)` :
-                               `$wr pages deploy $dir --project-name $(t.project)`
-        isempty(t.branch) || (cmd = `$cmd --branch $(t.branch)`)
-        env = Dict{String,String}()
-        isempty(t.token) || (env["CLOUDFLARE_API_TOKEN"] = t.token)
-        isempty(t.account_id) || (env["CLOUDFLARE_ACCOUNT_ID"] = t.account_id)
-        ok, log = _run_capture(cmd; env = env)
-        return PublishResult(; ok = ok, url = t.url, log = log)
-    finally
-        rm(dir; recursive = true, force = true)
-    end
-end
-
 function preflight(t::CloudflarePagesTarget)
     warnings = String[]
     (Sys.which("wrangler") === nothing && Sys.which("npx") === nothing) &&
@@ -383,22 +343,6 @@ end
 NetlifyTarget(; name = "netlify", site_id, token = "", url = "") =
     NetlifyTarget(String(name), String(site_id), String(token), String(url))
 
-function publish(t::NetlifyTarget, nb::LiveNotebook; slug = "", bundle = false, base_url = "", kwargs...)
-    dir = mktempdir()
-    try
-        build_site!(dir, nb; site_url = isempty(base_url) ? t.url : base_url, slug = slug, bundle = bundle, kwargs...)
-        nl = Sys.which("netlify")
-        cmd = nl === nothing ? `npx --yes netlify-cli deploy --prod --dir $dir` : `$nl deploy --prod --dir $dir`
-        env = Dict{String,String}()
-        isempty(t.token) || (env["NETLIFY_AUTH_TOKEN"] = t.token)
-        isempty(t.site_id) || (env["NETLIFY_SITE_ID"] = t.site_id)
-        ok, log = _run_capture(cmd; env = env)
-        return PublishResult(; ok = ok, url = t.url, log = log)
-    finally
-        rm(dir; recursive = true, force = true)
-    end
-end
-
 function preflight(t::NetlifyTarget)
     warnings = String[]
     (Sys.which("netlify") === nothing && Sys.which("npx") === nothing) &&
@@ -406,6 +350,19 @@ function preflight(t::NetlifyTarget)
     isempty(strip(t.site_id)) && push!(warnings, "no Netlify site id")
     isempty(strip(t.token)) && push!(warnings, "no NETLIFY_AUTH_TOKEN (set the target's secretRef)")
     return (; ok = isempty(warnings), warnings = warnings)
+end
+
+# Publishing one document to a site host: build it into a scratch dir and deploy that dir the way a
+# site deploys its build.
+function publish(t::Union{GenericUploadTarget,RsyncServeTarget,CloudflarePagesTarget,NetlifyTarget},
+                 nb::LiveNotebook; slug = "", bundle = false, base_url = "", kwargs...)
+    dir = mktempdir()
+    try
+        build_site!(dir, nb; site_url = isempty(base_url) ? t.url : base_url, slug = slug, bundle = bundle, kwargs...)
+        return deploy_dir(t, dir)
+    finally
+        rm(dir; recursive = true, force = true)
+    end
 end
 
 # ── deploy a PREBUILT site dir (the site-sync primitive) ─────────────────────────────────────────────
