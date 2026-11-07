@@ -750,22 +750,34 @@ function _force_locked!(nb::LiveNotebook, id::AbstractString; self::Bool = false
     return n
 end
 
+# Run `op` under the notebook lock once the build-floor guard admits `caller`. Returns the guard's
+# refusal, or `nothing` with `op` done.
+function _guarded!(op, nb::LiveNotebook; caller::AbstractString = "", expected_version::Int = -1)
+    return lock(nb.lock) do
+        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
+        r === nothing || return r
+        op()
+        return nothing
+    end
+end
+
+# The end of a change an agent committed: renew its build floor and tell the browsers.
+_agent_done!(nb::LiveNotebook, caller::AbstractString) = (_renew_floor!(nb, caller); _agent_push!(nb))
+
 function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
                          after::AbstractString = "", kind::AbstractString = "code",
                          id::AbstractString = "", tags::AbstractString = "",
                          caller::AbstractString = "", expected_version::Int = -1,
                          run::Bool = true, background::Bool = false, run_locked::Bool = false)
-    rej = nothing; errmsg = nothing
-    cid = lock(nb.lock) do
-        rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
-        rej === nothing || return ""
+    errmsg = nothing; cid = ""
+    rej = _guarded!(nb; caller = caller, expected_version = expected_version) do
         cells = nb.report.cells
         # An explicit id is sanitized to `#%%`-header-safe chars and MUST be unique; else auto-generate.
         nid = ""
         if !isempty(strip(String(id)))
             nid = replace(strip(String(id)), r"[^A-Za-z0-9_]+" => "_")
-            isempty(nid)                      && (errmsg = "id cannot be empty"; return "")
-            any(c -> c.id == nid, cells)      && (errmsg = "id '$(nid)' is already in use"; return "")
+            isempty(nid)                      && (errmsg = "id cannot be empty"; return)
+            any(c -> c.id == nid, cells)      && (errmsg = "id '$(nid)' is already in use"; return)
         else
             nid = _gen_id(nb.report)
         end
@@ -778,20 +790,19 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
         # added cell is visible (stale) immediately instead of only when its eval finishes.
         _commit_structure!(nb, i + 1; announce = true, run = run)
         (run && run_locked) && _force_locked!(nb, cell.id)
-        return cell.id
+        cid = cell.id
     end
-    errmsg === nothing || return "⛔ $errmsg"
     rej === nothing || return rej
+    errmsg === nothing || return "⛔ $errmsg"
     if !run
-        _renew_floor!(nb, caller); _agent_push!(nb)
+        _agent_done!(nb, caller)
         return "added id=$cid (NOT RUN) — $(_stale_note(nb))" * _parse_note(nb, cid)
     end
     # The cell is committed above, so its id is certain regardless of how the run goes — only the
     # WAIT is raced. A slow cell hands back a job id instead of holding the caller open.
     r = _run_bg(nb, "add_cell $cid"; grace = background ? 0 : _scratch_grace()) do
         _eval!(nb; wait_for = cid)       # wait OUTSIDE the lock — the agent wants the cell's result
-        _renew_floor!(nb, caller)
-        _agent_push!(nb)
+        _agent_done!(nb, caller)
         "added id=$cid →\n$(_result_of(nb, cid))"
     end
     return r.done ? r.text : "added id=$cid (running)\n$(r.text)"
@@ -823,9 +834,7 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
                           run::Bool = true, background::Bool = false, run_locked::Bool = false)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     _cell_editable(nb, id) || return "(cell id=$id was written by a newer Slate; it can be moved or deleted, not edited)"
-    rej = lock(nb.lock) do
-        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
-        r === nothing || return r
+    rej = _guarded!(nb; caller = caller, expected_version = expected_version) do
         # Tags FIRST: the edit below marks the cell stale and its eval can begin immediately, so
         # tags applied after it race the run — a freshly `cache`-tagged cell would evaluate once
         # more under its OLD flags (seen live: the tagged run didn't persist).
@@ -837,17 +846,15 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
         tags === nothing || set_cell_tags!(nb, id, tags)
         edit_cell!(nb, id, source; announce = true, run = run)   # show the edited source before its eval finishes
         (run && run_locked) && _force_locked!(nb, id; self = true)
-        return nothing
     end
     rej === nothing || return rej
     if !run
-        _renew_floor!(nb, caller); _agent_push!(nb)
+        _agent_done!(nb, caller)
         return "edited id=$id (NOT RUN) — $(_stale_note(nb))" * _parse_note(nb, id)
     end
     r = _run_bg(nb, "edit_cell $id"; grace = background ? 0 : _scratch_grace()) do
         _eval!(nb; wait_for = id)        # wait OUTSIDE the lock — the agent wants the cell's result
-        _renew_floor!(nb, caller)
-        _agent_push!(nb)
+        _agent_done!(nb, caller)
         "edited id=$id →\n$(_result_of(nb, id))"
     end
     return r.done ? r.text : "edited id=$id (running)\n$(r.text)"
@@ -857,16 +864,13 @@ end
 function agent_rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractString;
                             caller::AbstractString = "", expected_version::Int = -1)
     _cell_exists(nb, oldid) || return "(no cell id=$oldid)"
-    rej = nothing; ok = false; msg = ""
-    lock(nb.lock) do
-        rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
-        rej === nothing || return
+    ok = false; msg = ""
+    rej = _guarded!(nb; caller = caller, expected_version = expected_version) do
         ok, msg = rename_cell!(nb, oldid, newid)
     end
     rej === nothing || return rej
     ok || return "⛔ rename failed: $msg"
-    _renew_floor!(nb, caller)
-    _agent_push!(nb)
+    _agent_done!(nb, caller)
     return "renamed $oldid → $(replace(strip(String(newid)), r"[^A-Za-z0-9_]+" => "_"))"
 end
 
@@ -952,15 +956,9 @@ end
 function agent_delete_cell!(nb::LiveNotebook, id::AbstractString;
                             caller::AbstractString = "", expected_version::Int = -1)
     _cell_exists(nb, id) || return "(no cell id=$id)"
-    rej = lock(nb.lock) do
-        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
-        r === nothing || return r
-        delete_cell!(nb, id)
-        return nothing
-    end
+    rej = _guarded!(() -> delete_cell!(nb, id), nb; caller = caller, expected_version = expected_version)
     rej === nothing || return rej
-    _renew_floor!(nb, caller)
-    _agent_push!(nb)
+    _agent_done!(nb, caller)
     return "deleted id=$id"
 end
 
@@ -976,15 +974,9 @@ function agent_delete_cells!(nb::LiveNotebook, ids;
     present = String[id for id in want if _cell_exists(nb, id)]
     absent = String[id for id in want if !_cell_exists(nb, id)]
     isempty(present) && return "(no such cell$(length(want) == 1 ? "" : "s"): $(join(want, ", ")))"
-    rej = lock(nb.lock) do
-        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
-        r === nothing || return r
-        delete_cells!(nb, present)
-        return nothing
-    end
+    rej = _guarded!(() -> delete_cells!(nb, present), nb; caller = caller, expected_version = expected_version)
     rej === nothing || return rej
-    _renew_floor!(nb, caller)
-    _agent_push!(nb)
+    _agent_done!(nb, caller)
     msg = "deleted $(_n_cells(length(present))): $(join(present, ", "))"
     isempty(absent) || (msg *= " · not found: $(join(absent, ", "))")
     return msg
