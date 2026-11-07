@@ -799,7 +799,18 @@ function agentEvent(env) {
   } else if (k === 'error') {
     agentMsgs.push({ role: 'err', text: d.message || 'error' }); agentStatus(''); setWorking(false);
   } else { return; }
-  renderAgentMsgs();
+  _queueAgentRender();
+}
+// Events come in bursts: a reply a few words at a time, a tool call's arguments a few characters at a
+// time. Each render ends in a layout of the whole page (keeping the transcript at its bottom), so a
+// render per event held the page for seconds while an agent wrote a cell. A burst renders at most
+// every AGENT_RENDER_MS instead.
+const AGENT_RENDER_MS = 100;
+let _agentRenderQueued = false;
+function _queueAgentRender() {
+  if (_agentRenderQueued || _suppressAgentRender) return;
+  _agentRenderQueued = true;
+  setTimeout(() => requestAnimationFrame(() => { _agentRenderQueued = false; renderAgentMsgs(); }), AGENT_RENDER_MS);
 }
 // ── @id mention autocomplete (chat input) ─────────────────────────────────────
 // Typing `@` in the chat offers the notebook's cell ids; picking one inserts `@id `.
