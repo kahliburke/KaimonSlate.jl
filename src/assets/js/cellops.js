@@ -195,14 +195,22 @@ async function formatCells(ids) {
     const v = editors[id];
     if (v) marks[id] = _nonWs(v.state.doc.toString(), v.state.selection.main.head);
   }
+  let undoable = false;
   if (n && reader) {
     for (const id in edits) window.edSetText(id, edits[id]);
   } else if (n) {
     let st = null;
     try { st = await api('POST', '/api/cells-replace', { edits, label: `format (${n} ${n === 1 ? 'cell' : 'cells'})` }); }
     catch (_) { window.toast && window.toast('Format failed', 3000); return; }
+    undoable = !!(st && st.changed);
     if (st && st.cells) {
       rebaselineAll(st);
+      // A cell whose formatted text equals its saved source is not changed on the hub, so the
+      // rebaseline above skips it and its editor would keep the unformatted edit.
+      for (const id in edits) {
+        const c = st.cells.find(x => x.id === id);
+        if (c && window.edText(id) !== c.source) _rebaseline(id, c.source);
+      }
       renderAll(st);
       if (st.version != null) lastVersion = st.version;
     }
@@ -215,7 +223,7 @@ async function formatCells(ids) {
   const name = _FMT_NAMES[r.formatter] || r.formatter;
   const msg = bad.length === 1 ? (bad[0][0] ? `${bad[0][0]} not formatted: ${bad[0][1]}` : bad[0][1])
             : bad.length ? `${bad.length} cells not formatted: they don't parse`
-            : n ? `Formatted ${n} ${n === 1 ? 'cell' : 'cells'} (${name})` + (reader ? '' : ' · ⌘Z to undo')
+            : n ? `Formatted ${n} ${n === 1 ? 'cell' : 'cells'} (${name})` + (undoable ? ' · ⌘Z to undo' : '')
             : 'Already formatted';
   window.toast && window.toast(msg, bad.length ? 5000 : 2500);
 }
