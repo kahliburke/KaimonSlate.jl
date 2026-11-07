@@ -1392,6 +1392,19 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
 .dbgwnow { font-family:'Cascadia Code',monospace; font-size:.76rem; color:var(--strong); }
 .dbgwrange { font-size:.66rem; color:var(--dim); }
 .dbgwempty { font-size:.7rem; color:var(--dim); font-style:italic; padding:2px 0; }
+/* A watch's series, opened from its row. The plot stretches to the rail's width, so its lines keep
+   their stroke width as it does; the bounds are read off its left edge. */
+.dbgwplot { position:relative; margin:4px 0 2px; color:var(--teal); }
+.dbgwplot svg { display:block; width:100%; height:120px; background:var(--bg2); border-radius:4px; }
+.dbgwplot path, .dbgwpgrid, .dbgwpzero { vector-effect:non-scaling-stroke; }
+.dbgwpgrid { stroke:var(--border); stroke-width:1; stroke-dasharray:3 3; }
+.dbgwpzero { stroke:var(--dim); stroke-width:1; }
+.dbgwpax { position:absolute; top:0; left:5px; height:120px; display:flex; flex-direction:column;
+  justify-content:space-between; pointer-events:none; font-family:'Cascadia Code',monospace;
+  font-size:.62rem; color:var(--dim); }
+.dbgwpax span { background:var(--bg2); padding:0 2px; border-radius:2px; }
+.dbgwpfoot { display:flex; gap:6px; margin-top:2px; font-size:.64rem; color:var(--dim); }
+.dbgwpempty { font-size:.7rem; color:var(--dim); font-style:italic; padding:2px 0; }
 .dbgwadd { cursor:pointer; background:none; border:1px dashed var(--border); border-radius:4px;
   color:var(--dim); font-size:.7rem; line-height:1; padding:1px 6px; }
 .dbgwadd:hover { color:var(--teal); border-color:var(--teal); }
