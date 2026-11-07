@@ -270,6 +270,8 @@ function cancel!(root::AbstractString, sweep::AbstractString, launcher)
         want = Set(sweep_chunks(root, sweep))
         names = [nm for (nm, cs) in subs if any(in(want), cs)]
         isempty(names) || (n = BatchLauncher.cancel!(launcher, root, names))
+        # A unit stopped on request did not crash its process, so it is not struck for it.
+        for c in want; rm(SlateTask.inflight_path(root, c); force = true); end
     catch
         # Best effort: the marker matters more than reaping every job, and a scheduler that is
         # briefly unreachable must not leave the sweep looking live.

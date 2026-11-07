@@ -279,6 +279,36 @@ end
         end
     end
 
+    @testset "a unit that keeps taking its process down is recorded as an error" begin
+        # A crash in native code leaves no result, only the marker naming the unit it was running.
+        died_on(root, c, key; strikes = 0) = begin
+            mkpath(SlateTask.inflight_dir(root))
+            write(SlateTask.inflight_path(root, c), rpad(key, 128) * "\n")
+            strikes > 0 && write(SlateTask.inflight_path(root, c) * ".strikes", "\"$key\" = $strikes\n")
+        end
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 1, per = 3)
+            c = chunks[1]; ks = BS.chunk_shards(root, c)
+            died_on(root, c, ks[2])                 # one death is not proof: it runs again
+            r = SlateTask.run_chunk(root, c)
+            @test (r.ran, r.failed) == (3, 0)
+            @test !isfile(SlateTask.inflight_path(root, c))
+            died_on(root, c, ks[1])                 # died between units: the named one had landed
+            r = SlateTask.run_chunk(root, c)
+            @test (r.skipped, r.failed) == (3, 0)
+        end
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 1, per = 3)
+            c = chunks[1]; ks = BS.chunk_shards(root, c)
+            died_on(root, c, ks[2]; strikes = SlateTask.CRASH_STRIKES - 1)
+            r = SlateTask.run_chunk(root, c)
+            @test (r.ran, r.failed) == (2, 1)       # recorded without running, the rest ran
+            f = BS.failures(root, sweep)
+            @test length(f) == 1 && f[1].key == ks[2] && occursin("died while running", string(f[1].error))
+            @test !isfile(SlateTask.inflight_path(root, c) * ".strikes")
+        end
+    end
+
     @testset "a chunk that never lands stalls instead of resubmitting forever" begin
         # The walltime-kill / OOM case: the job dies without writing a manifest, so the shard looks
         # exactly like one that was never attempted. Only the attempt budget tells them apart.

@@ -444,6 +444,59 @@ shards, some failing is the normal case, and one bad parameter must not cost the
 # captured array a log has no business restating.
 _arg_label(arg) = first(sprint(show, arg; context = :compact => true), 200)
 
+# ── Units that take their process down ─────────────────────────────────────────────────────────
+# A unit that aborts or segfaults inside native code kills the task process before anything is
+# recorded, so the next attempt meets it again. Before each unit, the runner writes its key over a
+# per-chunk marker. A later attempt that finds a marker naming a unit with no result knows that unit
+# was running when the process died, and counts a strike against it. A walltime kill or a cancel
+# also leaves a marker, so one death is not proof: at `CRASH_STRIKES` the unit is recorded as an
+# error and the rest of the chunk runs.
+const CRASH_STRIKES = 2
+
+inflight_dir(root::AbstractString) = joinpath(String(root), "inflight")
+inflight_path(root::AbstractString, chunk::AbstractString) = joinpath(inflight_dir(root), String(chunk))
+_strikes_path(root, chunk) = inflight_path(root, chunk) * ".strikes"
+
+function _read_strikes(root, chunk)
+    f = _strikes_path(root, chunk)
+    isfile(f) || return Dict{String,Int}()
+    d = try; TOML.parsefile(f); catch; return Dict{String,Int}(); end
+    return Dict{String,Int}(String(k) => Int(v) for (k, v) in d if v isa Integer)
+end
+
+# The unit a dead predecessor was running, struck once more. Returns `(key, strikes)`, or `nothing`
+# when the last attempt ended cleanly or died between units.
+function _strike_inflight!(root, chunk, have)
+    f = inflight_path(root, chunk)
+    isfile(f) || return nothing
+    key = strip(try; read(f, String); catch; ""; end)
+    rm(f; force = true)
+    (isempty(key) || haskey(have, key)) && return nothing
+    st = _read_strikes(root, chunk)
+    st[key] = get(st, key, 0) + 1
+    tmp = tempname(inflight_dir(root))
+    try
+        open(io -> TOML.print(io, st), tmp, "w")
+        mv(tmp, _strikes_path(root, chunk); force = true)
+    catch
+        try; rm(tmp; force = true); catch; end
+    end
+    return (String(key), st[key])
+end
+
+# The marker stays open for the chunk, and each unit's key is written over it in place: one write
+# per unit. What a write has handed to the kernel survives the process dying, which is the only
+# failure this records.
+function _mark_inflight(io::IO, key::AbstractString)
+    seek(io, 0)
+    write(io, rpad(key, 128), "\n")
+    flush(io)
+end
+
+_crash_error(n::Integer) =
+    "the task process died while running this unit, on $n attempts. That is a crash in native code " *
+    "(an abort or segfault in a C library) or a kill; the chunk's log holds its last output."
+
 function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = false)
     d = MemoStore.read_manifest(root, chunk)
     d === nothing && error("no chunk descriptor for key $chunk under $root")
@@ -484,6 +537,9 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
             end
         end
     end
+    # A unit a dead predecessor was running when it went down, and how often that has happened.
+    struck = force ? nothing : _strike_inflight!(root, chunk, have)
+    poisoned = struck !== nothing && struck[2] >= CRASH_STRIKES ? struck : nothing
     jobid = job_tag()
     pending = Dict{String,Any}[]
     last_at = Ref(time())
@@ -539,6 +595,8 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
     summarize = isempty(sum_h) ? nothing : Core.eval(mod, Meta.parse(_get_txt(root, sum_h)))
     lazy = get(d, "lazy", false) === true
 
+    mkpath(inflight_dir(root))
+    marker = open(inflight_path(root, chunk), "w")
     for s in shards
         s isa AbstractDict || continue
         key = String(get(s, "key", ""))
@@ -548,6 +606,18 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
             continue
         end
         arg = _get_jls(root, String(s["arg"]))
+        if poisoned !== nothing && key == poisoned[1]
+            err = _crash_error(poisoned[2])
+            push!(pending, Dict{String,Any}(
+                "kind" => KIND_SHARD, "created" => round(Int, time()), "julia" => string(VERSION),
+                "chunk" => chunk, "ms" => 0.0, "ran_on" => _ran_on(), "status" => "error",
+                "artifacts" => Dict{String,Any}[], "bindings" => Any[], "error" => err, "key" => key))
+            failed += 1
+            @error "unit failed: " * err unit = _arg_label(arg)
+            emit!()     # durable before the next unit, which may crash as well
+            continue
+        end
+        _mark_inflight(marker, key)
         _ARTIFACTS[] = Dict{String,Any}[]
         _ROOT[] = root
         t0 = time()
@@ -657,6 +727,10 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
     end
 
     emit!()
+    # Finished, so nothing is in flight and nothing struck is still owed.
+    close(marker)
+    rm(inflight_path(root, chunk); force = true)
+    rm(_strikes_path(root, chunk); force = true)
     # Fold this chunk's own log now that it is finished. Bounded work on files this job wrote, no
     # coordination with anyone, and it keeps a chunk that was retried a few times from leaving a
     # pile behind. The grace window protects a reader that listed the directory a moment ago.
