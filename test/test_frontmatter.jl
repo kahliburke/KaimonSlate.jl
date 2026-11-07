@@ -493,6 +493,22 @@ x = 1
         # No placeholder in the page → cards appended before </body> rather than dropped.
         nomark = NS._site_index_with_home("<html><body><h1>Hi</h1></body></html>", docs)
         @test occursin("href=\"post-one/\"", nomark) && occursin("<h1>Hi</h1>", nomark)
+
+        # Built into a site, the front page becomes the root template: absolute og tags, no bundle.
+        d = mktempdir()
+        hb = _mknb("#%% md id=hero home\n# Kahli's Notebooks\n\n#%% md id=list docindex\nx\n\n#%% code id=fig\n1\n")
+        hb.report.cells[end].output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x89, 0x50])],
+            Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        r = NS.build_site!(d, hb; slug = "home", site_url = "https://u.github.io/s", bundle = true)
+        @test r.home && r.docUrl == "https://u.github.io/s/"
+        tmpl = read(joinpath(d, ".slate-home.html"), String)
+        @test occursin("https://u.github.io/s/og-image.png", tmpl) && isfile(joinpath(d, "og-image.png"))
+        @test occursin("og:type\" content=\"website", tmpl)
+        @test !isfile(joinpath(d, NS._SITE_RUNJL))
+        idx = read(joinpath(d, "index.html"), String)
+        @test occursin("Kahli's Notebooks", idx) && occursin("id=\"slate-cards-root\"", idx)
+        man = NS._read_site_manifest(d)
+        @test man["home"] === true && man["homeDoc"]["build"]["bundle"] === false
     end
 
     @testset "HTML export options: theme + code size + hide source" begin

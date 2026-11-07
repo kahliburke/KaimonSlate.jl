@@ -4529,22 +4529,33 @@ end
 # publish_site.
 function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; bundle::Bool = false,
                           base_url::AbstractString = "", agent::Bool = true, history::Bool = false, kwargs...)
-    img = og_image(nb)
-    ogpath = ""
-    if img !== nothing
-        write(joinpath(dir, "og-image.png"), img); ogpath = "og-image.png"
-    end
+    ogpath = _write_og_image!(dir, nb, "")
     bundle && _write_runnable_bundle!(dir, nb; base_url = base_url, agent = agent, history = history)
-    _write_page_assets!(dir, nb; imports = _site_import_mode(kwargs))   # referenced assets → page-local siblings (this page IS at `dir`)
-    # …and the ones only the export knows about. A `@replay` sweep is evaluated INSIDE `export_html`, so
-    # it does not exist yet above; the page names it as a sibling and the file has to follow.
-    sink = Dict{String,Vector{UInt8}}()
-    html = export_html(nb; og_image = ogpath, runnable = bundle, history = history,
-                       inline_assets = false, asset_sink = sink, kwargs...)
-    _write_sibling_assets!(dir, sink)
+    html = _export_page_into!(dir, nb; ogpath = ogpath, runnable = bundle, history = history, kwargs...)
     write(joinpath(dir, "index.html"), html)
     write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
     return dir
+end
+
+# Write the notebook's og-image into `dir` and return the URL a page names it by (`base` is "" for
+# page-relative, else the page's absolute URL with a trailing `/`), or "" when it has none.
+function _write_og_image!(dir::AbstractString, nb::LiveNotebook, base::AbstractString)
+    img = og_image(nb)
+    img === nothing && return ""
+    write(joinpath(dir, "og-image.png"), img)
+    return base * "og-image.png"
+end
+
+# Export `nb` as a page living in `dir` and return its html; where the html is written is the caller's
+# choice. Referenced assets go in first as page-local siblings, then the ones only the export knows
+# about: a `@replay` sweep is evaluated INSIDE `export_html`, so its files do not exist until it runs.
+# Every site page is built through here, so none can ship without the siblings its data needs.
+function _export_page_into!(dir::AbstractString, nb::LiveNotebook; ogpath::AbstractString, kwargs...)
+    _write_page_assets!(dir, nb; imports = _site_import_mode(kwargs))
+    sink = Dict{String,Vector{UInt8}}()
+    html = export_html(nb; og_image = ogpath, inline_assets = false, asset_sink = sink, kwargs...)
+    _write_sibling_assets!(dir, sink)
+    return html
 end
 
 """
@@ -4647,22 +4658,14 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
                      history::Bool = false, site_home::AbstractString = "", site_home_label::AbstractString = "",
                      kwargs...)
     mkpath(docdir)
-    img = og_image(nb)
-    ogpath = ""
-    if img !== nothing
-        write(joinpath(docdir, "og-image.png"), img)
-        # Absolute when we know the doc's URL (scrapers prefer it), else page-relative.
-        ogpath = isempty(strip(base_url)) ? "og-image.png" : rstrip(String(base_url), '/') * "/og-image.png"
-    end
+    # Absolute when we know the doc's URL (scrapers prefer it), else page-relative.
+    ogpath = _write_og_image!(docdir, nb, isempty(strip(base_url)) ? "" : rstrip(String(base_url), '/') * "/")
     bundle && _write_runnable_bundle!(docdir, nb; base_url = base_url, agent = agent, history = history)
-    # Referenced assets → this doc's OWN dir (<site>/<slug>/), so `registerMap` etc. use a plain
-    # page-relative path with no "../" — resolves wherever the site is mounted.
-    _write_page_assets!(docdir, nb; imports = _site_import_mode(kwargs))
-    sink = Dict{String,Vector{UInt8}}()          # …plus the siblings only the export can produce
-    html = export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, history = history,
-                       inline_assets = false, asset_sink = sink,
-                       site_home = site_home, site_home_label = site_home_label, kwargs...)
-    _write_sibling_assets!(docdir, sink)
+    # Assets go in this doc's OWN dir (<site>/<slug>/), so `registerMap` etc. use a plain page-relative
+    # path with no "../" — resolves wherever the site is mounted.
+    html = _export_page_into!(docdir, nb; ogpath = ogpath, og_url = String(base_url), runnable = bundle,
+                              history = history, site_home = site_home, site_home_label = site_home_label,
+                              kwargs...)
     write(joinpath(docdir, "index.html"), html)
     m = _doc_meta(nb)
     cs = nb.report.cells
@@ -4935,19 +4938,12 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
     local commit_title, docUrl
     if _home_notebook(nb)
         fm = report_frontmatter(nb.report)
-        himg = og_image(nb); hogpath = ""
-        if himg !== nothing
-            write(joinpath(dir, "og-image.png"), himg)
-            hogpath = isempty(su) ? "og-image.png" : su * "og-image.png"       # absolute when hosted
-        end
-        _write_page_assets!(dir, nb; imports = _site_import_mode(kwargs))   # referenced assets → page-local siblings (home page IS at `dir`)
-        hsink = Dict{String,Vector{UInt8}}()   # …plus the siblings only the export can produce
+        hogpath = _write_og_image!(dir, nb, su)                                # absolute when hosted
         # A front page is a site's index, not something a visitor runs, so it deliberately carries NO
         # runnable bundle however the option is set — `runnable=false` here is the decision, not an
         # oversight. Its `build` record below says `bundle=false` to match what was actually built.
-        hhtml = export_html(nb; runnable = false, og_image = hogpath, inline_assets = false,
-                            asset_sink = hsink, og_url = su, og_type = "website", kwargs...)  # carries `docindex`
-        _write_sibling_assets!(dir, hsink)
+        hhtml = _export_page_into!(dir, nb; ogpath = hogpath, runnable = false, og_url = su,
+                                   og_type = "website", kwargs...)             # carries `docindex`
         write(htmpl, hhtml)
         manifest["home"] = true
         # Provenance: WHICH notebook is the front page — the manager shows it and links back

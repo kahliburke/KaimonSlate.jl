@@ -1755,12 +1755,14 @@ end
     # The CALL sites (not the prose about them): each is a page whose data ships as neighbouring files.
     calls = [i for (i, l) in enumerate(lines)
              if occursin("inline_assets = false", l) && !startswith(strip(l), "#")]
-    @test length(calls) == 3            # _build_site_dir! · _build_doc! · _assemble_site!
-    for i in calls
-        window = join(lines[max(1, i - 5):min(length(lines), i + 4)], "\n")
-        # A new site-page builder that forgets this ships a page whose data is missing, silently.
-        @test occursin("asset_sink", window)
-    end
+    @test length(calls) == 1            # `_export_page_into!`, which every site page goes through
+    window = join(lines[max(1, calls[1] - 5):min(length(lines), calls[1] + 4)], "\n")
+    @test occursin("asset_sink", window) && occursin("_write_sibling_assets!", window)
+    # _build_site_dir! · _build_doc! · _assemble_site!'s front page. A builder that exports on its own
+    # ships a page whose data is missing, silently.
+    builders = count(l -> occursin("_export_page_into!(", l) && !startswith(strip(l), "#") &&
+                          !startswith(strip(l), "function"), lines)
+    @test builders == 3
     # …and whatever lands in the sink is written where the page will look for it.
     mktempdir() do dir
         n = NS._write_sibling_assets!(dir, Dict{String,Vector{UInt8}}(
