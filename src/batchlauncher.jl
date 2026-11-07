@@ -1037,25 +1037,33 @@ function _sbatch_script(l::SlurmLauncher, spec::JobSpec, indexfile::AbstractStri
     return join(lines, "\n") * "\n"
 end
 
-function submit!(l::SlurmLauncher, spec::JobSpec)
-    isempty(spec.chunks) && return ""
-    indexfile = joinpath(spec.root, "jobs", spec.name * ".index")
-    script = _sbatch_script(l, spec, indexfile)
-    # Write the index and the script on the far side, then submit. Heredocs keep it to one ssh
-    # round trip and avoid quoting the script through two shells.
+_index_file(spec::JobSpec) = joinpath(spec.root, "jobs", spec.name * ".index")
+
+# Write a sweep's index and its batch script (`<index>.<ext>`) on the far side, then run `submit`,
+# which prints the job id last. Heredocs keep it to one ssh round trip and avoid quoting the script
+# through two shells. `what` names the submit command in the error.
+function _stage_and_submit(l, spec::JobSpec, script::AbstractString, ext::AbstractString,
+                           submit::AbstractString, what::AbstractString)
+    indexfile = _index_file(spec)
     payload = """
     set -e
     mkdir -p $(joinpath(spec.root, "jobs")) $(spec.logdir)
     cat > $(indexfile) <<'SLATE_INDEX_EOF'
     $(join(spec.chunks, "\n"))
     SLATE_INDEX_EOF
-    cat > $(indexfile).sbatch <<'SLATE_SBATCH_EOF'
-    $(script)SLATE_SBATCH_EOF
-    sbatch --parsable $(indexfile).sbatch
+    cat > $(indexfile).$(ext) <<'SLATE_SCRIPT_EOF'
+    $(script)SLATE_SCRIPT_EOF
+    $(submit)
     """
-    ok, out = (_ssh(l, payload))
-    ok || error("sbatch failed on $(l.host): $(strip(out))")
-    return strip(split(strip(out), '\n')[end])
+    ok, out = _ssh(l, payload)
+    ok || error("$what failed on $(l.host): $(strip(out))")
+    return String(strip(split(strip(out), '\n')[end]))
+end
+
+function submit!(l::SlurmLauncher, spec::JobSpec)
+    isempty(spec.chunks) && return ""
+    f = _index_file(spec)
+    return _stage_and_submit(l, spec, _sbatch_script(l, spec, f), "sbatch", "sbatch --parsable $(f).sbatch", "sbatch")
 end
 
 # How many job names go into one scheduler query. Long enough that an ordinary sweep is one call,
@@ -1545,29 +1553,18 @@ end
 
 function submit!(l::PbsLauncher, spec::JobSpec)
     isempty(spec.chunks) && return ""
-    indexfile = joinpath(spec.root, "jobs", spec.name * ".index")
-    script = _pbs_script(l, spec, indexfile)
+    f = _index_file(spec)
     # The `qselect` guard is what `--dependency=singleton` does on SLURM: the hub can restart, or two
     # notebooks can reconcile the same sweep, and the name is content-derived either way. Without it
     # the second reconcile queues the work twice and both copies write the same shards.
-    payload = """
-    set -e
-    mkdir -p $(joinpath(spec.root, "jobs")) $(spec.logdir)
-    cat > $(indexfile) <<'SLATE_INDEX_EOF'
-    $(join(spec.chunks, "\n"))
-    SLATE_INDEX_EOF
-    cat > $(indexfile).pbs <<'SLATE_PBS_EOF'
-    $(script)SLATE_PBS_EOF
+    submit = """
     if [ -n "\$(qselect -N $(spec.name) -u \"\$USER\" 2>/dev/null)" ]; then
       echo SLATE_ALREADY
       exit 0
     fi
-    qsub $(indexfile).pbs
-    """
-    ok, out = (_ssh(l, payload))
-    ok || error("qsub failed on $(l.host): $(strip(out))")
-    id = strip(split(strip(out), '\n')[end])
-    return id == "SLATE_ALREADY" ? "" : String(id)
+    qsub $(f).pbs"""
+    id = _stage_and_submit(l, spec, _pbs_script(l, spec, f), "pbs", submit, "qsub")
+    return id == "SLATE_ALREADY" ? "" : id
 end
 
 # One `qstat -f` for the user's jobs, parsed by name. PBS has no `--name` filter, and asking per name
