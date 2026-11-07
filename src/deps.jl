@@ -670,7 +670,8 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
 const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol},Int,Set{Symbol},
-                                     Dict{Symbol,FuncSummary},Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}},Set{Symbol},Bool}}()
+                                     Dict{Symbol,FuncSummary},Vector{Tuple{Symbol,Vector{Union{Symbol,Nothing}}}},Set{Symbol},Bool,
+                                     Dict{Symbol,Set{UInt64}}}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # Bounded LRU: entries carry a recency tick (`_BIND_TICKS`, bumped on every hit/store) and overflow
 # evicts the least-recently-used ~10% — the old clear-on-full wholesale `empty!` made a long-lived
@@ -712,6 +713,7 @@ function infer_bindings!(cell::Cell)
         empty!(cell.topcalls); append!(cell.topcalls, hit[13])
         empty!(cell.soft_assigns); union!(cell.soft_assigns, hit[14])
         hit[15] ? push!(cell.flags, :eval_barrier) : delete!(cell.flags, :eval_barrier)
+        empty!(cell.methods); for (k, v) in hit[16]; cell.methods[k] = copy(v); end
         return cell
     end
     _infer_bindings_uncached!(cell)
@@ -719,7 +721,8 @@ function infer_bindings!(cell::Cell)
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && _bind_cache_evict!()
         _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now), gen, copy(cell.observes),
                                 Dict{Symbol,FuncSummary}(k => copy(v) for (k, v) in cell.funcs), copy(cell.topcalls),
-                                copy(cell.soft_assigns), :eval_barrier in cell.flags)
+                                copy(cell.soft_assigns), :eval_barrier in cell.flags,
+                                Dict{Symbol,Set{UInt64}}(k => copy(v) for (k, v) in cell.methods))
         _BIND_TICKS[cell.id] = (_BIND_TICK[] += 1)
     end
     return cell
@@ -730,9 +733,34 @@ end
 # the memo store guard, which then never caches a cell containing `x -> …` or a do-block). Strip them.
 _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_anon__"), names)
 
+# Several cells writing `name` only by adding methods, no two with the same signature: multiple
+# dispatch rather than a collision. A cell that assigns the name, or two that define the same method,
+# still collide.
+function _distinct_methods(name::Symbol, cells)
+    seen = Set{UInt64}()
+    for c in cells
+        sigs = get(c.methods, name, nothing)
+        sigs === nothing && return false
+        isempty(intersect(seen, sigs)) || return false
+        union!(seen, sigs)
+    end
+    return true
+end
+
+# The signatures of the methods a cell defines, by function name, for the names it defines ONLY by
+# method definitions (a name also assigned as a value is a plain definition). The hash is of the
+# normalised signature, so `f(x::Int)` and `f(y::Int)` are the same method.
+function _record_methods!(cell::Cell, node)
+    for p in node.funcdefs_with_signatures
+        n = p.name.joined
+        (startswith(String(n), "__ExprExpl_anon__") || n in node.definitions) && continue
+        push!(get!(Set{UInt64}, cell.methods, n), p.signature_hash)
+    end
+end
+
 function _infer_bindings_uncached!(cell::Cell)
     empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides); empty!(cell.observes)
-    empty!(cell.funcs); empty!(cell.topcalls); empty!(cell.soft_assigns)
+    empty!(cell.funcs); empty!(cell.topcalls); empty!(cell.soft_assigns); empty!(cell.methods)
     delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall); delete!(cell.flags, :eval_barrier)
     if interpolates(cell.kind)
         # A markdown or web cell "reads" the free variables of its `{{ expr }}` blocks, so it joins the
@@ -854,6 +882,7 @@ function _infer_bindings_uncached!(cell::Cell)
             union!(cell.writes, setdiff(_strip_anon(node.definitions),
                                         _macrocall_import_defs!(Set{Symbol}(), blk)))
             union!(cell.writes, _strip_anon(node.funcdefs_without_signatures))
+            _record_methods!(cell, node)
             union!(cell.writes, _collect_global_decls!(Set{Symbol}(), blk))
             # A function body mutates when the function is called, so only the cell's immediate code
             # counts here; the bodies go into the cell's function summaries, which its callers take on.
@@ -1260,6 +1289,9 @@ function build_dependencies!(report::Report)
     _apply_function_effects!(report)       # callers take on what the notebook functions they reach do
     _scan_imports!(report)                 # notebook-level `@use` import-map declarations → report.meta
     writer = Dict{Symbol,String}()        # name → id of most-recent prior writer
+    # name → every prior cell adding methods to it since it was last assigned as a value. A reader of a
+    # function depends on all of them: the method it calls may live in any of those cells.
+    method_writers = Dict{Symbol,Vector{String}}()
     barrier::Union{String,Nothing} = nothing
     seen = String[]
     pending_reads = Dict{Symbol,String}() # name → FIRST cell to read it top-level with no prior writer
@@ -1276,6 +1308,7 @@ function build_dependencies!(report::Report)
             # write, become a barrier, or enter `seen`.
             for r in c.reads
                 haskey(writer, r) && push!(c.deps, writer[r])
+                union!(c.deps, get(method_writers, r, ()))
             end
             for r in c.reads_now
                 haskey(writer, r) || get!(pending_reads, r, c.id)
@@ -1296,6 +1329,7 @@ function build_dependencies!(report::Report)
         in_dependency_graph(c.kind) || continue
         for r in c.reads
             haskey(writer, r) && push!(c.deps, writer[r])
+            union!(c.deps, get(method_writers, r, ()))
         end
         for r in c.reads_now
             haskey(writer, r) || get!(pending_reads, r, c.id)
@@ -1310,6 +1344,7 @@ function build_dependencies!(report::Report)
         delete!(c.deps, c.id)             # never self-depend
         for w in c.writes
             writer[w] = c.id
+            haskey(c.methods, w) ? push!(get!(Vector{String}, method_writers, w), c.id) : delete!(method_writers, w)
         end
         _full_barrier(c) && (barrier = c.id)
         # `seen` feeds ONLY the opaque-union above. A contentless cell (no reads, no writes, not a
@@ -1323,15 +1358,16 @@ function build_dependencies!(report::Report)
     # Names defined by 2+ code cells — a shared-namespace collision (last writer wins), a silent
     # footgun (an edit to one looks like dead reactivity). Count DISTINCT cells per name (each
     # cell's `writes` is a Set). Stashed on meta (runtime-only; never serialized) for the UI.
-    wcells = Dict{Symbol,Vector{String}}()
+    wcells = Dict{Symbol,Vector{Cell}}()
     for c in report.cells, w in c.writes
         w in c.provides && continue          # brought in by `using`/`import` — availability, not a colliding def
         w in c.mutates && continue           # mutated here (`prog[] = …`, `push!(v, …)`), not defined — not a collision
-        push!(get!(wcells, w, String[]), c.id)
+        push!(get!(wcells, w, Cell[]), c)
     end
-    report.meta["multidef"] = Set{String}(string(w) for (w, ids) in wcells if length(ids) >= 2)
-    report.meta["multidef_cells"] =                       # name → the cells defining it (for the UI popup)
-        Dict{String,Vector{String}}(string(w) => ids for (w, ids) in wcells if length(ids) >= 2)
+    clash = Dict{String,Vector{String}}(string(w) => [c.id for c in cs] for (w, cs) in wcells
+                                        if length(cs) >= 2 && !_distinct_methods(w, cs))
+    report.meta["multidef"] = Set{String}(keys(clash))
+    report.meta["multidef_cells"] = clash                 # name → the cells defining it (for the UI popup)
     # Import-scaffold ⇒ a `using`/`import` cell is memoizable. A cell that mixes a `using X` with
     # real compute normally can't be memoized: it PROVIDES X's names, and a plain restore would skip
     # the `using` (its method-table / name-in-scope effect), so `_memoizable` bails on any provider.

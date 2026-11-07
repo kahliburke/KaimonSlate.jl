@@ -1006,6 +1006,28 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test "q" in r6.meta["multidef"] && !("baz" in r6.meta["multidef"])
     end
 
+    @testset "methods added in several cells are multiple dispatch, not a collision" begin
+        r = parse_report("#%% code id=a\nstruct Foo end\nBase.show(io::IO, ::Foo) = print(io, \"foo\")\n" *
+                         "#%% code id=b\nstruct Bar end\nfunction Base.show(io::IO, ::MIME\"text/plain\", ::Bar)\n  print(io, \"bar\")\nend\n" *
+                         "#%% code id=c\narea(r::Real) = π * r^2\n" *
+                         "#%% code id=d\narea(s::Tuple) = s[1] * s[2]\n" *
+                         "#%% code id=e\ntotal = area(2.0) + area((1, 3))\n")
+        build_dependencies!(r)
+        @test isempty(r.meta["multidef"])
+        # A caller depends on every cell holding a method of what it calls, not only the last one.
+        @test issubset(Set(["c", "d"]), findcell(r, "e").deps)
+        # The same method in two cells is a redefinition, whatever its arguments are called.
+        r2 = parse_report("#%% code id=a\nf(x::Int) = 1\n#%% code id=b\nf(y::Int) = 2\n")
+        build_dependencies!(r2)
+        @test "f" in r2.meta["multidef"]
+        # A name assigned as a value in one cell and given a method in another still collides, and the
+        # assignment starts the method chain over: a reader depends only on the cells after it.
+        r3 = parse_report("#%% code id=a\ng(x) = 1\n#%% code id=b\ng = 5\n#%% code id=c\ng(x::Int) = 2\n#%% code id=d\ng(3)\n")
+        build_dependencies!(r3)
+        @test "g" in r3.meta["multidef"]
+        @test "c" in findcell(r3, "d").deps && !("a" in findcell(r3, "d").deps)
+    end
+
     @testset "`global x` is a write, even where EE reads it as a local" begin
         # Reported against the BonitoSlate example: a cell assigning its result with `global` from
         # inside a `let`, and a reader that never got an edge to it. ExpressionExplorer sees the

@@ -257,6 +257,9 @@ mutable struct Cell
                                   # predict (`note_defines!`), kept for the source they were seen with
     observed_complete::Bool       # a clean run of this source was observed, so `writes ∪ observed` is all it
                                   # binds: an `eval` cell then stops being a barrier for the cells below
+    methods::Dict{Symbol,Set{UInt64}}   # for each name this cell defines only by method definitions, the
+                                  # signature hashes of those methods. Several cells adding methods with
+                                  # different signatures is multiple dispatch, not a collision.
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -266,7 +269,8 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
                 STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0, "", 0.0, "", "",
                 nothing, "",
-                Dict{Symbol,FuncSummary}(), Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[], Set{Symbol}(), Set{Symbol}(), false)
+                Dict{Symbol,FuncSummary}(), Tuple{Symbol,Vector{Union{Symbol,Nothing}}}[], Set{Symbol}(), Set{Symbol}(), false,
+                Dict{Symbol,Set{UInt64}}())
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation
