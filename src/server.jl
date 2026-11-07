@@ -4166,17 +4166,7 @@ const _WD_LOCK   = ReentrantLock()
 nb_health(id::AbstractString) = lock(_WD_LOCK) do; get(_NB_HEALTH, String(id), nothing); end
 
 # Human side label for a kernel: "local" for the main kernel, else the region name it serves.
-# (The name lookup returns from INSIDE the lock closure, so capture its value — a bare `return`
-# in a `do` block returns from the closure, not the function.)
-function _kernel_side_label(nb::LiveNotebook, k)
-    k === nb.kernel && return "local"
-    return lock(_REGION_LOCK) do
-        for (key, rk) in _REGION_KERNELS
-            key[1] == nb.id && rk === k && return key[2]
-        end
-        "region"
-    end
-end
+_kernel_side_label(nb::LiveNotebook, k) = k === nb.kernel ? "local" : something(_kernel_side(nb, k), "region")
 
 # (side, latest, history) for each of a notebook's connected kernels that has telemetry.
 function _nb_kernel_stats(nb::LiveNotebook)
