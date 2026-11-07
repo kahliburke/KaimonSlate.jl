@@ -433,11 +433,16 @@ async function mockRegions(page) {
         name: 'worker-9300.log', job: '', bytes: size, modified: Math.floor(Date.now() / 1000), running: true }] }))
     }
     if (q.action === 'log_stat') return r.fulfill(J({ bytes: size, modified: Math.floor(Date.now() / 1000) }))
-    if (q.action === 'log_slice') return r.fulfill(J({ text: REG_WORKER_LOG, from: 0, to: size, size }))
-    const lines = REG_WORKER_LOG.split('\n'), pat = String(q.pattern || '').toLowerCase()
+    // `to` is the slice's last byte, inclusive, as the hub reports it.
+    if (q.action === 'log_slice') return r.fulfill(J({ text: REG_WORKER_LOG, from: 0, to: size - 1, size }))
+    // Searched like the hub does: a regex when asked (the level chips count with one), and `limit: 0`
+    // for the count alone.
+    const lines = REG_WORKER_LOG.split('\n'), pat = String(q.pattern || '')
+    const fold = !!q.ignorecase, re = q.regex ? new RegExp(pat, fold ? 'i' : '') : null
+    const hit = t => re ? re.test(t) : (fold ? t.toLowerCase().includes(pat.toLowerCase()) : t.includes(pat))
     let off = 0; const hits = []
-    lines.forEach((t, i) => { if (pat && t.toLowerCase().includes(pat)) hits.push({ offset: off, line: i + 1, text: t }); off += Buffer.byteLength(t) + 1 })
-    return r.fulfill(J({ total: hits.length, capped: false, hits }))
+    lines.forEach((t, i) => { if (pat && hit(t)) hits.push({ offset: off, line: i + 1, text: t }); off += Buffer.byteLength(t) + 1 })
+    return r.fulfill(J({ total: hits.length, capped: false, hits: q.limit === 0 ? [] : hits }))
   })
   await page.route('**/api/preflight-stream*', (r) => {
     const host = new URL(r.request().url()).searchParams.get('host') || 'gpu-box'
