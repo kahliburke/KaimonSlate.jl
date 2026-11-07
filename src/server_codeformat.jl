@@ -1,8 +1,7 @@
 # ── Code-cell formatting ──────────────────────────────────────────────────────────────────────────
 # Two formatters. Runic runs here, in the hub. Fatou runs in the browser from its WASM build, which
-# sends its output back; Fatou does not reject code that fails to parse, so the hub parses every
-# cell before and after formatting, whichever formatter produced it, and leaves a cell alone if
-# either side fails.
+# sends its output back. Whichever formatter produced it, the hub accepts output only when the source
+# parses and the output parses to the same program; Fatou does not reject code that fails to parse.
 #
 # Which one a notebook uses: the notebook's own `formatter` setting, else Fatou when a `fatou.toml`
 # governs the notebook's directory, else the global default (slate.json `formatter`), else Runic.
@@ -102,6 +101,23 @@ function _format_error(e)
     return loc === nothing ? reason : "line $(loc.captures[1]): $reason"
 end
 
+# Whether formatting kept the program: both texts parse to the same code once line positions are
+# dropped, `return x` is read as `x` (Runic adds `return` to a function's last line), and statements
+# joined by `;` count the same as statements on separate lines.
+_same_program(a::AbstractString, b::AbstractString) =
+    _program_shape(Meta.parseall(a)) == _program_shape(Meta.parseall(b))
+_program_shape(x) = x
+function _program_shape(e::Expr)
+    e.head == :return && length(e.args) == 1 && return _program_shape(e.args[1])
+    args = Any[]
+    for a in e.args
+        a isa LineNumberNode && continue
+        a = _program_shape(a)
+        e.head == :toplevel && a isa Expr && a.head == :toplevel ? append!(args, a.args) : push!(args, a)
+    end
+    return Expr(e.head, args...)
+end
+
 # Cells are stored without a trailing newline; a formatter that adds one should not.
 _keep_trailing_newline(src, out) = endswith(src, '\n') || !endswith(out, '\n') ? out : chomp(out)
 
@@ -114,7 +130,8 @@ const _FORMAT_MAX_BYTES = 4_000_000
 Format code-cell texts without changing the notebook: `sources` maps cell id → text, `formatted` in
 the result maps id → its formatted text, and the caller applies it. With `formatted` given (id →
 output, from a formatter that ran in the browser) that output is checked instead of running Runic.
-A cell whose source or output does not parse is left out and reported in `failed`.
+A cell whose source does not parse, or whose output does not parse to the same program, is left
+out and reported in `failed`.
 """
 function format_texts(nb::LiveNotebook, sources::AbstractDict; formatted::Union{Nothing,AbstractDict} = nothing)
     fmt = notebook_formatter(nb)["name"]
@@ -149,6 +166,7 @@ function format_texts(nb::LiveNotebook, sources::AbstractDict; formatted::Union{
         res = _keep_trailing_newline(src, res)
         bad = _parse_error(res)
         bad === nothing || (failed[id] = "formatted code does not parse, $bad"; continue)
+        _same_program(src, res) || (failed[id] = "formatting would change what the code does"; continue)
         out[id] = res
     end
     return (; formatted = out, failed, formatter = fmt)

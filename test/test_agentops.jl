@@ -782,6 +782,14 @@ end
                             formatted = Dict("a" => "x = 1\n", "b" => "f(1,\n"))
         @test r.formatted == Dict("a" => "x = 1")
         @test occursin("does not parse", r.failed["b"])
+        # Output that parses but changes the program is refused too; dropped line breaks, an added
+        # `return` and `;`-joined statements split onto lines are not changes.
+        r = NS.format_texts(nb, Dict("a" => "x=1", "b" => "f(1)",
+                                     "c" => "function g()\n  1\nend\nb = 2; c = 3"),
+                            formatted = Dict("a" => "x = 2", "b" => "f(\n    1,\n)",
+                                             "c" => "function g()\n    return 1\nend\nb = 2\nc = 3"))
+        @test collect(keys(r.formatted)) |> sort == ["b", "c"]
+        @test occursin("change what the code does", r.failed["a"])
 
         # Which formatter: a project's fatou.toml (up to the repository root), then the global default,
         # with the notebook's own setting over both.
