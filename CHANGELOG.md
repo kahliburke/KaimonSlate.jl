@@ -12,6 +12,15 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-06
+
+### Fixed
+
+- Clusters and regions work on a host whose login shell is not bash, such as zsh. Slate's commands
+  run in bash there, so a pattern that matches no file no longer stops a command.
+- A worker's setup that uses `module`, on a host whose shell does not define it, reads the site's
+  login profile first and keeps Julia on the PATH.
+
 ## [2.0.0] - 2026-11-05
 
 This is 2.0 for the size of the release. Code written for 1.x keeps working, and notebooks are
