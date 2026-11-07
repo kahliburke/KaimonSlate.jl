@@ -231,6 +231,8 @@ a line on the card names the step the test is on. Click the line to open the pre
 starts the test once per machine and project while it runs. If the test fails, the line
 says where, and you start it again from the dialog with **Prepare again**.
 
+![A sweep card held while its environment is tested on the nodes, with the step the test is on below the counts](./assets/sweep-testing.png)
+
 From then on the hub's supervisor keeps the sweep going: it submits the next wave, and resubmits
 what is missing, until the sweep finishes or you cancel it. That happens with or without the
 notebook open. A cluster nobody is signed in to waits until someone signs in.
@@ -269,6 +271,8 @@ several numeric fields, a menu above the chart picks the one it shows.
 
 The ⚙ on a job cell opens its settings beside its live state. Settings are on the left; drag the
 divider to resize.
+
+![The job cell's ⚙ panel: the cluster, the cell's scheduler options, storage and units per job on the left, and the cluster's live jobs, units, store and sweeps on the right](./assets/job-panel.png)
 
 | Setting | What it does |
 | --- | --- |
@@ -379,6 +383,8 @@ not exist until the scheduler grants it.
 
 So a cluster region stores what to ask for. The form in **🖧 Remotes → Regions** has these rows for it
 (the rest of the form is described in [Regions](regions.md)):
+
+![The region editor for a region on a cluster's login host: its machine, scheduler, partition, walltime and resources, the idle release, the scheduler options and startup command, the node it holds, and its readiness](./assets/region-cluster.png)
 
 | Row | What it is |
 | --- | --- |
