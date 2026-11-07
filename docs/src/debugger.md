@@ -67,6 +67,8 @@ A **watch** samples an expression every time a line runs, without stopping there
 every sample so far, which is how a value's behaviour over a long loop is seen. A watch keeps up to
 200,000 samples.
 
+![A watch on u opened in the rail: every sample over the loop plotted against evaluation count, with its range and the latest value](./assets/debugger-watch.png)
+
 A **live view** re-evaluates an expression, or renders another cell's output, after every step, as
 a tile beside the source.
 

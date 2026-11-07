@@ -1367,7 +1367,7 @@ async function toolShots(browser) {
     await page.keyboard.press('Escape')
     await runNotebook(page, 'debug')
     await page.evaluate(() => window.api('POST', '/api/debug/mark', { file: 'cell:run', line: 5, cond: 'k == 4200' }))
-    // A watch on the loop, so the rail's watches section shows a sampled value.
+    // Set before the start, so the watch has sampled every pass of the loop up to the breakpoint.
     await page.evaluate(() => window.api('POST', '/api/debug/watch', { file: 'cell:run', line: 6, expr: 'u' }))
     await page.evaluate(() => window.slateDebugCell('run'))
     await page.waitForSelector('.dbgfocus', { timeout: 60_000 })
@@ -1376,6 +1376,13 @@ async function toolShots(browser) {
     await page.waitForFunction(() => /4200|breakpoint/.test((document.querySelector('.dbgfocus') || {}).textContent || ''), null, { timeout: 60_000 }).catch(() => {})
     await sleep(1500)
     await elShot(page, '.dbgfocus', 'debugger-workspace.png')
+    try {
+      await page.locator('.dbgwatch .dbgwtop').first().click({ timeout: 3000 })
+      await page.waitForSelector('.dbgwplot svg path', { timeout: 8000 })
+      await sleep(500)
+      await shotCropped(page, '.dbgrail', 'debugger-watch.png', '.dbgwatches')
+      await page.locator('.dbgwatch .dbgwtop').first().click({ timeout: 3000 })   // closed again for the next shot
+    } catch (e) { log('! debugger-watch skipped:', e.message.split('\n')[0]) }
     // The breakpoint's line calls both gain_at and advance, so Into asks which.
     try {
       await page.evaluate(() => window.slateDebugInto())
