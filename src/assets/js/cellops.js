@@ -314,7 +314,7 @@ async function delCell(id) {
   // Select the PREVIOUS cell (idx-1), not the one that shifted up into the gap; clamp so
   // deleting the first cell falls back to the new first. selectCell scrolls it into view.
   after.length ? selectCell(after[Math.min(Math.max(0, idx - 1), after.length - 1)], true) : selectCell(null);
-  toast('Deleted ' + id, 2000);
+  _toastUndoable('Deleted ' + id);
 }
 // Delete several cells atomically (multi-select dd / cut). Selects the cell before the first
 // removed. `verb` ("delete"/"cut") labels the undo entry so it reads "Undo cut 2 cells". A plain
@@ -325,7 +325,18 @@ async function delCells(ids, verb) {
   renderAll(await api('POST', '/api/cells-delete', { ids, verb: verb || 'delete' }));
   const after = cellIds();
   after.length ? selectCell(after[Math.min(Math.max(0, firstIdx - 1), after.length - 1)], true) : selectCell(null);
-  if (verb !== 'cut') toast('Deleted ' + _idsLabel(ids), 2000);
+  if (verb !== 'cut') _toastUndoable('Deleted ' + _idsLabel(ids));
+}
+// A toast for an action that has just become the top of the notebook's undo stack, clickable to undo
+// it. The click undoes only while that action is still the top: anything done after it would be
+// what an undo reverses instead.
+function _toastUndoable(msg) {
+  const label = nbState && nbState.undoLabel;
+  if (!label) { toast(msg, 2000); return; }
+  toast(msg + ' · Undo', 5000, '', () => {
+    if (nbState && nbState.undoLabel === label) undoNb();
+    else toast('Not undone: other changes came after it', 3000);
+  });
 }
 async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-move/' + id, { dir })); }
 // ── Upstream-dependency navigation (🔗) ───────────────────────────────────────
@@ -411,7 +422,16 @@ async function toggleType(id, kind)  {
   // edit, so the convert accused an agent of it. Rebaseline, the way undo and split already do.
   renderAll(rebaselineAll(await api('POST', '/api/cell-type/' + id, body)));
 }
-async function undoNb() { const s = await api('POST', '/api/undo'); renderAll(rebaselineAll(s)); if (s && s.undid) toast('Undid ' + s.undid, 2000); }
+async function undoNb() {
+  const s = await api('POST', '/api/undo'); renderAll(rebaselineAll(s));
+  if (!(s && s.undid)) return;
+  // Clickable to redo, while what was undone is still the top of the redo stack.
+  const label = s.redoLabel;
+  toast('Undid ' + s.undid + (label ? ' · Redo' : ''), label ? 4000 : 2000, '', label ? () => {
+    if (nbState && nbState.redoLabel === label) redoNb();
+    else toast('Not redone: other changes came after it', 3000);
+  } : null);
+}
 async function redoNb() { const s = await api('POST', '/api/redo'); renderAll(rebaselineAll(s)); if (s && s.redid) toast('Redid ' + s.redid, 2000); }
 // ── Cell clipboard: copy / cut / paste (command-mode c / x / v) ────────────────
 // An internal clipboard of {kind, source} cells, mirrored to localStorage so you can copy
