@@ -309,6 +309,8 @@ const _CONFIG_UI = (
      choices = String[], global_default = nothing, restart = false),
     (key = "macroexpand", group = "Execution", label = "Macro-aware deps", type = :bool, default = true,
      choices = String[], global_default = nothing, restart = false),
+    (key = "formatter", group = "Editing", label = "Formatter", type = :enum, default = "runic",
+     choices = collect(FORMATTERS), global_default = () -> FORMATTER_DEFAULT[], restart = false),
     (key = "slidelevel", group = "Slides", label = "Slide heading level", type = :int, default = 2,
      choices = String[], global_default = nothing, restart = false),
     (key = "slidetransition", group = "Slides", label = "Slide transition", type = :enum, default = "fade",
@@ -352,6 +354,12 @@ function notebook_config_payload(nb::LiveNotebook)
                          "overridden" => overridden,
                          "value" => overridden ? meta[it.key] : (gd === nothing ? it.default : gd),
                          "default" => it.default, "global" => gd)
+    end
+    # The formatter inherits from the project as well as the global default: a `fatou.toml` picks Fatou.
+    for d in items
+        d["key"] == "formatter" && !d["overridden"] || continue
+        f = notebook_formatter(nb)
+        d["value"] = f["name"]; d["global"] = f["name"]; d["from"] = f["from"]
     end
     return Dict{String,Any}("items" => collect(items))
 end
@@ -1946,39 +1954,6 @@ function replace_cells!(nb::LiveNotebook, edits::AbstractDict; label::AbstractSt
     end
     changed > 0 && _autoindex!(nb)
     return changed
-end
-
-# Format code cells with Runic, as one `replace_cells!` operation. `sources` maps cell id → the text
-# to format, which the browser takes from the live editor so unsaved edits are formatted too. Only
-# code cells are formatted. A cell that does not parse is left as it is and reported in `failed`
-# with the first line of the parse error.
-function format_cells!(nb::LiveNotebook, sources::AbstractDict)
-    edits = Dict{String,String}()
-    failed = Dict{String,String}()
-    saved = lock(nb.lock) do
-        Dict(c.id => c.source for c in nb.report.cells if c.kind == CODE)
-    end
-    for (id, src) in sources
-        haskey(saved, String(id)) || continue
-        try
-            edits[String(id)] = Runic.format_string(String(src))
-        catch e
-            failed[String(id)] = _format_error(e)
-        end
-    end
-    n = count(((id, s),) -> saved[id] != s, edits)
-    changed = n == 0 ? 0 : replace_cells!(nb, edits; label = "format ($n $(n == 1 ? "cell" : "cells"))")
-    return (; changed, failed)
-end
-
-# A parse error as one line: JuliaSyntax puts the message after the `└ ──` marker under the source.
-function _format_error(e)
-    msg = sprint(showerror, e)
-    for l in split(msg, '\n')
-        m = match(r"──\s*(.+)$", l)
-        m === nothing || return String(m.captures[1])
-    end
-    return String(first(split(msg, '\n')))
 end
 
 # Edit a cell's source → reconcile (mark it + dependents stale) → run stale →

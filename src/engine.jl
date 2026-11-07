@@ -862,12 +862,14 @@ const _CONFIG_KEYS = ("sharefindings", "parallel", "threads", "hotreload", "macr
                       "slidelevel", "slidetransition", "slideauto", "deckstyle", "slidetimings", "slidetheme", "slideratio", "bibstyle",
                       "publishrepo", "publishslug", "series", "docid",
                       # `format` = the notebook file format this file is written in (see `FORMAT`).
-                      "format")
+                      "format",
+                      # `formatter` = the code formatter this notebook's cells are formatted with.
+                      "formatter")
 const _CONFIG_TYPES = Dict("sharefindings" => :bool, "parallel" => :bool, "threads" => :string, "hotreload" => :bool,
                            # `macroexpand` = macro-aware dependency analysis (expand unknown macros in
                            # the kernel to recover their true reads/writes). Off = conservative static
                            # analysis only, for the rare macro with expansion-time side effects.
-                           "macroexpand" => :bool, "replaystrides" => :string,
+                           "macroexpand" => :bool, "replaystrides" => :string, "formatter" => :string,
                            "agentmodel" => :string, "juliaflags" => :string,
                            # `runon` = this notebook's DURABLE run-location override ("host[,transport]"):
                            # a machine-specific ssh alias the author chose to bake in (the *session* and

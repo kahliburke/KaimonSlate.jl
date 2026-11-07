@@ -157,46 +157,80 @@ function rebaselineAll(state) {
 window.slateRebaseline = _rebaseline;
 window.slateRebaselineAll = rebaselineAll;
 
-// Format code cells with Runic on the hub: the given ids, or every code cell when `ids` is empty.
-// Each cell's text comes from its editor, so unsaved edits are formatted with it, and the result is
-// one notebook undo entry like Replace All.
+// Format code cells: the given ids, or every code cell when `ids` is empty. Each cell's text comes
+// from its editor, so unsaved edits are formatted with it. The hub says which formatter applies:
+// Runic runs on the hub, Fatou runs here and the hub checks what it produced. Authoring applies the
+// result as one notebook undo entry, like Replace All. A workbook reader formats only their own
+// cells, and the result goes into the editors for them to run.
 async function formatCells(ids) {
+  const reader = SLATE_IS_APP;
   const all = !ids || !ids.length;
-  const want = all ? cellIds() : ids;
   const sources = {};
-  for (const id of want) {
+  for (const id of all ? cellIds() : ids) {
     const c = window._cellById && window._cellById(id);
-    if (c && c.kind === 'code') sources[id] = window.edText(id);
+    if (c && c.kind === 'code' && (!reader || c.workbook)) sources[id] = window.edText(id);
   }
   if (!Object.keys(sources).length) { window.toast && window.toast('No code cell selected', 2500); return; }
+  const fmt = await api('GET', '/api/formatter').catch(() => null);
+  const body = { sources };
+  if (fmt && fmt.name === 'fatou') {
+    let f;
+    try { f = await _fatou(); }
+    catch (_) { window.toast && window.toast('Fatou could not be loaded', 4000); return; }
+    f.setConfig({}, fmt.config || {});
+    body.formatted = {};
+    for (const id in sources) {
+      try { body.formatted[id] = f.formatText({ filePath: 'cell.jl', fileText: sources[id] }); } catch (_) {}
+    }
+  }
+  const r = await api('POST', '/api/format', body).catch(() => null);
+  if (!r || r.ok === false) { window.toast && window.toast('Format failed', 3000); return; }
+  const edits = {};
+  for (const [id, out] of Object.entries(r.formatted || {})) if (out !== sources[id]) edits[id] = out;
+  const n = Object.keys(edits).length;
   // A formatter mostly moves whitespace, so a cursor is carried across as the number of
   // non-whitespace characters before it.
   const marks = {};
-  for (const id in sources) {
+  for (const id in edits) {
     const v = editors[id];
     if (v) marks[id] = _nonWs(v.state.doc.toString(), v.state.selection.main.head);
   }
-  let st = null;
-  try { st = await api('POST', '/api/cells-format', { sources }); }
-  catch (_) { window.toast && window.toast('Format failed', 3000); return; }
-  if (st && st.cells) {
-    rebaselineAll(st);
-    renderAll(st);
-    if (st.version != null) lastVersion = st.version;
+  if (n && reader) {
+    for (const id in edits) window.edSetText(id, edits[id]);
+  } else if (n) {
+    let st = null;
+    try { st = await api('POST', '/api/cells-replace', { edits, label: `format (${n} ${n === 1 ? 'cell' : 'cells'})` }); }
+    catch (_) { window.toast && window.toast('Format failed', 3000); return; }
+    if (st && st.cells) {
+      rebaselineAll(st);
+      renderAll(st);
+      if (st.version != null) lastVersion = st.version;
+    }
   }
   for (const id in marks) {
     const v = editors[id];
     if (v) v.dispatch({ selection: { anchor: _atNonWs(v.state.doc.toString(), marks[id]) } });
   }
-  const bad = Object.entries((st && st.failed) || {});
-  const n = (st && st.changed) || 0;
-  const msg = bad.length === 1 ? `${bad[0][0]} not formatted: ${bad[0][1]}`
+  const bad = Object.entries(r.failed || {});
+  const name = _FMT_NAMES[r.formatter] || r.formatter;
+  const msg = bad.length === 1 ? (bad[0][0] ? `${bad[0][0]} not formatted: ${bad[0][1]}` : bad[0][1])
             : bad.length ? `${bad.length} cells not formatted: they don't parse`
-            : n ? `Formatted ${n} ${n === 1 ? 'cell' : 'cells'} · ⌘Z to undo`
+            : n ? `Formatted ${n} ${n === 1 ? 'cell' : 'cells'} (${name})` + (reader ? '' : ' · ⌘Z to undo')
             : 'Already formatted';
   window.toast && window.toast(msg, bad.length ? 5000 : 2500);
 }
 window.formatCells = formatCells;
+const _FMT_NAMES = { runic: 'Runic', fatou: 'Fatou' };
+// Fatou's WASM build and dprint's host for it, loaded on the first format that needs them and kept.
+let _fatouP = null;
+function _fatou() {
+  return _fatouP || (_fatouP = (async () => {
+    const host = await import('/assets/vendor/dprint-formatter/mod.js');
+    const r = await fetch('/assets/vendor/fatou/plugin.wasm');
+    if (!r.ok) throw new Error('plugin.wasm: ' + r.status);
+    return host.createFromBuffer(await r.arrayBuffer());
+  })().catch(e => { _fatouP = null; throw e; }));
+}
 const _nonWs = (s, at) => { let n = 0; for (let i = 0; i < at; i++) if (!/\s/.test(s[i])) n++; return n; };
 function _atNonWs(s, n) {
   let i = 0;

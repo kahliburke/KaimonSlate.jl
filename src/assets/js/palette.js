@@ -164,7 +164,7 @@ window.slateUnregisterCommand = function (id) {
 // puts it here on purpose. Everything listed either reads the document or runs the reader's own code —
 // the two things a workbook already permits.
 const _WORKBOOK_CMDS = ['view.docs', 'view.settings', 'view.keymap', 'view.scratch', 'view.toc',
-                        'nb.runStale', 'cell.run', 'cell.runAdvance'];
+                        'nb.runStale', 'cell.run', 'cell.runAdvance', 'cell.format', 'nb.formatAll'];
 
 // One registry command → one palette row. The hint is asked for at render time, so reopening the
 // palette after a rebind shows the new chord with nothing to invalidate.

@@ -487,6 +487,8 @@
     <span class="rt"><input type="range" id="settipdelay" min="0" max="2000" step="50"/><span id="settipdelayv"></span></span></div>
   <div class="setrow"><label title="What Tab does when the autocomplete popup is open. Accept: Tab (and Enter) accept the highlighted item — the standard IDE convention. Navigate: Tab moves down the list, Shift-Tab up; only Enter accepts.">Tab in autocomplete</label>
     <span class="rt"><select id="setcomptab"><option value="accept">Accept (standard)</option><option value="navigate">Navigate list</option></select></span></div>
+  <div class="setrow"><label title="Formats code cells (Format cell, Format all cells). Runic keeps your line breaks; Fatou lays each expression out to a line width. A project with a fatou.toml uses Fatou, and a notebook can choose its own under “This notebook”.">Formatter (global default)</label>
+    <span class="rt"><select id="setformatter"><option value="runic">Runic</option><option value="fatou">Fatou</option></select></span></div>
   <div class="setsec">Agent</div>
   <div class="setrow"><label title="Your default model for every notebook. A single notebook can override it under “This notebook”.">Agent model (global default)</label>
     <select id="setmodel">

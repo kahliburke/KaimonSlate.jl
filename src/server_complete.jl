@@ -2382,14 +2382,26 @@ function _make_router(h::Hub)
         n = replace_cells!(nb, e; label = String(get(b, "label", "replace")))
         j = state_json(nb); j["changed"] = n; _json(j)
     end))
-    # Format code cells with Runic. Body {sources: {cellId: text, …}}, the texts taken from the
-    # editors like `cells-replace`. One undo entry; `failed` maps a cell that does not parse to why.
-    HTTP.register!(router, "POST", "/api/{id}/cells-format", req -> _withnb(h, req, nb -> begin
-        s = get(_body(req), "sources", nothing)
-        s isa AbstractDict || return _json(Dict("ok" => false, "changed" => 0))
-        r = format_cells!(nb, s)
-        j = state_json(nb); j["changed"] = r.changed; j["failed"] = r.failed; _json(j)
+    # Format code-cell texts (server_codeformat.jl) without changing the notebook: the page applies
+    # the result, through `cells-replace` when authoring and into the editors in a workbook. Body
+    # {sources: {cellId: text, …}, formatted?}; `formatted` carries a browser-side formatter's output
+    # for the hub to check. Answers {formatted, failed, formatter}.
+    HTTP.register!(router, "POST", "/api/{id}/format", req -> _withnb(h, req, nb -> begin
+        b = _body(req); s = get(b, "sources", nothing); f = get(b, "formatted", nothing)
+        s isa AbstractDict || return _json(Dict("ok" => false, "message" => "no sources"))
+        r = format_texts(nb, s; formatted = f isa AbstractDict ? f : nothing)
+        _json(Dict{String,Any}("ok" => true, "formatted" => r.formatted, "failed" => r.failed,
+                               "formatter" => r.formatter))
     end))
+    # The formatter this notebook uses, and the global default the Settings panel edits.
+    HTTP.register!(router, "GET", "/api/{id}/formatter", req -> _withnb(h, req, nb ->
+        _json(merge(notebook_formatter(nb), Dict{String,Any}("default" => formatter_default())))))
+    HTTP.register!(router, "POST", "/api/{id}/formatter-default", req -> begin
+        n = String(get(_body(req), "name", ""))
+        n in FORMATTERS || return _json(Dict("ok" => false, "message" => "unknown formatter"))
+        set_formatter_default!(n)
+        _json(Dict{String,Any}("ok" => true, "default" => formatter_default()))
+    end)
     # Set/clear a cell behavior flag (collapsed / hidecode / trace / cache / …) across one or many cells
     # in ONE persist → one history entry. Body {flag, value, cells?}: `cells` (a list of ids) targets
     # just those, omitted ⇒ every applicable cell. An eval-affecting flag (trace/cache/…) restales and

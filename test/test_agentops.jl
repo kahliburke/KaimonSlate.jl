@@ -754,11 +754,13 @@ end
     end
 end
 
-@testset "formatting code cells is one undoable rewrite that skips what does not parse" begin
+@testset "formatting code cells computes new text and skips what does not parse" begin
     NS.SlateHistory._ROOT[] = mktempdir()
     hub = NS.start_hub(; port = freeport())
+    saved_default = NS.FORMATTER_DEFAULT[]
     try
-        nbp = tempname() * ".jl"
+        dir = mktempdir(); mkdir(joinpath(dir, ".git"))
+        nbp = joinpath(dir, "fmt.jl")
         write(nbp, "#%% md id=intro\n@md\"\"\"\nx=1 stays as prose\n\"\"\"\n" *
                    "#%% code id=a\nx=1\n#%% code id=b\nfor i=1:3\n  println(i,x)\nend\n" *
                    "#%% code id=c\ny = 2\n")
@@ -767,21 +769,35 @@ end
         before = Dict(c.id => c.source for c in nb.report.cells)
 
         # The browser sends each cell's editor text, which may be unsaved: `c` arrives half-typed.
-        r = NS.format_cells!(nb, Dict("intro" => src("intro"), "a" => src("a"), "b" => src("b"),
-                                      "c" => "y = (2, "))
-        @test r.changed == 2
-        @test (src("a"), src("b")) == ("x = 1", "for i in 1:3\n    println(i, x)\nend")
-        @test src("intro") == before["intro"] && src("c") == before["c"]
-        @test collect(keys(r.failed)) == ["c"] && occursin("Expected", r.failed["c"])
+        r = NS.format_texts(nb, Dict("intro" => src("intro"), "a" => src("a"), "b" => src("b"),
+                                     "c" => "y = (2, "))
+        @test r.formatter == "runic"
+        @test r.formatted == Dict("a" => "x = 1", "b" => "for i in 1:3\n    println(i, x)\nend")
+        @test collect(keys(r.failed)) == ["c"] && startswith(r.failed["c"], "line 1: Expected")
+        @test all(c.source == before[c.id] for c in nb.report.cells)   # computing changes nothing
 
-        @test NS.undo!(nb) == "format (2 cells)"
-        @test all(c.source == before[c.id] for c in nb.report.cells)
+        # A browser-side formatter's output is checked, not trusted: one that mangles code is refused,
+        # and the trailing newline it adds is dropped.
+        r = NS.format_texts(nb, Dict("a" => "x=1", "b" => "f(1)");
+                            formatted = Dict("a" => "x = 1\n", "b" => "f(1,\n"))
+        @test r.formatted == Dict("a" => "x = 1")
+        @test occursin("does not parse", r.failed["b"])
 
-        # Formatting what is already formatted records nothing.
-        depth = length(nb.undo)
-        @test NS.format_cells!(nb, Dict("c" => src("c"))).changed == 0
-        @test length(nb.undo) == depth
+        # Which formatter: a project's fatou.toml (up to the repository root), then the global default,
+        # with the notebook's own setting over both.
+        @test NS.notebook_formatter(nb)["from"] == "default"
+        NS.FORMATTER_DEFAULT[] = "fatou"
+        @test NS.notebook_formatter(nb)["name"] == "fatou" && NS.notebook_formatter(nb)["from"] == "global"
+        NS.FORMATTER_DEFAULT[] = "runic"
+        write(joinpath(dir, "fatou.toml"), "[format]\nline-width = 100\n")
+        f = NS.notebook_formatter(nb)
+        @test (f["name"], f["from"], f["config"]) == ("fatou", "fatou.toml", Dict{String,Any}("lineWidth" => 100))
+        @test occursin("formats in the browser", NS.format_texts(nb, Dict("a" => "x=1")).failed["a"])
+        NS.set_notebook_config!(nb, "formatter", "runic")
+        @test NS.notebook_formatter(nb)["from"] == "notebook"
+        @test NS.format_texts(nb, Dict("a" => "x=1")).formatted["a"] == "x = 1"
     finally
+        NS.FORMATTER_DEFAULT[] = saved_default
         NS.stop_hub(hub)
     end
 end

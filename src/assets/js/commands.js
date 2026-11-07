@@ -223,10 +223,13 @@ R({ id: 'cell.merge', label: 'Merge selected cell with the one below', group: 'C
 R({ id: 'cell.split', label: 'Split selected cell at the cursor', group: 'Cells', ctx: ['command', 'editor'],
     keys: ['Mod-Shift--'], inst: true, available: _has('splitCell'),
     run: _onSel(t => { if ((window.editors || {})[t.id]) _fn('splitCell', t.id); }) });
+// An app reader has no code of their own to format; a workbook reader formats the cells they write.
+const _canFormat = () => typeof window.formatCells === 'function' &&
+                         (!SLATE_IS_APP || !!(window.__SLATE_APP__ && window.__SLATE_APP__.workbook));
 R({ id: 'cell.format', label: 'Format selected cell(s)', group: 'Cells', ctx: ['command', 'editor'],
-    keys: ['Shift-Alt-f'], available: _has('formatCells'), run: _onSel(t => _fn('formatCells', t.ids)) });
+    keys: ['Shift-Alt-f'], available: _canFormat, run: _onSel(t => _fn('formatCells', t.ids)) });
 R({ id: 'nb.formatAll', label: 'Format all cells', group: 'Cells', ctx: ['command'],
-    available: _has('formatCells'), run: () => _fn('formatCells', []) });
+    available: _canFormat, run: () => _fn('formatCells', []) });
 const _toKind = kind => _onSel(t => { if (t.cell && t.cell.kind !== kind) _fn('toggleType', t.id, kind); });
 R({ id: 'cell.toMarkdown', label: 'Convert selected to markdown', group: 'Cells', ctx: ['command'],
     keys: ['m'], available: _has('toggleType'), run: _toKind('md') });
