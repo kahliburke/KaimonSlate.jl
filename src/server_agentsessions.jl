@@ -117,7 +117,7 @@ function emit_external_tool!(nb::LiveNotebook, toolname::AbstractString, args::A
                              result::AbstractString; ok::Bool = true)
     use, res = _external_tool_envelopes(_ext_tool_id(), toolname, args, result; ok = ok)
     for s in (use, res)
-        _broadcast(nb, "agent:" * s)
+        _broadcast(nb, "agent:" * s; essential = true)
         _buffer_agent_log!(nb, s)
     end
     return nothing

@@ -1001,3 +1001,20 @@ end
         @test torn_reads(write, NS._read_settled; seconds = 1.0, gap = 0.05) == 0   # an editor saving in place
     end
 end
+
+@testset "an agent's complete reply reaches a client that is behind on its stream" begin
+    # A fast reply streams a message per few words, and a browser draining slower falls behind. Past
+    # the limit it gets a resync token in place of patches, which re-pulls the notebook's state but not
+    # the chat. The reply's complete copy is what repairs the streamed text, so it has to arrive.
+    ch = Channel{String}(256)
+    for i in 1:40; put!(ch, "agent:delta $i"); end
+    NS._deliver!(ch, "agent:delta 41", 7)                      # a streamed piece: dropped for a token
+    NS._deliver!(ch, "agent:final", 7; essential = true)       # the complete copy: delivered
+    got = String[]
+    while isready(ch); push!(got, take!(ch)); end
+    @test got[41:end] == ["7", "agent:final"]
+    full = Channel{String}(256)
+    for i in 1:245; put!(full, "x"); end
+    NS._deliver!(full, "agent:final", 7; essential = true)     # short of capacity, so it never blocks
+    @test Base.n_avail(full) == 245
+end

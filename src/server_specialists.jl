@@ -216,7 +216,7 @@ function sign_off!(nb::LiveNotebook, role::AbstractString, who::AbstractString, 
         env = JSON.json(Dict{String,Any}(
             "kind" => "assistant", "external" => true, "crew" => String(role),
             "data" => Dict{String,Any}("text" => "🐞 " * text)))
-        _broadcast(nb, "agent:" * env)
+        _broadcast(nb, "agent:" * env; essential = true)
         _buffer_agent_log!(nb, env)
     catch e
         @debug "specialist: sign-off could not reach the chat" exception = e

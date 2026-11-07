@@ -2,25 +2,34 @@
 # header: imports/exports, the LiveNotebook struct). Names here resolve in NotebookServer.
 
 # ── Live push over SSE (per notebook) ────────────────────────────────────────
-function _broadcast(nb::LiveNotebook, msg::AbstractString)
+# `essential`: a message nothing re-sends, so it is delivered past the slow-client limit. A resync
+# re-pulls the notebook's state, and the agent's chat is not part of it: a reply's complete copy
+# dropped here stays lost until a reload, leaving the reply as far as its streamed pieces got.
+function _broadcast(nb::LiveNotebook, msg::AbstractString; essential::Bool = false)
     lock(nb.llock) do
         for ch in nb.listeners
             try
-                isopen(ch) || continue
-                n = Base.n_avail(ch)
-                if n < 32
-                    put!(ch, String(msg))                 # normal: deliver the message
-                elseif n < 200
-                    # Slow client: stop forwarding patches (they'd back up), but enqueue ONE bare
-                    # version token so it re-pulls full state on catch-up — recovering any dropped
-                    # NON-idempotent patch (refresh:/celldone:/cellprog:) instead of going stale.
-                    put!(ch, string(nb.version))
-                end
-                # else: queue already deep with resync tokens — the pending resync covers this msg.
+                _deliver!(ch, msg, nb.version; essential)
             catch
             end
         end
     end
+end
+
+# One client's share of a broadcast. Under the limit, the message. Past it, a slow client stops
+# getting patches (they would back up) and gets ONE bare version token instead, so it re-pulls full
+# state on catch-up and recovers any dropped NON-idempotent patch (refresh:/celldone:/cellprog:). An
+# essential message still goes, short of the channel's capacity (256).
+function _deliver!(ch::Channel{String}, msg::AbstractString, version; essential::Bool = false)
+    isopen(ch) || return nothing
+    n = Base.n_avail(ch)
+    if n < 32 || (essential && n < 240)
+        put!(ch, String(msg))
+    elseif n < 200
+        put!(ch, string(version))
+    end
+    # else: the queue is already deep with resync tokens, and the pending resync covers this message.
+    return nothing
 end
 
 # Close this notebook's live SSE channels so each `_sse` loop's `take!` throws and

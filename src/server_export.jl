@@ -6333,7 +6333,7 @@ function relay_agent_event(channel::AbstractString, data)
     # reload-replay, but SKIP the liveness chunks (`data.delta == true` and
     # `tool_input_delta`) — the authoritative copies (the `delta:false` block, the
     # `tool_result`) are buffered, so replay stays clean and the cap isn't burned.
-    _broadcast(nb, "agent:" * s)
+    _broadcast(nb, "agent:" * s; essential = !is_delta)
     is_delta || _buffer_agent_log!(nb, s)   # persist non-delta envelopes for reload-replay
     return nothing
 end
