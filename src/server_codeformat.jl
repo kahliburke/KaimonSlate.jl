@@ -176,7 +176,10 @@ function format_texts(nb::LiveNotebook, sources::AbstractDict; formatted::Union{
         res = _keep_trailing_newline(src, res)
         bad = err === nothing ? _parse_error(res) : nothing
         bad === nothing || (failed[id] = "formatted code does not parse, $bad"; continue)
-        _same_program(src, res) || (failed[id] = "formatting would change what the code does"; continue)
+        # For a cell that does not parse, a refusal usually means the formatter guessed at the broken
+        # part (`3.*x` as `3.0 * x`), so the parse error is what the reader can act on.
+        _same_program(src, res) ||
+            (failed[id] = something(err, "formatting would change what the code does"); continue)
         out[id] = res
     end
     return (; formatted = out, failed, formatter = fmt)

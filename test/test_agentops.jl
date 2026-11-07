@@ -796,7 +796,10 @@ end
                             formatted = Dict("a" => "x = 1\ny = 2 + * 3\nz = x + y\n", "b" => "u = foo(1,2\nv = 3 + 5",
                                              "c" => "w = (1 + 2)"))
         @test r.formatted == Dict("a" => "x = 1\ny = 2 + * 3\nz = x + y")
-        @test occursin("change what the code does", r.failed["b"]) && occursin("change what the code does", r.failed["c"])
+        @test startswith(r.failed["b"], "line 1: Expected") && occursin("extra tokens", r.failed["c"])
+        # Code a formatter can only read by guessing is refused with the parse error, not rewritten.
+        r = NS.format_texts(nb, Dict("a" => "y = cos.(3.*xs)"); formatted = Dict("a" => "y = cos.(3.0 * xs)"))
+        @test isempty(r.formatted) && occursin("ambiguous `.` syntax", r.failed["a"])
 
         # Which formatter: a project's fatou.toml (up to the repository root), then the global default,
         # with the notebook's own setting over both.
