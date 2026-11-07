@@ -11,7 +11,7 @@
 // Kaimon (the agent pane, the Packages panel) are intentionally omitted.
 
 import { chromium } from 'playwright'
-import { spawn } from 'node:child_process'
+import { execSync, spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -722,7 +722,17 @@ async function sweepShots(browser) {
       }
       throw new Error('the sweep did not reach ' + Math.round(frac * 100) + '%')
     }
-    await landed(0.35)
+    try { await landed(0.35) }
+    catch (e) {
+      // Say why in the build log, and keep the card as it stands so the pages that show it still build.
+      log('! ' + e.message + '; the card reads:\n' + ((await page.locator(card).first().innerText().catch(() => '')) || '(empty)'))
+      for (const f of execSync(`find ${HOME} -name '*.log' 2>/dev/null | head -6`).toString().split('\n').filter(Boolean))
+        log(`--- ${f}\n` + execSync(`tail -n 30 '${f}'`).toString())
+      for (const n of ['sweep-running.png', 'sweep-card.png']) await cellShot(page, 'scan', n)
+      await elShot(page, card, 'sweep-logs.png')
+      await page.context().close()
+      return
+    }
     await cellShot(page, 'scan', 'sweep-running.png')
     await landed(1)
     await sleep(2500)                                       // the settled render and its chart
