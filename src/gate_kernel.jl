@@ -1056,6 +1056,10 @@ _credential_var(name::AbstractString) =
     !startswith(name, "KAIMON") && occursin(r"TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|PRIVATE_KEY|AUTH"i, name)
 
 function _spawn_worker!(k::GateKernel)
+    # A project that names KaimonSlate keeps the versions it last resolved, and a worker started on ones
+    # this Slate cannot run with exits at boot. Say why instead of starting it.
+    gap = slate_version_gap(k.project; slate = pkgversion(@__MODULE__))
+    isempty(gap) || error(gap)
     _fresh_namespace!(k)   # a fresh LOCAL process ⇒ blank namespace (mirrors spawn_and_connect_remote!): the
                     # ns_gen-keyed re-establish re-primes it — main-kernel @bind registrations here, and
                     # region prime/resource/sync in the region layer. Without this a mid-session respawn
@@ -1244,6 +1248,11 @@ function _eval_failure(k::GateKernel, e)
         sig = try; k.proc.termsignal; catch; 0; end
         rep = sig > 0 ? "killed by signal $sig" * (sig == 9 ? " (the system may have run out of memory)" : "") :
                         "exited (code $(try; k.proc.exitcode; catch; "?"; end))"
+        # The worker's own reason, when it left one.
+        if sig == 0
+            lines = _worker_error_lines(k.logpath; max_lines = 1, wait_s = 0.5)
+            (!isempty(lines) && startswith(lstrip(first(lines)), "ERROR")) && (rep *= "\n" * strip(first(lines)))
+        end
     end
     isempty(rep) && return msg
     return "the worker crashed: " * rep * (isempty(k.logpath) ? "" : "\nfull log: " * k.logpath)

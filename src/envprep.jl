@@ -289,6 +289,50 @@ function worker_seb_compat()
     return c isa AbstractString ? String(c) : ""
 end
 
+"The oldest SlateExtensionsBase Slate's worker runs with: the lower bound of `worker_seb_compat()`."
+function worker_seb_floor()
+    c = worker_seb_compat()
+    isempty(c) && return nothing
+    return tryparse(VersionNumber, lstrip(strip(first(split(c, ','))), ['^', '~', '=']))
+end
+
+# The version manifest `m` records for package `name`, or `nothing`. Format 2 keeps packages under
+# `deps`, format 1 at the top level.
+function _manifest_version(m::AbstractDict, name::AbstractString)
+    es = get(get(m, "deps", m), name, nothing)
+    (es isa AbstractVector && !isempty(es) && first(es) isa AbstractDict) || return nothing
+    v = get(first(es), "version", nothing)
+    return v isa AbstractString ? tryparse(VersionNumber, v) : nothing
+end
+
+"""
+    slate_version_gap(project; slate = nothing) -> String
+
+Why Slate's worker cannot run in the environment of `project` as its manifest resolves it: a
+SlateExtensionsBase older than the worker needs, or a KaimonSlate of another major version than
+`slate`. `""` when neither, or when there is no manifest to read. A project that uses Slate's API
+names KaimonSlate itself, and its manifest keeps whatever version it last resolved.
+"""
+function slate_version_gap(project::AbstractString; slate::Union{VersionNumber,Nothing} = nothing)
+    pf = project_file_in(project)
+    isempty(pf) && return ""
+    mf = _manifest_for(pf)
+    isempty(mf) && return ""
+    m = _toml(mf)
+    have, need = String[], String[]
+    ks = _manifest_version(m, "KaimonSlate")
+    if ks !== nothing && slate !== nothing && ks.major != slate.major
+        push!(have, "KaimonSlate $ks"); push!(need, "KaimonSlate $(slate.major).x")
+    end
+    seb, floor = _manifest_version(m, "SlateExtensionsBase"), worker_seb_floor()
+    if seb !== nothing && floor !== nothing && seb < floor
+        push!(have, "SlateExtensionsBase $seb"); push!(need, "SlateExtensionsBase $floor or later")
+    end
+    isempty(have) && return ""
+    return "the environment at $(dirname(pf)) resolves $(join(have, " and ")), which this Slate cannot " *
+           "run with: it needs $(join(need, " and ")). Update KaimonSlate in that environment."
+end
+
 # A fork lists SlateExtensionsBase with the worker's compat entry. The worker loads it from the
 # notebook's environment, which comes first on the load path, so a package there that allows an older
 # release (and Pkg prefers what is installed) would otherwise give the worker a version it cannot run.

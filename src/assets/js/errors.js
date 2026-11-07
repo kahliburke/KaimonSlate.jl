@@ -100,6 +100,40 @@ function _applyStaleCache(c) {
 }
 window._applyStaleCache = _applyStaleCache;
 
+// The environment the worker runs in resolves Slate packages this Slate cannot run with
+// (`slate_version_gap`, or the worker's own check). The update runs from the hub, since no worker
+// can start until it is done.
+const _OLD_SLATE_RE = /which this Slate cannot run with/;
+function _applyOldSlate(c) {
+  const cellEl = c && document.querySelector('.cell[data-cid="' + c.id + '"]');
+  if (!cellEl) return;
+  const out = cellEl.querySelector('.output');
+  const existing = cellEl.querySelector(':scope > .pkgoldslate');
+  const hit = out && _OLD_SLATE_RE.test(out.textContent || '');
+  if (!hit) { if (existing) existing.remove(); return; }
+  if (existing) return;
+  const b = document.createElement('div');
+  b.className = 'pkgmissing pkgoldslate';
+  b.innerHTML = '<span class="pmicon">\u{1F4E6}</span><span class="pmtext">Slate packages out of date</span>' +
+    '<button class="pmadd" onclick="updateSlateEnv(this)">Update KaimonSlate</button>';
+  cellEl.insertBefore(b, cellEl.firstChild);
+}
+window._applyOldSlate = _applyOldSlate;
+
+async function updateSlateEnv(btn) {
+  const stop = startPkgInstall('Updating <b>KaimonSlate</b>');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('POST', '/api/update-slate', {});
+    stop();
+    if (r && r.ok === false) { _pkgInstallFail(r.message); if (btn) btn.disabled = false; return; }
+    hidePkgInstalling();
+    document.querySelectorAll('.pkgoldslate').forEach(e => e.remove());
+    if (typeof runAll === 'function') runAll();
+  } catch (_) { stop(); _pkgInstallFail('Update failed.'); if (btn) btn.disabled = false; }
+}
+window.updateSlateEnv = updateSlateEnv;
+
 // The live install status from the worker log: the last few lines of Pkg's own output. Precompilation
 // prints a "✓ <pkg>" line as EACH package finishes (there's no in-progress line in a non-TTY log), so
 // a tail advances package-by-package instead of sitting on "Precompiling packages…".

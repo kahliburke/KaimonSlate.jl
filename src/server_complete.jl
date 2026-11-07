@@ -3328,6 +3328,7 @@ function _make_router(h::Hub)
         end
         _json(state_json(nb))
     end))
+    HTTP.register!(router, "POST", "/api/{id}/update-slate", req -> _withnb(h, req, nb -> _json(update_slate_env!(nb))))
     # Restart the worker. Body {side:"<region>"} restarts JUST that region's worker (leaving the main
     # kernel + other regions up); no side / "" restarts the main kernel (and tears regions down).
     HTTP.register!(router, "POST", "/api/{id}/restart", req -> _withnb(h, req, nb -> begin

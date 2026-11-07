@@ -349,6 +349,26 @@ function _instantiate_env!(envdir::AbstractString; online = nothing,
     return ok
 end
 
+# Update KaimonSlate, and with it SlateExtensionsBase, in the environment the notebook's worker runs
+# in (`slate_version_gap` says when it is behind), then start the worker again. From the hub, in a
+# process of its own: no worker can start on the versions being replaced.
+function update_slate_env!(nb::LiveNotebook)
+    k = nb.kernel
+    k isa ReportEngine.GateKernel ||
+        return Dict{String,Any}("ok" => false, "message" => "this notebook has no worker environment")
+    env = k.project
+    code = """using Pkg
+              have = Set(d.name for d in values(Pkg.dependencies()))
+              Pkg.update(filter(in(have), ["KaimonSlate", "SlateExtensionsBase"]))"""
+    lines = String[]
+    ok = _instantiate_env!(env; code, online = l -> (push!(lines, l); length(lines) > 12 && popfirst!(lines)))
+    ok || return Dict{String,Any}("ok" => false, "message" => "the update failed in $env:\n" * join(lines, "\n"))
+    gap = ReportEngine.slate_version_gap(env; slate = pkgversion(ReportEngine))
+    isempty(gap) || return Dict{String,Any}("ok" => false, "message" => gap)
+    restart_kernel!(nb)
+    return Dict{String,Any}("ok" => true)
+end
+
 # Rebuild a STALE or broken forked notebook env from its parent: re-seed via the shared policy
 # (`seed_env_project!` — dev paths made absolute), then a subprocess `develop(parent)` + instantiate,
 # with ONE reset-and-retry from the authoritative parent. The local mirror of the remote provisioner's

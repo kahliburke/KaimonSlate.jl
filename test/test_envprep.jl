@@ -508,3 +508,31 @@ end
     end
 
 end
+
+@testset "a project's manifest that holds Slate back is caught before a worker starts" begin
+    floor = ReportEngine.worker_seb_floor()
+    @test floor isa VersionNumber
+    function project_with(ks, seb)
+        d = mktempdir()
+        write(joinpath(d, "Project.toml"), "[deps]\nKaimonSlate = \"f7b954f5-0334-4562-ac21-b005218ce1da\"\n")
+        write(joinpath(d, "Manifest.toml"), """
+        manifest_format = "2.0"
+
+        [[deps.KaimonSlate]]
+        uuid = "f7b954f5-0334-4562-ac21-b005218ce1da"
+        version = "$ks"
+
+        [[deps.SlateExtensionsBase]]
+        uuid = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
+        version = "$seb"
+        """)
+        return d
+    end
+    slate = v"2.0.1"
+    @test ReportEngine.slate_version_gap(project_with("2.0.0", string(floor)); slate) == ""
+    old = ReportEngine.slate_version_gap(project_with("1.11.0", "0.0.1"); slate)
+    @test occursin("resolves KaimonSlate 1.11.0 and SlateExtensionsBase 0.0.1, which this Slate cannot run with", old)
+    @test occursin("KaimonSlate 2.x", old) && occursin("SlateExtensionsBase $floor or later", old)
+    @test occursin("SlateExtensionsBase 0.0.1", ReportEngine.slate_version_gap(project_with("2.0.0", "0.0.1"); slate))
+    @test ReportEngine.slate_version_gap(mktempdir(); slate) == ""          # no project, nothing to say
+end
