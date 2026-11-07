@@ -1635,8 +1635,12 @@ end
 _flush_sources!(k::GateKernel) =
     k.target isa RemoteTarget && (try; sync_flush!(k); catch e; _rlog("sync: flush before a cell failed — " * first(sprint(showerror, e), 160)); end)
 
-function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
-                      region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "")
+eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
+    _worker_eval(k, report, source, filename, region, regions, lane, ())
+
+function _worker_eval(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString,
+                      region::AbstractString, regions::AbstractVector, lane::AbstractString, memo_args)
     wire = try
         # prepare! is INSIDE the try: a worker spawn/connect or env-reconstruction failure must
         # surface as this cell's error, NOT propagate up through eval_stale!/sync_from_file! and 500
@@ -1648,16 +1652,14 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         # `ctx_*` seed the worker's task-local Slate execution context (see `_build_slate_ctx`).
         _tool(k, "__slate_eval", Dict{String,Any}("source" => String(source), "filename" => String(filename),
               "run_id" => current_run_id(),
-              _ctx_args(report, region, regions, filename)..., _lane_args(lane)...); timeout = _eval_timeout())
+              _ctx_args(report, region, regions, filename)..., _lane_args(lane)..., memo_args...);
+              timeout = _eval_timeout())
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", _eval_failure(k, e), nothing, 0.0)
     end
     return _wire_to_output(wire)
 end
 
-# Memo-aware: ask the worker to restore an expensive cell from disk (no recompute) or persist it
-# after a run exceeding `memo.threshold` ms. The key digests this cell + its upstream sources +
-# bind inputs; the worker folds in the Revise'd src + Manifest digests (see worker.jl `__slate_eval`).
 # Build the `ctx_*` tool-args carrying the Slate execution context to the worker: the effective side
 # (`""` = main), the notebook id, and the declared region names — the worker rebuilds the full context
 # (adding its own `slate_emit`) from these. See worker.jl `__slate_eval` / `_build_slate_ctx`.
@@ -1885,17 +1887,18 @@ function rerender_live(::InProcessKernel, report::Report)
     return out
 end
 
-function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
-                      region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "")
-    (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions, lane = lane)
-    wire = try
-        prepare!(k, report)
-        _flush_sources!(k)
-        _tool(k, "__slate_eval", Dict{String,Any}(
-            "source" => String(source), "filename" => String(filename),
-            "run_id" => current_run_id(),
-            _ctx_args(report, region, regions, filename)..., _lane_args(lane)...,
-            "memo_key" => String(memo.key), "memo_names" => collect(String, memo.names),
+# Memo-aware: the same eval, asking the worker to restore the cell from disk instead of recomputing
+# it, or to store the result once it runs past `memo.threshold` ms. The key digests this cell, its
+# upstream sources and bind inputs; the worker folds in the Revise'd src and Manifest digests (worker.jl
+# `__slate_eval`). A memo without a key is no memo.
+eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
+             region::AbstractString = "", regions::AbstractVector = String[], lane::AbstractString = "") =
+    _worker_eval(k, report, source, filename, region, regions, lane, _memo_args(memo))
+
+_memo_args(::Nothing) = ()
+function _memo_args(memo)
+    isempty(memo.key) && return ()
+    return ("memo_key" => String(memo.key), "memo_names" => collect(String, memo.names),
             "memo_threshold" => Float64(memo.threshold),
             # ▶ force: skip the restore (an explicit play must re-evaluate) but still store the fresh
             # result. `always`: the `cache` tag — persist regardless of runtime. Both hasproperty-guarded
@@ -1907,11 +1910,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
             # names nothing downstream reads — display objects among them store as wire-image only
             "memo_unread" => (hasproperty(memo, :unread) ? collect(String, memo.unread) : String[]),
             # names nothing downstream MUTATES — restore may zero-copy (mmap/arrow view)
-            "memo_safe" => (hasproperty(memo, :safe) ? collect(String, memo.safe) : String[])); timeout = _eval_timeout())
-    catch e
-        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", _eval_failure(k, e), nothing, 0.0)
-    end
-    return _wire_to_output(wire)
+            "memo_safe" => (hasproperty(memo, :safe) ? collect(String, memo.safe) : String[]))
 end
 
 # Ask every cell the worker is running to stop. Deliberately does NOT `prepare!` — if the worker is
