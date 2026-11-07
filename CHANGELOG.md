@@ -12,6 +12,20 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-11-07
+
+### Fixed
+
+- An agent's reply in the chat arrives whole when it streams faster than the page draws it. The
+  page used to miss the reply's complete copy and keep it as far as its streamed pieces got.
+- The page stays responsive while an agent writes cells: the chat redraws at most every 100 ms
+  during a burst, rather than once per streamed piece.
+- A notebook whose project resolves a KaimonSlate or SlateExtensionsBase this Slate cannot run with
+  is caught before its worker starts. The cell says which versions it found and offers to update
+  KaimonSlate in that environment. A worker that exits at boot shows its own error line.
+- A sweep whose jobs stop before any unit lands quotes the jobs' error, rather than reporting that
+  its units outran their walltime or memory.
+
 ## [2.0.1] - 2026-11-06
 
 ### Fixed
