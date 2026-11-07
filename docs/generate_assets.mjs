@@ -233,7 +233,8 @@ const REG_REGISTRY = {
     { name: 'bigmem', host: 'mem-box', transport: 'tunnel', base_port: 0, preload: '', data_root: '/scratch',
       warm: 1, threads: '16,1', sysimage: false, status: { ok: true, msg: 'warm 1/1 ready', age: 20 } },
   ],
-  parked: [{ host: 'gpu-box', label: 'vision', port: 9312, idle_s: 43 }],
+  // `since` in hub seconds, as the facts carry it; the page shows how long it has been idle.
+  parked: [{ host: 'gpu-box', label: 'vision', port: 9312, since: Date.now() / 1000 - 43 }],
 }
 // Per-host live rosters (/api/remote-workers?host=). state ∈ attached|idle; stats/manifest are JSON strings.
 const REG_ROSTERS = {
