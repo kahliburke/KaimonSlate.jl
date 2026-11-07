@@ -2,33 +2,44 @@
 # header: imports/exports, the LiveNotebook struct). Names here resolve in NotebookServer.
 
 # ── Live push over SSE (per notebook) ────────────────────────────────────────
-# `essential`: a message nothing re-sends, so it is delivered past the slow-client limit. A resync
+# `essential`: a message nothing re-sends, so it is delivered to a client that is behind. A resync
 # re-pulls the notebook's state, and the agent's chat is not part of it: a reply's complete copy
 # dropped here stays lost until a reload, leaving the reply as far as its streamed pieces got.
 function _broadcast(nb::LiveNotebook, msg::AbstractString; essential::Bool = false)
     lock(nb.llock) do
-        for ch in nb.listeners
+        for c in nb.listeners
             try
-                _deliver!(ch, msg, nb.version; essential)
+                _deliver!(c, msg, nb.version; essential)
             catch
             end
         end
     end
 end
 
-# One client's share of a broadcast. Under the limit, the message. Past it, a slow client stops
-# getting patches (they would back up) and gets ONE bare version token instead, so it re-pulls full
-# state on catch-up and recovers any dropped NON-idempotent patch (refresh:/celldone:/cellprog:). An
-# essential message still goes, short of the channel's capacity (256).
-function _deliver!(ch::Channel{String}, msg::AbstractString, version; essential::Bool = false)
+# How long a client's queue may go untaken before it counts as behind.
+const SSE_BEHIND_S = 2.0
+
+# One client's share of a broadcast. A client is behind when a message has waited in its queue for
+# `SSE_BEHIND_S` without its writer taking anything, or its queue is near capacity. A count alone
+# cannot tell that from a burst queued faster than the writer was scheduled, which happens whenever a
+# reply streams. Behind, it stops getting patches (they would back up) and gets ONE bare version
+# token instead, so it re-pulls full state on catch-up and recovers any dropped NON-idempotent patch
+# (refresh:/celldone:/cellprog:). An essential message still goes, short of the channel's capacity.
+function _deliver!(c::SseClient, msg::AbstractString, version; essential::Bool = false,
+                   now::Float64 = time())
+    ch = c.ch
     isopen(ch) || return nothing
     n = Base.n_avail(ch)
-    if n < 32 || (essential && n < 240)
+    n == 0 && (c.waiting[] = now)
+    room = c.cap - 16
+    behind = n >= room || now - c.waiting[] > SSE_BEHIND_S
+    if n < room && (!behind || essential)
         put!(ch, String(msg))
-    elseif n < 200
+    elseif n < room && !c.resync[]
+        c.resync[] = true
         put!(ch, string(version))
     end
-    # else: the queue is already deep with resync tokens, and the pending resync covers this message.
+    # else: a resync is already queued, and it covers this message.
     return nothing
 end
 
@@ -37,8 +48,8 @@ end
 # waiting for those streams to drain (a browser tab left open hangs the close).
 function _close_listeners(nb::LiveNotebook)
     lock(nb.llock) do
-        for ch in nb.listeners
-            try; close(ch); catch; end
+        for c in nb.listeners
+            try; close(c.ch); catch; end
         end
         empty!(nb.listeners)
     end
@@ -117,8 +128,9 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
     HTTP.setheader(stream, "Content-Type" => "text/event-stream")
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
     HTTP.startwrite(stream)
-    ch = Channel{String}(256)   # headroom so the slow-client resync tokens (see _broadcast) don't block
-    n = lock(nb.llock) do; push!(nb.listeners, ch); length(nb.listeners); end
+    client = SseClient(256)
+    ch = client.ch
+    n = lock(nb.llock) do; push!(nb.listeners, client); length(nb.listeners); end
     @info "Kaimon Slate: browser connected" id = nb.id clients = n
     # A freshly-connected browser page needs any LIVE (session-bound) outputs — WGLMakie figures, whose
     # scene + interaction live in the worker session, not the replayed HTML — re-rendered for IT, the way a
@@ -128,11 +140,13 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
         write(stream, "data: $(nb.version)\n\n")
         while true
             msg = take!(ch)
+            client.waiting[] = time()
+            all(isdigit, msg) && (client.resync[] = false)
             write(stream, msg == "hb" ? ": hb\n\n" : "data: $msg\n\n")
         end
     catch
     finally
-        left = lock(nb.llock) do; filter!(c -> c !== ch, nb.listeners); length(nb.listeners); end
+        left = lock(nb.llock) do; filter!(c -> c !== client, nb.listeners); length(nb.listeners); end
         close(ch)
         @info "Kaimon Slate: browser disconnected" id = nb.id clients = left
     end

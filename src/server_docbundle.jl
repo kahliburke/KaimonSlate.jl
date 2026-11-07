@@ -591,7 +591,7 @@ function render_doc_bundle_inprocess(path::AbstractString, dir::AbstractString; 
     r = parse_report(read(path, String); id = rid, title = base)
     build_dependencies!(r)
     kernel = _select_kernel(path, r)
-    nb = LiveNotebook(rid, path, r, kernel, 0, String[], String[], ReentrantLock(), Channel{String}[],
+    nb = LiveNotebook(rid, path, r, kernel, 0, String[], String[], ReentrantLock(), SseClient[],
                       ReentrantLock(), "", false, Dict{String,String}())
     t0 = time()
     run = Threads.@spawn _drain!(nb)

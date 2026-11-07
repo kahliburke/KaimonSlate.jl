@@ -54,6 +54,17 @@ const _ANSI_CSS_ASSET = joinpath(@__DIR__, "assets", "ansi.css")
 const _SHARED_CSS = joinpath(@__DIR__, "assets", "shared.css")
 const _JS_DIR = joinpath(@__DIR__, "assets", "js")                # notebook UI, split into modules
 
+# One live SSE connection: what is waiting for it, and since when. `waiting` is when its writer last
+# took a message, or when one arrived in its empty queue; being behind is measured by it, not by how
+# much is queued (`_deliver!`). `resync` is set while a version token is queued and not yet taken.
+struct SseClient
+    ch::Channel{String}
+    cap::Int
+    waiting::Threads.Atomic{Float64}
+    resync::Threads.Atomic{Bool}
+end
+SseClient(n::Integer) = SseClient(Channel{String}(n), n, Threads.Atomic{Float64}(time()), Threads.Atomic{Bool}(false))
+
 mutable struct LiveNotebook
     id::String                           # hub id (unique; used in /n/<id> + /api/<id>/…)
     path::String
@@ -63,7 +74,7 @@ mutable struct LiveNotebook
     undo::Vector{String}                 # source snapshots (most recent last)
     redo::Vector{String}
     lock::ReentrantLock                  # serializes eval (UI actions vs. async refresh)
-    listeners::Vector{Channel{String}}   # this notebook's live SSE connections
+    listeners::Vector{SseClient}         # this notebook's live SSE connections
     llock::ReentrantLock                 # protects `listeners`
     agent_id::String                     # default/solo agent (crew "") — back-compat alias of agents[""]
     agent_busy::Bool                     # true while ANY bound agent has a turn in flight (history attribution)
@@ -637,7 +648,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
         p = _read_preview(src)
         p === nothing || (r.meta["preview"] = p)
         nb = LiveNotebook(nbid, String(path), r, PendingKernel(), 0, String[], String[],
-                          ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                          ReentrantLock(), SseClient[], ReentrantLock(), "", false,
                           Dict{String,String}())
         _wire_callbacks!(nb)
         _load_chat_log!(nb)
@@ -672,7 +683,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
         p === nothing || (r.meta["preview"] = p)
     end
     nb = LiveNotebook(nbid, String(path), r, PendingKernel(), 0, String[], String[],
-                      ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                      ReentrantLock(), SseClient[], ReentrantLock(), "", false,
                       Dict{String,String}())
     _wire_callbacks!(nb)
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)

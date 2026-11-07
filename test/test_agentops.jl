@@ -1002,19 +1002,25 @@ end
     end
 end
 
-@testset "an agent's complete reply reaches a client that is behind on its stream" begin
-    # A fast reply streams a message per few words, and a browser draining slower falls behind. Past
-    # the limit it gets a resync token in place of patches, which re-pulls the notebook's state but not
-    # the chat. The reply's complete copy is what repairs the streamed text, so it has to arrive.
-    ch = Channel{String}(256)
-    for i in 1:40; put!(ch, "agent:delta $i"); end
-    NS._deliver!(ch, "agent:delta 41", 7)                      # a streamed piece: dropped for a token
-    NS._deliver!(ch, "agent:final", 7; essential = true)       # the complete copy: delivered
+@testset "a client is behind only when its queue has waited, not when a burst is queued" begin
+    # A fast reply arrives as a burst of small messages, queued faster than the page's writer is
+    # scheduled. That is not a slow client, and the burst goes through whole.
+    t0 = 1000.0
+    c = NS.SseClient(256)
+    for i in 1:40; NS._deliver!(c, "agent:delta $i", 7; now = t0); end
+    @test Base.n_avail(c.ch) == 40
+    # Nothing taken for longer than the limit: patches stop, and ONE version token stands in for
+    # them. The reply's complete copy is what repairs the streamed text, so it still arrives.
+    later = t0 + NS.SSE_BEHIND_S + 1
+    NS._deliver!(c, "agent:delta 41", 7; now = later)
+    NS._deliver!(c, "agent:delta 42", 7; now = later)
+    NS._deliver!(c, "agent:final", 7; essential = true, now = later)
     got = String[]
-    while isready(ch); push!(got, take!(ch)); end
+    while isready(c.ch); push!(got, take!(c.ch)); end
     @test got[41:end] == ["7", "agent:final"]
-    full = Channel{String}(256)
-    for i in 1:245; put!(full, "x"); end
-    NS._deliver!(full, "agent:final", 7; essential = true)     # short of capacity, so it never blocks
-    @test Base.n_avail(full) == 245
+    # Short of capacity, so a put never blocks the broadcaster.
+    full = NS.SseClient(256)
+    for i in 1:245; put!(full.ch, "x"); end
+    NS._deliver!(full, "agent:final", 7; essential = true, now = t0)
+    @test Base.n_avail(full.ch) == 245
 end

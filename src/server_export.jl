@@ -6335,6 +6335,9 @@ function relay_agent_event(channel::AbstractString, data)
     # `tool_result`) are buffered, so replay stays clean and the cap isn't burned.
     _broadcast(nb, "agent:" * s; essential = !is_delta)
     is_delta || _buffer_agent_log!(nb, s)   # persist non-delta envelopes for reload-replay
+    # Events arrive in bursts on one task, and a page's writer may share its thread: give it a turn
+    # between them, so a streamed reply reaches the page as it streams.
+    yield()
     return nothing
 end
 
