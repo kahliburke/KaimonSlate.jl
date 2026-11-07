@@ -707,6 +707,12 @@ async function regionShots(browser) {
 async function sweepShots(browser) {
   try {
     const page = await (await newContext(browser)).newPage()
+    // What the page saw, printed if the card stalls: its console, its errors and the requests that failed.
+    const seen = []
+    page.on('console', (m) => seen.push(`console.${m.type()}: ${m.text()}`))
+    page.on('pageerror', (e) => seen.push(`pageerror: ${e.message}`))
+    page.on('requestfailed', (r) => seen.push(`requestfailed: ${r.method()} ${r.url()} ${r.failure()?.errorText || ''}`))
+    page.on('response', (r) => { if (r.status() >= 400) seen.push(`http ${r.status()}: ${r.request().method()} ${r.url()}`) })
     await runNotebook(page, 'sweep')
     const card = '.cell[data-cid="scan"] [data-sweep]'
     await page.waitForSelector(`${card} [data-sw-do="submit"]`, { timeout: 60_000 })
@@ -726,6 +732,7 @@ async function sweepShots(browser) {
     catch (e) {
       // Say why in the build log, and keep the card as it stands so the pages that show it still build.
       log('! ' + e.message + '; the card reads:\n' + ((await page.locator(card).first().innerText().catch(() => '')) || '(empty)'))
+      log('the page saw:\n' + (seen.slice(-60).join('\n') || '(nothing)'))
       for (const f of execSync(`find ${HOME} -name '*.log' 2>/dev/null | head -6`).toString().split('\n').filter(Boolean))
         log(`--- ${f}\n` + execSync(`tail -n 30 '${f}'`).toString())
       for (const n of ['sweep-running.png', 'sweep-card.png']) await cellShot(page, 'scan', n)
