@@ -204,23 +204,6 @@ function _is_slate_export_html(path::AbstractString)
     return false
 end
 
-# True if a `.jl` carries Slate structure — an explicit `#%%` cell header or a `# ╔═╡ Slate.` footer.
-# A file with neither is a plain Julia script (offered as a NEW notebook rather than opened in place).
-# Scans a bounded line prefix so a huge file stays cheap.
-function _looks_like_notebook(path::AbstractString)
-    isfile(path) || return false
-    try
-        n = 0
-        for line in eachline(path)
-            startswith(lstrip(line), "#%%") && return true
-            startswith(line, "# ╔═╡ Slate.") && return true
-            (n += 1) > 4000 && break
-        end
-    catch
-    end
-    return false
-end
-
 # Classify a path the open box points at, so the front end can route it:
 #   "bundle"      self-contained `.jl` (Slate.bundle footer)   → import helper
 #   "notebook"    a Slate `.jl` notebook (has #%% cells)        → open live / inactive
@@ -234,7 +217,7 @@ function _source_kind(path::AbstractString)
     ext = lowercase(splitext(path)[2])
     if ext == ".jl"
         _has_bundle_footer(path) && return "bundle"
-        return _looks_like_notebook(path) ? "notebook" : "plain"
+        return _is_notebook_file(path) ? "notebook" : "plain"
     elseif ext == ".html" || ext == ".htm"
         _html_bundle_source(path) === nothing || return "html-bundle"
         return _is_slate_export_html(path) ? "html-static" : "foreign"

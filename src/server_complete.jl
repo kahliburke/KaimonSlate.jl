@@ -588,11 +588,10 @@ function _file_kind(name::AbstractString)
 end
 
 # Is this `.jl` a Slate notebook (rather than module/script source)? The Files tree marks those so
-# they can be OPENED as notebooks instead of only text-edited. A notebook's cells start with `#%%`
-# (within the preamble at worst) and a self-contained bundle carries the `# ╔═╡ Slate.` footer — so a
-# bounded head + tail read decides it. `_looks_like_notebook` (server_sse_import.jl) scans up to 4000
-# lines, which is right for classifying ONE path the user typed but would re-read every module file
-# in the project on every tree load.
+# they can be OPENED as notebooks instead of only text-edited, and the open box routes a plain script
+# to "new notebook" instead. A notebook's cells start with a column-0 `#%%` (the parser's own header
+# rule, after the preamble at worst) and a self-contained bundle carries the `# ╔═╡ Slate.` footer, so
+# a bounded head + tail read decides it without re-reading every module file on each tree load.
 const _NB_SNIFF_HEAD = 64 * 1024
 const _NB_SNIFF_TAIL = 8 * 1024
 function _is_notebook_file(path::AbstractString)
@@ -602,11 +601,13 @@ function _is_notebook_file(path::AbstractString)
         open(path, "r") do io
             head = String(read(io, min(sz, _NB_SNIFF_HEAD)))
             (startswith(head, "#%%") || occursin("\n#%%", head)) && return true
+            # Line-anchored as the parser reads footers, so a docstring that mentions the marker is not one.
+            footer(txt) = startswith(txt, "# ╔═╡ Slate.") || occursin("\n# ╔═╡ Slate.", txt)
             if sz > _NB_SNIFF_TAIL
                 seek(io, sz - _NB_SNIFF_TAIL)
-                return occursin("# ╔═╡ Slate.", String(read(io)))
+                return footer(String(read(io)))
             end
-            return occursin("# ╔═╡ Slate.", head)
+            return footer(head)
         end
     catch
         false

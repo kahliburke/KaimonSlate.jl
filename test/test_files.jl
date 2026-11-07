@@ -147,6 +147,31 @@ const NS = KaimonSlate.NotebookServer
         @test marked == Set(["demo.jl", "standalone.jl", "bundle.jl"])
     end
 
+    @testset "_source_kind tells notebooks from plain scripts as the parser does" begin
+        RE = KaimonSlate.ReportEngine
+        root = mktempdir()
+        v1 = "#%% md id=intro\n# A study\n\n#%% sweep id=scan\n1\n\n" *
+             "# ╔═╡ Slate.sweep · options\n#   {\"cell\":\"scan\",\"options\":{}}\n# ╚═╡\n"
+        v2 = RE.serialize_report(RE.parse_report(v1))      # current format: preamble, @md skin, footer
+        files = Dict(
+            "v1.jl" => v1,
+            "v2.jl" => v2,
+            "crlf.jl" => replace(v2, "\n" => "\r\n"),
+            "literate.jl" => repeat("# notes\nx = 1\n\n", 2000) * "#%% code id=a\n1\n",
+            "footer.jl" => "x = 1\n\n# ╔═╡ Slate.config\n#   format = 2\n# ╚═╡\n",
+            "script.jl" => "x = 1\n    #%% indented, not a header\nprintln(x)\n",
+            "mentions.jl" => "\"\"\"\nWrites `# ╔═╡ Slate.env` blocks.\n\"\"\"\nf() = 1\n")
+        for (f, txt) in files
+            write(joinpath(root, f), txt)
+        end
+        kinds = Dict(f => NS._source_kind(joinpath(root, f)) for f in keys(files))
+        @test kinds == Dict("v1.jl" => "notebook", "v2.jl" => "notebook", "crlf.jl" => "notebook",
+                            "literate.jl" => "notebook", "footer.jl" => "notebook", "script.jl" => "plain",
+                            "mentions.jl" => "plain")
+        @test RE.parse_report(files["v2.jl"]).meta["format"] == RE.FORMAT
+        @test NS._source_kind(joinpath(root, "gone.jl")) == "none"
+    end
+
     @testset "_mtime_conflict lost-update guard" begin
         root = mktempdir(); p = joinpath(root, "a.jl")
         write(p, "x")
