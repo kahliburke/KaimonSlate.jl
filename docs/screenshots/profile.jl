@@ -34,6 +34,15 @@ end
 xs = sin.(1:6000) .* 10
 energy = version == "slow" ? energy_slow(xs) : energy_fast(xs)
 
+#%% code id=spread
+# Uneven pieces of work, one per thread, so the threads finish at different times.
+sizes = [6000, 9000, 12000, 15000]
+parts = zeros(length(sizes))
+Threads.@threads for t in eachindex(sizes)
+    parts[t] = energy_fast(sin.(1:sizes[t]))
+end
+sum(parts)
+
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)
 #   docid = 96ceaa3f-ac67-4fa7-937f-26f3e2725823
 #   format = 2

@@ -73,7 +73,8 @@ function startServer() {
   log(`starting serve_notebook on :${PORT}`)
   const jl = `using KaimonSlate; KaimonSlate.serve_notebook(raw"${join(SHOTDIR, FIRST + '.jl')}"; port=${PORT})`
   // KAIMONSLATE_NO_OPEN: don't pop the system browser (Safari) — the captures run in headless Chromium.
-  const proc = spawn('julia', [`--project=${DOCS}`, '--startup-file=no', '--color=no', '-e', jl],
+  // Several threads, so the profiler's timeline has a lane for each. Cells run in this process.
+  const proc = spawn('julia', [`--project=${DOCS}`, '--startup-file=no', '--color=no', '--threads=4', '-e', jl],
     { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, KAIMONSLATE_NO_OPEN: '1', KAIMONSLATE_HOME: HOME } })
   proc.stdout.on('data', (d) => process.stdout.write(`[server] ${d}`))
   proc.stderr.on('data', (d) => process.stderr.write(`[server] ${d}`))
@@ -1168,11 +1169,20 @@ async function toolShots(browser) {
                                null, { timeout: 120_000 }).catch(() => {})
     await runProfile()
     await elShot(page, '.pfdock', 'profiler-compare.png')
+    // Profiled on the flame tab, which is what `profiled` waits on, then shown as a lane per thread.
+    await page.evaluate(() => window.slateProfileCell('spread'))
+    await sleep(800)
+    await runProfile()
+    await page.locator('.pfdock .pfbar2 .slate-tabs button', { hasText: 'Timeline' }).click({ timeout: 3000 })
+    await sleep(1200)
+    await elShot(page, '.pfdock', 'profiler-timeline.png')
   } catch (e) { log('! profiler shots skipped:', e.message.split('\n')[0]) }
   try {
     await page.keyboard.press('Escape')
     await runNotebook(page, 'debug')
     await page.evaluate(() => window.api('POST', '/api/debug/mark', { file: 'cell:run', line: 5, cond: 'k == 4200' }))
+    // A watch on the loop, so the rail's watches section shows a sampled value.
+    await page.evaluate(() => window.api('POST', '/api/debug/watch', { file: 'cell:run', line: 6, expr: 'u' }))
     await page.evaluate(() => window.slateDebugCell('run'))
     await page.waitForSelector('.dbgfocus', { timeout: 60_000 })
     await sleep(1500)
@@ -1180,6 +1190,20 @@ async function toolShots(browser) {
     await page.waitForFunction(() => /4200|breakpoint/.test((document.querySelector('.dbgfocus') || {}).textContent || ''), null, { timeout: 60_000 }).catch(() => {})
     await sleep(1500)
     await elShot(page, '.dbgfocus', 'debugger-workspace.png')
+    // The breakpoint's line calls both gain_at and advance, so Into asks which.
+    try {
+      await page.evaluate(() => window.slateDebugInto())
+      await page.waitForSelector('.dbginto .dbgintorow', { timeout: 15_000 })
+      await sleep(500)
+      // The source pane down to the picker, which opens over the variables below it.
+      const clip = await page.evaluate(() => {
+        const a = document.querySelector('.dbgfmid').getBoundingClientRect()
+        const b = document.querySelector('.dbginto').getBoundingClientRect()
+        return { x: a.left, y: a.top, width: a.width, height: b.bottom - a.top + 24 }
+      })
+      await page.screenshot({ path: join(OUT, 'debugger-into.png'), clip }); log('✓ debugger-into.png')
+      await page.locator('.dbginto .dbgfx').click({ timeout: 3000 })
+    } catch (e) { log('! debugger-into skipped:', e.message.split('\n')[0]) }
     await page.evaluate(() => window.slateDebugStep && window.api('POST', '/api/debug/stop', {})).catch(() => {})
   } catch (e) { log('! debugger shot skipped:', e.message.split('\n')[0]) }
   await page.context().close()

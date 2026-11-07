@@ -53,6 +53,8 @@ Four tabs show the samples:
   longest idle gaps, time on the GPU by line, what compiled during the run, and where dispatch
   happened at run time.
 
+![The Timeline tab on a threaded cell: a lane per thread over the run, each finishing at a different time, with the code pane beside it and the hot lines below](./assets/profiler-timeline.png)
+
 Beside the graph is the **code pane**: the source of the selected frame with each line tinted by
 its total share, and the share in the margin. Source comes from the machine the cell ran on, so a
 region cell's package code is the code that ran. Under the graph, the **hot lines** table lists the

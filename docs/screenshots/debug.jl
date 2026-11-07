@@ -8,8 +8,9 @@ A damped oscillator that blows up partway through a long run.
 """
 
 #%% code id=model
-function advance(u, v, k; dt = 0.01)
-    gain = k > 4000 ? 1.002 : 0.999
+gain_at(k) = k > 4000 ? 1.002 : 0.999
+
+function advance(u, v, gain; dt = 0.01)
     v = gain * (v - u * dt)
     u = u + v * dt
     return u, v
@@ -20,7 +21,7 @@ u, v = 1.0, 0.0
 peak = 0.0
 for k in 1:5000
     global u, v, peak
-    u, v = advance(u, v, k)
+    u, v = advance(u, v, gain_at(k))
     peak = max(peak, abs(u))
 end
 (u = u, peak = peak)

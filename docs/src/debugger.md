@@ -26,6 +26,8 @@ how many steps it has taken and a **⤢** to reopen it.
 The keys work only while a session is running, so F5 still reloads the page otherwise. They can be
 rebound in **Keyboard shortcuts**.
 
+![Into on a line that calls two functions of the notebook's own: the list asks which one to step into](./assets/debugger-into.png)
+
 Your own code is interpreted, so it can be stepped: the notebook's cells and packages you develop
 from a local checkout. Base, the standard libraries and registered packages run compiled, at full
 speed, and Into passes over their calls and says so. Turn on **step into library code** to be
