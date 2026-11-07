@@ -479,6 +479,16 @@ function rangeDrag(ev, canvas, sig, band, box) {
   window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
   show(x0);
 }
+// The drawn rect under the pointer, topmost first (later rects paint over earlier ones).
+function hitAt(cv, drawn, ev) {
+  const c = cv.current; if (!c) return null;
+  const b = c.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top, rs = drawn.current;
+  for (let i = rs.length - 1; i >= 0; i--) {
+    const r = rs[i];
+    if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return r;
+  }
+  return null;
+}
 // Double-click on nothing: back out, twice as wide, about the pointer.
 function zoomOutAt(ev, canvas, sig) {
   const b = canvas.getBoundingClientRect(), { v0, v1 } = sig.value;
@@ -757,15 +767,7 @@ function Flame() {
     : stt === 'waiting' ? html`<span class="hydspin"></span> waiting to run`
     : stt === 'preparing' ? html`<span class="hydspin"></span> compiling`
     : html`<button class="pfbtn primary pfbig" onClick=${run}>▶ Run and profile</button>`}</div>`;
-  const at = (ev) => {
-    const c = cv.current; if (!c) return null;
-    const b = c.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top, rs = drawn.current;
-    for (let i = rs.length - 1; i >= 0; i--) {
-      const r = rs[i];
-      if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return r;
-    }
-    return null;
-  };
+  const at = (ev) => hitAt(cv, drawn, ev);
   const move = (ev) => {
     if (dragPan(ev, drag.current, cv.current, view)) { if (tip.current) tip.current.style.display = 'none'; return; }
     const r = at(ev), t = tip.current;
@@ -1034,12 +1036,7 @@ function Timeline() {
   useZoomPan(box, cv, tview);
   if (!M) return html`<div class="pfflame pfempty">not profiled yet</div>`;
   if (!TL) return html`<div class="pfflame pfempty">${M.bytes ? 'an allocation profile has no timeline' : 'this profile has no timeline'}</div>`;
-  const at = (ev) => {
-    const c = cv.current; if (!c) return null;
-    const b = c.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top, rs = drawn.current;
-    for (let i = rs.length - 1; i >= 0; i--) { const r = rs[i]; if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return r; }
-    return null;
-  };
+  const at = (ev) => hitAt(cv, drawn, ev);
   const move = (ev) => {
     if (dragPan(ev, drag.current, cv.current, tview)) { if (tip.current) tip.current.style.display = 'none'; return; }
     const r = at(ev), t = tip.current;
