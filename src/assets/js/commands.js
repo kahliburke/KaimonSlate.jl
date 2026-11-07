@@ -227,7 +227,9 @@ R({ id: 'cell.split', label: 'Split selected cell at the cursor', group: 'Cells'
 const _canFormat = () => typeof window.formatCells === 'function' &&
                          (!SLATE_IS_APP || !!(window.__SLATE_APP__ && window.__SLATE_APP__.workbook));
 R({ id: 'cell.format', label: 'Format selected cell(s)', group: 'Cells', ctx: ['command', 'editor'],
-    keys: ['Shift-Alt-f'], available: _canFormat, run: _onSel(t => _fn('formatCells', t.ids)) });
+    // ⌘⌥L first: on macOS an editor reads ⌥-only chords as typed characters (⌥⇧F types Ï), so the
+    // VS Code chord works there only outside an editor.
+    keys: ['Mod-Alt-l', 'Shift-Alt-f'], available: _canFormat, run: _onSel(t => _fn('formatCells', t.ids)) });
 R({ id: 'nb.formatAll', label: 'Format all cells', group: 'Cells', ctx: ['command'],
     available: _canFormat, run: () => _fn('formatCells', []) });
 const _toKind = kind => _onSel(t => { if (t.cell && t.cell.kind !== kind) _fn('toggleType', t.id, kind); });
