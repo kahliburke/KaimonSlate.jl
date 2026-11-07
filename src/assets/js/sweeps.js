@@ -167,20 +167,9 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   const clusters = () => (window.__slateState || window.nbState || {}).clusters || [];
   const clusterByName = n => clusters().find(c => c.name === n);
 
-  // What a cluster IS, in one line: enough to know where the work goes without opening the editor.
-  function clusterSummary(c) {
-    if (!c) return '';
-    const bits = [];
-    const kind = (c.kind || 'slurm').toLowerCase();
-    bits.push(kind === 'local' ? 'local' : (c.host ? `${kind} · ${c.host}` : kind));
-    if (c.partition) bits.push(c.partition);
-    if (c.cpus) bits.push(`${c.cpus} cpu`);
-    if (c.gpus) bits.push(`${c.gpus} gpu`);
-    if (c.mem) bits.push(c.mem);
-    if (c.walltime) bits.push(`≤ ${c.walltime}`);
-    if (c.chunk) bits.push(`${c.chunk}/job`);
-    return bits.join(' · ');
-  }
+  // What a cluster IS, in one line (`schedopts.js`, shared with the machine list), with the GPUs
+  // and points per job this panel also edits.
+  const clusterSummary = c => SO().clusterSummary(c, { gpus: true, chunk: true });
 
   // ── The sweeps in a store ───────────────────────────────────────────────────────────────────
   // Sorted the way the log file list is, for the same reason: the interesting row is the one that

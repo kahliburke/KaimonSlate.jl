@@ -106,8 +106,25 @@
     return [...pre, ...mid].slice(0, max || MENU_MAX);
   }
 
+  // One line saying where a compute target's work goes, for the machine list and a job cell's
+  // panel. The job cell also asks for the GPUs and the points per job, which it submits by.
+  function clusterSummary(c, { gpus = false, chunk = false } = {}) {
+    if (!c) return '';
+    const k = c.kind || 'slurm';
+    const ex = k === 'exec' || k === 'local';
+    const bits = [ex ? (c.host || 'here') : (c.host || 'no host yet')];
+    if (ex && c.procs) bits.push(c.procs + ' at once');
+    if (c.partition) bits.push(c.partition);
+    if (c.walltime) bits.push('≤' + c.walltime);
+    if (c.cpus) bits.push(c.cpus + ' cpu');
+    if (gpus && c.gpus) bits.push(c.gpus + ' gpu');
+    if (c.mem) bits.push(c.mem);
+    if (chunk && c.chunk) bits.push(c.chunk + '/job');
+    return (ex ? 'no scheduler' : k) + ' · ' + bits.join(' · ');
+  }
+
   const api = { load, all, find, toKey, spellOf, availOf, hintOf, warnFor, suggestions,
-                matches, MENU_MAX, FIELD_OWNED };
+                matches, clusterSummary, MENU_MAX, FIELD_OWNED };
   if (typeof window !== 'undefined') window.slateSchedOpts = api;
   if (typeof globalThis !== 'undefined') globalThis.slateSchedOpts = api;   // for the node tests
 })();

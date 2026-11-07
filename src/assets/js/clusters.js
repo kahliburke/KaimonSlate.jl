@@ -93,20 +93,6 @@ const filledExtras = () =>
   [kChunk, kAccount, kPrologue, kPayload, kNote, kJulia, kTestQos, kTransfer].filter(s => (s.value || '').trim()).length +
   (kCompile.value === 'login' ? 1 : 0);
 
-// One line saying where the work goes, for the list and for the job cell's summary.
-export function clusterSummary(c) {
-  if (!c) return '';
-  const k = c.kind || 'slurm';
-  const ex = isExecKind(k);
-  const bits = [ex ? (c.host || 'here') : (c.host || 'no host yet')];
-  if (ex && c.procs) bits.push(c.procs + ' at once');
-  if (c.partition) bits.push(c.partition);
-  if (c.walltime) bits.push('≤' + c.walltime);
-  if (c.cpus) bits.push(c.cpus + ' cpu');
-  if (c.mem) bits.push(c.mem);
-  return (ex ? 'no scheduler' : k) + ' · ' + bits.join(' · ');
-}
-
 function save() {
   const name = (kName.value || '').trim();
   if (!name) { cmsg.value = { text: 'needs a name', err: true }; return; }
@@ -266,7 +252,7 @@ export function Clusters() {
     <div class="mchdetail">
     ${!open ? html`<div class="pddim mchempty">No machines yet</div>` : html`<div class="rppcfg">
       <div class="mchhead"><div class="rppformhead">${e ? e.name : 'New machine'}</div>
-        ${e ? html`<span class="pddim">${clusterSummary(e)}</span>
+        ${e ? html`<span class="pddim">${window.slateSchedOpts.clusterSummary(e)}</span>
           <button class="rppregdel" title="forget this machine" onClick=${() => del(e.name)}>Delete</button>` : null}</div>
       <div class="rpprow"><label>Name</label>
         <input class="rppname" autocomplete="off" spellcheck="false" placeholder="e.g. hpc, gpu, here" value=${kName.value} onInput=${ev => kName.value = ev.target.value}/>

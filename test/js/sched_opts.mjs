@@ -139,6 +139,17 @@ for (const typed of ['cpus', 'cpus-per-task', '--cpus-per-task', ' cpus ']) {
   if (SO.toKey(typed) !== 'cpus') fails.push(`"${typed}" should store as cpus, got ${SO.toKey(typed)}`);
 }
 
+// ── a compute target in one line ────────────────────────────────────────────────────────────────
+// The machine list and the job cell's panel both read this; the cell also asks for gpus and chunk.
+{
+  const c = { kind: 'slurm', host: 'login1', partition: 'debug', walltime: '1:00:00', cpus: 4, gpus: 2, mem: '8G', chunk: 10 };
+  eq('summary, machine list', SO.clusterSummary(c), 'slurm · login1 · debug · ≤1:00:00 · 4 cpu · 8G');
+  eq('summary, job cell', SO.clusterSummary(c, { gpus: true, chunk: true }),
+     'slurm · login1 · debug · ≤1:00:00 · 4 cpu · 2 gpu · 8G · 10/job');
+  eq('summary, no scheduler', SO.clusterSummary({ kind: 'local', procs: 3 }), 'no scheduler · here · 3 at once');
+  eq('summary, nothing', SO.clusterSummary(null), '');
+}
+
 // ── the readers actually share it ───────────────────────────────────────────────────────────────
 // `sweeps.js` filters through this file. It also keeps its own copy of the catalogue for its other
 // helpers, and for a while it filled that copy with its OWN fetch — which left the shared one empty
