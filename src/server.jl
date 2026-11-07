@@ -24,6 +24,7 @@ import REPL                                   # standalone serve: raw-mode ^C by
 import Tar
 import Runic                                  # the code-cell formatter
 import TOML                                   # a project's `fatou.toml`
+import JuliaSyntax                            # comparing a cell before and after formatting
 import Typst_jll
 import Pkg
 using ..ReportEngine

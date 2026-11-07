@@ -790,6 +790,13 @@ end
                                              "c" => "function g()\n    return 1\nend\nb = 2\nc = 3"))
         @test collect(keys(r.formatted)) |> sort == ["b", "c"]
         @test occursin("change what the code does", r.failed["a"])
+        # A cell that does not parse yet: a browser-side formatter may format around the broken part,
+        # but the statements around it must stay the same and the broken part must keep its tokens.
+        r = NS.format_texts(nb, Dict("a" => "x=1\ny=2 +* 3\nz=x+y", "b" => "u=foo(1,2\nv=3+4", "c" => "w=(1+2))"),
+                            formatted = Dict("a" => "x = 1\ny = 2 + * 3\nz = x + y\n", "b" => "u = foo(1,2\nv = 3 + 5",
+                                             "c" => "w = (1 + 2)"))
+        @test r.formatted == Dict("a" => "x = 1\ny = 2 + * 3\nz = x + y")
+        @test occursin("change what the code does", r.failed["b"]) && occursin("change what the code does", r.failed["c"])
 
         # Which formatter: a project's fatou.toml (up to the repository root), then the global default,
         # with the notebook's own setting over both.

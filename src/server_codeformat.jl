@@ -1,7 +1,8 @@
 # ── Code-cell formatting ──────────────────────────────────────────────────────────────────────────
 # Two formatters. Runic runs here, in the hub. Fatou runs in the browser from its WASM build, which
-# sends its output back. Whichever formatter produced it, the hub accepts output only when the source
-# parses and the output parses to the same program; Fatou does not reject code that fails to parse.
+# sends its output back. Whichever formatter produced it, the hub accepts output only when it is the
+# same program as the source. Fatou also formats a cell that does not parse yet, leaving the broken
+# part as it is; Runic refuses one.
 #
 # Which one a notebook uses: the notebook's own `formatter` setting, else Fatou when a `fatou.toml`
 # governs the notebook's directory, else the global default (slate.json `formatter`), else Runic.
@@ -103,9 +104,16 @@ end
 
 # Whether formatting kept the program: both texts parse to the same code once line positions are
 # dropped, `return x` is read as `x` (Runic adds `return` to a function's last line), and statements
-# joined by `;` count the same as statements on separate lines.
+# joined by `;` count the same as statements on separate lines. The parse recovers from errors, so
+# for code that does not parse, the statements around a broken one must be the same and the broken
+# one must hold the same tokens.
 _same_program(a::AbstractString, b::AbstractString) =
-    _program_shape(Meta.parseall(a)) == _program_shape(Meta.parseall(b))
+    try
+        _program_shape(_recovering_parse(a)) == _program_shape(_recovering_parse(b))
+    catch
+        false
+    end
+_recovering_parse(s) = JuliaSyntax.parseall(Expr, s; ignore_errors = true)
 _program_shape(x) = x
 function _program_shape(e::Expr)
     e.head == :return && length(e.args) == 1 && return _program_shape(e.args[1])
@@ -130,8 +138,8 @@ const _FORMAT_MAX_BYTES = 4_000_000
 Format code-cell texts without changing the notebook: `sources` maps cell id → text, `formatted` in
 the result maps id → its formatted text, and the caller applies it. With `formatted` given (id →
 output, from a formatter that ran in the browser) that output is checked instead of running Runic.
-A cell whose source does not parse, or whose output does not parse to the same program, is left
-out and reported in `failed`.
+A cell whose output is not the same program is left out and reported in `failed`, as is a cell
+that does not parse when Runic is the formatter.
 """
 function format_texts(nb::LiveNotebook, sources::AbstractDict; formatted::Union{Nothing,AbstractDict} = nothing)
     fmt = notebook_formatter(nb)["name"]
@@ -147,11 +155,13 @@ function format_texts(nb::LiveNotebook, sources::AbstractDict; formatted::Union{
         (id in code && v isa AbstractString) || continue
         src = String(v)
         err = _parse_error(src)
-        err === nothing || (failed[id] = err; continue)
         res = if formatted !== nothing
             o = get(formatted, id, nothing)
             o isa AbstractString || continue
             String(o)
+        elseif err !== nothing
+            failed[id] = err
+            continue
         elseif fmt == "runic"
             try
                 Runic.format_string(src)
@@ -164,7 +174,7 @@ function format_texts(nb::LiveNotebook, sources::AbstractDict; formatted::Union{
             continue
         end
         res = _keep_trailing_newline(src, res)
-        bad = _parse_error(res)
+        bad = err === nothing ? _parse_error(res) : nothing
         bad === nothing || (failed[id] = "formatted code does not parse, $bad"; continue)
         _same_program(src, res) || (failed[id] = "formatting would change what the code does"; continue)
         out[id] = res
