@@ -1313,8 +1313,9 @@ function cluster_status(name::AbstractString = "";
     try
         js = isempty(target_host(t)) ? nothing : collect_jobs(t)
         js_at = js === nothing ? Inf : collected_at(t)
+        jl = js === nothing ? Dict{String,Set{String}}() : collected_lost(t)
         for (sw, created) in store_sweeps(root)
-            p = BatchSweep.plan(root, sw; launcher = l, job_state = js, job_state_at = js_at)
+            p = BatchSweep.plan(root, sw; launcher = l, job_state = js, job_state_at = js_at, lost = jl)
             sp = BatchSweep.spans(root, sw)
             # NOT `t`: that is the target, and everything after this loop still needs it.
             tel = BatchSweep.telemetry(root, sw; launcher = l, plan = p)
@@ -4098,10 +4099,12 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # and handed to the plan rather than asked again per sweep on the page.
     js = target isa ClusterTarget && !isempty(target.host) ? collect_jobs(target) : nothing
     js_at = js === nothing ? Inf : collected_at(target)
+    jl = js === nothing ? Dict{String,Set{String}}() : collected_lost(target)
     p = advance ? reconcile_and_sync!(target, run, l; submit = started && _reachable(target),
-                                      job_state = js, job_state_at = js_at,
+                                      job_state = js, job_state_at = js_at, lost = jl,
                                       failure_policy = sweep_policy(target)) :
-                  BatchSweep.plan(root, run; launcher = l, job_state = js, job_state_at = js_at)
+                  BatchSweep.plan(root, run; launcher = l, job_state = js, job_state_at = js_at,
+                                  lost = jl)
     # What it just submitted is not in the cached answer: the next tick asks the scheduler again.
     (advance && started && !isempty(p.to_submit)) && collect_invalidate!(target)
     t = BatchSweep.telemetry(root, run; launcher = l, plan = p)

@@ -742,6 +742,37 @@ end
         @test BL._pbs_chunk_mem(Dict{Symbol,Any}(), 4, true) == BL._PBS_ALWAYS.mem
     end
 
+    @testset "a local process that exits frees its own chunks while its siblings run" begin
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 2, per = 2)
+            fake = FakeLauncher()
+            BS.reconcile!(root, sweep, fake, specfn(root); failure_policy = NOPROBE)
+            name = only(fake.submitted).name
+            # One submission, two processes: this one (alive) holds the first chunk, an exited one
+            # held the second.
+            l = BL.ExecLauncher(; maxproc = 2)
+            mkpath(BL._jobdir(root))
+            write(BL._jobfile(root, name), "$(getpid()) $(chunks[1])\n999991 $(chunks[2])\n")
+            @test BL.job_pids(l, root, name) == [getpid(), 999991]
+            d = BL.poll_detail(l, root, [name])
+            @test d.states[name] === :running && d.lost[name] == Set([chunks[2]])
+            p = BS.plan(root, sweep; launcher = l, failure_policy = NOPROBE)
+            @test p.chunk_state[chunks[1]] in (:running, :pending)
+            @test p.chunk_state[chunks[2]] === :missing && chunks[2] in p.to_submit
+            # A caller holding the answer already reads it the same way.
+            p2 = BS.plan(root, sweep; job_state = d.states, lost = d.lost, failure_policy = NOPROBE)
+            @test p2.chunk_state[chunks[2]] === :missing
+        end
+        # The far side answers one line per process, in the same terms.
+        l = BL.ExecLauncher("box"; root = "/scratch",
+                            runner = (h, sc) -> (true, "s1\t1\tc1 c2\ns1\t0\tc3\ns2\t0\tc4\n"))
+        d = BL.poll_detail(l, "/m", ["s1", "s2", "s3"])
+        @test d.states == Dict("s1" => :running, "s2" => :unknown, "s3" => :unknown)
+        @test d.lost == Dict("s1" => Set(["c3"]))
+        down = BL.ExecLauncher("box"; root = "/scratch", runner = (h, sc) -> (false, ""))
+        @test BL.poll(down, "/m", ["s1"]) == Dict("s1" => :unreachable)
+    end
+
     @testset "a remote exec launcher looks for its processes where it started them" begin
         # `reconcile!` hands every launcher `store_root`, which for a cluster is the hub's local
         # MIRROR. `submit!` writes its pid file under the cluster's own path, so asking the far side

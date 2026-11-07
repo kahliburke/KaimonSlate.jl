@@ -548,9 +548,11 @@ skips shards that are already in the store, so a chunk killed at 90% resumes rat
 # `job_state` is the scheduler's answer when the caller already has it. One query covers every
 # submission in a store, so a page watching four sweeps asked the same question four times; the
 # caller that holds a shared answer passes it here instead. `nothing` means ask. `job_state_at` is when
-# that answer was taken; a submission made since then is waiting, not missing.
+# that answer was taken; a submission made since then is waiting, not missing. `lost` goes with
+# `job_state`: the chunks of a live submission whose own process has exited (`poll_detail`).
 function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
               job_state::Union{Nothing,AbstractDict} = nothing, job_state_at::Real = Inf,
+              lost::AbstractDict = Dict{String,Set{String}}(),
               max_attempts::Integer = MAX_ATTEMPTS,
               failure_policy::FailurePolicy = FailurePolicy())
     chunks = sweep_chunks(root, sweep)
@@ -595,14 +597,23 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
         open_ = Set(c for c in chunks if !get(chunk_done, c, false))
         names = String[n for (n, cs) in subs if any(in(open_), cs)]
         if !isempty(names)
-            states = job_state !== nothing ? job_state :
-                     BatchLauncher.poll(launcher, root, names)
+            states = if job_state !== nothing
+                job_state
+            else
+                d = BatchLauncher.poll_detail(launcher, root, names)
+                lost = d.lost
+                d.states
+            end
             for (name, st) in states
                 st === :unknown && continue
                 # The scheduler did not answer for it: it may well be running, so it is treated as
                 # waiting rather than gone, and nothing it covers is submitted again on this answer.
                 st === :unreachable && (st = :pending)
+                # A chunk whose own process is gone is not covered by this submission, however long
+                # its siblings keep it alive. Per submission, so a resubmission of the chunk counts.
+                gone = get(lost, name, nothing)
                 for c in get(subs, name, String[])
+                    gone !== nothing && c in gone && continue
                     # running beats pending when a chunk appears in more than one submission
                     (get(live, c, :pending) === :running) || (live[c] = st)
                 end
@@ -690,8 +701,9 @@ Firing thousands of jobs should take an explicit decision, not happen because a 
 function reconcile!(root::AbstractString, sweep::AbstractString, launcher, specfn;
                     submit::Bool = true, cap::Integer = 0,
                     job_state::Union{Nothing,AbstractDict} = nothing, job_state_at::Real = Inf,
+                    lost::AbstractDict = Dict{String,Set{String}}(),
                     failure_policy::FailurePolicy = FailurePolicy())
-    p = plan(root, sweep; launcher, job_state, job_state_at, failure_policy)
+    p = plan(root, sweep; launcher, job_state, job_state_at, lost, failure_policy)
     # A tripped breaker produces an empty submit list, so this is belt and braces; being explicit
     # keeps it true if the plan's ordering ever changes.
     # A cancelled sweep must not be resurrected by the next reconcile — that is the whole point of

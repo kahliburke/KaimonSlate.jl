@@ -111,6 +111,17 @@ the store can answer that, because a job can die without producing anything.
 function poll end
 
 """
+    poll_detail(launcher, root, names) -> (; states, lost)
+
+`poll`, plus the chunks each live submission can no longer run: `lost[name]` holds the chunks of
+`name` whose own process has exited while another process of the same submission is still alive.
+A backend that runs one chunk per scheduler element has nothing to add here, so the default
+reports none.
+"""
+poll_detail(l::Launcher, root::AbstractString, names) =
+    (; states = poll(l, root, names), lost = Dict{String,Set{String}}())
+
+"""
     cancel!(launcher, names) -> Int
 
 Cancel anything live under these names. Returns how many names were acted on.
@@ -408,8 +419,22 @@ function _exec_start_here(spec::JobSpec, slices, heap)
         p = run(cmd; wait = false)
         push!(pids, getpid(p))
     end
-    write(_jobfile(spec.root, spec.name), join(pids, "\n"))
+    write(_jobfile(spec.root, spec.name),
+          join((string(pid, " ", join(sl, " ")) for (pid, sl) in zip(pids, slices)), "\n") * "\n")
     return pids
+end
+
+# A pid file holds one line per process: its pid, then the chunks dealt to it. Each process runs
+# only its own slice, so a chunk is live exactly while the process holding it is.
+function _pid_lines(txt::AbstractString)
+    out = Tuple{Int,Vector{String}}[]
+    for line in eachsplit(txt, '\n'; keepempty = false)
+        w = split(line)
+        isempty(w) && continue
+        pid = tryparse(Int, w[1]); pid === nothing && continue
+        push!(out, (pid, String.(w[2:end])))
+    end
+    return out
 end
 
 # One round trip starts every slice and hands back their pids. `nohup … &` with stdin closed is
@@ -421,16 +446,17 @@ end
 function _exec_start_there(l::ExecLauncher, spec::JobSpec, slices, heap)
     # The log files are created by THIS shell's redirection, not by the task process, so the umask
     # has to be set here as well as inside `task_command`.
+    pf = _shq(_jobfile(spec.root, spec.name))
     lines = [isempty(spec.umask) ? ":" : "umask " * spec.umask,
-             "mkdir -p $(_shq(_jobdir(spec.root))) $(_shq(spec.logdir))", "pids=''"]
+             "mkdir -p $(_shq(_jobdir(spec.root))) $(_shq(spec.logdir))", ": > $pf.tmp"]
     for (i, slice) in enumerate(slices)
         logf = joinpath(spec.logdir, "$(spec.name).$(i).log")
         push!(lines, "nohup sh -c $(_shq(task_command(spec, slice; heap = heap))) " *
                      "> $(_shq(logf)) 2>&1 < /dev/null &")
-        push!(lines, "pids=\"\$pids \$!\"")
+        push!(lines, "printf '%s %s\\n' \$! $(_shq(join(slice, " "))) >> $pf.tmp")
     end
-    push!(lines, "printf '%s\\n' \$pids > $(_shq(_jobfile(spec.root, spec.name)))")
-    push!(lines, "printf '%s\\n' \$pids")
+    push!(lines, "mv $pf.tmp $pf")
+    push!(lines, "cut -d' ' -f1 $pf")
     ok, out = _there(l, join(lines, "\n"))
     ok || error("could not start work on $(l.host): " * first(strip(String(out)), 300))
     return [something(tryparse(Int, s), 0) for s in split(String(out); keepempty = false)]
@@ -457,47 +483,62 @@ function job_pids(l::ExecLauncher, root::AbstractString, name::AbstractString)
     else
         isfile(f) ? read(f, String) : ""
     end
-    return [something(tryparse(Int, x), 0) for x in split(txt; keepempty = false)]
+    return [pid for (pid, _) in _pid_lines(txt)]
 end
 
 # Every name `:unreachable`: the scheduler (or the host) did not answer. Distinct from `:unknown`, which
 # means it answered and does not hold the job, so a caller can tell "gone" from "not known".
 _unreachable(names) = Dict{String,Symbol}(String(n) => :unreachable for n in names)
 
-function poll(l::ExecLauncher, root::AbstractString, names)
-    _remote(l) && return _exec_poll_there(l, root, names)
-    out = Dict{String,Symbol}()
+poll(l::ExecLauncher, root::AbstractString, names) = poll_detail(l, root, names).states
+
+function poll_detail(l::ExecLauncher, root::AbstractString, names)
+    procs = _remote(l) ? _exec_probe_there(l, root, names) : _exec_probe_here(l, root, names)
+    states = Dict{String,Symbol}(String(n) => :unknown for n in names)
+    lost = Dict{String,Set{String}}()
+    for (name, ps) in procs
+        ps === :unreachable && (states[name] = :unreachable; continue)
+        any(p -> p.alive, ps) || continue
+        states[name] = :running
+        gone = Set{String}(c for p in ps if !p.alive for c in p.chunks)
+        isempty(gone) || (lost[name] = gone)
+    end
+    return (; states, lost)
+end
+
+const _Proc = NamedTuple{(:alive, :chunks),Tuple{Bool,Vector{String}}}
+
+function _exec_probe_here(l::ExecLauncher, root, names)
+    out = Dict{String,Any}()
     for name in names
         f = _procfile(l, root, name)
-        if !isfile(f)
-            out[String(name)] = :unknown
-            continue
-        end
-        pids = [something(tryparse(Int, s), 0) for s in split(read(f, String); keepempty = false)]
-        out[String(name)] = any(_alive, pids) ? :running : :unknown
+        isfile(f) || continue
+        out[String(name)] = _Proc[(; alive = _alive(pid), chunks) for (pid, chunks) in _pid_lines(read(f, String))]
     end
     return out
 end
 
 # Every name in ONE round trip, like every other backend's poll: a sweep can have hundreds of
 # submissions and the answer has to cost one call, not one call each. `kill -0` is the far side's
-# `_alive` — it signals nothing and only asks whether the pid is still there.
-function _exec_poll_there(l::ExecLauncher, root, names)
-    out = Dict{String,Symbol}(String(n) => :unknown for n in names)
-    isempty(out) && return out
+# `_alive`: it signals nothing and only asks whether the pid is still there. One line back per
+# process: name, 1 or 0, then its chunks.
+function _exec_probe_there(l::ExecLauncher, root, names)
+    isempty(names) && return Dict{String,Any}()
     lines = String[]
     for name in names
         f = _procfile(l, root, name)
-        push!(lines, "n=0; if [ -f $(_shq(f)) ]; then while read p; do " *
-                     "[ -n \"\$p\" ] && kill -0 \$p 2>/dev/null && n=\$((n+1)); " *
-                     "done < $(_shq(f)); fi; printf '%s\\t%s\\n' $(_shq(String(name))) \$n")
+        push!(lines, "if [ -f $(_shq(f)) ]; then while read p rest; do [ -n \"\$p\" ] || continue; " *
+                     "a=0; kill -0 \$p 2>/dev/null && a=1; " *
+                     "printf '%s\\t%s\\t%s\\n' $(_shq(String(name))) \$a \"\$rest\"; " *
+                     "done < $(_shq(f)); fi")
     end
     ok, txt = _there(l, join(lines, "\n"))
-    ok || return _unreachable(names)
+    ok || return Dict{String,Any}(String(n) => :unreachable for n in names)
+    out = Dict{String,Any}()
     for line in eachsplit(String(txt), '\n'; keepempty = false)
-        parts = split(line, '\t'); length(parts) == 2 || continue
-        alive = something(tryparse(Int, strip(parts[2])), 0)
-        out[String(strip(parts[1]))] = alive > 0 ? :running : :unknown
+        parts = split(line, '\t'); length(parts) == 3 || continue
+        ps = get!(() -> _Proc[], out, String(strip(parts[1])))
+        push!(ps, (; alive = strip(parts[2]) == "1", chunks = String.(split(parts[3]))))
     end
     return out
 end
@@ -507,8 +548,7 @@ function cancel!(l::ExecLauncher, root::AbstractString, names)
     n = 0
     for name in names
         f = _procfile(l, root, name); isfile(f) || continue
-        for s in split(read(f, String); keepempty = false)
-            pid = tryparse(Int, s); pid === nothing && continue
+        for (pid, _) in _pid_lines(read(f, String))
             _alive(pid) && (try; ccall(:kill, Cint, (Cint, Cint), pid, 15); catch; end)
         end
         rm(f; force = true); n += 1
@@ -520,7 +560,7 @@ function _exec_cancel_there(l::ExecLauncher, root, names)
     lines = String[]
     for name in names
         f = _procfile(l, root, name)
-        push!(lines, "if [ -f $(_shq(f)) ]; then while read p; do " *
+        push!(lines, "if [ -f $(_shq(f)) ]; then while read p rest; do " *
                      "[ -n \"\$p\" ] && kill -TERM \$p 2>/dev/null; done < $(_shq(f)); " *
                      "rm -f $(_shq(f)); echo x; fi")
     end

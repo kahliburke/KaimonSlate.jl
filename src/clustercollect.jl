@@ -33,6 +33,7 @@ const COLLECT_SIZE_S = 120.0
 mutable struct ClusterCollect
     target::ClusterTarget
     jobs::Dict{String,Symbol}
+    lost::Dict{String,Set{String}}     # `poll_detail`'s per-submission lost chunks, taken with `jobs`
     size::NamedTuple{(:bytes, :blobs),Tuple{Int,Int}}
     pulled::Float64
     polled::Float64
@@ -47,7 +48,8 @@ mutable struct ClusterCollect
 end
 
 ClusterCollect(t::ClusterTarget) =
-    ClusterCollect(t, Dict{String,Symbol}(), (; bytes = 0, blobs = 0), 0.0, 0.0, 0.0, "",
+    ClusterCollect(t, Dict{String,Symbol}(), Dict{String,Set{String}}(), (; bytes = 0, blobs = 0),
+                   0.0, 0.0, 0.0, "",
                    ReentrantLock(), ReentrantLock(), ReentrantLock())
 
 # Keyed like the ssh session is: by the host and the store on it. Two cards pointed at the same
@@ -98,6 +100,9 @@ than one per sweep. Falls back to the last answer when the query fails.
 # When `collect_jobs`'s answer was taken (0 = never), so a plan can tell what was submitted since.
 collected_at(t::ClusterTarget) = (c = collector(t); lock(() -> c.polled, c.poll_lk))
 
+"The lost chunks that went with `collect_jobs`'s last answer: pass both to `plan` together."
+collected_lost(t::ClusterTarget) = (c = collector(t); lock(() -> copy(c.lost), c.poll_lk))
+
 function collect_jobs(t::ClusterTarget; force::Bool = false)
     isempty(t.host) && return Dict{String,Symbol}()
     c = collector(t)
@@ -107,14 +112,17 @@ function collect_jobs(t::ClusterTarget; force::Bool = false)
         (force || due) || return
         try
             subs = BatchSweep.known_submissions(store_root(t))
-            fresh = isempty(subs) ? Dict{String,Symbol}() :
-                    BatchLauncher.poll(launcher_for(t), store_root(t), collect(keys(subs)))
+            d = isempty(subs) ? (; states = Dict{String,Symbol}(), lost = Dict{String,Set{String}}()) :
+                BatchLauncher.poll_detail(launcher_for(t), store_root(t), collect(keys(subs)))
+            fresh = d.states
             # A name the scheduler did not answer for keeps its last answer, as the docstring promises.
             gaps = [n for (n, st) in fresh if st === :unreachable]
             for n in gaps
                 haskey(c.jobs, n) && (fresh[n] = c.jobs[n])
+                haskey(c.lost, n) && (d.lost[n] = c.lost[n])
             end
             c.jobs = fresh
+            c.lost = d.lost
             c.err = isempty(gaps) ? "" : "the scheduler did not answer for $(length(gaps)) submission(s)"
             c.polled = time()
         catch e
