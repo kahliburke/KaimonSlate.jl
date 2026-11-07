@@ -754,6 +754,38 @@ end
     end
 end
 
+@testset "formatting code cells is one undoable rewrite that skips what does not parse" begin
+    NS.SlateHistory._ROOT[] = mktempdir()
+    hub = NS.start_hub(; port = freeport())
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, "#%% md id=intro\n@md\"\"\"\nx=1 stays as prose\n\"\"\"\n" *
+                   "#%% code id=a\nx=1\n#%% code id=b\nfor i=1:3\n  println(i,x)\nend\n" *
+                   "#%% code id=c\ny = 2\n")
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        src(id) = nb.report.cells[findfirst(c -> c.id == id, nb.report.cells)].source
+        before = Dict(c.id => c.source for c in nb.report.cells)
+
+        # The browser sends each cell's editor text, which may be unsaved: `c` arrives half-typed.
+        r = NS.format_cells!(nb, Dict("intro" => src("intro"), "a" => src("a"), "b" => src("b"),
+                                      "c" => "y = (2, "))
+        @test r.changed == 2
+        @test (src("a"), src("b")) == ("x = 1", "for i in 1:3\n    println(i, x)\nend")
+        @test src("intro") == before["intro"] && src("c") == before["c"]
+        @test collect(keys(r.failed)) == ["c"] && occursin("Expected", r.failed["c"])
+
+        @test NS.undo!(nb) == "format (2 cells)"
+        @test all(c.source == before[c.id] for c in nb.report.cells)
+
+        # Formatting what is already formatted records nothing.
+        depth = length(nb.undo)
+        @test NS.format_cells!(nb, Dict("c" => src("c"))).changed == 0
+        @test length(nb.undo) == depth
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
 # Liveness reporting for a BLOCKED agent call. `_note_run_progress` only fires after
 # _AGENT_PROGRESS_EVERY seconds of blocking, so no ordinary test path reaches it — call it
 # directly, or a rename/typo here (it reaches across into ReportEngine) ships silently.

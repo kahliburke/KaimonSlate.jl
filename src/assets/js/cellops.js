@@ -156,6 +156,53 @@ function rebaselineAll(state) {
 }
 window.slateRebaseline = _rebaseline;
 window.slateRebaselineAll = rebaselineAll;
+
+// Format code cells with Runic on the hub: the given ids, or every code cell when `ids` is empty.
+// Each cell's text comes from its editor, so unsaved edits are formatted with it, and the result is
+// one notebook undo entry like Replace All.
+async function formatCells(ids) {
+  const all = !ids || !ids.length;
+  const want = all ? cellIds() : ids;
+  const sources = {};
+  for (const id of want) {
+    const c = window._cellById && window._cellById(id);
+    if (c && c.kind === 'code') sources[id] = window.edText(id);
+  }
+  if (!Object.keys(sources).length) { window.toast && window.toast('No code cell selected', 2500); return; }
+  // A formatter mostly moves whitespace, so a cursor is carried across as the number of
+  // non-whitespace characters before it.
+  const marks = {};
+  for (const id in sources) {
+    const v = editors[id];
+    if (v) marks[id] = _nonWs(v.state.doc.toString(), v.state.selection.main.head);
+  }
+  let st = null;
+  try { st = await api('POST', '/api/cells-format', { sources }); }
+  catch (_) { window.toast && window.toast('Format failed', 3000); return; }
+  if (st && st.cells) {
+    rebaselineAll(st);
+    renderAll(st);
+    if (st.version != null) lastVersion = st.version;
+  }
+  for (const id in marks) {
+    const v = editors[id];
+    if (v) v.dispatch({ selection: { anchor: _atNonWs(v.state.doc.toString(), marks[id]) } });
+  }
+  const bad = Object.entries((st && st.failed) || {});
+  const n = (st && st.changed) || 0;
+  const msg = bad.length === 1 ? `${bad[0][0]} not formatted: ${bad[0][1]}`
+            : bad.length ? `${bad.length} cells not formatted: they don't parse`
+            : n ? `Formatted ${n} ${n === 1 ? 'cell' : 'cells'} · ⌘Z to undo`
+            : 'Already formatted';
+  window.toast && window.toast(msg, bad.length ? 5000 : 2500);
+}
+window.formatCells = formatCells;
+const _nonWs = (s, at) => { let n = 0; for (let i = 0; i < at; i++) if (!/\s/.test(s[i])) n++; return n; };
+function _atNonWs(s, n) {
+  let i = 0;
+  for (; i < s.length && n > 0; i++) if (!/\s/.test(s[i])) n--;
+  return i;
+}
 // What a state push means for ONE cell's open editor.
 //
 // Pure on purpose: the caller gathers the facts and acts on the verdict. This decision has been wrong

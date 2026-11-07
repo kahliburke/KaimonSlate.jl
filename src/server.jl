@@ -22,6 +22,7 @@ import Dates                                  # publish dates for the multi-doc 
 import Logging                                # standalone serve: route hub log detail to a file
 import REPL                                   # standalone serve: raw-mode ^C byte (see _wait_for_ctrl_c)
 import Tar
+import Runic                                  # the code-cell formatter
 import Typst_jll
 import Pkg
 using ..ReportEngine

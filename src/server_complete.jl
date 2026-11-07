@@ -2382,6 +2382,14 @@ function _make_router(h::Hub)
         n = replace_cells!(nb, e; label = String(get(b, "label", "replace")))
         j = state_json(nb); j["changed"] = n; _json(j)
     end))
+    # Format code cells with Runic. Body {sources: {cellId: text, …}}, the texts taken from the
+    # editors like `cells-replace`. One undo entry; `failed` maps a cell that does not parse to why.
+    HTTP.register!(router, "POST", "/api/{id}/cells-format", req -> _withnb(h, req, nb -> begin
+        s = get(_body(req), "sources", nothing)
+        s isa AbstractDict || return _json(Dict("ok" => false, "changed" => 0))
+        r = format_cells!(nb, s)
+        j = state_json(nb); j["changed"] = r.changed; j["failed"] = r.failed; _json(j)
+    end))
     # Set/clear a cell behavior flag (collapsed / hidecode / trace / cache / …) across one or many cells
     # in ONE persist → one history entry. Body {flag, value, cells?}: `cells` (a list of ids) targets
     # just those, omitted ⇒ every applicable cell. An eval-affecting flag (trace/cache/…) restales and
