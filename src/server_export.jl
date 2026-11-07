@@ -368,12 +368,17 @@ end
 # exactly what `@replay`'s macro does for a hand-written mark.
 function _chain_sweep_source(chain, control::AbstractString)
     io = IOBuffer()
+    _print_sweep_let!(io, chain, control)
+    print(io, "end")
+    return String(take!(io))
+end
+
+# The opening both closures share: the control as the parameter, then the chain's sources inside a `let`.
+function _print_sweep_let!(io, chain, control::AbstractString)
     print(io, control, " -> let\n")
     for c in chain
         print(io, c.source, "\n")
     end
-    print(io, "end")
-    return String(take!(io))
 end
 
 # Is this table spec a candidate — an eager table with no mark of its own?
@@ -395,55 +400,21 @@ _replay_chain_candidate(spec) =
 # shipped rows. So the band slider still moves the band figure and does not move the table, which is a
 # true statement about precomputed data rather than a broken control.
 function _chain_sweep_plan(cells)
+    ctls, cones = _sweep_controls(cells)
+    isempty(ctls) && return NamedTuple[]
     byid = Dict(c.id => c for c in cells)
     order = Dict(c.id => i for (i, c) in enumerate(cells))
-    # control name → (declaring cell id, its domain length)
-    ctls = Dict{Symbol,Tuple{String,Int}}()
-    for c in cells, b in c.binds
-        dom = try
-            ReportEngine.bind_domain(ReportEngine.Widget(b.widget, b.params, b.value))
-        catch
-            nothing
-        end
-        dom === nothing && continue
-        ctls[b.name] = (c.id, length(dom))
-    end
-    isempty(ctls) && return NamedTuple[]
-    cones = Dict(v => _replay_chain_cone(cells, v) for v in keys(ctls))
 
     out = NamedTuple[]
     for c in cells
         memoizes(c.kind) || continue
         specs = _table_specs(c)
         isempty(specs) && continue
-        up = _replay_chain_upstream(byid, c.id)
-        # Controls whose cone reaches this cell, cheapest domain first.
-        reach = sort!([v for v in keys(ctls) if c.id in cones[v]]; by = v -> (ctls[v][2], String(v)))
-        isempty(reach) && continue
-        # An author who surfaced a control ON this cell has said which knob belongs to it — a stronger
-        # signal than a domain size, and the reason `table_filtered` picks `region` over `band`.
-        surfaced = Set{String}(n for col in c.controls for n in col)
-        pick = isempty(surfaced) ? reach : (let s = [v for v in reach if String(v) in surfaced]
-                                               isempty(s) ? reach : s
-                                           end)
-        v = first(pick)
-        chain = sort!(Cell[byid[i] for i in intersect(up, cones[v]) if haskey(byid, i)];
-                      by = x -> order[x.id])
-        push!(chain, c)
-        # Every link, INCLUDING the table's own cell — it is the closure's body, so a `@bind` or an
-        # `@replay` sitting beside the table would be re-run once per position just the same.
-        blocked = nothing
-        for lk in chain
-            b = _replay_chain_blocker(lk)
-            b === nothing && continue
-            blocked = string("`", lk.id, "` ", b)
-            break
-        end
-        if blocked === nothing && ctls[v][2] > _CHAIN_MAX_POSITIONS
-            blocked = string("`", v, "` has ", ctls[v][2], " positions, past the ",
-                             _CHAIN_MAX_POSITIONS, " a composed sweep will run unasked — mark the ",
-                             "expression with `@replay` to ask for it")
-        end
+        # The table's own cell is a link too: it is the closure's body, so a `@bind` or an `@replay`
+        # sitting beside the table would be re-run once per position just the same.
+        pk = _pick_chain(byid, order, cones, ctls, c; include_self = true)
+        pk === nothing && continue
+        (; v, reach, chain, blocked) = pk
         held = String[String(x) for x in reach if x != v]
         for (si, spec) in enumerate(specs)
             _replay_chain_candidate(spec) || continue
@@ -454,6 +425,56 @@ function _chain_sweep_plan(cells)
         end
     end
     return out
+end
+
+# The replayable controls a notebook declares, as name → (declaring cell id, domain length), and each
+# one's reactive cone.
+function _sweep_controls(cells)
+    ctls = Dict{Symbol,Tuple{String,Int}}()
+    for c in cells, b in c.binds
+        dom = try
+            ReportEngine.bind_domain(ReportEngine.Widget(b.widget, b.params, b.value))
+        catch
+            nothing
+        end
+        dom === nothing && continue
+        ctls[b.name] = (c.id, length(dom))
+    end
+    cones = Dict(v => _replay_chain_cone(cells, v) for v in keys(ctls))
+    return ctls, cones
+end
+
+# The control that drives cell `c`, the chain of upstream cells it re-runs, and why that chain cannot be
+# swept (`blocked`, or `nothing`). `nothing` when no control reaches `c`. `reach` is every control that
+# does, cheapest domain first, so the caller can name the ones it held.
+function _pick_chain(byid, order, cones, ctls, c; include_self::Bool)
+    reach = sort!([v for v in keys(ctls) if c.id in cones[v]]; by = v -> (ctls[v][2], String(v)))
+    isempty(reach) && return nothing
+    # An author who surfaced a control ON this cell has said which knob belongs to it — a stronger
+    # signal than a domain size, and the reason `table_filtered` picks `region` over `band`.
+    surfaced = Set{String}(n for col in c.controls for n in col)
+    pick = isempty(surfaced) ? reach : (let s = [v for v in reach if String(v) in surfaced]
+                                           isempty(s) ? reach : s
+                                       end)
+    v = first(pick)
+    up = _replay_chain_upstream(byid, c.id)
+    chain = sort!(Cell[byid[i] for i in intersect(up, cones[v]) if haskey(byid, i)];
+                  by = x -> order[x.id])
+    include_self && push!(chain, c)
+    blocked = nothing
+    for lk in chain
+        b = _replay_chain_blocker(lk)
+        b === nothing && continue
+        blocked = string("`", lk.id, "` ", b)
+        break
+    end
+    if blocked === nothing && ctls[v][2] > _CHAIN_MAX_POSITIONS
+        # Only a table can take a hand-written `@replay`; a markdown cell's interpolations cannot.
+        blocked = string("`", v, "` has ", ctls[v][2], " positions, past the ",
+                         _CHAIN_MAX_POSITIONS, " a composed sweep will run unasked",
+                         include_self ? " — mark the expression with `@replay` to ask for it" : "")
+    end
+    return (; v, reach, chain, blocked)
 end
 
 # ── Prose that follows its control ────────────────────────────────────────────────────────────────
@@ -468,47 +489,19 @@ end
 #
 # Same one-control rule as a table, for the same reason, and the same refusals upstream.
 function _prose_sweep_plan(cells)
+    ctls, cones = _sweep_controls(cells)
+    isempty(ctls) && return NamedTuple[]
     byid = Dict(c.id => c for c in cells)
     order = Dict(c.id => i for (i, c) in enumerate(cells))
-    ctls = Dict{Symbol,Tuple{String,Int}}()
-    for c in cells, b in c.binds
-        dom = try
-            ReportEngine.bind_domain(ReportEngine.Widget(b.widget, b.params, b.value))
-        catch
-            nothing
-        end
-        dom === nothing && continue
-        ctls[b.name] = (c.id, length(dom))
-    end
-    isempty(ctls) && return NamedTuple[]
-    cones = Dict(v => _replay_chain_cone(cells, v) for v in keys(ctls))
 
     out = NamedTuple[]
     for c in cells
         is_prose(c.kind) || continue
         exprs = try; ReportEngine._md_interp_exprs(c.source); catch; String[]; end
         isempty(exprs) && continue
-        reach = sort!([v for v in keys(ctls) if c.id in cones[v]]; by = v -> (ctls[v][2], String(v)))
-        isempty(reach) && continue
-        surfaced = Set{String}(n for col in c.controls for n in col)
-        pick = isempty(surfaced) ? reach : (let s = [v for v in reach if String(v) in surfaced]
-                                               isempty(s) ? reach : s
-                                           end)
-        v = first(pick)
-        up = _replay_chain_upstream(byid, c.id)
-        chain = sort!(Cell[byid[i] for i in intersect(up, cones[v]) if haskey(byid, i)];
-                      by = x -> order[x.id])
-        blocked = nothing
-        for lk in chain
-            b = _replay_chain_blocker(lk)
-            b === nothing && continue
-            blocked = string("`", lk.id, "` ", b)
-            break
-        end
-        if blocked === nothing && ctls[v][2] > _CHAIN_MAX_POSITIONS
-            blocked = string("`", v, "` has ", ctls[v][2], " positions, past the ",
-                             _CHAIN_MAX_POSITIONS, " a composed sweep will run unasked")
-        end
+        pk = _pick_chain(byid, order, cones, ctls, c; include_self = false)
+        pk === nothing && continue
+        (; v, reach, chain, blocked) = pk
         push!(out, (; id = string(c.id, ":prose:", v), control = String(v), cell = c.id,
                     source = _prose_sweep_source(chain, String(v), exprs),
                     held = String[String(x) for x in reach if x != v], blocked = blocked))
@@ -521,10 +514,7 @@ end
 # numbered in, so a position's strings land on the right words with no mapping to carry.
 function _prose_sweep_source(chain, control::AbstractString, exprs)
     io = IOBuffer()
-    print(io, control, " -> let\n")
-    for c in chain
-        print(io, c.source, "\n")
-    end
+    _print_sweep_let!(io, chain, control)
     print(io, "Any[")
     for (i, e) in enumerate(exprs)
         i == 1 || print(io, ",\n")
