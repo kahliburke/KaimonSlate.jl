@@ -17,6 +17,7 @@
 import { html, render } from 'htm/preact';
 import { signal, computed, effect } from '@preact/signals';
 import { lockScroll } from './scrolllock.js';
+import { specialistPane, Ask, bareModel } from './specpane.js';
 import { useRef, useEffect } from 'preact/hooks';
 
 // ── state ─────────────────────────────────────────────────────────────────────────────────────────
@@ -36,10 +37,6 @@ const marks = signal([]);
 // want while stepping; an index pins a CALLER, because the line you are stopped on is often not
 // the line that is wrong — the arguments that got you here were built further up.
 const selFrame = signal(null);
-// Requests an agent is BLOCKED on: [{id, kind, from, text}]. A question it needs answered, or
-// permission to disturb a session it does not own. Its turn is stopped until one of these is
-// answered, so they are shown where the session is, not tucked in a notification.
-const asks = signal([]);
 
 const live = computed(() => st.value && !st.value.finished);
 // The notebook stays still under the workspace while it is up.
@@ -203,7 +200,7 @@ function apply(next) {
   if (prev && prev !== here) window.clearDebugLine?.(prev);
   if (s && s.cell && s.cell !== here) window.clearDebugLine?.(s.cell);
   if (here) window.markDebugLine?.(here, s.line);
-  if (s && s.asks !== undefined) asks.value = s.asks || [];
+  if (s && s.asks !== undefined) spec.setAsks(s.asks);
   if (s && s.marks) paintMarks(s.marks);
   if (s && s.watches) watches.value = s.watches;
   if (s && s.live) liveW.value = s.live;
@@ -326,154 +323,35 @@ async function probe(expr) {
 }
 
 // ── the specialist ────────────────────────────────────────────────────────────────────────────────
-// Summoned by the orchestrating agent (spec_summon), on the model set for the role.
-const specialist = signal(null); // {agent_id, cell, model} once one is here
-
-// The bare model name: `acp:opencode:opencode/claude-sonnet-5` → `claude-sonnet-5`.
-const bareModel = (m) => String(m).replace(/^acp:\w+:/, '').replace(/^.*\//, '');
-
-// ── the specialist's transcript ────────────────────────────────────────────────────────────────
-// Its own, not the chat panel's. A debugging transcript wants different things on screen: a step
-// is one line saying where it landed, not a JSON blob; an evaluation is the expression and its
-// answer; and the whole thing sits beside the frame it is talking about.
-const convo = signal([]);   // [{role:'said'|'think'|'act'|'brief'|'you', text, verb, detail, done}]
-const working = signal(false);
-// A tool call, named the way a debugger session reads: the verb plus what came back, not the tool
-// name and its arguments.
-const VERB = {
-  dbg_start: 'start', dbg_step: 'step', dbg_frame: 'frame', dbg_eval: 'eval', dbg_watch: 'watch',
-  dbg_break: 'breakpoint', spec_ask: 'ask', spec_done: 'done',
-};
-const verbOf = (title) => {
-  const t = String(title || '').replace(/^.*?(dbg_\w+).*$/, '$1');
-  return VERB[t] || null;
-};
-// The one line worth keeping from a result: where it stopped, or what the answer was.
-function gist(verb, text) {
-  const s = String(text || '').trim();
-  if (!s) return '';
-  if (verb === 'eval') return s.split('\n')[0].slice(0, 160);
-  const stop = s.match(/^[⏸✅⛔].*$/m);
-  if (stop) return stop[0].replace(/^⏸\s*/, '').slice(0, 160);
-  return s.split('\n')[0].slice(0, 160);
-}
-
-window.onDebugAgentEvent = (env) => {
-  // Exactly this role, not a name containing it. The server stamps `crew` with the specialist's
-  // registered name verbatim (relay_agent_event), so a substring test would quietly pull a second
-  // role's events into this transcript once one is registered whose name contains this one.
-  if (!env || env.crew !== DEBUG_ROLE) return;
-  const d = env.data || {}, k = env.kind;
-  // Anything arriving from it means a turn is in flight. Keying the spinner on `turn_started`
-  // alone left the pane looking idle whenever a backend doesn't send one — rows appeared
-  // underneath with nothing saying the specialist was still going.
-  if (k !== 'result' && k !== 'turn_ended') working.value = true;
-  const list = convo.value.slice();
-  // What it was TOLD, shown alongside what it said. The opening brief arrives this way, and
-  // dropping it left the transcript starting at the specialist's first move with no sign of the
-  // question it was answering — you cannot judge the answer without seeing the brief.
-  if (k === 'user_text') {
-    const txt = (d.content && d.content.text) || d.text || '';
-    if (txt && !list.some(m => m.role === 'brief' && m.text === txt)) {
-      list.push({ role: 'brief', text: txt, done: true });
-      convo.value = list;
-    }
-    return;
-  }
-  if (k === 'assistant_text' || k === 'thought' || k === 'assistant') {
-    const role = k === 'thought' ? 'think' : 'said';
-    const txt = (d.content && d.content.text) || d.text || '';
-    const last = list[list.length - 1];
-    if (d.delta === true) {
-      if (!txt) return;
-      if (last && last.role === role && !last.done) last.text += txt;
-      else list.push({ role, text: txt, done: false });
-    } else if (last && last.role === role && !last.done) {
-      last.text = txt || last.text; last.done = true;
-    } else if (txt) list.push({ role, text: txt, done: true });
-  } else if (k === 'tool_use') {
-    const c = d.call || {};
-    const verb = verbOf(c.title || c.kind);
-    if (!verb) return;                       // a refused tool shows up as its result, not a row
-    if (!list.some(m => m.id === c.toolCallId)) {
-      const inp = c.rawInput || {};
-      list.push({ role: 'act', id: c.toolCallId, verb,
-                  arg: inp.mode || inp.expr || inp.cell || (inp.file ? inp.file + ':' + inp.line : ''),
-                  detail: '', done: false });
-    }
-  } else if (k === 'tool_result') {
-    const u = d.update || {};
-    const m = list.find(x => x.id === u.toolCallId);
-    if (!m) return;
-    const c = ((u.content || [])[0] || {}).content || {};
-    m.detail = gist(m.verb, c.text);
-    m.failed = String(u.status || '') === 'failed';
-    m.done = true;
-  } else if (k === 'turn_started') working.value = true;
-  else if (k === 'result' || k === 'turn_ended') {
-    working.value = false;
-    convo.value = list;
-    // Anything you typed while it worked goes in now, before it takes its next step.
-    setTimeout(flushQueue, 0);
-    return;
-  }
-  convo.value = list;
-};
-
-// Talking to it WHILE it works.
-//
-// A turn cannot take a second message: the backend fires another `session/prompt` on the same ACP
-// session and clears the buffer the running turn is accumulating into, so the reply you were
-// reading is destroyed. So a message sent mid-turn is HELD and delivered when the turn ends — it
-// still reaches the specialist before its next move, which is what you wanted it for. If you need
-// it to stop and read you now, interrupt: that ends the turn and the queue flushes into the gap.
-const queued = signal([]);
-
-async function deliver(text) {
-  try { await A('POST', '/api/chat', { text, crew: DEBUG_ROLE }); }
-  catch (e) { working.value = false; }
-}
-
-// Flush on the turn boundary, joined into ONE turn — several notes typed while it worked are one
-// piece of context, not a queue of interruptions to answer in order.
-function flushQueue() {
-  const q = queued.value;
-  if (!q.length) return false;
-  queued.value = [];
-  convo.value = convo.value.map(m => (m.held ? { ...m, held: false } : m));
-  working.value = true;
-  deliver(q.join('\n\n'));
-  return true;
-}
-
-async function interruptSpecialist() {
-  try { await A('POST', '/api/chat-interrupt', {}); } catch (e) {}
-  working.value = false;
-  setTimeout(flushQueue, 300);   // let the turn-ended event land before the next turn opens
-}
-
-async function answerAsk(id, text) {
-  try {
-    const r = await A('POST', '/api/debug/answer', { id, text });
-    asks.value = (r && r.asks) || [];
-  } catch (e) {}
-}
+// Summoned by the orchestrating agent (spec_summon), on the model set for the role. Its transcript,
+// asks and turn state are the shared specialist pane's; this workspace renders them its own way,
+// beside the frame they are about. A tool call reads as a debugger session does: the verb plus what
+// came back, not the tool name and its arguments.
+const spec = specialistPane(DEBUG_ROLE, {
+  summonPath: '/api/debug/agent',
+  verbs: {
+    dbg_start: 'start', dbg_step: 'step', dbg_frame: 'frame', dbg_eval: 'eval', dbg_watch: 'watch',
+    dbg_break: 'breakpoint', spec_ask: 'ask', spec_done: 'done',
+  },
+  arg: (_name, inp) => inp.mode || inp.expr || inp.cell || (inp.file ? inp.file + ':' + inp.line : ''),
+  // The one line worth keeping from a result: where it stopped, or what the answer was.
+  gist: (name, text) => {
+    const s = String(text || '').trim();
+    if (!s) return '';
+    if (name === 'dbg_eval') return s.split('\n')[0].slice(0, 160);
+    const stop = s.match(/^[⏸✅⛔].*$/m);
+    if (stop) return stop[0].replace(/^⏸\s*/, '').slice(0, 160);
+    return s.split('\n')[0].slice(0, 160);
+  },
+});
 
 // ── live push ─────────────────────────────────────────────────────────────────────────────────────
 // Every verb the server runs is broadcast, whoever ran it. That is what makes an agent's session
 // watchable: the strip and the focus view are reading the session, not their own last click.
 // Specialist-framework events arrive on their own channel and name the role they belong to, so a
 // second kind of specialist gets its own pane without either surface knowing about the other.
-// This pane OWNS the debugger's events, and says so: anything nobody claims falls through to the
+// The specialist pane claims the debugger's role, so anything nobody claims falls through to the
 // chat, which is where a specialist with no surface of its own has to be answerable.
-(window.slateRolePanes ||= new Set()).add(DEBUG_ROLE);
-
-(window.slateSpecialistSubs ||= []).push((p) => {
-  if (!p || p.role !== DEBUG_ROLE) return;
-  if (p.asks !== undefined) asks.value = p.asks || [];
-  if (p.ask) asks.value = [...asks.value.filter(a => a.id !== p.ask.id), p.ask];
-  if (p.specialist) specialist.value = p.specialist;
-});
 
 window.onDebugPush = (p) => {
   if (!p) return;
@@ -485,7 +363,7 @@ window.onDebugPush = (p) => {
     }];
     return;
   }
-    if (p.session === false) { specialist.value = null; apply(null); paintMarks(p.marks || []); syncGutter(); return; }
+    if (p.session === false) { spec.agent.value = null; apply(null); paintMarks(p.marks || []); syncGutter(); return; }
   if (p.livecell) {
     const d = p.livecell;
     liveOut.value = { ...liveOut.value, [d.spec]: { status: d.status, why: d.why, cell: d.cell } };
@@ -501,16 +379,7 @@ window.onDebugPush = (p) => {
   try {
     // The specialist and its transcript outlive a reload: both live on the server, so replay them
     // rather than showing an empty pane beside a session that is plainly still going.
-    const log = await A('GET', '/api/agent-log');
-    const aid = (log && log.agents && log.agents.debugger) || '';
-    if (aid) specialist.value = { agent_id: aid, cell: '', model: '' };
-    const events = (log && log.events) || [];
-    for (const line of events) {
-      try { window.onDebugAgentEvent(JSON.parse(line)); } catch (e) {}
-    }
-    working.value = false;   // a turn that was live when the page went away is not live now
-  } catch (e) {}
-  try {
+    await spec.resume();
     const r = await A('GET', '/api/debug/frame');
     if (r && r.session) return apply(r);
     const m = await A('GET', '/api/debug/marks');   // no session, but the breakpoints outlive one
@@ -698,31 +567,11 @@ function Owner({ s }) {
 // the whole workspace, which put agent prose in two places at once — the band and the transcript
 // — and read as two different conversations happening about the same thing.
 function Asks() {
-  // This specialist's questions only. `asks_json` is per notebook and unfiltered, and the frame
-  // carries it wholesale — so without this, a question the notebook's own agent asked (a plan to
-  // approve, a request for file access) rendered here AND in the chat, which is the two-places
-  // problem the note above describes, reintroduced by a different route.
-  const list = asks.value.filter(a => a.role === DEBUG_ROLE);
+  // This specialist's questions only (`spec.asks` keeps its role's): a question the notebook's own
+  // agent asked belongs in the chat, and showing it here too is the two-places problem above.
+  const list = spec.asks.value;
   if (!list.length) return null;
-  return html`<div class="dbgasks">${list.map(a => html`<div class=${'dbgask ' + a.kind} key=${a.id}>
-    <div class="dbgaskq">${a.text}</div>
-    ${a.kind === 'consent'
-      ? html`<div class="dbgaskbtns">
-          <button class="dbgb" onClick=${() => answerAsk(a.id, 'yes')}>Allow</button>
-          <button class="dbgb dbgb-stop" onClick=${() => answerAsk(a.id, 'no')}>Keep it</button></div>`
-      : a.kind === 'choice' && (a.options || []).length
-      /* Buttons, not a text box: whoever asked has already worked out the alternatives, and making
-         someone retype one of them is slower and invites a typo nobody notices until the call
-         using it fails. The LABEL is what you read, the VALUE is what the asker gets back. */
-      ? html`<div class="dbgaskopts">
-          ${a.options.map(o => html`<button class="dbgopt" key=${o.value} title=${o.value}
-              onClick=${() => answerAsk(a.id, o.value)}>${o.label}</button>`)}
-          <button class="dbgopt skip" title="answer in your own words instead"
-              onClick=${() => answerAsk(a.id, '')}>none of these</button></div>`
-      : html`<form class="dbgpform" onSubmit=${e => { e.preventDefault(); const el = e.target.querySelector('input');
-               const v = el.value; el.value = ''; answerAsk(a.id, v); }}>
-          <span class="dbgpp">›</span><input autocomplete="off" autofocus placeholder="answer…" /></form>`}
-  </div>`)}</div>`;
+  return html`<div class="dbgasks">${list.map(q => html`<${Ask} key=${q.id} q=${q} answer=${spec.answer} />`)}</div>`;
 }
 
 // ── the cell strip ────────────────────────────────────────────────────────────────────────────────
@@ -762,7 +611,7 @@ export function DebugStrip({ cell }) {
     </div>
     ${/* The specialist's, not every ask on the notebook — this badge sends you to the workspace,
           which is the wrong place to answer a question the notebook's own agent asked in chat. */''}
-    ${asks.value.some(a => a.role === DEBUG_ROLE) ? html`<div class="dbgaskbadge" onClick=${() => focus.value = true}>
+    ${spec.asks.value.length ? html`<div class="dbgaskbadge" onClick=${() => focus.value = true}>
       ❓ the specialist is waiting on you — open the workspace to answer</div>` : null}
   </div>`;
 }
@@ -1109,15 +958,15 @@ function Grip({ axis, onDrag, onReset }) {
 // the conversation is. Talking to the specialist directly routed around the orchestrator that is
 // supposed to be running it.
 function Convo({ s }) {
-  const here = !!specialist.value;
-  if (!here && !asks.value.some(a => a.role === DEBUG_ROLE)) return null;
+  const a = spec.agent.value, w = spec.working.value;
+  if (!a && !spec.asks.value.length) return null;
   return html`<div class="dbgconvo">
-    ${here ? html`<div class="dbgrhead">specialist
-      ${working.value ? html`<span class="hydspin"></span>` : null}
+    ${a ? html`<div class="dbgrhead">specialist
+      ${w ? html`<span class="hydspin"></span>` : null}
       <span class="dbgsp"></span>
-      <span class="dbgcrew">${bareModel(specialist.value.model || 'default')}</span>
-      ${working.value ? html`<button class="dbgclear" title="stop its turn so it reads you now"
-        onClick=${interruptSpecialist}>interrupt</button>` : null}
+      <span class="dbgcrew">${bareModel(a.model || 'default')}</span>
+      ${w ? html`<button class="dbgclear" title="stop its turn so it reads you now"
+        onClick=${spec.interrupt}>interrupt</button>` : null}
     </div>` : null}
     <${Asks} />
   </div>`;
@@ -1305,10 +1154,6 @@ style.textContent = `
 .dbgasks { flex:0 0 auto; display:flex; flex-direction:column; gap:7px; margin-top:8px;
   padding:8px 9px; border-radius:7px; border:1px solid var(--teal);
   background:color-mix(in srgb, var(--teal) 10%, transparent); }
-.dbgask { display:flex; flex-direction:column; gap:7px; font-size:.78rem; }
-.dbgaskq { color:var(--strong); line-height:1.5; }
-.dbgaskbtns { display:flex; gap:6px; }
-.dbgask .dbgpform { margin-top:0; }
 /* In the cell ribbon, when the workspace is shut: a nudge, not the prompt itself. */
 .dbgaskbadge { padding:5px 10px; font-size:.74rem; cursor:pointer; color:var(--teal);
   border-top:1px solid var(--border);
@@ -1534,13 +1379,6 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
 .dbgtile.big .dbgtilechart { height:calc(100% - 10px); min-height:320px; }
 .dbgtileout img, .dbgtileout svg { max-width:100%; height:auto; }
 .dbgtileempty { color:var(--dim); font-family:var(--mono,ui-monospace,monospace); font-size:.7rem; }
-.dbgaskopts { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
-/* Wrapping, not a row: an option's label is a sentence explaining the trade-off, and truncating
-   it to fit leaves you choosing between two things you cannot tell apart. */
-.dbgopt { padding:4px 9px; border:1px solid var(--teal); border-radius:6px; background:transparent;
-  color:var(--teal); cursor:pointer; font-size:.74rem; text-align:left; max-width:100%; }
-.dbgopt:hover { background:color-mix(in srgb, var(--teal) 15%, transparent); }
-.dbgopt.skip { border-color:var(--border); color:var(--dim); }
 /* The expression, what it is now, and what it has been. */
 .dbgwatches { display:flex; flex-direction:column; }
 .dbgwatches .dbgwatch { padding:4px 0 6px; border-bottom:1px solid var(--bg3); }
@@ -1655,12 +1493,7 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
 .dbgpq::before { content:'\\203A '; color:var(--accent); }
 .dbgpa { color:var(--val); white-space:pre-wrap; word-break:break-word; }
 .dbgpa.err { color:var(--red); }
-.dbgpform { display:flex; align-items:center; gap:6px; margin-top:7px; padding:4px 8px;
-  border:1px solid var(--border); border-radius:6px; background:var(--bg3); }
-.dbgpform:focus-within { border-color:var(--accent); }
 .dbgpp { color:var(--accent); font-family:var(--mono,ui-monospace,monospace); flex:0 0 auto; }
-.dbgpform input { flex:1 1 auto; background:transparent; border:none; outline:none; color:var(--text);
-  font-family:var(--mono,ui-monospace,monospace); font-size:.76rem; }
 
 /* The probe editor: a real CodeMirror, so completion, highlighting and the keymap match the cells.
    Enter runs it, ⇧Enter is a newline (CodeMirror's own), ↑/↓ walk history from the document edge. */

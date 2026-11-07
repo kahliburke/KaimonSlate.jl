@@ -11,7 +11,7 @@ import { signal } from '@preact/signals';
 import { useRef, useEffect } from 'preact/hooks';
 
 const A = (m, p, b) => window.api(m, p, b);
-const bareModel = (m) => String(m || '').replace(/^acp:\w+:/, '').replace(/^.*\//, '');
+export const bareModel = (m) => String(m || '').replace(/^acp:\w+:/, '').replace(/^.*\//, '');
 
 /**
  * `verbs`: tool name → the word a step is shown as. `arg(verb, input)`: what the step was about.
@@ -27,13 +27,16 @@ export function specialistPane(role, { verbs = {}, arg = () => '', gist = defaul
   const queued = signal([]);
   const summoning = signal(false);
 
+  // Asks are per notebook; this pane keeps its role's.
+  const setAsks = (list) => { asks.value = (list || []).filter(a => a.role === role); };
+
   const toolRe = new RegExp('(?:^|[^a-z])(' + Object.keys(verbs).sort((a, b) => b.length - a.length).join('|') + ')(?![a-z_])');
   const verbOf = (title) => { const m = toolRe.exec(String(title || '')); return m ? m[1] : null; };
 
   (window.slateRolePanes ||= new Set()).add(role);
   (window.slateSpecialistSubs ||= []).push((p) => {
     if (!p || p.role !== role) return;
-    if (p.asks !== undefined) asks.value = (p.asks || []).filter(a => a.role === role);
+    if (p.asks !== undefined) setAsks(p.asks);
     if (p.ask) asks.value = [...asks.value.filter(a => a.id !== p.ask.id), p.ask];
     if (p.specialist) agent.value = { ...(agent.value || {}), ...p.specialist };
   });
@@ -124,7 +127,7 @@ export function specialistPane(role, { verbs = {}, arg = () => '', gist = defaul
   async function answer(id, text) {
     try {
       const r = await A('POST', '/api/debug/answer', { id, text });
-      asks.value = ((r && r.asks) || []).filter(a => a.role === role);
+      setAsks(r && r.asks);
     } catch (e) {}
   }
 
@@ -150,7 +153,7 @@ export function specialistPane(role, { verbs = {}, arg = () => '', gist = defaul
       for (const line of (log.events || [])) { try { onEvent(JSON.parse(line), false); } catch (_) {} }
       working.value = false;
       const q = await A('GET', '/api/asks');
-      asks.value = ((q && q.asks) || []).filter(a => a.role === role);
+      setAsks(q && q.asks);
     } catch (e) {}
   }
 
@@ -182,7 +185,7 @@ export function specialistPane(role, { verbs = {}, arg = () => '', gist = defaul
     </div>`;
   }
 
-  return { role, convo, working, asks, agent, summoning, summon, resume, say, interrupt, Pane };
+  return { role, convo, working, asks, setAsks, agent, summoning, summon, resume, say, interrupt, answer, Pane };
 }
 
 function defaultGist(_verb, text) {
@@ -226,7 +229,7 @@ function firstLine(t) {
   return last.length > 90 ? last.slice(0, 90) + '…' : last;
 }
 
-function Ask({ q, answer }) {
+export function Ask({ q, answer }) {
   return html`<div class=${'spask ' + (q.kind || '')}>
     <div class="spaskq">${inline(q.text)}</div>
     ${q.kind === 'consent'

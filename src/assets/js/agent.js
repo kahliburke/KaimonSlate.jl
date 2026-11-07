@@ -682,11 +682,9 @@ function _argCid(args) {
 }
 function agentEvent(env) {
   if (!env) return;
-  // The debugger's focus view keeps its OWN transcript of the specialist working, rendered for a
-  // debugging session rather than for chat. It reads the same envelopes; the panel below is
-  // unaffected either way, so a crew member appears in both places without either owning it.
-  try { window.onDebugAgentEvent && window.onDebugAgentEvent(env); } catch (e) {}
-  // Workspaces with a specialist pane of their own (specpane.js) read them too.
+  // Workspaces with a specialist pane of their own (specpane.js: the debugger, the profiler) read
+  // the same envelopes; the panel below is unaffected, so a crew member appears in both places
+  // without either owning it.
   for (const h of (window.slateAgentEventSubs || [])) { try { h(env); } catch (e) {} }
   const d = env.data || {};
   const k = env.kind;
