@@ -1971,24 +1971,10 @@ end
 # ── Pre-eval `using` resolution (stable memo keys) ────────────────────────────
 # The bare-`using` module paths in barrier cells whose exports aren't resolved (nor attempted) yet.
 # Pure read — callers that share `report` with a live server take their lock around it.
-function unresolved_using_paths(report::Report)
-    pending = String[]
-    for c in report.cells
-        (refines_analysis(c.kind) && :opaque in c.flags) || continue
-        top = try; Meta.parseall(c.source); catch; continue; end
-        stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
-        for s in stmts
-            s isa LineNumberNode && continue
-            _import_names(s) === nothing && append!(pending, _using_module_paths(s))
-        end
-    end
-    return lock(_USING_LOCK) do
-        [p for p in unique!(pending) if !haskey(_USING_EXPORTS, p) && !(p in _USING_TRIED)]
-    end
-end
+unresolved_using_paths(report::Report) = get(unresolved_using_paths_by_side(report, _ -> ""), "", String[])
 
-# The same, grouped by where each cell runs (`side(cell)`, "" for the notebook's own kernel), so a module
-# is loaded where the cells that use it run. One a main-side cell also uses stays on the main side.
+# Grouped by where each cell runs (`side(cell)`, "" for the notebook's own kernel), so a module is
+# loaded where the cells that use it run. One a main-side cell also uses stays on the main side.
 function unresolved_using_paths_by_side(report::Report, side)
     by = Dict{String,Vector{String}}()
     for c in report.cells
