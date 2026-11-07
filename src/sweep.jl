@@ -3802,6 +3802,29 @@ function logs(t::SweepTarget, run::AbstractString; lines::Integer = 200,
     return String(take!(io))
 end
 
+# Why an exhausted run never landed, in its jobs' words: the first `ERROR:` line of their output, or
+# "" when none printed one, as a walltime cut or a memory kill does not. A job that dies loading its
+# environment writes no manifest either, so without this it reads as a resource limit. Read once per
+# run and set of jobs: an exhausted run is finished, and on a cluster the read is a round trip.
+const _EXHAUST_WHY = Dict{Tuple{String,String,Vector{String}},String}()
+const _EXHAUST_WHY_LOCK = ReentrantLock()
+
+function exhausted_error(t::SweepTarget, run::AbstractString)
+    jobs = run_jobs(t, run)
+    isempty(jobs) && return ""
+    key = (String(store_root(t)), String(run), jobs)
+    hit = lock(() -> get(_EXHAUST_WHY, key, nothing), _EXHAUST_WHY_LOCK)
+    hit === nothing || return hit
+    txt = try; logs(t, run; lines = 200); catch; ""; end
+    line = ""
+    for l in eachline(IOBuffer(replace(txt, r"\e\[[0-9;]*m" => "")))
+        s = strip(l)
+        startswith(s, "ERROR:") && (line = String(s); break)
+    end
+    lock(() -> (_EXHAUST_WHY[key] = line), _EXHAUST_WHY_LOCK)
+    return line
+end
+
 """
     handle_action(target, run, params, keys, action; plot = nothing, opts = Dict()) -> payload
 
@@ -4119,7 +4142,8 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
                       action_list(p, started; jobs = !isempty(run_jobs(target, run)))],
         # Why it stopped. Carried on every poll because a sweep that blocks WHILE being watched
         # must explain itself then, not only if someone happens to re-run the cell afterwards.
-        "why" => _signin_html(target) * _why_html(p),
+        "why" => _signin_html(target) *
+                 _why_html(p; err = p.state === :exhausted ? exhausted_error(target, run) : ""),
         # The cluster's host and whether there is a session to it. Without a sign-in the card can
         # read nothing and submit nothing, and that is worth saying on the card rather than leaving
         # it to be discovered as a provisioning failure on the next Submit.
@@ -4779,13 +4803,16 @@ const _QUEUE_REASONS = Dict(
     "JobHeldUser" => "held", "JobHeldAdmin" => "held by an administrator", "None" => "")
 _queue_reason(r::AbstractString) = (s = get(_QUEUE_REASONS, String(r), String(r)); isempty(s) ? "" : s)
 
-function _why_html(p::BatchSweep.Plan)
+function _why_html(p::BatchSweep.Plan; err::AbstractString = "")
     box(color, body) = string(
         "<div style='margin-top:8px;padding:8px;border-radius:6px;background:color-mix(in srgb, ",
         color, " 12%, transparent);font-size:12px;color:", color, "'>", body, "</div>")
     p.state === :blocked && return box("var(--red,#e57575)",
         string(_esc(p.blocked), "<br><span style='opacity:.8'>Nothing further will be submitted. ",
                "Fix the body, then <code>Sweep.reset!</code>.</span>"))
+    (p.state === :exhausted && !isempty(err)) && return box("var(--red,#e57575)",
+        string("The jobs stop with an error before any unit lands:<br><code>", _esc(err), "</code>",
+               "<br><span style='opacity:.8'>Fix it, then Retry.</span>"))
     p.state === :exhausted && return box("var(--red,#e57575)",
         string("Attempted ", BatchSweep.MAX_ATTEMPTS, "× without landing, so these units are ",
                "outrunning their resources rather than erroring.<br><span style='opacity:.8'>",
@@ -5032,7 +5059,8 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     # While a submitted run waits for its environment's test: the step the test is on. Filled by the
     # script from the hub, which runs it; a click opens the prepare's own view.
     println(io, "<div data-sw='testing' style='margin-top:8px;font-size:12px;opacity:.85;cursor:pointer'></div>")
-    println(io, "<div data-sw='why'>", _why_html(p), "</div>")
+    err = p.state === :exhausted ? exhausted_error(getfield(r, :target), getfield(r, :run)) : ""
+    println(io, "<div data-sw='why'>", _why_html(p; err), "</div>")
     println(io, "<div data-sw='fails'>", _fails_html(getfield(r, :rows)), "</div>")
 
     _actions(io, r)
@@ -5546,6 +5574,10 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
                     "`Sweep.resume!(r)` continues with the remaining $(p.shards_missing).")
     elseif p.state === :partial
         println(io, "   `r.errors` lists them; `Sweep.retry_failed!(r)` clears them for a retry.")
+    elseif p.state === :exhausted && !isempty(exhausted_error(getfield(r, :target), getfield(r, :run)))
+        println(io, "   The jobs stop with an error before any unit lands:")
+        println(io, "   ", exhausted_error(getfield(r, :target), getfield(r, :run)))
+        println(io, "   Fix it, then Retry on the card or `Sweep.reset!(r)`.")
     elseif p.state === :exhausted
         println(io, "   Attempted $(BatchSweep.MAX_ATTEMPTS)× without landing, so these units are ",
                     "outrunning their resources rather than erroring.")
