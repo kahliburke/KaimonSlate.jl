@@ -1943,6 +1943,27 @@ _slate_handler_nparams(f) = try; first(methods(f)).nargs - 1; catch; 1; end
 _invoke_slate_handler(f, sargs, progress) =
     _slate_handler_nparams(f) >= 2 ? Base.invokelatest(f, sargs, progress) : Base.invokelatest(f, sargs)
 
+# A JS→Julia call on namespace `m`: find the `slate_on` handler a cell registered for `channel` and run it
+# with the execution context set, so a handler that streams (`slate_emit`) works as it does in a cell.
+# `found` is false only when `m` has no such handler; a handler that throws was found. `progress` carries a
+# 2-arg handler's frames back to the caller, and how it does that differs between the hub and a worker.
+function _call_slate_handler(m::Module, channel, args, progress; notebook::AbstractString = "")
+    hs = try; Base.invokelatest(getglobal, m, :__slate_handlers); catch; nothing; end
+    hs isa AbstractDict || return (; found = false, ok = false, value = nothing, error = "call handlers unavailable")
+    f = get(hs, String(channel), nothing)
+    f === nothing && return (; found = false, ok = false, value = nothing,
+                             error = "no slate_on handler registered for channel '$channel'")
+    try
+        ctx = _build_slate_ctx(m, notebook, "", String[])
+        v = task_local_storage(:slate_ctx, ctx) do
+            _invoke_slate_handler(f, _slate_args(args), progress)   # Dict → NamedTuple: the handler reads `args.field`
+        end
+        return (; found = true, ok = true, value = v, error = "")
+    catch e
+        return (; found = true, ok = false, value = nothing, error = first(sprint(showerror, e), 400))
+    end
+end
+
 # ── The namespace contract ────────────────────────────────────────────────────
 # Inject the COMPLETE, identical set of notebook-namespace names into module `m`.
 # Context-specific helper *implementations* (echart/tables/refresh) are passed in;

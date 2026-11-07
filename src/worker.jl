@@ -1241,11 +1241,6 @@ end
 # `(; ok, value)` (the hub JSON-encodes `value` for the socket) or `(; ok=false, error)` — a missing
 # channel or a throwing handler is a clean error, never a hang.
 function __slate_call(channel::String, args; call_id::String = "")
-    m = _NS[]
-    hs = try; Base.invokelatest(getglobal, m, :__slate_handlers); catch; nothing; end
-    (hs isa AbstractDict) || return (; ok = false, error = "call handlers unavailable on this worker")
-    f = get(hs, String(channel), nothing)
-    f === nothing && return (; ok = false, error = "no slate_on handler registered for channel '$channel'")
     # A 2-arg handler `(args, progress) -> …` gets a `progress` closure: it streams a frame on the reserved
     # `__slate_call_progress` emit channel carrying THIS call's id, which the browser routes to the call's
     # onProgress (no user-visible token). Reuses the slate_emit transport (publish → poller → WS).
@@ -1254,18 +1249,8 @@ function __slate_call(channel::String, args; call_id::String = "")
             KaimonGate._publish_stream("slate_emit", "__slate_call_progress\x1f" *
                 Base64.base64encode(Serialization.serialize, (id = call_id, data = p)))
         catch; end; nothing))
-    try
-        # Establish the per-cell execution context for the handler task, so a package that STREAMS from its
-        # `slate_on` action — `slate_emit`/`slate_effect` via SlateExtensionsBase's ctx accessors — works the
-        # same inside a handler as inside a cell eval. Without this, `slate_emit` in a handler is a silent
-        # no-op (its `_ctx_field(:emit)` is unset). A browser call is main-side, so no region/notebook needed.
-        ctx = _build_slate_ctx(m, "", "", String[])
-        return task_local_storage(:slate_ctx, ctx) do
-            (; ok = true, value = _invoke_slate_handler(f, _slate_args(args), progress))   # Dict → NamedTuple so the handler reads `args.field`
-        end
-    catch e
-        return (; ok = false, error = first(sprint(showerror, e), 400))
-    end
+    r = _call_slate_handler(_NS[], channel, args, progress)   # a browser call is main-side: no region
+    return r.ok ? (; ok = true, value = r.value) : (; ok = false, error = r.error)
 end
 
 "Discard the namespace (full rebuild). Fire the outgoing namespace's per-cell cleanups first so a live

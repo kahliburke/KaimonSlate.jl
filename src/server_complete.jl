@@ -3778,23 +3778,14 @@ function _try_slate_call(nb::LiveNotebook, k, channel::AbstractString, args, cal
             err = string(_gf(r, :error, "call failed"))
             return (!_nohandler(err), Dict{String,Any}("ok" => false, "error" => err))
         end
-        # In-process kernel: invoke the handler directly in the report's namespace module. A 2-arg handler
-        # gets a `progress` closure that pushes on the reserved `__slate_call_progress` emit channel (routed
-        # to the caller's onProgress by call id) — the in-process twin of the worker's progress closure.
-        m = ReportEngine.report_module(nb.report)
-        hs = try; Base.invokelatest(getglobal, m, :__slate_handlers); catch; nothing; end
-        (hs isa AbstractDict) || return (false, Dict{String,Any}("ok" => false, "error" => "call handlers unavailable"))
-        f = get(hs, String(channel), nothing)
-        f === nothing && return (false, Dict{String,Any}("ok" => false, "error" => "no slate_on handler registered for channel '$channel'"))
+        # In-process kernel: the handler runs here, in the report's namespace module. Its progress frames go
+        # out on the reserved `__slate_call_progress` emit channel, routed to the caller by call id.
         progress = isempty(call_id) ? (p -> nothing) :
             (p -> ReportEngine._do_emit(nb.report.id, "__slate_call_progress", (id = String(call_id), data = p)))
-        # Establish the execution context so a handler that STREAMS (`slate_emit` via SlateExtensionsBase's
-        # ctx accessors) works — the in-process twin of the worker fix.
-        ctx = ReportEngine._build_slate_ctx(m, nb.report.id, "", String[])
-        return (true, Dict{String,Any}("ok" => true,
-            "value" => task_local_storage(:slate_ctx, ctx) do
-                ReportEngine._invoke_slate_handler(f, ReportEngine._slate_args(args), progress)
-            end))
+        r = ReportEngine._call_slate_handler(ReportEngine.report_module(nb.report), channel, args, progress;
+                                             notebook = nb.report.id)
+        return (r.found, r.ok ? Dict{String,Any}("ok" => true, "value" => r.value) :
+                                Dict{String,Any}("ok" => false, "error" => r.error))
     catch e
         return (false, Dict{String,Any}("ok" => false, "error" => first(sprint(showerror, e), 300)))
     end
