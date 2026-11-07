@@ -273,6 +273,51 @@ function regStatsHistory(port) {
     cpu: Math.max(0, Math.round(base + 14 * Math.sin(i / 3) + (i % 5))),
     rss: Math.round((rssB + 30 * Math.sin(i / 4)) * MB) }))
 }
+// The telemetry view's own read (full=1): each sample also names the cells running in it and the
+// collections it saw, and the hub adds the runs it timed. That is what the dock's Timeline draws.
+// The runs are timed from the first read, so every poll returns the same ones and the view keeps
+// one copy of each.
+let regRunsAt = 0
+function regTelemetryFull(port) {
+  const samples = regStatsHistory(port), now = (regRunsAt ||= samples[samples.length - 1].t)
+  let pauses = 0, fulls = 0, gcms = 0
+  for (const [i, x] of samples.entries()) {
+    const gc = []
+    if (i % 3 === 0 && (i < 14 || i >= 31)) gc.push([x.t - 0.4, 4 + (i % 7), false, (620 + 8 * i) * MB])
+    if (i === 12) gc.push([x.t - 1.2, 145, true, 540 * MB])
+    pauses += gc.length; fulls += gc.filter((g) => g[2]).length; gcms += gc.reduce((a, g) => a + g[1], 0)
+    Object.assign(x, { running: i >= 32 ? ['train'] : [], gc, gc_ms: gcms, proc: { gc_pauses: pauses, gc_full: fulls, threads: 9 } })
+  }
+  const run = (id, a, b, o = {}) => ({ id, t0: now - a, t1: now - b, memo: '', err: false, profile: '', ...o })
+  return { ok: true, port, host: 'gpu-box', connected: true, samples, runs: [
+    run('train', 116, 79, { profile: '1762531200000' }), run('evaluate', 77, 66),
+    run('evaluate', 63, 62.6, { memo: 'restored' }), run('train', 58, 47, { err: true })] }
+}
+// /api/{id}/transfer-rules — what a provision to a region would send, one level of the project at a
+// time, with the `.slateignore` already holding the checkpoints back.
+const REG_TRAVEL_DIR = '/home/ada/pipeline'
+const REG_TRAVEL = {
+  '': [
+    { name: 'data', path: 'data', dir: true, bytes: 1840 * MB, files: 212, sent_bytes: 1840 * MB, sent_files: 212, state: 'sent', ruled: false },
+    { name: 'checkpoints', path: 'checkpoints', dir: true, bytes: 6200 * MB, files: 48, sent_bytes: 0, sent_files: 0, state: 'held', ruled: true },
+    { name: 'runs', path: 'runs', dir: true, bytes: 930 * MB, files: 1604, sent_bytes: 0, sent_files: 0, state: 'gitignored', ruled: false },
+    { name: 'src', path: 'src', dir: true, bytes: 0.4 * MB, files: 23, sent_bytes: 0.4 * MB, sent_files: 23, state: 'sent', ruled: false },
+    { name: 'pipeline.jl', path: 'pipeline.jl', dir: false, bytes: 0.03 * MB, files: 1, sent_bytes: 0.03 * MB, sent_files: 1, state: 'sent', ruled: false },
+    { name: 'Project.toml', path: 'Project.toml', dir: false, bytes: 0.002 * MB, files: 1, sent_bytes: 0.002 * MB, sent_files: 1, state: 'sent', ruled: false },
+  ],
+  data: [
+    { name: 'raw', path: 'data/raw', dir: true, bytes: 1610 * MB, files: 180, sent_bytes: 1610 * MB, sent_files: 180, state: 'sent', ruled: false },
+    { name: 'labels.csv', path: 'data/labels.csv', dir: false, bytes: 210 * MB, files: 1, sent_bytes: 210 * MB, sent_files: 1, state: 'sent', ruled: false },
+    { name: 'splits', path: 'data/splits', dir: true, bytes: 20 * MB, files: 31, sent_bytes: 20 * MB, sent_files: 31, state: 'sent', ruled: false },
+  ],
+}
+function regTravel(region, path) {
+  const all = REG_TRAVEL[''], sent = all.reduce((a, e) => a + e.sent_bytes, 0), bytes = all.reduce((a, e) => a + e.bytes, 0)
+  const nsent = all.reduce((a, e) => a + e.sent_files, 0), files = all.reduce((a, e) => a + e.files, 0)
+  return { region, dir: REG_TRAVEL_DIR, warn_mb: 100, file: REG_TRAVEL_DIR + '/.slateignore', exists: true,
+    last: { files: nsent, bytes: sent, ago: 3 * 3600, dir: 'pipeline' }, text: 'checkpoints/\n', path,
+    entries: REG_TRAVEL[path] || [], sent: { files: nsent, bytes: sent }, held: { files: files - nsent, bytes: bytes - sent } }
+}
 // /api/{id}/peer-plan — resolved routes + host grants + live/recent boundary transfers.
 const REG_PEERPLAN = {
   regions: ['gpu', 'db'], refreshed: true,
@@ -410,16 +455,24 @@ async function mockRegions(page) {
   })
   await page.route('**/api/remote-notebook-workers', (r) => r.fulfill(J({ workers: REG_NB_REMOTE })))
   await page.route('**/api/worker-stats*', (r) => {
-    const port = Number(new URL(r.request().url()).searchParams.get('port'))
-    r.fulfill(J({ ok: true, port, samples: regStatsHistory(port) }))
+    const q = new URL(r.request().url()).searchParams
+    // The dock names its worker by notebook and side rather than by port.
+    const port = q.get('side') === 'gpu' ? 9300 : q.get('side') === 'db' ? 9200 : Number(q.get('port'))
+    // Only the gpu worker has runs to show; it is the one the dock opens on.
+    r.fulfill(J(q.get('full') === '1' && port === 9300 ? regTelemetryFull(port) : { ok: true, port, samples: regStatsHistory(port) }))
   })
   await page.route('**/api/ssh-hosts', (r) => r.fulfill(J({ hosts: ['gpu-box', 'db-box', 'mem-box', 'workstation'], global: '' })))
   await page.route('**/api/sysimage*', (r) => {
     const region = new URL(r.request().url()).searchParams.get('region') || ''
     r.fulfill(J({ ok: true, building: false, current: region === 'gpu', stale: false, bytes: 1780 * MB,
-      built: 'built · 2h ago', compiler: true, host: region === 'gpu' ? 'gpu-box' : 'db-box', reachable: true }))
+      packages: 38, built: Date.now() / 1000 - 2 * 3600, compiler: true, host: region === 'gpu' ? 'gpu-box' : 'db-box', reachable: true }))
   })
   await page.route('**/peer-plan*', (r) => r.fulfill(J(REG_PEERPLAN)))
+  await page.route('**/transfer-rules*', (r) => {
+    if (r.request().method() !== 'GET') return r.continue()
+    const q = new URL(r.request().url()).searchParams
+    r.fulfill(J(regTravel(q.get('region') || '', q.get('path') || '')))
+  })
   await page.route('**/transfer-stats*', (r) => r.fulfill(J(regTransferStats())))
   await page.route((u) => u.pathname.endsWith('/worker-log'), (r) => r.fulfill(J({ side: new URL(r.request().url()).searchParams.get('side') || '',
     host: 'gpu-box', port: 9300, connected: true, status: 'ok', note: '',
@@ -551,6 +604,7 @@ async function regionShots(browser) {
       await page.waitForSelector('#wdock-tel.on', { timeout: 6000 })
       await sleep(2500)                                       // the telemetry view's first samples
       await elShot(page, '#workerdock', 'worker-dock.png')
+      await elShot(page, '#workerdock .tm-sec:has(h3:text-is("Timeline"))', 'worker-timeline.png')
       await page.evaluate(() => document.body.style.removeProperty('--wdockh'))
       await page.evaluate(() => window.wpOpenLog && window.wpOpenLog('gpu'))
       await page.waitForSelector('#wdock-log.on', { timeout: 6000 })
@@ -626,6 +680,19 @@ async function regionShots(browser) {
       await elShot(page, '#dagpeerpanel', 'dag-peer-plan-probing.png')
       await page.evaluate(() => document.getElementById('dagpeerpanel')?.remove())
     } catch (e) { log('! dag-peer-plan-probing skipped:', e.message.split('\n')[0]) }
+
+    // a region's detail panel: what a provision to it sends, as a tree with sizes
+    try {
+      // The hub's own workers frame has replaced the mocked list by now; put the mocked one back.
+      await page.evaluate((ws) => window._dagOnWorkers && window._dagOnWorkers(ws), REG_NBSTATE.workers)
+      await page.evaluate(() => window._dagRegionDetail && window._dagRegionDetail('gpu'))
+      await page.waitForSelector('#dagregpanel .dagtvrow', { timeout: 6000 })
+      await page.evaluate(() => window._dagTravelsExpand && window._dagTravelsExpand('data'))
+      await page.waitForSelector('#dagregpanel .dagtvrow[style*="padding-left:14px"]', { timeout: 6000 })
+      await sleep(500)
+      await elShot(page, '#dagregpanel', 'dag-what-travels.png')
+      await page.evaluate(() => { document.getElementById('dagregpanel')?.remove(); window._dagRegPanelClear && window._dagRegPanelClear() })
+    } catch (e) { log('! dag-what-travels skipped:', e.message.split('\n')[0]) }
 
     // close the DAG pane so the cell-level popovers/bars aren't covered
     await page.evaluate(() => { if (document.getElementById('dagpane')?.classList.contains('open')) window.toggleDag() })

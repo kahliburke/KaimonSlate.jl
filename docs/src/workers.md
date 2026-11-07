@@ -55,6 +55,8 @@ range.
 - **I/O, pressure and the Julia runtime**: disk and network rates, how long work waited for CPU,
   memory or I/O, and the heap, allocation rate and memo store.
 
+![The Telemetry tab's timeline: a lane per cell with each run as a bar, a profiled run outlined, a failed one in red, the cell still running in green, and the garbage collections on a lane of their own](./assets/worker-timeline.png)
+
 GPU figures come from NVML, so they need an NVIDIA GPU. The host and job figures (per-core use,
 I/O, pressure, the job's limits) are read from Linux and are left out on other systems.
 

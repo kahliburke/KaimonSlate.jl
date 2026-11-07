@@ -88,6 +88,8 @@ When a send would be larger than 100 MB (`transfer_warn_mb` in `slate.json`) and
 `.slateignore`, the region pauses before sending. The region's detail panel, from the DAG legend,
 then opens by itself: it lists the project as a tree with sizes, lets you hold files or folders
 back, and **Save** writes the `.slateignore`.
+
+![A region's detail panel from the DAG legend: what a send would transfer and what is held back, the last provision, and the project as a tree with sizes, where a .gitignore'd folder is marked as such and a held one has its tick off](./assets/dag-what-travels.png)
 ## Using a region in a notebook
 
 Open the **Destinations** manager (＋ Add destination… in the tag editor) and **enable** the regions this
