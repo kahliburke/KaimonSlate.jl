@@ -1173,12 +1173,23 @@
       for (const k of ['html', 'css', 'js']) {
         const val = p[k] || '';
         if (!w.panes[k] && val.trim() && w.addPane) w.addPane(k, val);   // a section that arrived → mount its pane
-        const v = w.panes[k]; if (v && v.state.doc.toString() !== val) v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: val } });
+        const v = w.panes[k]; if (v) _setDoc(v, val);
       }
       return;
     }
-    const v = editors[id]; if (v && v.state.doc.toString() !== s) v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: s } });
+    const v = editors[id]; if (v) _setDoc(v, s);
   };
+  // Replace only the span between the common prefix and suffix, so a cursor outside the change
+  // stays where it was and one inside it lands at its end.
+  function _setDoc(v, s) {
+    const cur = v.state.doc.toString();
+    if (cur === s) return;
+    let a = 0; const n = Math.min(cur.length, s.length);
+    while (a < n && cur.charCodeAt(a) === s.charCodeAt(a)) a++;
+    let b = 0;
+    while (b < n - a && cur.charCodeAt(cur.length - 1 - b) === s.charCodeAt(s.length - 1 - b)) b++;
+    v.dispatch({ changes: { from: a, to: cur.length - b, insert: s.slice(a, s.length - b) } });
+  }
   // Standalone CM6 editor for the Files tab. Delegates to the full cell factory `mkEditor` so a
   // source file gets the SAME feature set as a cell — Julia autocomplete (server `/api/complete`,
   // which keys off the code + cursor, not a cell id), snippets, comment-toggle (⌘/), bracket

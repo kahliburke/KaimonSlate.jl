@@ -852,6 +852,14 @@ function _load_slate_config!()
         return nothing
     end
     NotebookServer.CHECKER_ON[] = get(_slate_config(), "checker_on", false) === true
+    let f = get(_slate_config(), "formatter", "runic")
+        f in NotebookServer.FORMATTERS && (NotebookServer.FORMATTER_DEFAULT[] = String(f))
+    end
+    NotebookServer._FORMATTER_PERSIST[] = function (name)
+        cfg = _slate_config(); cfg["formatter"] = name
+        _persist_slate_config!(cfg)
+        return nothing
+    end
     # Workers' telemetry kept on disk per notebook (slate.json "telemetry_log", "telemetry_keep_days").
     NotebookServer.TELEMETRY_LOG[] = get(_slate_config(), "telemetry_log", true) !== false
     let k = get(_slate_config(), "telemetry_keep_days", 14)

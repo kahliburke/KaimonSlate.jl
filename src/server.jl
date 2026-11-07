@@ -22,6 +22,9 @@ import Dates                                  # publish dates for the multi-doc 
 import Logging                                # standalone serve: route hub log detail to a file
 import REPL                                   # standalone serve: raw-mode ^C byte (see _wait_for_ctrl_c)
 import Tar
+import Runic                                  # the code-cell formatter
+import TOML                                   # a project's `fatou.toml`
+import JuliaSyntax                            # comparing a cell before and after formatting
 import Typst_jll
 import Pkg
 using ..ReportEngine
@@ -6173,6 +6176,7 @@ end
 
 
 include("region_sweeps.jl")     # the hub's driver for sweeps that run on a region's node
+include("server_codeformat.jl")   # code-cell formatting; `_CONFIG_UI` below reads its formatter list
 include("server_history.jl")
 include("server_facts.jl")     # the one description of the hub's state that pages render from
 include("server_agentops.jl")

@@ -18,5 +18,11 @@
   "modern-screenshot": { "version": "4.7.0", "base": "https://cdn.jsdelivr.net/npm/modern-screenshot@{version}/dist/",
                     "files": ["index.js"] },
   "dagre":        { "version": "3.0.0",   "base": "https://cdn.jsdelivr.net/npm/@dagrejs/dagre@{version}/dist/",
-                    "files": ["dagre.min.js", "dagre.min.js.map"] }
+                    "files": ["dagre.min.js", "dagre.min.js.map"] },
+
+  "_comment_fatou": "The Fatou formatter's WASM build, run in the browser through dprint's plugin host. It is published as a GitHub release asset rather than on npm, so its `files` are exact names under `base`, not globs.",
+  "dprint-formatter": { "version": "0.6.0", "base": "https://cdn.jsdelivr.net/npm/@dprint/formatter@{version}/esm/",
+                    "files": ["*.js"] },
+  "fatou":        { "version": "0.7.7",   "base": "https://github.com/jolars/dprint-plugin-fatou/releases/download/v{version}/",
+                    "files": ["plugin.wasm"] }
 }

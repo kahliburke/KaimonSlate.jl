@@ -88,12 +88,14 @@ const _WORKBOOK_POST = (
     # Emptying the scratchpad. The client clears its own list optimistically, so without this the
     # panel would LOOK cleared and refill from the server on the next reload.
     r"^/api/[^/]+/scratch/clear$",
+    r"^/api/[^/]+/format$",          # formatting the reader's own code; computes, changes nothing
 )
 
 const _WORKBOOK_GET = (
     r"^/api/[^/]+/workbook-stub/[^/]+$",   # the exercise as the author wrote it (the Reset button)
     r"^/api/[^/]+/help$",                  # `?name` docstring lookup — a reader writing Julia needs it
     r"^/api/[^/]+/docsearch$",             # its search box; returns nothing without the Kaimon index
+    r"^/api/[^/]+/formatter$",             # which formatter the Format command uses
 )
 
 # Routes a workbook adds on top of `_APP_POST`/`_APP_GET`. Cell-level authority is checked separately

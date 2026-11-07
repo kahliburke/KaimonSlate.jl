@@ -309,6 +309,8 @@ const _CONFIG_UI = (
      choices = String[], global_default = nothing, restart = false),
     (key = "macroexpand", group = "Execution", label = "Macro-aware deps", type = :bool, default = true,
      choices = String[], global_default = nothing, restart = false),
+    (key = "formatter", group = "Editing", label = "Formatter", type = :enum, default = "runic",
+     choices = collect(FORMATTERS), global_default = () -> FORMATTER_DEFAULT[], restart = false),
     (key = "slidelevel", group = "Slides", label = "Slide heading level", type = :int, default = 2,
      choices = String[], global_default = nothing, restart = false),
     (key = "slidetransition", group = "Slides", label = "Slide transition", type = :enum, default = "fade",
@@ -352,6 +354,12 @@ function notebook_config_payload(nb::LiveNotebook)
                          "overridden" => overridden,
                          "value" => overridden ? meta[it.key] : (gd === nothing ? it.default : gd),
                          "default" => it.default, "global" => gd)
+    end
+    # The formatter inherits from the project as well as the global default: a `fatou.toml` picks Fatou.
+    for d in items
+        d["key"] == "formatter" && !d["overridden"] || continue
+        f = notebook_formatter(nb)
+        d["value"] = f["name"]; d["global"] = f["name"]; d["from"] = f["from"]
     end
     return Dict{String,Any}("items" => collect(items))
 end
