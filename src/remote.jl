@@ -4266,48 +4266,44 @@ function _xfer_trace_push!(meta, started, total, ts, bs, err)
 end
 xfer_traces() = lock(_XFER_TRACE_LOCK) do; copy(_XFER_TRACES); end
 
-# A bulk read a worker asked for (`Sweep.fetch_to`), written into its cache by this process and shown
-# in the transfers view beside the region transfers.
-function fetch_viewed(host::AbstractString, script::AbstractString, dest::AbstractString,
-                      part::AbstractString; input = nothing, name::AbstractString = "", total::Integer = -1)
+# One row in the transfers view for a bulk read from `host`, with its trace for the dashboard.
+# `read(on_bytes)` does the read and returns (ok, bytes, why).
+function _xfer_viewed(read, host::AbstractString, name::AbstractString, via::AbstractString, total::Integer)
     vid = Threads.atomic_add!(_XFER_VIEW_SEQ, 1)
     t0 = time()
     _xfer_view_prune!()
     lock(_XFER_VIEW_LOCK) do
-        _XFER_VIEWS[vid] = XferView("local", String(host), String(name), "ssh", 0, Int(total), t0, 0.0, "")
+        _XFER_VIEWS[vid] = XferView("local", String(host), String(name), String(via), 0, Int(total), t0, 0.0, "")
     end
     upd(f) = lock(_XFER_VIEW_LOCK) do; v = get(_XFER_VIEWS, vid, nothing); v === nothing || f(v); end
     ok, n, why = false, 0, "failed"
     try
-        ok, n, why = Sweep.fetch_to(host, script, dest; input, part, total, on_bytes = b -> upd(v -> (v.done = b)))
+        ok, n, why = read(b -> upd(v -> (v.done = b)))
     finally
         upd(v -> (v.done = n; v.finished = time(); ok || (v.err = why)))
-        _xfer_trace_push!((; src = String(host), dst = "local", name = String(name), via = "ssh"),
+        _xfer_trace_push!((; src = String(host), dst = "local", name = String(name), via = String(via)),
                           t0, n, [t0, time()], [0, n], ok ? "" : why)
     end
     return (ok, n, why)
 end
 
+# A bulk read a worker asked for (`Sweep.fetch_to`), written into its cache by this process and shown
+# in the transfers view beside the region transfers.
+fetch_viewed(host::AbstractString, script::AbstractString, dest::AbstractString, part::AbstractString;
+             input = nothing, name::AbstractString = "", total::Integer = -1) =
+    _xfer_viewed(host, name, "ssh", total) do on_bytes
+        Sweep.fetch_to(host, script, dest; input, part, total, on_bytes)
+    end
+
 # `fetch_viewed` for a read split into jobs across several connections (`Sweep.fetch_many`): one row
 # in the transfers view for the whole read.
 function fetch_many_viewed(host::AbstractString, script::AbstractString, jobs::AbstractVector;
                            streams::Integer = 4, name::AbstractString = "", total::Integer = -1)
-    vid = Threads.atomic_add!(_XFER_VIEW_SEQ, 1)
-    t0 = time()
-    _xfer_view_prune!()
-    lock(_XFER_VIEW_LOCK) do
-        _XFER_VIEWS[vid] = XferView("local", String(host), String(name), "ssh×$(streams)", 0, Int(total), t0, 0.0, "")
-    end
-    upd(f) = lock(_XFER_VIEW_LOCK) do; v = get(_XFER_VIEWS, vid, nothing); v === nothing || f(v); end
     results = Tuple{Bool,Int,String}[]
-    try
-        results = Sweep.fetch_many(host, script, jobs; streams, name, total, on_bytes = b -> upd(v -> (v.done = b)))
-    finally
-        n = sum(r -> r[2], results; init = 0); ok = !isempty(results) && all(first, results)
-        why = ok ? "" : something((r[3] for r in results if !r[1]), "failed")
-        upd(v -> (v.done = n; v.finished = time(); ok || (v.err = why)))
-        _xfer_trace_push!((; src = String(host), dst = "local", name = String(name), via = "ssh×$(streams)"),
-                          t0, n, [t0, time()], [0, n], why)
+    _xfer_viewed(host, name, "ssh×$(streams)", total) do on_bytes
+        results = Sweep.fetch_many(host, script, jobs; streams, name, total, on_bytes)
+        ok = !isempty(results) && all(first, results)
+        (ok, sum(r -> r[2], results; init = 0), ok ? "" : something((r[3] for r in results if !r[1]), "failed"))
     end
     return results
 end
