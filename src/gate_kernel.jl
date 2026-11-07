@@ -1686,6 +1686,8 @@ function _cluster_args(::Report)
                   for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]
 end
 
+# The evaluating cell's `key=value` attributes in the `"k=v"` shape the worker reads. The in-process
+# kernel builds its context from the same, so a cell reads the same `slate_context().attrs` either way.
 function _attr_args(report::Report, filename::AbstractString)
     cid = replace(String(filename), r"^cell:" => "")
     isempty(cid) && return String[]

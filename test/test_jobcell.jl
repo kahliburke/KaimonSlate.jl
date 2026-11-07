@@ -196,6 +196,15 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
     # node and what is DIGESTED into the sweep key. A bare `include` would do neither: the file
     # would be absent on the far side, and editing it would not invalidate anything, so the sweep
     # would serve results computed from a version of the code that no longer exists.
+    @testset "a cell's footer options reach its context in-process as on a worker" begin
+        r = RE.parse_report("#%% code id=probe size=small\nattrs = SEB.slate_context().attrs\n")
+        r.meta["jobopts"] = Dict("probe" => Dict("size" => "large", "qos" => "debug"))
+        Core.eval(RE.report_module(r), :(const SEB = $(RE.SlateExtensionsBase)))
+        RE.eval_cell!(r, findcell(r, "probe"), RE.InProcessKernel())
+        a = Base.invokelatest(getglobal, RE.report_module(r), :attrs)
+        @test (a["size"], a["qos"]) == ("large", "debug")   # the footer goes over the header
+    end
+
     @testset "a sweep's script file ships and is keyed" begin
         S = RE.Sweep
         mktempdir() do dir
