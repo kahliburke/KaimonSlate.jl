@@ -1278,6 +1278,21 @@ end
         end
     end
 
+    @testset "retry_failed! gives exhausted chunks their attempts back, like the card's Retry" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:6), t; submit = false) do p; p.x; end
+            cs = BS.sweep_chunks(root, r.run)
+            for c in cs[1:2]; SlateTask.run_chunk(root, c); end
+            for _ in 1:BS.MAX_ATTEMPTS; BS.bump_attempts!(root, [cs[3]]); end
+            @test BS.plan(root, r.run).chunk_state[cs[3]] === :exhausted
+            Sweep.retry_failed!(r)
+            @test !haskey(BS.read_attempts(root), cs[3])
+            @test BS.plan(root, r.run).chunk_state[cs[3]] !== :exhausted
+        end
+    end
+
     @testset "the status payload is JSON-shaped and covers every unit" begin
         mktempdir() do root
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
@@ -1288,6 +1303,10 @@ end
             @test length(s["tiles"]) == 5           # one tile per unit at this size
             @test s["done"] == 5 && s["settled"] === true
             @test s["label"] isa String && startswith(s["color"], "#")
+            # The stall warning rides the poll into a container the card always emits, so it can
+            # age and clear instead of staying frozen at the age it had at render.
+            @test s["stall"] == ""
+            @test occursin("data-sw='stall'", repr(MIME"text/html"(), r))
         end
     end
 

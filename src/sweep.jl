@@ -3428,12 +3428,25 @@ function load(r::ShardedResult; max_bytes::Integer = 512 * 1024^2, limit::Intege
     return [row.value isa ShardRef ? row.value[] : row.value for row in ok]
 end
 
-"Clear the failed shards so the next run of the job cell retries exactly those."
-function retry_failed!(r::ShardedResult)
-    root = store_root(r.target)
+"""
+    retry_failed!(r) -> Int
+
+Clear the failed units, and give chunks that used up their attempts without landing their budget
+back, so the next run of the job cell retries exactly those. Returns how many units were cleared.
+"""
+retry_failed!(r::ShardedResult) =
+    _with_store_lock(() -> _retry_failed!(r.target, r.run, r.keys), r.target)
+
+# The card's Retry and `retry_failed!` share this, so the two cannot drift. The caller holds the
+# store lock. Dropping a failed unit's manifest only in the mirror would leave it on the cluster and
+# the next sync would bring the failure straight back, so this goes through `forget_results!`.
+function _retry_failed!(target::SweepTarget, run::AbstractString, keys)
+    root = store_root(target)
     st = BatchSweep.fold(root).status          # status alone: no record is read to find a failure
-    failed = [k for k in r.keys if get(st, k, "") == "error"]
-    return forget_results!(r.target, failed)
+    n = forget_results!(target, [k for k in keys if get(st, k, "") == "error"])
+    p = BatchSweep.plan(root, run)
+    BatchSweep.forget_attempts!(root, [c for (c, s) in p.chunk_state if s === :exhausted])
+    return n
 end
 
 """
@@ -3481,6 +3494,9 @@ function _dur(s::Real)
     s < 86400 && return string(round(Int, s ÷ 3600), "h", lpad(round(Int, (s % 3600) ÷ 60), 2, '0'), "m")
     return string(round(s / 86400; digits = 1), "d")
 end
+
+"The stall warning, shared by the card, its poll, and the text display."
+_stall_text(idle::Real) = "⚠ nothing has finished in $(_dur(idle)) — it may be stuck."
 
 _bar(frac, width = 24) =
     (n = clamp(round(Int, frac * width), 0, width); "▰"^n * "▱"^(width - n))
@@ -4005,14 +4021,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
         BatchSweep.resume!(root, run)
         BatchSweep.start!(root, run)
     elseif action == "retry"
-        # Same reason as reset: dropping a failed unit's manifest only in the mirror leaves it on
-        # the cluster, and the next sync brings the failure straight back.
-        st = BatchSweep.fold(root).status      # status alone: no record is read to find a failure
-        failed = [k for k in keys if get(st, k, "") == "error"]
-        forget_results!(target, failed)
-        # And the chunks that used up their attempts without landing get them back.
-        p = BatchSweep.plan(root, run)
-        BatchSweep.forget_attempts!(root, [c for (c, s) in p.chunk_state if s === :exhausted])
+        _retry_failed!(target, run, keys)
     elseif action == "reset"
         # Kill anything live FIRST. `clear_attempts!` forgets the submission records, and with them
         # the job names needed to reach the scheduler — reversing these two would leave orphaned jobs
@@ -4121,13 +4130,15 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         push!(tiles, _tile_color(ok, err, hi - lo + 1, ring))
     end
 
+    stalled = BatchSweep.stalled_for(t)
     out = Dict{String,Any}(
         "state" => String(_ds), "label" => _state_label(_ds),
         "total" => p.shards_total, "done" => p.shards_done,
         "ok" => p.shards_ok, "failed" => p.shards_failed, "missing" => p.shards_missing,
         "frac" => BatchSweep.fraction(p),
         "rate" => t.rate_per_s, "eta" => t.eta_s, "idle" => t.idle_s,
-        "stuck" => BatchSweep.stalled_for(t), "blocked" => p.blocked,
+        "stuck" => stalled, "blocked" => p.blocked,
+        "stall" => stalled > 0 ? _esc(_stall_text(stalled)) : "",
         "settled" => BatchSweep.is_settled(p), "tiles" => tiles, "rings" => rings,
         # Which units each chunk holds and what the scheduler is doing with it. O(chunks), so it
         # rides the poll; the per-unit detail behind a tile is O(units) and is fetched on hover.
@@ -5043,9 +5054,11 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
                                 _esc(join(first(hosts, 8), ", ")),
                                 length(hosts) > 8 ? " (+$(length(hosts) - 8))" : "", "</div>")
 
+    # Always emitted, so the poll can raise, age, and clear it: a stall that recovers must not leave
+    # its warning behind, frozen at the age it had when the cell rendered.
     idle = BatchSweep.stalled_for(t)
-    idle > 0 && print(io, "<div style='margin-top:8px;font-size:12px;color:var(--gold,#ffd700)'>",
-                          "⚠ nothing has finished in ", _dur(idle), " — it may be stuck.</div>")
+    print(io, "<div data-sw='stall' style='margin-top:8px;font-size:12px;color:var(--gold,#ffd700)'>",
+              idle > 0 ? _esc(_stall_text(idle)) : "", "</div>")
 
     # Both of these are emitted as CONTAINERS even when empty, and their contents ride the poll —
     # a sweep that starts failing while you watch it has to grow its own explanation and error list.
@@ -5259,7 +5272,7 @@ function _live_script(io, r::ShardedResult)
         // Why it stopped, and which units failed. Rendered by Julia and swapped in whole, so the
         // browser holds no second copy of this markup to drift from the cell's own render. Only on
         // CHANGE, so an open <details> is not collapsed underneath the reader on every poll.
-      ["queue", "why", "fails", "data"].forEach(function(k){
+      ["queue", "why", "fails", "data", "stall"].forEach(function(k){
           var el = root.querySelector('[data-sw="' + k + '"]');
           if (!el || s[k] === undefined) return;
           if (el.dataset.h !== s[k]) { el.dataset.h = s[k]; el.innerHTML = s[k]; }
@@ -5563,7 +5576,7 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
     end
 
     idle = BatchSweep.stalled_for(t)
-    idle > 0 && println(io, "   ⚠ nothing has finished in $(_dur(idle)) — it may be stuck.")
+    idle > 0 && println(io, "   ", _stall_text(idle))
 
     if p.state === :blocked
         println(io, "   🛑 $(p.blocked)")
