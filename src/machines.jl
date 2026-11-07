@@ -16,7 +16,7 @@ struct Machine
     depot::String      # Julia depot; "" = automatic (the site's scratch when preparing finds one)
     prologue::String   # the user's shell setup, run before every Julia here
     # Where a prepare compiles packages: `:node`, the granted node its workers run on, or `:login`,
-    # the login node, which some sites (NERSC) ask for. Compiled code is reused wherever the CPU
+    # the login node, which some sites ask for. Compiled code is reused wherever the CPU
     # architecture is the same (`_SYSIMAGE_CPU_SH`), so a node of another architecture still compiles.
     compile::Symbol
 end

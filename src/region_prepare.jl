@@ -354,8 +354,8 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
                 ("ok", "")
             end
         end
-        # Compiled here as well when the machine says so (`Machine.compile = :login`): some sites, NERSC
-        # among them, want compiles on login nodes rather than on granted ones. The record it leaves keys
+        # Compiled here as well when the machine says so (`Machine.compile = :login`): some sites want
+        # compiles on login nodes rather than on granted ones. The record it leaves keys
         # on the CPU architecture, so the node's own compile step finds it current when the node's
         # architecture is the same and compiles for itself when it is not. It compiles against the
         # region's sysimage when one is built for this architecture; an image the node builds after this

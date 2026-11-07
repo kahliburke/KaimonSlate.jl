@@ -1,5 +1,5 @@
 # Every scheduler command Slate sends a cluster, counted. Sites ask users to keep the aggregate rate of
-# their scheduler queries low (NERSC asks for one or two a minute across all of a user's jobs), so the
+# their scheduler queries low (often one or two a minute across all of a user's jobs), so the
 # hub counts what it sends by host, command and the Slate function that sent it, warns when a host's
 # last minute goes over budget, and appends one record per host and minute to a history file in the
 # hub's cache. `run_there` notes each script it runs; the counting is by the script's text.

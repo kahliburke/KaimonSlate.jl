@@ -8,10 +8,10 @@ const RE = KaimonSlate.ReportEngine
 @testset "machines" begin
     withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do
         @testset "an entry describes the machine" begin
-            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm",
+            RE.cluster_set!(Dict("name" => "pm", "host" => "hpc1", "kind" => "slurm",
                                  "account" => "m1", "depot" => "\$HOME/d", "prologue" => "module load x"))
             m = RE.machine_get("pm")
-            @test m.host == "perlmutter" && m.kind === :slurm && m.account == "m1"
+            @test m.host == "hpc1" && m.kind === :slurm && m.account == "m1"
             @test m.depot == "~/d"                                  # one spelling for the shell to expand
             @test RE.machine_get("nope") === nothing
             @test RE.machine_from(Dict("name" => "w", "host" => "box", "kind" => "exec")).kind === :exec
@@ -19,31 +19,31 @@ const RE = KaimonSlate.ReportEngine
 
         @testset "a region takes its host and scheduler from its machine" begin
             # Its own machine, since a filtered run may skip the testset above.
-            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m1"))
+            RE.cluster_set!(Dict("name" => "pm", "host" => "hpc1", "kind" => "slurm", "account" => "m1"))
             r = RE.region_set!("gpu"; machine = "pm", partition = "gpu", gpus = "4")
-            @test r.host == "perlmutter" && r.scheduler === :slurm && r.account == "m1"
+            @test r.host == "hpc1" && r.scheduler === :slurm && r.account == "m1"
             @test RE.region_machine(r).name == "pm"
             # An edit to the machine reaches the region on the next read.
-            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter2", "kind" => "pbs"))
+            RE.cluster_set!(Dict("name" => "pm", "host" => "hpc2", "kind" => "pbs"))
             r = RE.region_get("gpu")
-            @test r.host == "perlmutter2" && r.scheduler === :pbs && r.account == ""
+            @test r.host == "hpc2" && r.scheduler === :pbs && r.account == ""
             # The region's own account wins over the machine's.
-            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m1"))
+            RE.cluster_set!(Dict("name" => "pm", "host" => "hpc1", "kind" => "slurm", "account" => "m1"))
             @test RE.region_set!("gpu"; account = "m2").account == "m2"
             # Editing a region, or another one, does not copy the machine's values into it.
             RE.region_set!("cpu"; machine = "pm")
             RE.region_set!("cpu"; walltime = "01:00:00")
             RE.region_set!("gpu"; walltime = "00:30:00")
-            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m3"))
+            RE.cluster_set!(Dict("name" => "pm", "host" => "hpc1", "kind" => "slurm", "account" => "m3"))
             @test RE.region_get("cpu").account == "m3" && RE.region_get("cpu").walltime == "01:00:00"
             @test RE.region_get("gpu").account == "m2"
             # How the node is asked for comes from the machine too, and a region can say otherwise.
-            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m3",
+            RE.cluster_set!(Dict("name" => "pm", "host" => "hpc1", "kind" => "slurm", "account" => "m3",
                                  "submit" => "salloc"))
             @test RE.region_get("cpu").submit == "salloc"
             @test RE.region_set!("cpu"; submit = "sbatch").submit == "sbatch"
             @test RE.region_set!("cpu"; submit = "qsub").submit == "salloc"           # not a way: the machine's
-            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m3"))
+            RE.cluster_set!(Dict("name" => "pm", "host" => "hpc1", "kind" => "slurm", "account" => "m3"))
             # A region that names a host directly runs on an implicit machine there.
             w = RE.region_set!("ws"; host = "box")
             m = RE.region_machine(w)
@@ -51,7 +51,7 @@ const RE = KaimonSlate.ReportEngine
         end
 
         @testset "a region's node is a sweep target of its own" begin
-            RE.cluster_set!(Dict("name" => "pms", "host" => "perlmutter", "kind" => "slurm",
+            RE.cluster_set!(Dict("name" => "pms", "host" => "hpc1", "kind" => "slurm",
                                  "root_remote" => "/scratch/store"))
             RE.region_set!("pmsr"; machine = "pms", gpus = "4", data_root = "/scratch/data")
             RE.region_set!("plain"; host = "box", data_root = "/data/x")
@@ -69,9 +69,9 @@ const RE = KaimonSlate.ReportEngine
         end
 
         @testset "a machine says where a prepare compiles" begin
-            RE.cluster_set!(Dict("name" => "pmc", "host" => "perlmutter", "kind" => "slurm"))
+            RE.cluster_set!(Dict("name" => "pmc", "host" => "hpc1", "kind" => "slurm"))
             @test RE.machine_get("pmc").compile === :node                       # the granted node, as before
-            RE.cluster_set!(Dict("name" => "pmc", "host" => "perlmutter", "kind" => "slurm", "compile" => "login"))
+            RE.cluster_set!(Dict("name" => "pmc", "host" => "hpc1", "kind" => "slurm", "compile" => "login"))
             @test RE.machine_get("pmc").compile === :login
             @test RE._compiles_on_login(RE.region_set!("pmcr"; machine = "pmc"))
             # A region booting from a sysimage compiles there too, against its image; a plain host has one place.
@@ -125,29 +125,29 @@ const RE = KaimonSlate.ReportEngine
         end
 
         @testset "what preparing found is kept per host" begin
-            @test isempty(RE.host_facts("perlmutter"))
-            RE.host_facts_merge!("perlmutter", Dict("scratch" => "/pscratch/sd/k/me"))
-            RE.host_facts_merge!("perlmutter", Dict("depot" => "/pscratch/sd/k/me/.julia-slate"))
-            @test RE.host_facts("perlmutter")["scratch"] == "/pscratch/sd/k/me"
-            @test RE.host_facts("perlmutter")["depot"] == "/pscratch/sd/k/me/.julia-slate"
-            RE.host_facts_set!("perlmutter", Dict{String,Any}())
-            @test isempty(RE.host_facts("perlmutter"))
+            @test isempty(RE.host_facts("hpc1"))
+            RE.host_facts_merge!("hpc1", Dict("scratch" => "/scratch/me"))
+            RE.host_facts_merge!("hpc1", Dict("depot" => "/scratch/me/.julia-slate"))
+            @test RE.host_facts("hpc1")["scratch"] == "/scratch/me"
+            @test RE.host_facts("hpc1")["depot"] == "/scratch/me/.julia-slate"
+            RE.host_facts_set!("hpc1", Dict{String,Any}())
+            @test isempty(RE.host_facts("hpc1"))
         end
 
         @testset "the depot: the machine's setting, else what automatic resolved to" begin
-            mk(depot) = RE.Machine("pm", "perlmutter", :slurm, "", "", depot, "")
+            mk(depot) = RE.Machine("pm", "hpc1", :slurm, "", "", depot, "")
             @test RE.machine_depot(mk("/data/jl")) == "/data/jl"
             @test RE.machine_depot(mk("~/.julia")) == "" && RE.machine_depot(mk("\$HOME/.julia/")) == ""
             @test RE.machine_depot(mk("")) == ""                    # automatic, before any prepare
-            RE.host_facts_merge!("perlmutter", Dict("depot" => "/scratch/me/.julia-slate"))
+            RE.host_facts_merge!("hpc1", Dict("depot" => "/scratch/me/.julia-slate"))
             @test RE.machine_depot(mk("")) == "/scratch/me/.julia-slate"
             @test RE._auto_depot("/scratch/me/") == "/scratch/me/.julia-slate" && RE._auto_depot("") == ""
-            RE.host_facts_set!("perlmutter", Dict{String,Any}())
+            RE.host_facts_set!("hpc1", Dict{String,Any}())
         end
 
         @testset "every Julia on a machine starts in one shell" begin
-            m = RE.Machine("pm", "perlmutter", :slurm, "", "", "/scratch/me/jd", "module load x")
-            RE.host_facts_merge!("perlmutter", Dict("site_prologue" => "module unload cudatoolkit"))
+            m = RE.Machine("pm", "hpc1", :slurm, "", "", "/scratch/me/jd", "module load x")
+            RE.host_facts_merge!("hpc1", Dict("site_prologue" => "module unload cudatoolkit"))
             s = RE.machine_setup(m)
             @test occursin("\$HOME/.juliaup/bin", s)
             # The trailing `:` keeps the bundled stdlib depot; juliaup is kept looking at home.
@@ -156,9 +156,9 @@ const RE = KaimonSlate.ReportEngine
             @test endswith(s, RE.guarded_prologue("module unload cudatoolkit ; module load x"))
             @test occursin("{ { module unload cudatoolkit ; module load x ; }", s)
             # A machine that names its own julia puts that directory first instead of juliaup's.
-            j = RE.machine_setup(RE.Machine("pm", "perlmutter", :slurm, "", "/opt/julia/bin/julia", "", ""))
+            j = RE.machine_setup(RE.Machine("pm", "hpc1", :slurm, "", "/opt/julia/bin/julia", "", ""))
             @test occursin("'/opt/julia/bin':", j) && !occursin("juliaup", j)
-            RE.host_facts_set!("perlmutter", Dict{String,Any}())
+            RE.host_facts_set!("hpc1", Dict{String,Any}())
             @test RE.machine_setup(RE.Machine("", "box", :exec, "", "", "", "")) ==
                   "export PATH=\"\$HOME/.juliaup/bin:\$PATH\"; "
             # It runs: a POSIX shell takes the whole prefix.
@@ -240,7 +240,7 @@ const RE = KaimonSlate.ReportEngine
 
         @testset "batch tasks start in their machine's shell" begin
             S = RE.Sweep
-            RE.cluster_set!(Dict("name" => "pmb", "host" => "perlmutter", "kind" => "slurm",
+            RE.cluster_set!(Dict("name" => "pmb", "host" => "hpc1", "kind" => "slurm",
                                  "root_remote" => "/scratch/store", "depot" => "/scratch/jd"))
             d = only(filter(c -> c["name"] == "pmb", RE.clusters_resolved()))
             @test d["_depot"] == "/scratch/jd" && occursin("JULIA_DEPOT_PATH='/scratch/jd':", d["_setup"])
@@ -270,7 +270,7 @@ const RE = KaimonSlate.ReportEngine
         @testset "a later wave builds from the project the run was written from" begin
             S = RE.Sweep
             proj = mktempdir()
-            t = S.ClusterTarget("perlmutter"; root_remote = "/scratch/store", parent = "/hub/own/project")
+            t = S.ClusterTarget("hpc1"; root_remote = "/scratch/store", parent = "/hub/own/project")
             root = S.store_root(t); mkpath(root)
             run = repeat("ab", 32)
             S.BatchSweep.write_sweep!(root, run, String[]; parent = proj,
@@ -286,7 +286,7 @@ const RE = KaimonSlate.ReportEngine
 
         @testset "a sweep waits for its environment to pass a test task" begin
             S = RE.Sweep
-            t = S.ClusterTarget("perlmutter"; root_remote = "/scratch/store", parent = mktempdir(),
+            t = S.ClusterTarget("hpc1"; root_remote = "/scratch/store", parent = mktempdir(),
                                 setup = "export PATH=x; ", depot = "/scratch/jd", machine = "pmb")
             k = S.env_test_key(t)
             @test k == S.proj_key(t.parent) * "|/"
@@ -298,18 +298,18 @@ const RE = KaimonSlate.ReportEngine
             # does while the machine's site has changed since it was prepared.
             depot = RE.machine_depot(RE.machine_from(RE.cluster_get("pmb")))
             write(joinpath(t.parent, "Project.toml"), "")
-            RE.record_env_test!("perlmutter", t.parent, "/"; by = "test task", status = "ok", depot)
+            RE.record_env_test!("hpc1", t.parent, "/"; by = "test task", status = "ok", depot)
             bad = mktempdir(); write(joinpath(bad, "Project.toml"), "")
-            RE.record_env_test!("perlmutter", bad, "/"; by = "test task", status = "fail", depot)
+            RE.record_env_test!("hpc1", bad, "/"; by = "test task", status = "fail", depot)
             d = RE.cluster_get_resolved("pmb")
             @test d["_tested"] == k
             @test S.cluster(Dict(String(a) => string(b) for (a, b) in d)).tested == k
-            @test RE.env_readiness("perlmutter", bad, "/"; depot) == "The last prepare of these packages failed."
-            RE.host_facts_merge!("perlmutter", Dict{String,Any}("stale" => "changed since prepared: modules"))
+            @test RE.env_readiness("hpc1", bad, "/"; depot) == "The last prepare of these packages failed."
+            RE.host_facts_merge!("hpc1", Dict{String,Any}("stale" => "changed since prepared: modules"))
             @test RE.cluster_get_resolved("pmb")["_tested"] == ""
-            @test RE.env_readiness("perlmutter", t.parent, "/"; depot) ==
-                  "On perlmutter, the loaded modules changed since the last prepare, so the packages need building again."
-            RE.host_facts_set!("perlmutter", Dict{String,Any}())
+            @test RE.env_readiness("hpc1", t.parent, "/"; depot) ==
+                  "On hpc1, the loaded modules changed since the last prepare, so the packages need building again."
+            RE.host_facts_set!("hpc1", Dict{String,Any}())
         end
 
         @testset "a region's prepare tests the sweeps of the same project and node type" begin
@@ -448,13 +448,13 @@ const RE = KaimonSlate.ReportEngine
 
         @testset "a start marks the machine stale when its host changed" begin
             RE.region_set!("gpu"; machine = "pm")
-            RE.host_facts_merge!("perlmutter", Dict("stamps" => Dict("julia" => "julia version 1.12.7", "modules" => "a b")))
+            RE.host_facts_merge!("hpc1", Dict("stamps" => Dict("julia" => "julia version 1.12.7", "modules" => "a b")))
             t = RE.RemoteTarget("nid1"; region = "gpu")
             RE.readiness_check!(t; seen = Dict("julia" => "julia version 1.12.7", "modules" => "b a"))
-            @test get(RE.host_facts("perlmutter"), "stale", "") == ""          # module order is not a change
+            @test get(RE.host_facts("hpc1"), "stale", "") == ""          # module order is not a change
             RE.readiness_check!(t; seen = Dict("julia" => "julia version 1.12.8", "modules" => "a b"))
-            @test occursin("julia", RE.host_facts("perlmutter")["stale"])
-            RE.host_facts_set!("perlmutter", Dict{String,Any}())
+            @test occursin("julia", RE.host_facts("hpc1")["stale"])
+            RE.host_facts_set!("hpc1", Dict{String,Any}())
         end
 
         @testset "a sysimage build reports what it did" begin

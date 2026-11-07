@@ -2625,9 +2625,9 @@ function create_tools(GateTool::Type)
     exec, `account`, `root_remote` (its batch store, on scratch), `depot`, `julia`, `prologue`, the
     batch defaults `partition`, `walltime`, `cpus`, `mem`, `gpus`, `qos`, `directives` (scheduler
     flags, one per line or `;`-separated), `test_qos`, `compile` (`node`, the default, compiles
-    packages on the granted node; `login` compiles them on the login node first, as NERSC asks, and a
+    packages on the granted node; `login` compiles them on the login node first, as some sites ask, and a
     node of the same CPU architecture reuses that), and `transfer_host`, the site's data transfer node
-    (e.g. `dtn01.nersc.gov`) that bulk reads go through instead of the login host; an empty argument
+    (e.g. `dtn01.example.org`) that bulk reads go through instead of the login host; an empty argument
     leaves that field as it is. `action="delete"` removes it.
 
     `action="list"` lists them; `"show"` gives one with what preparing found on its host (Julia,
@@ -2851,7 +2851,7 @@ function create_tools(GateTool::Type)
 
     Last, the scheduler commands this hub has sent each cluster (`squeue`, `srun`, `sbatch`, `qstat`,
     …): in the last minute and the last ten, by command and by the Slate function that sent them, and
-    since the hub started. Sites ask for a low aggregate rate (NERSC: one or two a minute); the hub
+    since the hub started. Sites ask for a low aggregate rate (often one or two a minute); the hub
     warns in its log above `KAIMONSLATE_SCHED_BUDGET` a minute (default 2), and keeps a per-minute
     history in `sched_calls.jsonl` in its cache directory.
     """
