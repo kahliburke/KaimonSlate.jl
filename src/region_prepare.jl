@@ -10,8 +10,9 @@
 
 # A site defines `module` in its login profile. Bash running an ssh command reads that profile through
 # `~/.bashrc`; zsh does not, and neither does a bash that zsh started, so the profile is read here when
-# `module` is missing. It costs a fraction of a second, so only what uses `module` pays it.
-const _MODULE_INIT_SH = "{ type module >/dev/null 2>&1 || { [ -r /etc/profile ] && . /etc/profile >/dev/null 2>&1 ; } ; true ; }"
+# `module` is missing. It costs a fraction of a second, so only what uses `module` pays it. A profile
+# can set PATH from scratch, as a compute node's does, so the PATH from before it stays in front.
+const _MODULE_INIT_SH = raw"""{ type module >/dev/null 2>&1 || { _slate_profile="${SLATE_PROFILE:-/etc/profile}"; [ -r "$_slate_profile" ] && { _slate_path=$PATH; . "$_slate_profile" >/dev/null 2>&1; export PATH="$_slate_path:$PATH"; } ; } ; true ; }"""
 
 # The loaded modules, or nothing on a site without a module system. Asked of the shell first: the
 # error a missing `module` prints names the shell's path, which differs between the login node and a

@@ -190,6 +190,15 @@ const RE = KaimonSlate.ReportEngine
             @test !occursin(RE._MODULE_INIT_SH, RE.guarded_prologue("export X=1"))
             ok, out, _ = run_sh(RE._MODULE_INIT_SH * " && echo ran")
             @test ok && strip(out) == "ran"
+            # A profile that sets PATH from scratch, as a compute node's does, keeps the PATH from
+            # before it in front, so the Julia put there is still found.
+            mktempdir() do d
+                prof = joinpath(d, "profile")
+                write(prof, "PATH=/usr/bin:/bin\nmodule() { echo module \"\$@\"; }\n")
+                ok, out, _ = run_sh("export SLATE_PROFILE='$prof'; PATH='$d/jl':\$PATH; " *
+                                    RE._MODULE_INIT_SH * " && type module >/dev/null && echo \"\$PATH\"")
+                @test ok && startswith(strip(out), "$d/jl:")
+            end
         end
 
         @testset "a worker launch that exits leaves its exit code in the log" begin
