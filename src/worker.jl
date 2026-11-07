@@ -2067,40 +2067,8 @@ function __slate_macroexpand(; cells::Dict = Dict{String,Any}())
     return out
 end
 
-"The worker project's direct dependencies as `{name, version, uuid, source, origin}` (for eager docs
-auto-index + the package viewer). `source` = \"registry\" | \"path\" (a dev'd local checkout) | \"git\"
-(added from a URL); `origin` carries the path or `url#rev` for the non-registry ones — so the UI can flag
-that a dep points at something machine-specific rather than a pinned registry release."
-function __slate_project_deps()
-    out = Dict{String,Any}[]
-    try
-        proj = Pkg.project()
-        info = Pkg.dependencies()
-        for (name, uuid) in proj.dependencies
-            pi = get(info, uuid, nothing)
-            ver = (pi === nothing || pi.version === nothing) ? "" : string(pi.version)
-            source = "registry"; origin = ""
-            if pi !== nothing
-                try
-                    if getfield(pi, :is_tracking_path)
-                        source = "path"; origin = String(something(getfield(pi, :source), ""))
-                    elseif getfield(pi, :is_tracking_repo)
-                        source = "git"
-                        url = ""; rev = ""
-                        try; url = String(something(getfield(pi, :git_source), "")); catch; end
-                        try; rev = String(something(getfield(pi, :git_revision), "")); catch; end
-                        origin = isempty(rev) ? url : (isempty(url) ? rev : url * "#" * rev)
-                    end
-                catch
-                end
-            end
-            push!(out, Dict{String,Any}("name" => name, "version" => ver, "uuid" => string(uuid),
-                                        "source" => source, "origin" => origin))
-        end
-    catch
-    end
-    return out
-end
+"The worker project's direct dependencies, as `_project_deps` (pkg_ops.jl) reads them."
+__slate_project_deps() = _project_deps()
 
 "Read a project's direct deps as `[{name, version, uuid, source, origin}]`, in the shape
 `__slate_project_deps` gives. Versions and sources come from whichever manifest resolves that project
@@ -2274,39 +2242,9 @@ end
 # `slate_pkg` / the package pane: `_pkg_apply` (pkg_ops.jl), shared with the in-process kernel.
 __slate_pkg(op, name) = _pkg_apply(op, name)
 
-"""
-    _same_registry(reg, url) -> Bool
-
-Does an installed registry point at `url`? Compared on `repo` (the only field that carries it),
-ignoring a trailing `.git` and case, so the http/ssh spelling a user pastes still matches.
-"""
-function _same_registry(reg, url::AbstractString)
-    repo = try; something(reg.repo, ""); catch; ""; end
-    norm(s) = lowercase(rstrip(replace(String(s), r"\.git$" => ""), '/'))
-    return !isempty(repo) && norm(repo) == norm(url)
-end
-
-"Install a package registry into THIS worker's depot — the depot the notebook actually resolves
-against, which for a remote region is not the hub's. Idempotent: an already-installed registry
-(matched by url or by name) reports success without touching anything. Returns `{ok, message}`."
-function __slate_registry_add(url)
-    u = String(url)
-    isempty(strip(u)) && return Dict{String,Any}("ok" => false, "message" => "no registry url")
-    want = basename(rstrip(replace(u, r"\.git$" => ""), '/'))
-    try
-        for r in Pkg.Registry.reachable_registries()
-            # `repo`, not `url`: a `RegistryInstance` has no `url` field, and reading one throws a
-            # FieldError that surfaces as "could not add the registry" — the failure only appears on
-            # a machine that does NOT already have it, which is exactly the machine this runs for.
-            (_same_registry(r, u) || r.name == want) &&
-                return Dict{String,Any}("ok" => true, "message" => "registry $(r.name) already installed")
-        end
-        Pkg.Registry.add(Pkg.RegistrySpec(; url = u))
-        return Dict{String,Any}("ok" => true, "message" => "added registry $want")
-    catch e
-        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
-    end
-end
+"Install a package registry into THIS worker's depot, the one the notebook resolves against (for a
+remote region, not the hub's). See `_registry_add` (pkg_ops.jl)."
+__slate_registry_add(url) = _registry_add(url)
 
 "Add/remove package(s) in the notebook's PARENT PROJECT (shared) rather than its own env, then
 re-resolve the active notebook env so the change is visible. `parent` is the parent project dir.

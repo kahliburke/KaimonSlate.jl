@@ -19,6 +19,11 @@ module CatalogUnderTest
     # Stubs for the two things the service layer calls into that belong to the server proper.
     struct InProcessKernel end
     _notebook_adds(nb) = nb
+    # The engine's package helpers, which the catalog shares with the kernels (pkg_ops.jl).
+    module ReportEngine
+        import Pkg
+        include("../src/pkg_ops.jl")
+    end
     include("../src/server_catalog.jl")
 end
 const C = CatalogUnderTest
@@ -225,7 +230,7 @@ end
     @test !hasfield(typeof(r), :url)
 
     # The comparison tolerates the spellings a user actually pastes.
-    same = C._same_registry
+    same = C.ReportEngine._same_registry
     fake = (name = "X", repo = "https://github.com/o/R.git")
     @test same(fake, "https://github.com/o/R")
     @test same(fake, "https://github.com/o/R.git")

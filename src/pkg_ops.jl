@@ -75,3 +75,76 @@ function _pkg_apply(op, name)
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end
 end
+
+"""
+    _same_registry(reg, url) -> Bool
+
+Does an installed registry point at `url`? Compared on `repo`, which is the only field carrying it:
+a `RegistryInstance` has NO `url` field, and reading one throws a `FieldError` that surfaces to the
+user as "could not add the registry". That failure appears only on a machine which does not already
+have the registry — precisely the machine the add path exists for.
+
+Trailing `.git`, a trailing slash and case are all ignored, so the spelling a user pastes matches.
+"""
+function _same_registry(reg, url::AbstractString)
+    repo = try; something(reg.repo, ""); catch; ""; end
+    norm(s) = lowercase(rstrip(replace(String(s), r"\.git$" => ""), '/'))
+    return !isempty(repo) && norm(repo) == norm(url)
+end
+
+"The active project's direct dependencies as `{name, version, uuid, source, origin}` (for eager docs
+auto-index + the package viewer). `source` = \"registry\" | \"path\" (a dev'd local checkout) | \"git\"
+(added from a URL); `origin` carries the path or `url#rev` for the non-registry ones — so the UI can flag
+that a dep points at something machine-specific rather than a pinned registry release."
+function _project_deps()
+    out = Dict{String,Any}[]
+    try
+        proj = Pkg.project()
+        info = Pkg.dependencies()
+        for (name, uuid) in proj.dependencies
+            pi = get(info, uuid, nothing)
+            ver = (pi === nothing || pi.version === nothing) ? "" : string(pi.version)
+            source = "registry"; origin = ""
+            if pi !== nothing
+                try
+                    if getfield(pi, :is_tracking_path)
+                        source = "path"; origin = String(something(getfield(pi, :source), ""))
+                    elseif getfield(pi, :is_tracking_repo)
+                        source = "git"
+                        url = ""; rev = ""
+                        try; url = String(something(getfield(pi, :git_source), "")); catch; end
+                        try; rev = String(something(getfield(pi, :git_revision), "")); catch; end
+                        origin = isempty(rev) ? url : (isempty(url) ? rev : url * "#" * rev)
+                    end
+                catch
+                end
+            end
+            push!(out, Dict{String,Any}("name" => name, "version" => ver, "uuid" => string(uuid),
+                                        "source" => source, "origin" => origin))
+        end
+    catch
+    end
+    return out
+end
+
+"Install a package registry into this process's depot. It runs in the kernel rather than the hub
+because a notebook on a remote region resolves against the remote depot. Idempotent: an already-installed registry
+(matched by url or by name) reports success without touching anything. Returns `{ok, message}`."
+function _registry_add(url)
+    u = String(url)
+    isempty(strip(u)) && return Dict{String,Any}("ok" => false, "message" => "no registry url")
+    want = basename(rstrip(replace(u, r"\.git$" => ""), '/'))
+    try
+        for r in Pkg.Registry.reachable_registries()
+            # `repo`, not `url`: a `RegistryInstance` has no `url` field, and reading one throws a
+            # FieldError that surfaces as "could not add the registry" — the failure only appears on
+            # a machine that does NOT already have it, which is exactly the machine this runs for.
+            (_same_registry(r, u) || r.name == want) &&
+                return Dict{String,Any}("ok" => true, "message" => "registry $(r.name) already installed")
+        end
+        Pkg.Registry.add(Pkg.RegistrySpec(; url = u))
+        return Dict{String,Any}("ok" => true, "message" => "added registry $want")
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end

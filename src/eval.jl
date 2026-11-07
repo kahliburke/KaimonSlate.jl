@@ -779,23 +779,6 @@ function macroexpand_cells(::InProcessKernel, report::Report, srcs::AbstractDict
     return out
 end
 
-"The in-process kernel's own active project's direct deps as `{name, version, uuid}` — the
-same project `pkg_op` mutates. Mirrors the gate worker's `__slate_project_deps`."
-function _active_project_deps()
-    out = Dict{String,Any}[]
-    try
-        proj = Pkg.project()
-        info = Pkg.dependencies()
-        for (name, uuid) in proj.dependencies
-            pi = get(info, uuid, nothing)
-            ver = (pi === nothing || pi.version === nothing) ? "" : string(pi.version)
-            push!(out, Dict{String,Any}("name" => name, "version" => ver, "uuid" => string(uuid)))
-        end
-    catch
-    end
-    return out
-end
-
 # The in-process kernel's dependency baseline — whatever was already in the active project
 # when the process started, i.e. the running app's OWN footprint (KaimonSlate + its deps
 # standalone, or Kaimon + its deps as an extension). Captured once (KaimonSlate's `__init__`,
@@ -824,7 +807,7 @@ reads the notebook's own env, under the same scope swap a cell runs in — so wh
 indexed is what the notebook can actually `using`, not what the hub happens to carry.
 """
 project_deps(k::InProcessKernel, ::Report) = _in_notebook_env(k) do
-    _active_project_deps()
+    _project_deps()
 end
 
 # A server-opened notebook always has an env of its own (`_select_kernel` materialises it), so `own`
@@ -842,7 +825,7 @@ function env_info(k::InProcessKernel, ::Report)
         # No env of its own yet (base mode). The only notebook-specific packages are then whatever
         # was added to the HOST project at runtime, which the startup baseline isolates.
         base = _INPROCESS_BASE_DEPS[]
-        deps = filter(d -> !(string(get(d, "name", "")) in base), _active_project_deps())
+        deps = filter(d -> !(string(get(d, "name", "")) in base), _project_deps())
         own = (path = dirname(Pkg.project().path), name = "", deps = deps)
     end
     return (notebook = own, parent = _project_group(k.projectdir))
@@ -997,22 +980,7 @@ It has to run kernel-side rather than in the hub: a notebook on a remote region 
 the REMOTE depot, so adding the registry in the hub's depot would leave the install still failing.
 Adding a registry that's already present is a no-op, not an error. Returns `{ok, message}`.
 """
-function registry_add(::InProcessKernel, ::Report, url::AbstractString)
-    try
-        # `repo`, not `url` — a `RegistryInstance` has no `url` field and reading one throws.
-        want = basename(rstrip(replace(String(url), r"\.git$" => ""), '/'))
-        norm(s) = lowercase(rstrip(replace(String(s), r"\.git$" => ""), '/'))
-        already = any(Pkg.Registry.reachable_registries()) do r
-            repo = try; something(r.repo, ""); catch; ""; end
-            (!isempty(repo) && norm(repo) == norm(url)) || r.name == want
-        end
-        already && return Dict{String,Any}("ok" => true, "message" => "registry already installed")
-        Pkg.Registry.add(Pkg.RegistrySpec(; url = String(url)))
-        return Dict{String,Any}("ok" => true, "message" => "registry added")
-    catch e
-        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
-    end
-end
+registry_add(::InProcessKernel, ::Report, url::AbstractString) = _registry_add(url)
 
 """
     eval_cell!(report, cell, kernel=InProcessKernel()) -> Cell
