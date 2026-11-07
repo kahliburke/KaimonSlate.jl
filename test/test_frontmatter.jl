@@ -420,6 +420,12 @@ x = 1
         docs2 = NS._read_site_manifest(d)["docs"]
         @test count(x -> String(get(x, "slug", "")) == "alpha", docs2) == 1
         @test occursin("Alpha v2", read(joinpath(d, "alpha", "index.html"), String))
+        # The index re-renders from the manifest alone, with no notebook.
+        rm(joinpath(d, "index.html"))
+        @test NS.rewrite_site_index!(d) === nothing
+        idx2 = read(joinpath(d, "index.html"), String)
+        @test occursin("href=\"alpha/\"", idx2) && occursin("href=\"beta/\"", idx2)
+        @test NS.rewrite_site_index!(joinpath(d, "missing")) === nothing && !isdir(joinpath(d, "missing"))
     end
 
     # Local site host: export into a persistent named site (served under /sites/<name>/), and the

@@ -4986,11 +4986,7 @@ end
 # (Doc SUB-pages still bake their own chrome, so those refresh only when their notebook is re-exported.)
 function rewrite_site_index!(dir::AbstractString)
     isdir(dir) || return nothing
-    man = _read_site_manifest(dir)
-    docs = get(man, "docs", Any[])
-    htmpl = joinpath(dir, ".slate-home.html")
-    write(joinpath(dir, "index.html"),
-          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(man))
+    _rewrite_index!(dir, _read_site_manifest(dir))
     return nothing
 end
 
