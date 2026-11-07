@@ -5211,19 +5211,30 @@ function reorder_site!(name::AbstractString, ordering)
     return (; ok = true, docCount = length(docs))
 end
 
-# The docs on `repo`'s published site (manifest entries incl. section/order) — for the manager's
-# reorder view. `[]` when unpublished/unreachable.
+# A site manifest's docs as the UI lists them. `order` adds the `section`/`order` the reorder view edits.
+function _site_doc_rows(manifest; order::Bool = false)
+    rows = Dict{String,Any}[]
+    for d in get(manifest, "docs", Any[])
+        d isa AbstractDict || continue
+        r = Dict{String,Any}("slug" => String(get(d, "slug", "")),
+                             "title" => String(get(d, "title", get(d, "slug", ""))),
+                             "date" => String(get(d, "date", "")))
+        if order
+            r["section"] = String(get(d, "section", get(d, "series", "")))
+            r["order"] = get(d, "order", nothing)
+        end
+        push!(rows, r)
+    end
+    return rows
+end
+
+# The docs on `repo`'s published site — for the manager's reorder view. `[]` when unpublished/unreachable.
 function published_site_docs(repo::AbstractString)
-    gh = Sys.which("gh"); gh === nothing && return Any[]
+    gh = Sys.which("gh"); gh === nothing && return Dict{String,Any}[]
     # Same owner/name guard the other gh-api paths use — keep `repo` from reaching other API routes.
-    occursin(r"^[\w.-]+/[\w.-]+$", String(repo)) || return Any[]
-    m = _fetch_published_manifest(gh, repo); m === nothing && return Any[]
-    return Any[Dict{String,Any}("slug" => String(get(d, "slug", "")),
-                                "title" => String(get(d, "title", get(d, "slug", ""))),
-                                "date" => String(get(d, "date", "")),
-                                "section" => String(get(d, "section", get(d, "series", ""))),
-                                "order" => get(d, "order", nothing))
-               for d in get(m, "docs", Any[]) if d isa AbstractDict]
+    occursin(r"^[\w.-]+/[\w.-]+$", String(repo)) || return Dict{String,Any}[]
+    m = _fetch_published_manifest(gh, repo); m === nothing && return Dict{String,Any}[]
+    return _site_doc_rows(m; order = true)
 end
 
 """
@@ -5342,15 +5353,6 @@ function deploy_dir_to_gh_pages(repo::AbstractString, dir::AbstractString; priva
     end
 end
 
-# The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.
-function _existing_site_docs(gh, repo::AbstractString)
-    m = _fetch_published_manifest(gh, repo); m === nothing && return Dict{String,Any}[]
-    return [Dict{String,Any}("slug" => String(get(d, "slug", "")),
-                             "title" => String(get(d, "title", get(d, "slug", ""))),
-                             "date" => String(get(d, "date", "")))
-            for d in get(m, "docs", Any[]) if d isa AbstractDict]
-end
-
 """
     publish_preflight(repo) -> NamedTuple
 
@@ -5366,7 +5368,8 @@ function publish_preflight(repo::AbstractString)
     vis = try; strip(read(pipeline(`$gh repo view $repo --json visibility -q .visibility`; stderr = devnull), String)); catch; ""; end
     pageurl = try; strip(read(pipeline(`$gh api repos/$repo/pages -q .html_url`; stderr = devnull), String)); catch; ""; end
     hasGhPages = _gh_ok(`$gh api repos/$repo/branches/gh-pages`)
-    docs = hasGhPages ? _existing_site_docs(gh, repo) : Dict{String,Any}[]   # a Slate SITE's existing documents
+    m = hasGhPages ? _fetch_published_manifest(gh, repo) : nothing          # a Slate SITE's existing documents
+    docs = m === nothing ? Dict{String,Any}[] : _site_doc_rows(m)
     return (; gh = true, valid = true, exists = true, visibility = vis,
             hasGhPages, pagesUrl = pageurl, docs)
 end

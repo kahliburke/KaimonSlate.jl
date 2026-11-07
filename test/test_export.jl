@@ -1048,6 +1048,22 @@ end
     @test !haskey(docs[3], "section") && !haskey(docs[3], "order")     # unmatched doc untouched
 end
 
+@testset "_site_doc_rows lists manifest docs, with section/order for the reorder view" begin
+    m = Dict{String,Any}("docs" => Any[
+        Dict{String,Any}("slug" => "a", "title" => "A", "date" => "2026-01-01", "section" => "Intro",
+                         "order" => 2.0, "image" => "a/og.png"),
+        Dict{String,Any}("slug" => "b", "series" => "Optics"),
+        "not a doc"])
+    rows = NS._site_doc_rows(m)
+    @test rows == [Dict{String,Any}("slug" => "a", "title" => "A", "date" => "2026-01-01"),
+                   Dict{String,Any}("slug" => "b", "title" => "b", "date" => "")]   # title falls back to slug
+    ord = NS._site_doc_rows(m; order = true)
+    @test ord[1]["section"] == "Intro" && ord[1]["order"] == 2.0
+    @test ord[2]["section"] == "Optics" && ord[2]["order"] === nothing           # series stands in
+    @test isempty(NS._site_doc_rows(Dict{String,Any}()))
+    @test isempty(NS.published_site_docs("not a repo"))                           # guard, no gh call
+end
+
 @testset "_split_region_csv strips, drops empties, dedups in order" begin
     @test NS._split_region_csv("east, west , , east ,north") == ["east", "west", "north"]
     @test NS._split_region_csv("") == String[]
