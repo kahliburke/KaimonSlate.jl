@@ -219,13 +219,18 @@ async function formatCells(ids) {
     const v = editors[id];
     if (v) v.dispatch({ selection: { anchor: _atNonWs(v.state.doc.toString(), marks[id]) } });
   }
-  const bad = Object.entries(r.failed || {});
+  // Failures in notebook order, so a click on the toast goes to the first one in the document.
+  const order = cellIds();
+  const bad = Object.entries(r.failed || {}).sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
   const name = _FMT_NAMES[r.formatter] || r.formatter;
   const msg = bad.length === 1 ? (bad[0][0] ? `${bad[0][0]} not formatted: ${bad[0][1]}` : bad[0][1])
-            : bad.length ? `${bad.length} cells not formatted: they don't parse`
+            : bad.length ? `${bad.length} cells not formatted, first ${bad[0][0]}: ${bad[0][1]}`
             : n ? `Formatted ${n} ${n === 1 ? 'cell' : 'cells'} (${name})` + (undoable ? ' · ⌘Z to undo' : '')
             : 'Already formatted';
-  window.toast && window.toast(msg, bad.length ? 5000 : 2500);
+  const [badId, why] = bad.length ? bad[0] : ['', ''];
+  const line = +((/^line (\d+):/.exec(why) || [])[1] || 1);
+  const go = badId && window.jumpToCellLine ? () => window.jumpToCellLine(badId, line) : null;
+  window.toast && window.toast(msg, bad.length ? 8000 : 2500, '', go);
 }
 window.formatCells = formatCells;
 const _FMT_NAMES = { runic: 'Runic', fatou: 'Fatou' };

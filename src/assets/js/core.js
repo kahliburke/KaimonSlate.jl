@@ -32,14 +32,20 @@ window.kindInfo = kindInfo;
 let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '200', 10) || 0);
 let lastVersion = -1;
 
-// Lightweight transient notification (bottom-right corner); stacks, auto-dismisses.
-function toast(msg, ms = 4500, kind = '') {
+// Lightweight transient notification (upper-left corner); stacks, auto-dismisses. `onClick`, when
+// given, makes the toast clickable: it runs and the toast goes.
+function toast(msg, ms = 4500, kind = '', onClick = null) {
   let host = document.getElementById('toasts');
   if (!host) { host = document.createElement('div'); host.id = 'toasts'; document.body.appendChild(host); }
   const t = document.createElement('div'); t.className = 'toast' + (kind ? ' ' + kind : ''); t.textContent = msg;
+  const dismiss = () => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); };
+  if (typeof onClick === 'function') {
+    t.classList.add('act');
+    t.addEventListener('click', () => { dismiss(); onClick(); });
+  }
   host.appendChild(t);
   requestAnimationFrame(() => t.classList.add('show'));
-  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, ms);
+  setTimeout(dismiss, ms);
 }
 
 const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-click to edit</em>';
