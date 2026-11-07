@@ -8,10 +8,15 @@
 # The notebook's own environment is not prepared here. It changes during a session, so it stays with
 # provisioning, which a matching fingerprint makes free.
 
+# A site defines `module` in its login profile. Bash running an ssh command reads that profile through
+# `~/.bashrc`; zsh does not, and neither does a bash that zsh started, so the profile is read here when
+# `module` is missing. It costs a fraction of a second, so only what uses `module` pays it.
+const _MODULE_INIT_SH = "{ type module >/dev/null 2>&1 || { [ -r /etc/profile ] && . /etc/profile >/dev/null 2>&1 ; } ; true ; }"
+
 # The loaded modules, or nothing on a site without a module system. Asked of the shell first: the
 # error a missing `module` prints names the shell's path, which differs between the login node and a
 # compute node, and a stamp made of it reads as a changed site on every start.
-const _MODULES_LINE = raw"echo \"modules=$(type module >/dev/null 2>&1 && module -t list 2>&1 | grep -v ':$' | sort | tr '\n' ' ')\""
+const _MODULES_LINE = _MODULE_INIT_SH * raw"; echo \"modules=$(type module >/dev/null 2>&1 && module -t list 2>&1 | grep -v ':$' | sort | tr '\n' ' ')\""
 
 # Whether Julia's preferences on this site tell CUDA.jl to use the system CUDA toolkit: some
 # directory on JULIA_LOAD_PATH holds a project whose `[preferences.CUDA_Runtime_jll]` sets
@@ -24,7 +29,7 @@ echo "cudalocal=$(for d in $(echo "$JULIA_LOAD_PATH" | tr ':' ' '); do for f in 
 # Each loaded CUDA module by name, with whether the site lets it be unloaded: `ok`, or `fails` when
 # another loaded module requires it. The unload is tried in a subshell, so the probe keeps every
 # module.
-const _CUDAMODS_LINE = String(strip(raw"""
+const _CUDAMODS_LINE = _MODULE_INIT_SH * "; " * String(strip(raw"""
 echo "cudamods=$(type module >/dev/null 2>&1 && for m in $(module -t list 2>&1 | grep -iE '^(cudatoolkit|cuda)(/|$)'); do n=${m%%/*}; if ( module unload "$n" >/dev/null 2>&1 ); then v=ok; else v=fails; fi; printf '%s:%s ' "$n" "$v"; done)"
 """))
 

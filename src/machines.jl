@@ -539,7 +539,8 @@ function guarded_prologue(prologue::AbstractString)
     p = String(strip(prologue))
     isempty(p) && return ""
     q = Sweep.shq(p)
-    return "{ { " * p * " ; } || { echo \"slate: the shell setup before Julia failed (exit \$?):\" " * q * " >&2; false; } ; } && " *
+    init = occursin(r"\bmodule\b", p) ? _MODULE_INIT_SH * " && " : ""
+    return init * "{ { " * p * " ; } || { echo \"slate: the shell setup before Julia failed (exit \$?):\" " * q * " >&2; false; } ; } && " *
            "{ [ -z \"\${JULIA_LOAD_PATH+x}\" ] || [ -n \"\$JULIA_LOAD_PATH\" ] || " *
            "{ echo \"slate: the shell setup before Julia left JULIA_LOAD_PATH set but empty, so Julia finds no packages:\" " *
            q * " >&2; false; } ; } && "

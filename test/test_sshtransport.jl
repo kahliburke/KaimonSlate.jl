@@ -174,6 +174,20 @@ end
     end
 end
 
+@testset "a command written for bash runs the same under another login shell" begin
+    # The server parses a command in the account's login shell. Under zsh an unmatched glob is an
+    # error, so a session whose login shell is not bash hands commands to bash.
+    ep = T.Endpoint("shell-test", "shell-test", 22, "u", String[], "", false, "")
+    s = T.Session(ep, Cint(-1), C_NULL, Channel{Any}(1), nothing, T.Prompter("shell-test"), true, "", T.Fwd[])
+    cmd = "ls /nonexistent-slate-test/* 2>/dev/null; x='a b'; v=abc/def; echo \"\$x\" \"it's\" \${v%%/*}"
+    @test T._as_sent(s, cmd) == cmd                     # a bash login shell gets it as written
+    s.in_bash = true
+    want = read(`bash -c $cmd`, String)
+    @test want == "a b it's abc\n"
+    zsh = Sys.which("zsh")
+    zsh === nothing || @test read(`$zsh -c $(T._as_sent(s, cmd))`, String) == want
+end
+
 @testset "a server refusing channels with none of ours open ends the session" begin
     # A server that counts sessions this side has already let go refuses every command from then on, while
     # the forwards on the connection keep working. A minute of that, with no channel of ours open, ends the

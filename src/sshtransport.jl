@@ -286,11 +286,35 @@ mutable struct Session
     # not closed yet answers EAGAIN and frees nothing, so the channel waits here and the pump frees it
     # once the close has gone through (`_free_channel!`). Under `lk`.
     dying::Vector{Ptr{Cvoid}}
+    # The server runs a command in the account's login shell. Commands here are written for bash, so
+    # when that shell is another one (zsh, whose unmatched glob is an error) and bash is installed,
+    # each command is handed to bash. Set once signed in (`_note_login_shell!`).
+    in_bash::Bool
 end
 Session(ep, fd, ptr, req, owner, prompter, alive, err, fwds; bulk::Bool = false) =
     Session(ep, fd, ptr, req, owner, prompter, alive, err, fwds, ReentrantLock(), ReentrantLock(), Cint(0), "",
             Base.Semaphore(_max_channels()), Threads.Atomic{Int}(0), Channel{Any}(32),
-            Base.Event(true), Base.Event(true), Threads.Atomic{Int}(0), nothing, bulk, Ptr{Cvoid}[])
+            Base.Event(true), Base.Event(true), Threads.Atomic{Int}(0), nothing, bulk, Ptr{Cvoid}[], false)
+
+# `cmd` as the server should be sent it: as it is under a bash login shell, else as bash's argument.
+_as_sent(s::Session, cmd::AbstractString) =
+    s.in_bash ? "exec bash -c '" * replace(cmd, "'" => "'\\''") * "'" : String(cmd)
+
+# Ask the login shell what it is. The probe parses in sh, bash and zsh alike; a shell it fails in is
+# left to run commands itself. The last line is read, since a login file may print before it.
+function _note_login_shell!(s::Session)
+    s.in_bash = false
+    ok, out, _ = _exec(s, "printf '%s|' \"\${BASH_VERSION:-}\"; command -v bash"; timeout = 15.0)
+    ok || return nothing
+    lines = split(strip(out), '\n')
+    isempty(lines) && return nothing
+    parts = split(last(lines), '|'; limit = 2)
+    length(parts) == 2 || return nothing
+    ver, path = parts
+    s.in_bash = isempty(ver) && !isempty(strip(path))
+    s.in_bash && !s.bulk && @info "ssh: $(s.ep.alias) login shell is not bash; commands run in $(strip(path))"
+    return nothing
+end
 
 # Free a channel now, or once its close has gone through. Under `s.lk`.
 function _free_channel!(s::Session, ch::Ptr{Cvoid})
@@ -941,7 +965,7 @@ function _open_started(s::Session, cmd::AbstractString; merge::Bool)
         # it waits until stdout ends, which holds back a command's progress (Pkg reports on stderr).
         merge && _again(s, () -> ccall((:libssh2_channel_handle_extended_data2, LIB), Cint, (Ptr{Cvoid}, Cint),
                                        ch, EXTENDED_DATA_MERGE))
-        rc, m = _start(s, ch, cmd)
+        rc, m = _start(s, ch, _as_sent(s, cmd))
         rc == 0 && (_note_open!(s, ch, cmd); return (ch, ""))
         lock(() -> _free_channel!(s, ch), s.lk)
         why = "exec: " * m * " (libssh2 $rc)"
@@ -1377,6 +1401,7 @@ function _open!(s::Session, ask)
     end
     _authed(s) || error("$(s.ep.alias): authentication did not complete")
     s.alive = true
+    Base.acquire(() -> _note_login_shell!(s), s.slots)
     s.bulk || errormonitor(Threads.@spawn _announce_connect(s.ep.alias))
     # Which login node the session landed on (an address can be shared by several) and the pid of its sshd there:
     # where to look for what the session holds when the server refuses it a channel

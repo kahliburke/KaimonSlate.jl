@@ -184,6 +184,12 @@ const RE = KaimonSlate.ReportEngine
             @test !ok && isempty(out) && occursin("JULIA_LOAD_PATH set but empty", err)
             ok, out, _ = run_sh(RE.guarded_prologue("unset JULIA_LOAD_PATH") * "echo ran")
             @test ok && strip(out) == "ran"
+            # A prologue using `module` first reads the login profile when the shell lacks it, and a
+            # machine without a module system goes on as before.
+            @test startswith(RE.guarded_prologue("module load cuda"), RE._MODULE_INIT_SH)
+            @test !occursin(RE._MODULE_INIT_SH, RE.guarded_prologue("export X=1"))
+            ok, out, _ = run_sh(RE._MODULE_INIT_SH * " && echo ran")
+            @test ok && strip(out) == "ran"
         end
 
         @testset "a worker launch that exits leaves its exit code in the log" begin
