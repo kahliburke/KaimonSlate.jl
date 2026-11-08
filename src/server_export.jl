@@ -5780,11 +5780,19 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
                 println(io, "```\n", rstrip(plain(o.stdout)), "\n```\n")
             alt = haskey(fignum_of, c.id) ? string("Figure ", fignum_of[c.id]) : "figure"   # meaningful alt when a data-URI won't render
             imgs = 0
-            for ch in o.display
+            for (i, ch) in pairs(o.display)
+                # markdown right after a value's HTML, LaTeX or Slate display is that value's export
+                # form (capture.jl `_capture_export_markdown!`), written in place of the form it restates
+                restated = ch.mime in ReportRender._RESTATED_MIMES && i < length(o.display) &&
+                           o.display[i + 1].mime == "text/markdown"
                 if startswith(ch.mime, "image/")
                     println(io, "![", alt, "](data:", ch.mime, ";base64,", Base64.base64encode(ch.data), ")\n"); imgs += 1
+                elseif restated
+                    continue
                 elseif ch.mime == "text/latex"
                     println(io, "\$\$", strip(String(copy(ch.data))), "\$\$\n")
+                elseif ch.mime == "text/markdown"
+                    println(io, strip(String(copy(ch.data))), "\n")
                 end
             end
             (texts && imgs == 0 && isempty(o.display) && !isempty(strip(o.value_repr))) &&

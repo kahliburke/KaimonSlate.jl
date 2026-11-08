@@ -1905,6 +1905,21 @@ Base.show(io::IO, ::MIME"text/markdown", ::_MdRendered) = print(io, "**card**")
     @test !occursin("**card**", html) && !occursin("<strong>card</strong>", html)
 end
 
+# The markdown export prints that form in place of the HTML, and a markdown display as it is.
+@testset "markdown export writes an output's markdown form" begin
+    RE = KaimonSlate.ReportEngine
+    rep = RE.parse_report("#%% md id=t title\n# Cards\n\n#%% code id=c\ncard\n\n#%% code id=m\nnote\n")
+    chunk(m, s) = RE.MimeChunk(m, Vector{UInt8}(s))
+    out(display) = RE.CellOutput("", display, Any[], Any[], RE.BindSpec[], "", nothing, nothing, 1.0, Any[], "")
+    rep.cells[2].output = out([chunk("text/html", "<b>card</b>"), chunk("text/markdown", "**card**")])
+    rep.cells[3].output = out([chunk("text/markdown", "*note*")])
+    nb = NS.LiveNotebook("cards", "/tmp/cardstest.jl", rep, RE.InProcessKernel(), 1, String[],
+                         String[], ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                         Dict{String,String}())
+    md = NS.export_markdown(nb)
+    @test occursin("**card**", md) && !occursin("<b>card</b>", md) && occursin("*note*", md)
+end
+
 # The SCREEN half of the same story. KaTeX is configured for the bracket spellings, but CommonMark
 # reads `\(` / `\[` as escaped punctuation and drops the backslash, so by the time KaTeX ran there
 # was no delimiter left and the maths rendered as literal text. They have to be stashed like `$…$`.
