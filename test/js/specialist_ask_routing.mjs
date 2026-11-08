@@ -21,7 +21,7 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const jsdir = join(here, '..', '..', 'src', 'assets', 'js');
 const agent = readFileSync(join(jsdir, 'agent.js'), 'utf8');
-const dbg = readFileSync(join(jsdir, 'debugger.js'), 'utf8');
+const pane = readFileSync(join(jsdir, 'specpane.js'), 'utf8');
 
 const fails = [];
 const ok = (cond, what) => { if (!cond) fails.push(what); };
@@ -41,7 +41,7 @@ function sub(src, marker) {
 
 // What each surface does with a payload, reduced to "did it take it?".
 const CHAT = sub(agent, '(window.slateSpecialistSubs ||= []).push(p => {');
-const PANE = sub(dbg, '(window.slateSpecialistSubs ||= []).push((p) => {');
+const PANE = sub(pane, '(window.slateSpecialistSubs ||= []).push((p) => {');
 
 function route(payload, panes) {
   const seen = { chat: false, pane: false };
@@ -50,10 +50,9 @@ function route(payload, panes) {
   new Function('p', 'window', '_agentFinding', '_agentAsk', 'renderAgentMsgs', 'renderAsks',
                'agentMsgs', 'took', CHAT + '\n took.chat = true;')
     (payload, win, () => {}, () => { seen.chat = true; }, () => {}, () => {}, [], seen);
-  new Function('p', 'window', 'DEBUG_ROLE', 'asks', 'specialist', 'took',
+  new Function('p', 'window', 'role', 'setAsks', 'asks', 'agent', 'took',
                PANE + '\n took.pane = true;')
-    (payload, win, 'debugger',
-     { value: [] }, { value: null }, seen);
+    (payload, win, 'debugger', () => {}, { value: [] }, { value: null }, seen);
   return seen;
 }
 
