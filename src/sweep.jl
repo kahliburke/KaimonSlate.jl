@@ -90,6 +90,32 @@ end
 "A grid from explicit rows, for a parameter set that is not a product."
 paramgrid(rows::AbstractVector) = collect(rows)
 
+# Fields a parameter carries for the reader only (`@sweep(…; labels = :chapter)`): a grouping, a
+# display name. They are removed before the unit is keyed and before it is shipped, so relabelling a
+# grid keeps every result, and a body cannot compute with a field its key does not cover. Hub-side
+# views (`r.params`, the results table, the card) keep them.
+_label_names(l) = l === nothing ? Symbol[] :
+                  l isa Union{Symbol,AbstractString} ? [Symbol(l)] : Symbol[Symbol(x) for x in l]
+
+function _without_labels(params::AbstractVector, labs::Vector{Symbol})
+    isempty(labs) && return params
+    out = map(params) do p
+        p isa NamedTuple ||
+            throw(ArgumentError("labels = $(Tuple(labs)) needs NamedTuple parameters, not $(typeof(p))"))
+        for l in labs
+            haskey(p, l) || throw(ArgumentError("label field `$l` is not in the parameter $p"))
+        end
+        Base.structdiff(p, NamedTuple{Tuple(labs)})
+    end
+    first_at = Dict{Any,Int}()
+    for (i, w) in enumerate(out)
+        j = get!(first_at, w, i)
+        j == i || throw(ArgumentError("parameters $j and $i differ only in their labels " *
+                                      "($(join(labs, ", "))), so they are the same unit"))
+    end
+    return out
+end
+
 # ── The environment task processes run in ────────────────────────────────────────────────────
 # Seeded from the notebook's PARENT project by the same policy the notebook fork and the remote
 # provisioner use, then instantiated once. Keyed by the parent's fingerprint, so repeated sweeps
@@ -5752,7 +5778,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                    setup_src::AbstractString = "", captures::AbstractDict = Dict{Symbol,Any}(),
                    submit::Bool = false, cap::Integer = 0, register = nothing, probe::Bool = true,
                    resources = nothing, plot = nothing, refresh = nothing, cell = "",
-                   summary_src::AbstractString = "", lazy::Bool = false,
+                   summary_src::AbstractString = "", lazy::Bool = false, labels = nothing,
                    attrs::AbstractDict = Dict{String,String}())
     # Resource overrides do NOT enter the key. Re-running the same body with a longer walltime is
     # the same sweep resumed, not a different one — otherwise the fix for a walltime kill would
@@ -5773,7 +5799,9 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     root = store_root(target)
     mkpath(root)
     key = sweep_key(body_src, setup_src, captures, env_key(target), summary_src)
-    keys = [shard_key(key, prm) for prm in params]
+    # What the units compute with: the parameters less their labels. Keys and descriptors use this.
+    work = _without_labels(params, _label_names(labels))
+    keys = [shard_key(key, prm) for prm in work]
     run = run_key(key, keys)
 
     # (Re)write the descriptors. Content-addressed, so doing this every run is nearly free: the
@@ -5789,7 +5817,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         ck = chunk_key(run, ci)
         SlateTask.write_chunk!(root, ck; fn_src = body_src, setup_src = setup_src,
                                captures = Dict(String(k) => v for (k, v) in captures),
-                               params = params[lo:hi], keys = keys[lo:hi],
+                               params = work[lo:hi], keys = keys[lo:hi],
                                summary_src = summary_src, lazy = lazy, landed = landed)
         push!(chunks, ck)
     end
@@ -6222,6 +6250,10 @@ The body travels as SOURCE, so it must be self-contained apart from:
 
 Re-running the cell is a reconcile: whatever has landed is kept, only what is missing is submitted.
 Editing the body makes it a different sweep.
+
+`labels = :chapter` (or a list of names) marks fields of the parameter rows as display only. They
+stay in `r.params`, the results and the card, and are removed before a unit is keyed and shipped,
+so changing a label keeps every result and the body never sees it.
 """
 macro sweep(args...)
     # Without parentheses, `@sweep grid do p … end` reaches the macro as ONE `do` expression around
@@ -6285,6 +6317,7 @@ macro sweep(args...)
     res    = get(opts, :resources, nothing)
     plot   = get(opts, :plot, nothing)
     lazy   = get(opts, :lazy, false)
+    labels = get(opts, :labels, nothing)
     # Hold the rest of the grid back until a unit has landed. `false` sends every chunk in the first
     # reconcile, which is what a re-run of a body you have already watched work wants — and it is
     # also what makes a sweep need nothing local once it is submitted, since there is no second wave
@@ -6294,9 +6327,9 @@ macro sweep(args...)
     # quietly does nothing is worse than one that says so.
     script = get(opts, :script, nothing)
     for k in keys(opts)
-        k in (:setup, :cap, :submit, :resources, :plot, :summary, :lazy, :script, :probe) ||
+        k in (:setup, :cap, :submit, :resources, :plot, :summary, :lazy, :script, :probe, :labels) ||
             error("@sweep: unknown option `$k` " *
-                  "(accepted: setup, cap, submit, resources, plot, summary, lazy, script, probe)")
+                  "(accepted: setup, cap, submit, resources, plot, summary, lazy, script, probe, labels)")
     end
 
     # What the shard module needs before the body runs: the imports lifted out of the body, then
@@ -6360,7 +6393,7 @@ macro sweep(args...)
                            cap = $(esc(cap)), submit = $(esc(submit)), register = _reg,
                            probe = $(esc(probe)),
                            resources = $(esc(res)), plot = $(esc(plot)),
-                           summary_src = $sumsrc, lazy = $(esc(lazy)),
+                           summary_src = $sumsrc, lazy = $(esc(lazy)), labels = $(esc(labels)),
                            refresh = _refresh, cell = String(_cell), attrs = _attrs)
     end
 end

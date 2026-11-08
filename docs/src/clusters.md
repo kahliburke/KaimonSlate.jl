@@ -207,6 +207,7 @@ Written after the grid, as `key = value`. An unknown option is an error.
 | `setup = begin … end` | Definitions the body needs, written out. For a helper with no cell behind it. Part of the sweep's key. |
 | `script = "model.jl"` | A file of definitions, resolved next to the notebook like `@asset`. Its source travels with the sweep and is part of its key, so editing the file re-keys the sweep. |
 | `summary = expr` | Runs on the compute node over each unit's value and records the result for the chart. `summary = sum(abs2, v)` is read as `v -> sum(abs2, v)`. Use it when a unit's value is too large to record inline. |
+| `labels = :chapter` | Fields of the parameter rows that are for display only: a grouping, a name. They stay in `r.params`, the results and the card, and are left out of each unit's key and of what the body receives. Changing a label keeps every result. Takes one name or a list. |
 | `plot = f` | Your own chart: `f(rows)` returns an `echart(…)` or an option `Dict`, called over every unit in grid order, landed or not. `plot = false` shows no chart. |
 | `probe = false` | Sends the whole grid in the first submission. See below. |
 | `cap = n` | Refuses a submission of more than `n` chunks. |

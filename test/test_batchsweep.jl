@@ -1339,6 +1339,29 @@ end
         end
     end
 
+    @testset "label fields stay out of a unit's key and out of its body" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            rows = [(; x = 1, group = "a"), (; x = 2, group = "b")]
+            r = Sweep.@sweep(rows, t; submit = false, labels = :group) do p
+                hasproperty(p, :group) ? -1 : p.x * 10
+            end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).ok == 2 && Sweep.load(r) == [10, 20]
+            @test r.params[1].group == "a"              # the reader's views keep them
+            # Relabelled: the same units, already landed.
+            r2 = Sweep.@sweep([(; x = 1, group = "z"), (; x = 2, group = "y")], t;
+                              submit = false, labels = [:group]) do p
+                hasproperty(p, :group) ? -1 : p.x * 10
+            end
+            @test r2.run == r.run && r2.keys == r.keys && r2.ok == 2 && r2.params[1].group == "z"
+            @test_throws ArgumentError Sweep.@sweep([(; x = 1, g = 1), (; x = 1, g = 2)], t;
+                                                    submit = false, labels = :g) do p; p.x; end
+            @test_throws ArgumentError Sweep.@sweep([(; x = 1)], t; submit = false, labels = :g) do p; p.x; end
+        end
+    end
+
     @testset "retry_failed! gives exhausted chunks their attempts back, like the card's Retry" begin
         mktempdir() do root
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
