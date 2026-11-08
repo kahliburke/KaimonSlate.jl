@@ -338,9 +338,12 @@
     return [
       cmSearch.highlightSelectionMatches(),
       // Overrides the fixed #99ff7780 green the extension ships, which ignores the editor theme.
+      // Shown only while the editor has focus: the matches describe a selection being worked on,
+      // and a cell left behind keeps its selection.
       EditorView.theme({
-        '.cm-selectionMatch': { backgroundColor: mix(20),
-                                outline: `1px solid ${mix(38)}`, borderRadius: '2px' },
+        '&.cm-focused .cm-selectionMatch': { backgroundColor: mix(20),
+                                             outline: `1px solid ${mix(38)}`, borderRadius: '2px' },
+        '&:not(.cm-focused) .cm-selectionMatch': { backgroundColor: 'transparent', outline: 'none' },
       }),
     ];
   };
