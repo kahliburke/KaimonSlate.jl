@@ -5245,6 +5245,11 @@ function _live_script(io, r::ShardedResult)
         // drawn. When the series change kind — a line becoming a heatmap once a second axis starts
         // varying — merging would leave both on screen, so that case replaces instead.
         var sig = sigOf(opt);
+        // No transitions: the option is re-applied on every poll, and an author's `plot =` that
+        // animates would replay its morph each time. Series settings win over the global one.
+        opt.animation = false;
+        (Array.isArray(opt.series) ? opt.series : opt.series ? [opt.series] : [])
+          .forEach(function(x){ if (x) x.animation = false; });
         try { chart.setOption(opt, { notMerge: sig !== chartSig, lazyUpdate: true }); } catch (e) {}
         chartSig = sig;
       }
