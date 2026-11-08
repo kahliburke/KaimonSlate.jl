@@ -4109,16 +4109,28 @@ body.slate-dragging .logv-body *, body.slate-dragging .swcfg-body * { pointer-ev
 .srec-mat-svg { display:block; border-radius:2px; border:1px solid var(--border); }
 .srec-mat-cap { font-family:'Cascadia Code',monospace; font-size:.68rem; color:var(--dim); white-space:nowrap; }
 .srec-mat:hover .srec-mat-svg { border-color:var(--accent); }
-/* The expanded view rides in a <template>, so it costs the page nothing until it is opened. */
-.srec-matovl { position:fixed; inset:0; z-index:9000; display:flex; align-items:center; justify-content:center;
-  background:rgba(0,0,0,.62); backdrop-filter:blur(3px); }
-.srec-matbox { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px;
-  max-width:92vw; max-height:92vh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.5); }
-.srec-matbox .srec-mat-svg { width:min(76vw, 620px); height:auto; }
-.srec-matbox .srec-matlabel { font-family:'Cascadia Code',monospace; font-size:.8rem; color:var(--text); margin-bottom:9px; }
-/* The stage holds the thumbnail first, then whatever `slate_matrix` sends back in its place. */
-.srec-matchart { width:min(76vw, 620px); height:min(70vh, 520px); }
-.srec-mattex { max-width:min(80vw, 760px); overflow:auto; }
+/* A cell output, full window (core.js `slateOutputView`): a chart, typeset math, or a record's matrix
+   field. The stage is the space the content is sized to fit. */
+.outview { position:fixed; inset:0; z-index:9000; display:flex; flex-direction:column;
+  background:rgba(0,0,0,.84); backdrop-filter:blur(4px); }
+.outview-bar { display:flex; align-items:center; gap:10px; padding:10px 14px; }
+.outview-label { flex:1; font-family:'Cascadia Code',monospace; font-size:.8rem; color:var(--text); }
+.outview-bar button { height:30px; min-width:30px; border:0; border-radius:6px; background:#fff2; color:#fff;
+  font:13px/1 system-ui,sans-serif; cursor:pointer; }
+.outview-bar button:hover { background:#fff4; }
+.outview-stage { flex:1; min-height:0; margin:0 3vw 4vh; display:flex; align-items:center; justify-content:center; overflow:auto; }
+.outview-chart { background:var(--bg2); border-radius:6px; }
+.outview-tex { display:inline-block; max-width:100%; color:var(--text); }
+.outview-tex .katex-display { margin:0; }
+/* The thumbnail's larger SVG, until the real render replaces it. */
+.outview-stage > .srec-mat-svg { width:auto; height:100%; max-width:100%; }
+/* The ⤢ that opens one, shown while the pointer is over the output. */
+.echarts > .echart, .disp.latex { position:relative; }
+.outexp { position:absolute; top:6px; right:6px; z-index:5; display:flex; align-items:center; justify-content:center;
+  height:24px; min-width:24px; padding:0 6px; border:0; border-radius:5px; background:#000a; color:#fff;
+  font:12px/1 system-ui,sans-serif; cursor:pointer; opacity:0; transition:opacity .2s; }
+.outexp:hover { background:#000d; }
+.echart:hover > .outexp, .disp.latex:hover > .outexp, .outexp:focus-visible { opacity:1; }
 
 /* Clicking a record field marks the source that produced it: a brief flash, then a quiet tint that
    stays until the next click. Kept clear of the error-line marks, which own the warm colours. */

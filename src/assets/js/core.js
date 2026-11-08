@@ -954,6 +954,7 @@ window.chartRuntime = {
   scripts(spec) { return spec && spec.requireScripts ? _ensureScripts(spec) : Promise.resolve(); },
   init(el, spec) { const inst = _initChart(el, spec); el.__inst = inst; return inst; },
   apply(el, inst, spec) {
+    el.__spec = spec;                               // what the full-window view rebuilds from
     _applySize(el, inst, spec);
     return _ensurePrereqs(spec)
       .then(() => _geoSafeSetOption(inst, spec))
@@ -2204,66 +2205,117 @@ document.addEventListener('click', e => {
   document.addEventListener('keydown', onKey);
 });
 
-// ── A record's matrix field, expanded ──────────────────────────────────────────────────────────
-// The field carries a small heat strip and, in a <template>, a larger one (record_display.jl).
-// Clicking lifts the larger SVG into an overlay. Delegated from the document so it keeps working
-// across Preact re-renders, and it reads only markup the worker already sent — no round-trip.
+// ── A cell output, full window ─────────────────────────────────────────────────────────────────
+// A chart or a typeset equation opens window-sized from the ⤢ button in its corner, and a record's
+// matrix field from its thumbnail. The large view is built again from the output's source (the
+// chart's spec, the TeX) rather than by scaling the small one, so a downsampled heatmap gets real
+// pixels per cell and the math stays sharp. Image outputs have their own view (imgzoom.js).
+function slateOutputView(label) {
+  const ovl = document.createElement('div');
+  ovl.className = 'outview';
+  ovl.setAttribute('role', 'dialog');
+  ovl.setAttribute('data-slate-keys', '');            // the notebook's command keys stay out (keymap.js)
+  ovl.innerHTML = '<div class="outview-bar"><span class="outview-label"></span>' +
+    '<button type="button" title="Close (Esc)">✕</button></div><div class="outview-stage"></div>';
+  const lab = ovl.querySelector('.outview-label'), stage = ovl.querySelector('.outview-stage');
+  lab.textContent = label || '';
+  const back = document.activeElement, cleanups = [];
+  const onKey = ev => { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); close(); } };
+  function close() {
+    if (!ovl.isConnected) return;
+    for (const f of cleanups) { try { f(); } catch (_) {} }
+    ovl.remove();
+    document.removeEventListener('keydown', onKey, true);
+    back && back.focus && back.focus({ preventScroll: true });
+  }
+  ovl.querySelector('.outview-bar button').addEventListener('click', close);
+  // Only the empty space closes: a chart in the view is interactive (tooltip, zoom, brush).
+  ovl.addEventListener('click', ev => { if (ev.target === ovl || ev.target === stage) close(); });
+  document.addEventListener('keydown', onKey, true);
+  document.body.appendChild(ovl);
+  return { stage, close, isOpen: () => ovl.isConnected, setLabel: t => { lab.textContent = t; },
+           onClose: f => cleanups.push(f) };
+}
+window.slateOutputView = slateOutputView;
+
+// Width over height when the spec fixes both, as a matrix heatmap does to keep the matrix's shape.
+function _fixedAspect(spec) {
+  const sz = (spec && spec.__size) || spec || {};
+  return typeof sz.width === 'number' && typeof sz.height === 'number' && sz.width > 0 && sz.height > 0
+    ? sz.width / sz.height : 0;
+}
+
+function _outviewChart(v, spec) {
+  const r = v.stage.getBoundingClientRect();
+  let w = r.width, h = r.height;
+  const a = _fixedAspect(spec);
+  if (a) { w = Math.min(w, h * a); h = w / a; }
+  const div = document.createElement('div');
+  div.className = 'outview-chart';
+  div.style.width = Math.floor(w) + 'px'; div.style.height = Math.floor(h) + 'px';
+  v.stage.replaceChildren(div);
+  let inst = null;
+  v.onClose(() => { if (inst) try { inst.dispose(); } catch (_) {} });
+  // A package-vendored lib must load before `init` (see `chartRuntime.scripts`).
+  window.chartRuntime.scripts(spec).then(() => {
+    if (!v.isOpen()) return;
+    inst = _initChart(div, spec);
+    return _ensurePrereqs(spec).then(() => v.isOpen() && _geoSafeSetOption(inst, spec));
+  }).catch(() => {});
+}
+
+function _outviewTex(v, tex) {
+  const d = document.createElement('div');
+  d.className = 'outview-tex';
+  v.stage.replaceChildren(d);
+  try { katex.render(String(tex).trim().replace(/^\$\$|\$\$$/g, ''), d, slateKatexOpts({ displayMode: true })); }
+  catch (_) { d.textContent = tex; return; }
+  // Typeset at the base size, then scale the font so the expression fills the window.
+  const r = v.stage.getBoundingClientRect();
+  const k = Math.min(r.width / d.scrollWidth, r.height / d.scrollHeight, 4);
+  if (k > 1) d.style.fontSize = (parseFloat(getComputedStyle(d).fontSize) * k * 0.92) + 'px';
+}
+
+const _cellIdOf = el => { const c = el.closest('[id^="cell-"]'); return c ? c.id.slice(5) : ''; };
+
+// The corner button, added on first hover. A chart's div is re-filled by ECharts on a re-init, and a
+// latex display by a re-render, so a button that went with them is made again.
+document.addEventListener('pointerover', e => {
+  const t = e.target && e.target.closest ? e.target.closest('.echarts > .echart, .disp.latex') : null;
+  if (!t || (t._outexp && t._outexp.isConnected) || t.closest('.outview')) return;
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'outexp'; b.title = 'Open full size'; b.textContent = '⤢';
+  b.addEventListener('pointerdown', ev => ev.stopPropagation());
+  b.addEventListener('click', ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    const v = slateOutputView(_cellIdOf(t));
+    if (t.classList.contains('echart')) t.__spec && _outviewChart(v, t.__spec);
+    else _outviewTex(v, t.getAttribute('data-tex') || '');
+  });
+  t.appendChild(b); t._outexp = b;
+}, true);
+
+// A record's matrix field: the thumbnail's larger SVG (record_display.jl, in a <template>) shows at
+// once, then the kernel that holds the value renders it with `slate_matrix`, the renderer a bare
+// matrix gets. Delegated from the document so it keeps working across Preact re-renders.
 document.addEventListener('click', e => {
   const host = e.target.closest && e.target.closest('.srec-mat-open');
   if (!host) return;
   const tpl = host.querySelector('template.srec-mat-full');
   if (!tpl) return;
   e.preventDefault(); e.stopPropagation();
-  const ovl = document.createElement('div');
-  ovl.className = 'srec-matovl';
-  const box = document.createElement('div');
-  box.className = 'srec-matbox';
-  const lab = document.createElement('div');
-  lab.className = 'srec-matlabel';
-  lab.textContent = tpl.getAttribute('data-label') || '';
-  box.appendChild(lab);
-  // The thumbnail's larger SVG goes up IMMEDIATELY, so the popup is never empty while the kernel
-  // is asked for the real thing. It is replaced below the moment that answer lands.
-  const stage = document.createElement('div');
-  stage.className = 'srec-matstage';
-  stage.appendChild(tpl.content.cloneNode(true));
-  box.appendChild(stage);
-  ovl.appendChild(box);
-  const close = () => { ovl.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } };
-  ovl.addEventListener('click', close);
-  // Clicks INSIDE the box must not close it — a chart is interactive (zoom, tooltip, brush).
-  box.addEventListener('click', ev => ev.stopPropagation());
-  document.addEventListener('keydown', onKey);
-  document.body.appendChild(ovl);
-
-  // Ask the kernel that holds the value to render it with `slate_matrix` — the same renderer a
-  // bare matrix gets. A heatmap comes back as an ECharts option, a small or banded one as KaTeX.
-  const cellEl = host.closest('[id^="cell-"]');
-  const cellId = cellEl ? cellEl.id.slice(5) : '';
-  const field = host.getAttribute('data-matfield') || '';
+  const label = tpl.getAttribute('data-label') || '';
+  const v = slateOutputView(label);
+  v.stage.appendChild(tpl.content.cloneNode(true));
+  const cellId = _cellIdOf(host), field = host.getAttribute('data-matfield') || '';
   if (!cellId || !field) return;
   api('POST', '/api/matrix', { cell: cellId, field })
     .then(r => {
-      if (!document.body.contains(ovl)) return;          // closed while we waited
-      if (!r || r.error) { if (r && r.error) lab.textContent += '  (' + r.error + ')'; return; }
-      if (r.label) lab.textContent = r.label;
-      if (r.kind === 'echart' && r.option && window.echarts) {
-        stage.innerHTML = '';
-        const div = document.createElement('div');
-        div.className = 'srec-matchart';
-        stage.appendChild(div);
-        const inst = echarts.init(div, _slateEchartsTheme());
-        inst.setOption(r.option);
-        ovl.addEventListener('DOMNodeRemoved', () => { try { inst.dispose(); } catch (_) {} }, { once: true });
-      } else if (r.kind === 'latex' && r.tex && typeof katex !== 'undefined') {
-        stage.innerHTML = '';
-        const d = document.createElement('div');
-        d.className = 'srec-mattex';
-        stage.appendChild(d);
-        try { katex.render(r.tex.replace(/^\$\$|\$\$$/g, ''), d, slateKatexOpts({ displayMode: true })); }
-        catch (_) {}
-      }
+      if (!v.isOpen() || !r) return;
+      if (r.error) { v.setLabel(label + '  (' + r.error + ')'); return; }
+      if (r.label) v.setLabel(r.label);
+      if (r.kind === 'echart' && r.option && window.echarts) _outviewChart(v, r.option);
+      else if (r.kind === 'latex' && r.tex && typeof katex !== 'undefined') _outviewTex(v, r.tex);
     })
     .catch(() => {});                                     // the thumbnail stays up; nothing to say
 });
