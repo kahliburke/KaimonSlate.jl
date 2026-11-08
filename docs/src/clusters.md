@@ -652,6 +652,16 @@ a cluster it has no mount on. So:
 Reads of a region's files and of datasets adopted there go through the machine's **Transfer host**
 when it names one, else the login host.
 
+### Earlier sweeps
+
+Editing a sweep's body or a capture makes it a new sweep, and the cell's result is the new one. The
+store keeps the old one. `Sweep.list(; cluster = "hpc")` shows every sweep a store holds, newest
+first: its run id, the cell and notebook it came from, its counts and state, and its body.
+`Sweep.reopen("sw9de6…"; cluster = "hpc")` takes a run id or a prefix naming one run and returns the
+sweep as a result, with its parameters and labels read from the store, so `r.dataset`, `r.errors` and
+the card work on it as they did in its own cell. With one cluster in the notebook, `cluster` can be
+left out.
+
 ### One view of the output
 
 `results.dataset` is what you read, whatever the units returned. Every grid point is in it: a unit

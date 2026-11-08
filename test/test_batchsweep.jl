@@ -1362,6 +1362,31 @@ end
         end
     end
 
+    @testset "a sweep its cell no longer reaches is listed and reopened from the store" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            rows = [(; x = 1, group = "a"), (; x = 2, group = "b"), (; x = 3, group = "a")]
+            r = Sweep.@sweep(rows, t; submit = false, labels = :group) do p
+                p.x == 3 && error("bad")
+                p.x * 10
+            end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            Sweep.refresh!(r)
+            r2 = Sweep.@sweep([(; x = 1)], t; submit = false) do p; p.x + 1; end   # the cell re-keyed
+            o = Sweep.reopen(t, r.run[1:end-3])             # a prefix naming one run
+            @test o.run == r.run && o.keys == r.keys && o.params == r.params   # labels come back
+            @test o.ok == 2 && o.failed == 1 && Sweep.load(o) == [10, 20]
+            ls = Sweep.list(t)
+            row = only(filter(x -> x.run == r.run, ls))
+            @test (row.units, row.ok, row.failed, row.missing, row.state) == (3, 2, 1, 0, :partial)
+            @test row.sweep == r.key && occursin("p.x * 10", row.body)
+            @test only(filter(x -> x.run == r2.run, ls)).state === :ready
+            @test_throws ErrorException Sweep.reopen(t, "sw")      # names both
+            @test_throws ErrorException Sweep.reopen(t, "nope")
+        end
+    end
+
     @testset "retry_failed! gives exhausted chunks their attempts back, like the card's Retry" begin
         mktempdir() do root
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,

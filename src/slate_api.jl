@@ -990,6 +990,9 @@ See also `save_asset`, `FileUpload`."""),
         ACTIONS are qualified calls, because `reset!`/`cancel!` are names your own packages may
         export: `Sweep.refresh!(r)`, `Sweep.retry_failed!(r)`, `Sweep.cancel!(r)`, `Sweep.resume!(r)`,
         `Sweep.reset!(r)`. The card offers the same as buttons.
+        `Sweep.list(; cluster)` lists the sweeps a store holds (run id, cell, counts, state, body);
+        `Sweep.reopen(run; cluster)` returns one of them as a result, card included, for a sweep
+        its cell no longer reaches after a re-key.
         `Sweep.text(r)` is the sweep in PLAIN TEXT — state, progress, timing and the first rows of
         `r.dataset`. A job cell renders as an HTML card and the richer MIME always wins in a
         notebook, so the text form needs asking for. It renders as the report in a cell and also

@@ -1218,17 +1218,23 @@ end
 # answer — so it reports what is true rather than what some cell last recorded.
 
 "Every sweep descriptor in a store, newest first. One directory listing plus a manifest read each."
-function store_sweeps(root::AbstractString)
-    out = Tuple{String,Int}[]
+store_sweeps(root::AbstractString) =
+    [(run, Int(get(m, "created", 0))) for (run, m) in _store_sweep_manifests(root)]
+
+function _store_sweep_manifests(root::AbstractString)
+    out = Tuple{String,Dict{String,Any}}[]
     d = joinpath(root, "manifests")
     isdir(d) || return out
     for f in readdir(d; join = true)
         endswith(f, ".toml") || continue
+        # A store holds a manifest per unit and per chunk, named by `shard_key` and `chunk_key`.
+        # Skipping those by name leaves only the few worth parsing.
+        occursin(r"_s[0-9a-f]{12}\.toml$|_c\d+\.toml$", f) && continue
         m = try; TOML.parsefile(f); catch; continue; end
         String(get(m, "kind", "")) == BatchSweep.KIND_SWEEP || continue
-        push!(out, (basename(f)[1:end-5], Int(get(m, "created", 0))))
+        push!(out, (basename(f)[1:end-5], m))
     end
-    sort!(out; by = x -> -x[2])
+    sort!(out; by = x -> -Int(get(x[2], "created", 0)))
     return out
 end
 
@@ -5821,7 +5827,12 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                                summary_src = summary_src, lazy = lazy, landed = landed)
         push!(chunks, ck)
     end
+    labs = _label_names(labels)
+    lab_blob = isempty(labs) ? "" :
+               MemoStore.put_blob(io -> Serialization.serialize(io, [NamedTuple{Tuple(labs)}(p) for p in params]),
+                                  root)[1]
     BatchSweep.write_sweep!(root, run, chunks; cell = String(cell), notebook = _ctx_docid(),
+                            labels = lab_blob,
                             parent = target isa ClusterTarget ? target.parent : "",
                             resources = target isa ClusterTarget ?
                                 Dict{String,String}(String(k) => string(v) for (k, v) in pairs(target.resources)) :
@@ -5866,6 +5877,128 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     submit && BatchSweep.start!(root, run)
     reconcile_and_sync!(target, run, launcher; cap, submit = submit && _reachable(target),
                         failure_policy = sweep_policy(target))
+    return _attach(target, run, key, params, keys; launcher, plot, register, refresh,
+                   cell = String(cell))
+end
+
+# ── Sweeps already in a store ────────────────────────────────────────────────────────────────
+# A cell that re-keys its sweep (an edited body, a changed capture) can no longer reach the old one
+# through its own result, but the store still holds all of it: each chunk descriptor names its units
+# and their parameters. These read it back, so a notebook can compare a run with its predecessors.
+
+# A target from a cluster NAME, resolved as a job cell's `cluster=` is. No name means the notebook's
+# only cluster.
+function _named_target(name::AbstractString)
+    cs = _ctx_clusters()
+    nm = String(name)
+    if isempty(nm)
+        length(cs) == 1 || error("name a cluster: " * (isempty(cs) ? "this notebook has none" :
+                                                       join(sort!(collect(keys(cs))), ", ")))
+        nm = first(keys(cs))
+    end
+    return resolve_target(nothing, Dict{String,String}("cluster" => nm), cs)
+end
+
+_sweep_of(run::AbstractString) = (i = findlast("_r", run); i === nothing ? String(run) : String(run[1:first(i)-1]))
+
+# A run id, or a prefix naming exactly one run in the store.
+function _find_run(root::AbstractString, run::AbstractString)
+    r = String(run)
+    m = try; MemoStore.read_manifest(root, r); catch; nothing; end
+    (m !== nothing && get(m, "kind", "") == BatchSweep.KIND_SWEEP) && return r
+    hits = [n for (n, _) in store_sweeps(root) if startswith(n, r)]
+    length(hits) == 1 && return hits[1]
+    isempty(hits) && error("no sweep `$r` in the store at $root (`Sweep.list` shows what it holds)")
+    error("`$r` names $(length(hits)) sweeps: $(join(first(hits, 6), ", "))" *
+          (length(hits) > 6 ? ", …" : "") * ". Give more of the id.")
+end
+
+"""
+    reopen(run; cluster = "", plot = nothing) -> ShardedResult
+    reopen(target, run; plot = nothing) -> ShardedResult
+
+A sweep from its store, by run id (`r.run`, or a prefix naming one run, as `Sweep.list` shows it).
+The parameters come from the store's own descriptors, with any `labels` the sweep was given, so
+`r.results`, `r.dataset`, `r.errors` and the card work as they do on the cell that ran it. The card's
+controls act on the stored sweep. `plot` is the card's chart, as `@sweep(plot =)` takes it.
+"""
+reopen(run::AbstractString; cluster::AbstractString = "", plot = nothing) =
+    reopen(_named_target(cluster), run; plot)
+
+function reopen(target::SweepTarget, run::AbstractString; plot = nothing)
+    sync_in!(target)
+    root = store_root(target)
+    run = _find_run(root, run)
+    params = Any[]; keys = String[]
+    for c in BatchSweep.sweep_chunks(root, run)
+        d = MemoStore.read_manifest(root, c)
+        d === nothing && error("sweep $run has no descriptor for its chunk $c in $root")
+        for sh in get(d, "shards", Any[])
+            sh isa AbstractDict || continue
+            push!(keys, String(sh["key"]))
+            push!(params, SlateTask._get_jls(root, String(sh["arg"])))
+        end
+    end
+    lab = String(get(MemoStore.read_manifest(root, run), "labels", ""))
+    if !isempty(lab)
+        labs = SlateTask._get_jls(root, lab)
+        length(labs) == length(params) && (params = Any[merge(p, l) for (p, l) in zip(params, labs)])
+    end
+    sctx = get(task_local_storage(), :slate_ctx, nothing)
+    reg = (sctx !== nothing && hasproperty(sctx, :on)) ? sctx.on : nothing
+    return _attach(target, run, _sweep_of(run), params, keys; plot, register = reg)
+end
+
+"""
+    list(; cluster = "") -> Vector{NamedTuple}
+    list(target) -> Vector{NamedTuple}
+
+The sweeps a store holds, newest first: `(; run, sweep, created, cell, notebook, units, ok, failed,
+missing, state, body)`. `sweep` is the digest of the body, setup and captures, so two runs with the
+same `sweep` computed the same thing over different grids. `state` is read from the store alone:
+`:succeeded`, `:partial` (finished with failures), `:cancelled`, `:unfinished` (started, not done)
+or `:ready` (never started). `Sweep.reopen(row.run)` gives the result.
+"""
+list(; cluster::AbstractString = "") = list(_named_target(cluster))
+
+function list(target::SweepTarget)
+    sync_in!(target)
+    root = store_root(target)
+    landed = BatchSweep.fold(root).status
+    out = NamedTuple[]
+    for (run, m) in _store_sweep_manifests(root)
+        units = 0; ok = 0; failed = 0; body = ""
+        for c in String.(get(m, "chunks", String[]))
+            d = MemoStore.read_manifest(root, c)
+            d === nothing && continue
+            isempty(body) && (body = try; SlateTask._get_txt(root, String(d["fn"])); catch; ""; end)
+            for sh in get(d, "shards", Any[])
+                sh isa AbstractDict || continue
+                units += 1
+                st = get(landed, String(sh["key"]), "")
+                st == "ok" ? (ok += 1) : st == "error" ? (failed += 1) : nothing
+            end
+        end
+        missing = units - ok - failed
+        state = units > 0 && missing == 0 ? (failed == 0 ? :succeeded : :partial) :
+                BatchSweep.is_cancelled(root, run) ? :cancelled :
+                BatchSweep.is_started(root, run) ? :unfinished : :ready
+        created = Int(get(m, "created", 0))
+        push!(out, (; run, sweep = _sweep_of(run),
+                      created = Dates.unix2datetime(created) + _localoffset(),
+                      cell = String(get(m, "cell", "")), notebook = String(get(m, "notebook", "")),
+                      units, ok, failed, missing, state, body))
+    end
+    return out
+end
+
+# The sweep as a result object, with its card's live channels registered when there is a notebook to
+# register them with. Shared by `run_sweep` and `reopen`, so a sweep reopened from the store has the
+# same card and the same controls as the cell that ran it.
+function _attach(target::SweepTarget, run::AbstractString, key::AbstractString, params, keys;
+                 launcher = launcher_for(target), plot = nothing, register = nothing,
+                 refresh = nothing, cell::AbstractString = "")
+    root = store_root(target)
     # Filled with the result below, so the card's settle report can bring the OBJECT level with what
     # the card already knows. A Ref because the channel is registered before the result exists.
     rref = Ref{Any}(nothing)
