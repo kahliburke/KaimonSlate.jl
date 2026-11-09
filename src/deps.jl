@@ -1612,11 +1612,11 @@ function _value_origin(report::Report, idx::Int, n::Symbol)
     return nothing
 end
 
-# The names some code cell writes by the analysis alone, each with how many cells write it.
+# The names some cell in the graph writes by the analysis alone, each with how many cells write it.
 function _static_writers(report::Report)
     n = Dict{Symbol,Int}()
     for c in report.cells
-        refines_analysis(c.kind) || continue
+        in_dependency_graph(c.kind) || continue
         for w in c.writes
             w in c.observed && continue
             n[w] = get(n, w, 0) + 1

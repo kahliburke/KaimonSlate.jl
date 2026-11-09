@@ -259,6 +259,10 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
         # A stored observation that names another cell's write is ignored at build time too.
         push!(b.observed, :x1); build_dependencies!(r)
         @test !(:x1 in b.writes)
+        # A job cell's assignments count as the analysis's too: one batch can run it beside a code cell.
+        rj = parse_report("#%% job id=j\nrows = [1, 2]\n#%% code id=k\nlen = 3\n")
+        build_dependencies!(rj)
+        @test !RE.note_defines!(rj, rj.cells[2], [:rows])
     end
 
     @testset "what a restore replays" begin
