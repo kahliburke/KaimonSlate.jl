@@ -2655,7 +2655,8 @@ function _make_router(h::Hub)
         _json(merge(man, Dict{String,Any}("ok" => true, "dir" => normpath(dest), "name" => basename(normpath(dest)))))
     end))
     # Static export: a self-contained HTML document of the notebook. `?dl=1` downloads; `?source=0`
-    # hides code; `?theme=light|dark`; `?code=normal|small|smaller|tiny|hidden` sizes/hides listings.
+    # hides code; `?theme=light|dark`; `?code=normal|small|smaller|tiny|hidden` sizes/hides listings;
+    # `?toc=1` adds a table of contents panel.
     # No scripts/server needed; KaTeX (CDN) typesets math, figures are embedded.
     HTTP.register!(router, "GET", "/api/{id}/export.html", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
@@ -2686,7 +2687,8 @@ function _make_router(h::Hub)
                            # 4-option Select with a 500-position slider, and the useful decision is
                            # almost always about ONE of them, so this overrides the blanket `replay=`.
                            replay_strides = _parse_replay_strides(get(qp, "replays", "")),
-                           memo_budget = budget, preview_budget = pbudget, width = pw)
+                           memo_budget = budget, preview_budget = pbudget, width = pw,
+                           toc = get(qp, "toc", "0") == "1")   # reader-side table of contents panel
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
             fn = _download_name(nb, ".html")
@@ -2739,7 +2741,7 @@ function _make_router(h::Hub)
                         theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
                         renderer = get(qp, "renderer", ""),
                         override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
-                        outputs = get(qp, "outputs", "all"), width = pw)
+                        outputs = get(qp, "outputs", "all"), width = pw, toc = get(qp, "toc", "0") == "1")
         _json(Dict{String,Any}("ok" => r.ok, "url" => r.url, "preview" => r.preview,
                                "raw" => r.raw, "curl" => r.curl, "error" => r.error))
     end))
