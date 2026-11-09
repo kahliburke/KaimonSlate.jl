@@ -12,6 +12,51 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-08
+
+### Added
+
+- **Sweep labels.** `@sweep(...; labels = :chapter)` names parameter fields that are for display
+  only. They stay out of a unit's key and out of what its body receives, and appear in `r.params`,
+  the results and the card. Relabelling a grid keeps every result.
+- **Earlier sweeps.** `Sweep.list()` lists the sweeps in a cluster's store with their notebook,
+  counts and state, read from the store without asking the scheduler. `Sweep.reopen(run)` rebuilds
+  a sweep's result from the store and attaches the same live card a job cell shows, for a sweep its
+  cell no longer reaches. See [Clusters](https://kahliburke.github.io/KaimonSlate.jl/dev/clusters).
+- A chart or typeset math output has a corner button that opens it full window, redrawn at that
+  size, so a downsampled heatmap gets real pixels per cell. A record's matrix popup uses the same
+  view.
+- Sweep task processes start Julia with `--threads=auto,1`, and the interactive thread writes the
+  units a task has finished while a longer one is still running. `threads=` on the cell header, the
+  cluster or a `LocalTarget` changes it.
+
+### Changed
+
+- Cells that add methods to the same function with different signatures are read as multiple
+  dispatch, not as a name collision, and a cell calling the function depends on every cell that
+  defines one of its methods. The same method in two cells still collides.
+- The markdown export writes a value's markdown form when it has one, in place of its HTML or LaTeX.
+
+### Fixed
+
+- A sweep unit that takes its task process down twice is recorded as an error, and the rest of its
+  chunk runs. Such a unit used to fail the whole chunk on every attempt until its attempts ran out.
+- On this machine and over SSH, a task process that exits frees its own chunks for resubmission
+  while the other processes of the same submission keep running.
+- Retry, on the card or as `Sweep.retry_failed!`, gives exhausted chunks their attempts back and
+  keeps the units that finished. An exhausted sweep's card points at Retry and names a process
+  death as a cause.
+- A sweep card's stall warning ages and clears with the run, rather than staying as first drawn.
+- A sweep card's chart updates without a transition animation.
+- A name a job cell assigns counts as one of its known writes.
+- Matching text is highlighted only in the editor that has focus.
+- Typing `/` in the path box descends into the directory the typed text names, rather than the
+  first directory that starts with it.
+- An opened `.jl` file counts as a notebook only for a cell header at the start of a line or a
+  footer at the end of the file, as the notebook parser reads it.
+- In-process notebooks read a cell's job options from the footer as worker notebooks do.
+- The debugger's watch plot is styled.
+
 ## [2.0.2] - 2026-11-07
 
 ### Fixed
