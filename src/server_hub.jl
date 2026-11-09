@@ -211,7 +211,10 @@ function _path_completions(q::AbstractString; limit::Int = 500)
         full = joinpath(base, e)
         push!(keep, isdir(full) ? string(prefix, e, sep) : string(prefix, e))
     end
-    sort!(keep; by = p -> ((endswith(p, '/') || endswith(p, '\\')) ? 0 : (endswith(p, ".jl") ? 1 : 2), lowercase(p)))
+    # Compare names without the trailing separator, so a directory precedes its longer namesakes
+    # (`a.jl/` before `a.jl-b/`).
+    sort!(keep; by = p -> ((endswith(p, '/') || endswith(p, '\\')) ? 0 : (endswith(p, ".jl") ? 1 : 2),
+                           lowercase(rstrip(p, ('/', '\\')))))
     return (items = first(keep, limit), truncated = length(keep) > limit)
 end
 

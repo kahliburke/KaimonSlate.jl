@@ -257,3 +257,11 @@ end
         end
     end
 end
+
+@testset "a directory's path completion precedes its longer namesakes" begin
+    mktempdir() do d
+        mkdir(joinpath(d, "a.jl")); mkdir(joinpath(d, "a.jl-b")); touch(joinpath(d, "a.jl.txt"))
+        p = d * "/"
+        @test NS._path_completions(p * "a.jl").items == [p * "a.jl/", p * "a.jl-b/", p * "a.jl.txt"]
+    end
+end

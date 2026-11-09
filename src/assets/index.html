@@ -746,6 +746,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       .then(function(r){return r.json();}).then(function(d){items=d.completions||[];moreTrunc=!!d.truncated;sel=-1;render();});}
     function commonPrefix(a){if(!a.length)return '';var p=a[0];for(var k=0;k<a.length;k++){var s=a[k],i=0;
       while(i<p.length&&i<s.length&&p[i]===s[i])i++;p=p.slice(0,i);}return p;}
+    // The directory a typed separator descends into: the highlighted one, else the one the typed
+    // text names exactly, else the only directory matching. Anything else types the separator.
+    function slashPick(){
+      if(sel>=0)return isdir(items[sel])?items[sel]:null;
+      var v=inp.value, exact=items.filter(function(c){return c===v+'/'||c===v+'\\';});
+      if(exact.length)return exact[0];
+      var dirs=items.filter(isdir);
+      return dirs.length===1?dirs[0]:null;}
     inp.addEventListener('input',function(){clearTimeout(t);t=setTimeout(fetchComp,110);});
     // Completion follows focus: load on focus, hide on blur (small delay so a
     // click on a suggestion lands first).
@@ -759,8 +767,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         else{var cp=commonPrefix(items);
           if(cp.length>inp.value.length){inp.value=cp;fetchComp();}
           else{sel=(sel+1)%items.length;inp.value=items[sel];render();}}}
-      else if(e.key==='/'||e.key==='\\'){var idx=sel>=0?sel:(items.length?0:-1);   // commit a dir + descend
-        if(idx>=0&&isdir(items[idx])){e.preventDefault();inp.value=items[idx];fetchComp();}}
+      else if(e.key==='/'||e.key==='\\'){var pick=slashPick();   // commit a dir + descend
+        if(pick){e.preventDefault();inp.value=pick;fetchComp();}}
       else if(e.key==='ArrowDown'){e.preventDefault();if(items.length){sel=(sel+1)%items.length;inp.value=items[sel];render();}}
       else if(e.key==='ArrowUp'){e.preventDefault();if(items.length){sel=(sel-1+items.length)%items.length;inp.value=items[sel];render();}}
       else if(e.key==='Enter'){e.preventDefault();onSubmit();}
