@@ -866,6 +866,51 @@ end
                                                             project = "/p", payload = "/t.jl"), ["c1"]))
     end
 
+    @testset "a task process starts with every core and one interactive thread unless told otherwise" begin
+        js(res) = BL.JobSpec("j", ["c1"]; root = "/s", project = "/p", payload = "/t.jl", resources = res)
+        @test occursin(" --threads=auto,1 ", BL.task_command(js((; cpus = 4)), ["c1"]))
+        @test occursin(" --threads=8,1 ", BL.task_command(js((; threads = "8,1")), ["c1"]))
+        # Not a scheduler option: neither script asks the queue for it.
+        @test !occursin("threads", BL._sbatch_script(BL.SlurmLauncher("login"), js((; threads = "8")), "/s/i"))
+        @test !occursin("-l threads", BL._pbs_script(BL.PbsLauncher("login"), js((; threads = "8")), "/s/i"))
+        # A cell header and a cluster definition both carry it, checked as `--threads` reads it.
+        @test Sweep.attr_resources(Dict("threads" => "auto,2")).threads == "auto,2"
+        @test_throws ArgumentError Sweep.attr_resources(Dict("threads" => "lots"))
+        @test Sweep.cluster_resources(Dict("threads" => "4")).threads == "4"
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), threads = "2,1")
+            @test Sweep.with_chunk(Sweep.with_probe(t, 2), 3).threads == "2,1"
+            @test Sweep.with_resources(t, (; threads = "1")).threads == "1"
+            @test occursin("--threads=2,1", BL.task_command(Sweep.specfn_for(t)("j", ["c1"]), ["c1"]))
+            @test_throws ArgumentError Sweep.LocalTarget(; root, project = tempdir(), threads = "x")
+        end
+    end
+
+    # A unit that runs long holds back nothing that finished before it: the interactive thread writes
+    # those rows while it runs. A subprocess, because the test's own process may have no such thread.
+    @testset "units finished before a long one land while it runs" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 3,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            gate = joinpath(root, "go")
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:3), t; submit = false) do p
+                p.x == 3 && while !isfile(joinpath(SlateTask._ROOT[], "go")); sleep(0.1); end
+                p.x
+            end
+            c = only(BS.sweep_chunks(root, r.run))
+            code = "include($(repr(t.payload))); SlateTask.run_chunk($(repr(root)), $(repr(c)); write_after = 0.5)"
+            proc = run(pipeline(`$(Base.julia_cmd()) --threads=1,1 --startup-file=no -e $code`;
+                                stdout = devnull, stderr = devnull); wait = false)
+            landed() = count(m -> get(m, "status", "") == "ok",
+                             values(SlateTask.rows_of(root, get(SlateTask.events_by_chunk(root), c, String[]))))
+            t0 = time()
+            while landed() < 2 && process_running(proc) && time() - t0 < 120; sleep(0.2); end
+            @test landed() == 2 && process_running(proc)
+            touch(gate); wait(proc)
+            @test success(proc) && landed() == 3
+        end
+    end
+
     @testset "when a sweep's units ran, without reading any of them" begin
         mktempdir() do root
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,

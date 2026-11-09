@@ -303,10 +303,10 @@ cell names one with `cluster=`, and `run_sweep` runs a grid on it.
 abstract type SweepTarget end
 
 """
-    LocalTarget(; root, chunk = 8, procs = …)
+    LocalTarget(; root, chunk = 8, procs = …, threads = "auto,1")
 
 Run shards as local subprocesses. The default when there is no cluster, and the same cells work
-against it.
+against it. `threads` is each task process's `--threads`.
 """
 struct LocalTarget <: SweepTarget
     root::String
@@ -315,6 +315,7 @@ struct LocalTarget <: SweepTarget
     chunk::Int
     procs::Int                   # concurrent task processes; 0 = follow `local_procs()`
     probe::Int                   # chunks released before any unit has finished (`@sweep(probe=)`)
+    threads::String              # each task process's `--threads`; "" = `BatchLauncher.DEFAULT_THREADS`
 end
 #
 # The task environment is PREPARED here, at construction: seeded from `parent` and instantiated once
@@ -328,10 +329,11 @@ function LocalTarget(; root = joinpath(homedir(), ".cache", "kaimonslate", "swee
                      parent = dirname(Base.active_project()), env = :parent,
                      project = nothing,
                      payload = joinpath(@__DIR__, "slatetask.jl"), chunk = 8, procs = 0,
-                     probe = 1)
+                     probe = 1, threads = "")
     mkpath(String(root))
+    _check_threads(String(threads))
     proj = project === nothing ? task_env!(String(root), String(parent), env) : String(project)
-    LocalTarget(String(root), proj, String(payload), Int(chunk), Int(procs), Int(probe))
+    LocalTarget(String(root), proj, String(payload), Int(chunk), Int(procs), Int(probe), String(threads))
 end
 
 # ── How much of this machine a local sweep may take ──────────────────────────────────────────
@@ -472,7 +474,10 @@ end
 # Resources belong to the TARGET (a site's account, its partitions) but walltime, memory and cores
 # are properties of the WORK, and vary sweep to sweep against the same cluster. So a sweep can
 # override them without defining a second target.
-with_resources(t::LocalTarget, res) = t          # nothing to schedule locally
+# Locally there is nothing to schedule; only the task processes' threads apply.
+with_resources(t::LocalTarget, res) =
+    (res === nothing || !haskey(res, :threads)) ? t :
+    LocalTarget(t.root, t.project, t.payload, t.chunk, t.procs, t.probe, String(string(res.threads)))
 with_resources(t::ClusterTarget, res) =
     res === nothing ? t :
     _with(t; resources = merge(t.resources, res))
@@ -502,7 +507,7 @@ with_resources(t::ClusterTarget, res) =
 const _ATTR_RESOURCES = (:cpus, :mem, :mem_per_cpu, :walltime, :partition, :account, :qos,
                          :gpus, :gres, :nodes, :ntasks, :ntasks_per_node,
                          :constraint, :exclusive, :reservation, :nodelist, :exclude, :tmp,
-                         :select)
+                         :select, :threads)
 
 # Which of those are counts rather than scheduler strings. Everything else passes through as
 # WRITTEN: inventing a duration or size syntax here would only stand between the author and the
@@ -513,6 +518,11 @@ const _ATTR_COUNTS = (:cpus, :gpus, :nodes, :ntasks, :ntasks_per_node)
 # to the scheduler, and so must never be forwarded as a job option.
 const _ATTR_OTHER = ("cluster", "data", "chunk", "id", "controls", "needs", "mutates", "region",
                      "script")
+
+_check_threads(s::AbstractString) =
+    isempty(s) || BatchLauncher.valid_threads(s) ||
+        throw(ArgumentError("threads=$s: give a thread count and optionally interactive threads, " *
+                            "as Julia's --threads takes them: auto, 8, auto,1 or 8,1"))
 
 "Is this header key a scheduler option (rather than one of Slate's own cell settings)?"
 is_sched_attr(k::AbstractString) = !(String(k) in _ATTR_OTHER)
@@ -540,6 +550,7 @@ const _ATTR_HELP = Dict(
     :exclude         => "never run on these nodes",
     :tmp             => "local scratch required per node",
     :select          => "PBS only: the chunk statement verbatim, e.g. 2:ncpus=8:mem=16gb",
+    :threads         => "Julia threads per task process, e.g. 8 or 8,1 (default auto,1)",
 )
 
 """
@@ -583,7 +594,8 @@ function cluster(spec::AbstractDict)
     # No scheduler AND no host is this machine, which has a target of its own — it needs no ssh
     # session and prepares its environment directly.
     (a.kind == "exec" && isempty(a.host)) &&
-        return LocalTarget(; a.root, a.parent, a.chunk, a.procs)
+        return LocalTarget(; a.root, a.parent, a.chunk, a.procs,
+                           threads = string(get(a.resources, :threads, "")))
     return ClusterTarget(a.host; kind = Symbol(a.kind), a.root, a.root_remote, a.parent, a.payload,
                          a.chunk, a.account, a.qos, a.prologue, a.directives, a.resources, a.procs,
                          a.mode, a.setup, a.depot, a.tested, machine = a.name, a.region)
@@ -705,6 +717,7 @@ function attr_resources(attrs::AbstractDict)
                 error("@sweep: `$k=$v` must be a positive integer")
             res[s] = n
         else
+            s === :threads && _check_threads(String(v))
             res[s] = String(v)
         end
     end
@@ -731,6 +744,7 @@ function cluster_resources(spec::AbstractDict)
                 error("cluster: `$k=$v` must be a positive integer")
             res[k] = n
         else
+            k === :threads && _check_threads(String(v))
             res[k] = String(v)
         end
     end
@@ -783,12 +797,12 @@ sweep_policy(t::SweepTarget) = BatchSweep.FailurePolicy(; probe_chunks = t.probe
 # `probe=` is the SWEEP's call, not the cluster's: a header option describes the machine the work
 # runs on, and how much of a grid to risk before checking is a property of the body.
 with_probe(t::LocalTarget, n) = n === nothing ? t :
-    LocalTarget(t.root, t.project, t.payload, t.chunk, t.procs, n)
+    LocalTarget(t.root, t.project, t.payload, t.chunk, t.procs, n, t.threads)
 with_probe(t::ClusterTarget, n) = n === nothing ? t :
     _with(t; probe = n)
 
 with_chunk(t::LocalTarget, n) = n === nothing ? t :
-    LocalTarget(t.root, t.project, t.payload, n, t.procs, t.probe)
+    LocalTarget(t.root, t.project, t.payload, n, t.procs, t.probe, t.threads)
 with_chunk(t::ClusterTarget, n) = n === nothing ? t :
     _with(t; chunk = n)
 
@@ -838,7 +852,7 @@ store_umask(t::ClusterTarget) = store_umask(t.mode)
 store_umask(::LocalTarget) = ""      # a local store sits under the user's own directories
 
 specfn_for(t::LocalTarget) = (name, cs) -> BatchLauncher.JobSpec(name, cs;
-    root = t.root, project = t.project, payload = t.payload)
+    root = t.root, project = t.project, payload = t.payload, resources = (; threads = t.threads))
 # `reconcile!` calls this only when it has a job to submit, so provisioning here is what keeps it off
 # the path that merely reads the store. Once per reconcile, not once per job.
 function specfn_for(t::ClusterTarget)
@@ -1648,6 +1662,12 @@ function _as_run(t::ClusterTarget, run::AbstractString)
         t = _with(t; resources = merge(t.resources, NamedTuple(Symbol(k) => String(v) for (k, v) in r)))
     end
     return t
+end
+function _as_run(t::LocalTarget, run::AbstractString)
+    m = try; MemoStore.read_manifest(store_root(t), run); catch; nothing; end
+    r = m === nothing ? nothing : get(m, "resources", nothing)
+    (r isa AbstractDict && haskey(r, "threads")) || return t
+    return with_resources(t, (; threads = String(r["threads"])))
 end
 _as_run(t::SweepTarget, ::AbstractString) = t
 
@@ -5842,7 +5862,8 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                             parent = target isa ClusterTarget ? target.parent : "",
                             resources = target isa ClusterTarget ?
                                 Dict{String,String}(String(k) => string(v) for (k, v) in pairs(target.resources)) :
-                                Dict{String,String}())
+                                isempty(target.threads) ? Dict{String,String}() :
+                                Dict{String,String}("threads" => target.threads))
     # At most ONE unstarted run per cell. A run is keyed by body + setup + captures + grid, so every
     # edit to any of them mints a new one — and the old one, which nobody ever asked to run, is left
     # behind holding a blob per parameter point. An afternoon of adjusting a constant leaves a store

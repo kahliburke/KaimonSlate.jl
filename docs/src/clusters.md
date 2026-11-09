@@ -191,6 +191,13 @@ The cell is a **reconciler**. Running it again submits only what is missing; it 
 unit that has already landed. Resources are not part of the sweep's identity, so raising a walltime
 *resumes* the sweep and keeps the units that already finished.
 
+Each task process starts Julia with `--threads=auto,1`: a thread per core it can use, and one
+interactive thread. On a scheduler that pins a job to its cores, `auto` counts the job's `cpus`. The
+interactive thread writes the units a task has finished while a longer one is still running, so the
+card's count does not wait for it. `threads=` changes it, on the cell header or as an option row on
+the cluster: `threads=1,1` for a body that relies on BLAS's own threads, `threads=8,1` for a fixed
+count. A `LocalTarget` takes `threads=` too.
+
 The body travels as **source**, because a compute node cannot revive a function value. Data in
 notebook variables is captured and shipped. `using` is written in the body and lifted out to run
 once per job. A function, macro or struct the notebook defines is traced to the cell that defined it

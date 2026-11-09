@@ -295,6 +295,17 @@ function log_search end
 # JULIA_PKG_PRECOMPILE_AUTO=0 is not optional: hundreds of tasks starting against an incomplete
 # depot would each try to precompile into it, which is how a shared filesystem gets taken down. A
 # task must load from a ready depot or fail fast.
+# The Julia threads a task process starts with, `--threads` syntax: every core it was given, and one
+# interactive thread, which writes the results units have finished while a long one is still running.
+# A resource rather than a flag of its own so a cell header, a cluster definition and the run's
+# record carry it like `cpus`; the scheduler scripts leave it out.
+const DEFAULT_THREADS = "auto,1"
+valid_threads(s::AbstractString) = occursin(r"^(auto|[1-9][0-9]*)(,[0-9]+)?$", s)
+function task_threads(spec::JobSpec)
+    s = strip(string(get(spec.resources, :threads, "")))
+    return isempty(s) ? DEFAULT_THREADS : String(s)
+end
+
 function task_command(spec::JobSpec, chunks; heap::AbstractString = "")
     # Before the prologue: whatever a site's `module load` writes belongs to this store too.
     um = isempty(spec.umask) ? "" : "umask " * spec.umask * "\n"
@@ -308,7 +319,7 @@ function task_command(spec::JobSpec, chunks; heap::AbstractString = "")
     isempty(spec.command) || return string(pre, spec.command)
     return string(pre,
         "export JULIA_PKG_PRECOMPILE_AUTO=0\n",
-        spec.julia, " --project=", spec.project, " --startup-file=no ", hh,
+        spec.julia, " --project=", spec.project, " --startup-file=no --threads=", task_threads(spec), " ", hh,
         "-e 'include(\"", spec.payload, "\"); exit(SlateTask.main(ARGS))' ",
         spec.root, " ", cs)
 end
@@ -1045,7 +1056,7 @@ function _sbatch_script(l::SlurmLauncher, spec::JobSpec, indexfile::AbstractStri
     seen = Set{String}(["job-name", "array", "output", "cpus-per-task", "mem", "time",
                         "dependency", "account", "qos"])
     for k in sort!(collect(keys(r)))
-        k in (:cpus, :mem, :walltime, :account, :qos, :exclusive) && continue
+        k in (:cpus, :mem, :walltime, :account, :qos, :exclusive, :threads) && continue
         v = getfield(r, k)
         (v === nothing || isempty(string(v))) && continue
         f = sbatch_flag(k)
@@ -1418,7 +1429,7 @@ end
 
 # The settings that become something other than a job-wide `-l key=value`.
 const _PBS_NAMED = (:cpus, :mem, :mem_per_cpu, :walltime, :partition, :account, :qos, :exclusive,
-                    :nodes, :select)
+                    :nodes, :select, :threads)
 
 """
     pbs_size(v) -> String
@@ -1518,6 +1529,7 @@ pbs_flag(k::Symbol) =
     k === :exclusive         ? "-l place" :
     # No per-CPU memory on PBS: it becomes the chunk's `mem`, multiplied by its cpu count.
     k === :mem_per_cpu       ? "select=…:mem (×ncpus)" :
+    k === :threads           ? "julia --threads" :
     "-l " * String(k)
 
 # `$PBS_ARRAY_INDEX` picks this element's chunk out of the index file, the same trick the sbatch

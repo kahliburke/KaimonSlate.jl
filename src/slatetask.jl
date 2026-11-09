@@ -497,7 +497,8 @@ _crash_error(n::Integer) =
     "the task process died while running this unit, on $n attempts. That is a crash in native code " *
     "(an abort or segfault in a C library) or a kill; the chunk's log holds its last output."
 
-function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = false)
+function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = false,
+                   write_after::Real = EVENT_SECS)
     d = MemoStore.read_manifest(root, chunk)
     d === nothing && error("no chunk descriptor for key $chunk under $root")
     get(d, "kind", "") == KIND_CHUNK || error("manifest $chunk is not a $KIND_CHUNK")
@@ -597,136 +598,162 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
 
     mkpath(inflight_dir(root))
     marker = open(inflight_path(root, chunk), "w")
-    for s in shards
-        s isa AbstractDict || continue
-        key = String(get(s, "key", ""))
-        isempty(key) && continue
-        if haskey(have, key)
-            skipped += 1
-            continue
-        end
-        arg = _get_jls(root, String(s["arg"]))
-        if poisoned !== nothing && key == poisoned[1]
-            err = _crash_error(poisoned[2])
-            push!(pending, Dict{String,Any}(
-                "kind" => KIND_SHARD, "created" => round(Int, time()), "julia" => string(VERSION),
-                "chunk" => chunk, "ms" => 0.0, "ran_on" => _ran_on(), "status" => "error",
-                "artifacts" => Dict{String,Any}[], "bindings" => Any[], "error" => err, "key" => key))
-            failed += 1
-            @error "unit failed: " * err unit = _arg_label(arg)
-            emit!()     # durable before the next unit, which may crash as well
-            continue
-        end
-        _mark_inflight(marker, key)
-        _ARTIFACTS[] = Dict{String,Any}[]
-        _ROOT[] = root
-        t0 = time()
-        local ok, value, err
-        try
-            value = Base.invokelatest(fn, arg)
-            ok = true
-        catch e
-            # The traceback matters more than the exception here: the user is looking at one of
-            # thousands of shards and needs to know where it went wrong, not just that it did.
-            err = sprint(showerror, e, catch_backtrace())
-            ok = false
-        end
-        # `adopt` only means anything on the addressable path. Without `data=auto` the value would be
-        # serialized as an inert struct holding a path that does not exist on this machine, which is
-        # a failure the reader would meet much later and much further away.
-        if ok && value isa AdoptedFile && !lazy
-            ok = false
-            err = "adopt() stores a file addressably, which this cell did not ask for — " *
-                  "add `data=auto` to the cell header."
-        end
-        ms = (time() - t0) * 1000
-        _flush_output()
-        arts = _ARTIFACTS[]
-        _ARTIFACTS[] = nothing
-
-        m = Dict{String,Any}(
-            "kind" => KIND_SHARD, "created" => round(Int, time()), "julia" => string(VERSION),
-            "chunk" => chunk, "ms" => ms, "ran_on" => _ran_on(),
-            "status" => ok ? "ok" : "error", "artifacts" => arts)
-        if ok
-            # Two different questions, recorded separately.
-            #
-            # `value` is WHAT THE UNIT RETURNED, kept inline whenever it is small enough to carry.
-            # That is the sweep's results table, and it must not depend on whether the author also
-            # wanted a chart. `summary` is the DERIVED figure `summary =` computes for the progress
-            # chart. One field served both before, so `summary = v -> v.snr` on a unit returning
-            # `(; snr, sep_px)` silently dropped `sep_px` out of every cheap view of the run: asking
-            # for a chart cost you a column, which is not a trade anyone would make on purpose.
-            #
-            # Both are limited to small TOML-carryable values, and anything larger is dropped rather
-            # than stringified — a half-written value is worse than an absent one. The blob below
-            # stays authoritative: a TOML round trip does not preserve Julia types (a `Float32`
-            # returns as `Float64`), so this is a VIEW of the result, never the result itself.
-            iv = _summarize(nothing, value)
-            if iv !== nothing
-                m["value"] = iv
-                # A manifest is TOML and a `Dict` has no order, so the fields came back in whichever
-                # order hashing produced — `(; snr, sep_px)` reading back as `(sep_px, snr)`, and a
-                # results table whose columns moved between reads. The author's own order is the one
-                # that means something, so it is recorded beside the values.
-                if value isa NamedTuple && iv isa AbstractDict
-                    m["value_keys"] = String[String(k) for k in keys(value) if haskey(iv, String(k))]
+    # Units that finished before a long one are written while it runs, by a task on the interactive
+    # thread. The unit loop holds `book` except while a unit's body runs, so the writer sees the rows
+    # and the counters of one moment. Without an interactive thread they wait for the long unit.
+    book = ReentrantLock()
+    writing = Ref(true)
+    lock(book)
+    Threads.nthreads(:interactive) > 0 && Threads.@spawn :interactive begin
+        while writing[]
+            sleep(1)
+            try
+                lock(book) do
+                    writing[] && !isempty(pending) && time() - last_at[] >= write_after && emit!()
                 end
+            catch e
+                @warn "could not write finished units while one runs" exception = e
             end
-            if summarize !== nothing
-                sv = _summarize(summarize, value)
-                sv === nothing || (m["summary"] = sv)
-            end
-            # A `data=auto` cell stores the result ADDRESSABLY: chunked and indexed, so the notebook
-            # can slice it without moving it. Falls through to the whole-value path for anything with
-            # no addressable form, which keeps the attribute a performance choice rather than a
-            # constraint on what a unit may return.
-            ds = lazy ? write_dataset!(root, value) : nothing
-            if ds !== nothing
-                idx, n = ds
-                m["dataset"] = idx
-                m["bindings"] = Any[]
-                m["shape"] = _shape_of(value, n)
-            else
-                codec = _codec_pick(value)
-                h, n = MemoStore.put_blob(io -> _codec_encode(io, codec, value), root)
-                m["bindings"] = [Dict{String,Any}("name" => "result", "codec" => codec,
-                                                  "blob" => h, "bytes" => n)]
-                m["shape"] = _shape_of(value, n)
-                # WHY this one is not addressable, recorded where the answer is known: on the node,
-                # holding the value. The notebook otherwise sees an empty dataset with no way to
-                # tell "the cell did not ask" from "this shape has nothing to chunk" — and advised
-                # a reset for both, which for the second discards good units and changes nothing.
-                #
-                # The structural checks only. `dataset_kind` would consult `_ds_arrow`, which
-                # IMPORTS Arrow on first use, and a unit that stored whole has no business paying
-                # for that to explain itself.
-                could = _ds_arrayable(value) || _ds_columns(value) !== nothing
-                m["whole"] = !could ? "shape" : (lazy ? "arrow" : "eager")
-            end
-            ran += 1
-        else
-            m["bindings"] = Any[]
-            m["error"] = err
-            failed += 1
-            # The failure in the LOG, not only in the unit's row. A reader opening the log — which is
-            # the first place anyone looks — found a line saying the chunk had failures and no way to
-            # learn what they were.
-            #
-            # In the MESSAGE rather than a field: a field value is shown with `show`, so the
-            # traceback arrives as one line with its newlines escaped. A multi-line message is
-            # rendered across `│` continuations, which is a record the viewer can already read.
-            #
-            # One per failed unit, which is bounded by the breaker rather than by the grid: a sweep
-            # failing wholesale is stopped long before every unit has had a turn.
-            @error "unit failed: " * err unit = _arg_label(arg)
         end
-        m["key"] = key
-        push!(pending, m)
-        maybe_emit!()
     end
+    try
+        for s in shards
+            s isa AbstractDict || continue
+            key = String(get(s, "key", ""))
+            isempty(key) && continue
+            if haskey(have, key)
+                skipped += 1
+                continue
+            end
+            arg = _get_jls(root, String(s["arg"]))
+            if poisoned !== nothing && key == poisoned[1]
+                err = _crash_error(poisoned[2])
+                push!(pending, Dict{String,Any}(
+                    "kind" => KIND_SHARD, "created" => round(Int, time()), "julia" => string(VERSION),
+                    "chunk" => chunk, "ms" => 0.0, "ran_on" => _ran_on(), "status" => "error",
+                    "artifacts" => Dict{String,Any}[], "bindings" => Any[], "error" => err, "key" => key))
+                failed += 1
+                @error "unit failed: " * err unit = _arg_label(arg)
+                emit!()     # durable before the next unit, which may crash as well
+                continue
+            end
+            _mark_inflight(marker, key)
+            _ARTIFACTS[] = Dict{String,Any}[]
+            _ROOT[] = root
+            t0 = time()
+            local ok, value, err
+            unlock(book)
+            try
+                value = Base.invokelatest(fn, arg)
+                ok = true
+            catch e
+                # The traceback matters more than the exception here: the user is looking at one of
+                # thousands of shards and needs to know where it went wrong, not just that it did.
+                err = sprint(showerror, e, catch_backtrace())
+                ok = false
+            finally
+                lock(book)
+            end
+            # `adopt` only means anything on the addressable path. Without `data=auto` the value would be
+            # serialized as an inert struct holding a path that does not exist on this machine, which is
+            # a failure the reader would meet much later and much further away.
+            if ok && value isa AdoptedFile && !lazy
+                ok = false
+                err = "adopt() stores a file addressably, which this cell did not ask for — " *
+                      "add `data=auto` to the cell header."
+            end
+            ms = (time() - t0) * 1000
+            _flush_output()
+            arts = _ARTIFACTS[]
+            _ARTIFACTS[] = nothing
 
-    emit!()
+            m = Dict{String,Any}(
+                "kind" => KIND_SHARD, "created" => round(Int, time()), "julia" => string(VERSION),
+                "chunk" => chunk, "ms" => ms, "ran_on" => _ran_on(),
+                "status" => ok ? "ok" : "error", "artifacts" => arts)
+            if ok
+                # Two different questions, recorded separately.
+                #
+                # `value` is WHAT THE UNIT RETURNED, kept inline whenever it is small enough to carry.
+                # That is the sweep's results table, and it must not depend on whether the author also
+                # wanted a chart. `summary` is the DERIVED figure `summary =` computes for the progress
+                # chart. One field served both before, so `summary = v -> v.snr` on a unit returning
+                # `(; snr, sep_px)` silently dropped `sep_px` out of every cheap view of the run: asking
+                # for a chart cost you a column, which is not a trade anyone would make on purpose.
+                #
+                # Both are limited to small TOML-carryable values, and anything larger is dropped rather
+                # than stringified — a half-written value is worse than an absent one. The blob below
+                # stays authoritative: a TOML round trip does not preserve Julia types (a `Float32`
+                # returns as `Float64`), so this is a VIEW of the result, never the result itself.
+                iv = _summarize(nothing, value)
+                if iv !== nothing
+                    m["value"] = iv
+                    # A manifest is TOML and a `Dict` has no order, so the fields came back in whichever
+                    # order hashing produced — `(; snr, sep_px)` reading back as `(sep_px, snr)`, and a
+                    # results table whose columns moved between reads. The author's own order is the one
+                    # that means something, so it is recorded beside the values.
+                    if value isa NamedTuple && iv isa AbstractDict
+                        m["value_keys"] = String[String(k) for k in keys(value) if haskey(iv, String(k))]
+                    end
+                end
+                if summarize !== nothing
+                    sv = _summarize(summarize, value)
+                    sv === nothing || (m["summary"] = sv)
+                end
+                # A `data=auto` cell stores the result ADDRESSABLY: chunked and indexed, so the notebook
+                # can slice it without moving it. Falls through to the whole-value path for anything with
+                # no addressable form, which keeps the attribute a performance choice rather than a
+                # constraint on what a unit may return.
+                ds = lazy ? write_dataset!(root, value) : nothing
+                if ds !== nothing
+                    idx, n = ds
+                    m["dataset"] = idx
+                    m["bindings"] = Any[]
+                    m["shape"] = _shape_of(value, n)
+                else
+                    codec = _codec_pick(value)
+                    h, n = MemoStore.put_blob(io -> _codec_encode(io, codec, value), root)
+                    m["bindings"] = [Dict{String,Any}("name" => "result", "codec" => codec,
+                                                      "blob" => h, "bytes" => n)]
+                    m["shape"] = _shape_of(value, n)
+                    # WHY this one is not addressable, recorded where the answer is known: on the node,
+                    # holding the value. The notebook otherwise sees an empty dataset with no way to
+                    # tell "the cell did not ask" from "this shape has nothing to chunk" — and advised
+                    # a reset for both, which for the second discards good units and changes nothing.
+                    #
+                    # The structural checks only. `dataset_kind` would consult `_ds_arrow`, which
+                    # IMPORTS Arrow on first use, and a unit that stored whole has no business paying
+                    # for that to explain itself.
+                    could = _ds_arrayable(value) || _ds_columns(value) !== nothing
+                    m["whole"] = !could ? "shape" : (lazy ? "arrow" : "eager")
+                end
+                ran += 1
+            else
+                m["bindings"] = Any[]
+                m["error"] = err
+                failed += 1
+                # The failure in the LOG, not only in the unit's row. A reader opening the log — which is
+                # the first place anyone looks — found a line saying the chunk had failures and no way to
+                # learn what they were.
+                #
+                # In the MESSAGE rather than a field: a field value is shown with `show`, so the
+                # traceback arrives as one line with its newlines escaped. A multi-line message is
+                # rendered across `│` continuations, which is a record the viewer can already read.
+                #
+                # One per failed unit, which is bounded by the breaker rather than by the grid: a sweep
+                # failing wholesale is stopped long before every unit has had a turn.
+                @error "unit failed: " * err unit = _arg_label(arg)
+            end
+            m["key"] = key
+            push!(pending, m)
+            maybe_emit!()
+        end
+
+        emit!()
+    finally
+        writing[] = false
+        unlock(book)
+    end
     # Finished, so nothing is in flight and nothing struck is still owed.
     close(marker)
     rm(inflight_path(root, chunk); force = true)
