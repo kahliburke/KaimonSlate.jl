@@ -4860,9 +4860,9 @@ function _why_html(p::BatchSweep.Plan; err::AbstractString = "")
         string("The jobs stop with an error before any unit lands:<br><code>", _esc(err), "</code>",
                "<br><span style='opacity:.8'>Fix it, then Retry.</span>"))
     p.state === :exhausted && return box("var(--red,#e57575)",
-        string("Attempted ", BatchSweep.MAX_ATTEMPTS, "× without landing, so these units are ",
-               "outrunning their resources rather than erroring.<br><span style='opacity:.8'>",
-               "Raise the walltime or memory, then <code>Sweep.reset!</code>.</span>"))
+        string("Attempted ", BatchSweep.MAX_ATTEMPTS, "× and no unit landed: each job ended without ",
+               "an error, so it was killed (walltime, memory) or its process died.<br>",
+               "<span style='opacity:.8'>Logs has the job's last output. Fix it, then Retry.</span>"))
     p.state === :cancelled && return string(
         "<div style='margin-top:8px;padding:8px;border-radius:6px;background:color-mix(in srgb, ",
         "var(--dim,#6a7090) 12%, transparent);font-size:12px;opacity:.85'>",
@@ -5630,15 +5630,15 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
     elseif p.state === :exhausted && !isempty(exhausted_error(getfield(r, :target), getfield(r, :run)))
         println(io, "   The jobs stop with an error before any unit lands:")
         println(io, "   ", exhausted_error(getfield(r, :target), getfield(r, :run)))
-        println(io, "   Fix it, then Retry on the card or `Sweep.reset!(r)`.")
+        println(io, "   Fix it, then Retry on the card or `Sweep.retry_failed!(r)`.")
     elseif p.state === :exhausted
-        println(io, "   Attempted $(BatchSweep.MAX_ATTEMPTS)× without landing, so these units are ",
-                    "outrunning their resources rather than erroring.")
+        println(io, "   Attempted $(BatchSweep.MAX_ATTEMPTS)× and no unit landed: each job ended without ",
+                    "an error, so it was killed (walltime, memory) or its process died.")
         # These units left no manifest, so there is no error to read: the kill message exists only
         # in the job's own output. Pointing at it is the difference between a diagnosis and a guess
         # about which resource ran out.
-        println(io, "   `Sweep.logs(r)` shows the kill message. Raise the walltime or memory, ",
-                    "then `Sweep.reset!(r)`.")
+        println(io, "   `Sweep.logs(r)` shows the job's last output. Fix it, then Retry on the card or ",
+                    "`Sweep.retry_failed!(r)`.")
     elseif p.state !== :succeeded
         println(io, "   re-run this cell to refresh.")
     end

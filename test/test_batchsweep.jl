@@ -332,10 +332,10 @@ end
             # Retry gives the units their attempts back and keeps the submissions, whose logs say why.
             @test ("retry", "Retry 2 units") in Sweep.action_list(p)
             # The card names a resource limit only when the jobs printed no error of their own.
-            @test occursin("outrunning their resources", Sweep._why_html(p))
+            @test occursin("killed (walltime, memory)", Sweep._why_html(p)) && occursin("Retry", Sweep._why_html(p))
             why = Sweep._why_html(p; err = "ERROR: ArgumentError: Package <Demo> not found in current path.")
             @test occursin("stop with an error", why) && occursin("Package &lt;Demo&gt; not found", why)
-            @test !occursin("outrunning", why)
+            @test !occursin("killed", why)
             nsubs = length(BS.known_submissions(root))
             @test BS.forget_attempts!(root, chunks) == 1
             @test BS.plan(root, sweep; launcher = l).state === :pending && length(BS.known_submissions(root)) == nsubs
