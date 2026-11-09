@@ -871,7 +871,8 @@ end
         @test occursin(" --threads=auto,1 ", BL.task_command(js((; cpus = 4)), ["c1"]))
         @test occursin(" --threads=8,1 ", BL.task_command(js((; threads = "8,1")), ["c1"]))
         # Not a scheduler option: neither script asks the queue for it.
-        @test !occursin("threads", BL._sbatch_script(BL.SlurmLauncher("login"), js((; threads = "8")), "/s/i"))
+        sb = BL._sbatch_script(BL.SlurmLauncher("login"), js((; threads = "8")), "/s/i")
+        @test !occursin("#SBATCH --threads", sb) && occursin("--threads=8 ", sb)
         @test !occursin("-l threads", BL._pbs_script(BL.PbsLauncher("login"), js((; threads = "8")), "/s/i"))
         # A cell header and a cluster definition both carry it, checked as `--threads` reads it.
         @test Sweep.attr_resources(Dict("threads" => "auto,2")).threads == "auto,2"
