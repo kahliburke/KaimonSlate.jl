@@ -1400,6 +1400,12 @@ function _ctx_docid()
     return ""
 end
 
+function _ctx_notebook()
+    sctx = get(task_local_storage(), :slate_ctx, nothing)
+    (sctx !== nothing && hasproperty(sctx, :notebook)) && return String(sctx.notebook)
+    return ""
+end
+
 function _ctx_clusters()
     sctx = get(task_local_storage(), :slate_ctx, nothing)
     (sctx !== nothing && hasproperty(sctx, :clusters)) && return sctx.clusters
@@ -5832,7 +5838,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                MemoStore.put_blob(io -> Serialization.serialize(io, [NamedTuple{Tuple(labs)}(p) for p in params]),
                                   root)[1]
     BatchSweep.write_sweep!(root, run, chunks; cell = String(cell), notebook = _ctx_docid(),
-                            labels = lab_blob,
+                            name = _ctx_notebook(), labels = lab_blob,
                             parent = target isa ClusterTarget ? target.parent : "",
                             resources = target isa ClusterTarget ?
                                 Dict{String,String}(String(k) => string(v) for (k, v) in pairs(target.resources)) :
@@ -5953,11 +5959,13 @@ end
     list(; cluster = "") -> Vector{NamedTuple}
     list(target) -> Vector{NamedTuple}
 
-The sweeps a store holds, newest first: `(; run, sweep, created, cell, notebook, units, ok, failed,
-missing, state, body)`. `sweep` is the digest of the body, setup and captures, so two runs with the
-same `sweep` computed the same thing over different grids. `state` is read from the store alone:
-`:succeeded`, `:partial` (finished with failures), `:cancelled`, `:unfinished` (started, not done)
-or `:ready` (never started). `Sweep.reopen(row.run)` gives the result.
+The sweeps a store holds, newest first: `(; run, sweep, created, cell, notebook, docid, units, ok,
+failed, missing, state, body)`. `sweep` is the digest of the body, setup and captures, so two runs
+with the same `sweep` computed the same thing over different grids. `notebook` is the notebook's name
+when the run was written and `docid` the id that identifies it. `state` is read from the store alone:
+`:succeeded`, `:partial` (finished with failures), `:cancelled`, `:exhausted` (every unfinished chunk
+has used its attempts), `:unfinished` (started, not done) or `:ready` (never started).
+`Sweep.reopen(row.run)` gives the result.
 """
 list(; cluster::AbstractString = "") = list(_named_target(cluster))
 
@@ -5965,31 +5973,54 @@ function list(target::SweepTarget)
     sync_in!(target)
     root = store_root(target)
     landed = BatchSweep.fold(root).status
+    tries = BatchSweep.read_attempts(root)
     out = NamedTuple[]
     for (run, m) in _store_sweep_manifests(root)
         units = 0; ok = 0; failed = 0; body = ""
+        # Gave up: a chunk with work left used its attempts, none is part-way through them, and any
+        # never tried is held behind the probe, which nothing has landed to release.
+        spent = false; trying = false; untried = false
         for c in String.(get(m, "chunks", String[]))
             d = MemoStore.read_manifest(root, c)
             d === nothing && continue
-            isempty(body) && (body = try; SlateTask._get_txt(root, String(d["fn"])); catch; ""; end)
+            isempty(body) && (body = try; _body_text(SlateTask._get_txt(root, String(d["fn"]))); catch; ""; end)
+            left = false
             for sh in get(d, "shards", Any[])
                 sh isa AbstractDict || continue
                 units += 1
                 st = get(landed, String(sh["key"]), "")
-                st == "ok" ? (ok += 1) : st == "error" ? (failed += 1) : nothing
+                st == "ok" ? (ok += 1) : st == "error" ? (failed += 1) : (left = true)
+            end
+            if left
+                n = get(tries, c, 0)
+                n >= BatchSweep.MAX_ATTEMPTS ? (spent = true) : n > 0 ? (trying = true) : (untried = true)
             end
         end
         missing = units - ok - failed
         state = units > 0 && missing == 0 ? (failed == 0 ? :succeeded : :partial) :
                 BatchSweep.is_cancelled(root, run) ? :cancelled :
-                BatchSweep.is_started(root, run) ? :unfinished : :ready
+                !BatchSweep.is_started(root, run) ? :ready :
+                spent && !trying && (!untried || ok + failed == 0) ? :exhausted : :unfinished
         created = Int(get(m, "created", 0))
+        docid = String(get(m, "notebook", ""))
         push!(out, (; run, sweep = _sweep_of(run),
                       created = Dates.unix2datetime(created) + _localoffset(),
-                      cell = String(get(m, "cell", "")), notebook = String(get(m, "notebook", "")),
-                      units, ok, failed, missing, state, body))
+                      cell = String(get(m, "cell", "")), notebook = String(get(m, "notebook_name", docid)),
+                      docid, units, ok, failed, missing, state, body))
     end
     return out
+end
+
+# A stored body is the do-block as a lambda, `p -> begin … end`; a reader wants the statements.
+function _body_text(src::AbstractString)
+    ex = try; Meta.parse(src); catch; return String(src); end
+    (ex isa Expr && ex.head === :->) || return String(src)
+    stmts(b) = b isa Expr && b.head === :block ? filter(a -> !(a isa LineNumberNode), b.args) : Any[b]
+    s = stmts(ex.args[2])
+    while length(s) == 1 && s[1] isa Expr && s[1].head === :block
+        s = stmts(s[1])
+    end
+    return join((sprint(Base.show_unquoted, a) for a in s), "\n")
 end
 
 # The sweep as a result object, with its card's live channels registered when there is a notebook to

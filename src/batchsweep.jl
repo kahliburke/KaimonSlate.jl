@@ -50,8 +50,9 @@ Record which chunks make up a sweep. The chunk descriptors themselves already li
 this is the only extra bookkeeping a sweep needs.
 """
 function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
-                      cell::AbstractString = "", notebook::AbstractString = "", parent::AbstractString = "",
-                      resources::AbstractDict = Dict{String,String}(), labels::AbstractString = "")
+                      cell::AbstractString = "", notebook::AbstractString = "", name::AbstractString = "",
+                      parent::AbstractString = "", resources::AbstractDict = Dict{String,String}(),
+                      labels::AbstractString = "")
     d = Dict{String,Any}(
         "kind" => KIND_SWEEP,
         "created" => round(Int, time()),
@@ -66,6 +67,8 @@ function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
     # a cell called `fit` are indistinguishable without this — which matters most beside a button
     # that releases a run.
     isempty(notebook) || (d["notebook"] = String(notebook))
+    # The notebook's name when the run was written, for a reader. The docid above is what identifies it.
+    isempty(name) || (d["notebook_name"] = String(name))
     # …and which PROJECT its task environment is built from. Whoever submits a later wave rebuilds
     # the target from the registry, and the registry's default project is that process's own.
     isempty(parent) || (d["parent"] = String(parent))

@@ -1381,7 +1381,16 @@ end
             row = only(filter(x -> x.run == r.run, ls))
             @test (row.units, row.ok, row.failed, row.missing, row.state) == (3, 2, 1, 0, :partial)
             @test row.sweep == r.key && occursin("p.x * 10", row.body)
+            @test startswith(row.body, "p.x == 3") && !occursin("begin", row.body)   # statements, not the lambda
             @test only(filter(x -> x.run == r2.run, ls)).state === :ready
+            # A run whose probe chunk used its attempts, with nothing landed, has given up.
+            r3 = task_local_storage(:slate_ctx, (; notebook = "fits", docid = "d-123")) do
+                Sweep.@sweep([(; x = 1), (; x = 2), (; x = 3)], t; submit = false) do p; p.x - 1; end
+            end
+            BS.start!(root, r3.run)
+            for _ in 1:BS.MAX_ATTEMPTS; BS.bump_attempts!(root, BS.sweep_chunks(root, r3.run)[1:1]); end
+            row3 = only(filter(x -> x.run == r3.run, Sweep.list(t)))
+            @test row3.state === :exhausted && (row3.notebook, row3.docid) == ("fits", "d-123")
             @test_throws ErrorException Sweep.reopen(t, "sw")      # names both
             @test_throws ErrorException Sweep.reopen(t, "nope")
         end
