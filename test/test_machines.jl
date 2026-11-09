@@ -286,6 +286,8 @@ const RE = KaimonSlate.ReportEngine
 
         @testset "a sweep waits for its environment to pass a test task" begin
             S = RE.Sweep
+            RE.cluster_set!(Dict("name" => "pmb", "host" => "hpc1", "kind" => "slurm",
+                                 "root_remote" => "/scratch/store", "depot" => "/scratch/jd"))
             t = S.ClusterTarget("hpc1"; root_remote = "/scratch/store", parent = mktempdir(),
                                 setup = "export PATH=x; ", depot = "/scratch/jd", machine = "pmb")
             k = S.env_test_key(t)
