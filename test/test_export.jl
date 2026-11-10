@@ -344,6 +344,16 @@ end
     @test !occursin('\e', join([read(f, String) for f in readdir(edir; join = true)], "\n"))
 end
 
+@testset "markdown export sets a cell's outputs in a blockquote under its code" begin
+    RE = KaimonSlate.ReportEngine
+    rep = RE.parse_report("#%% code id=c\n1 + 1\n")
+    rep.cells[end].output = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "2", nothing, nothing, 1.0,
+                                          Any[], "")
+    nb = NS.LiveNotebook("quoted", "/tmp/quotedtest.jl", rep, RE.InProcessKernel(), 1, String[], String[],
+                         ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    @test occursin("```julia\n1 + 1\n```\n\n> ```text\n> 2\n> ```", NS.export_markdown(nb))
+end
+
 @testset "table export — in-cell viz + export_rows cap" begin
     spec = Dict{String,Any}(
         "columns" => Any[

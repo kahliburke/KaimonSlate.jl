@@ -5718,15 +5718,25 @@ function _md_references(ctx)
     return String(take!(io))
 end
 
+# `text` as a markdown blockquote, each line behind `> ` and a blank line `>`, then a blank line
+function _md_quote!(io::IO, text::AbstractString)
+    body = strip(text)
+    isempty(body) && return
+    for line in split(body, '\n')
+        println(io, isempty(strip(line)) ? ">" : string("> ", line))
+    end
+    println(io)
+end
+
 """
     export_markdown(nb; include_source=true, outputs="all") -> String
 
 Serialize the notebook to GitHub-flavored Markdown for copy-paste (Discourse / Slack / GitHub /
 Obsidian / docs). Prose rides verbatim; `[@cite]` and `[@fig:label]` render to their in-text form
 (per the notebook's bibstyle) with a trailing References section; code cells become fenced ```julia
-blocks; text outputs are fenced; figures / frozen charts embed as a markdown image whose source is a
-base64 `data:` URI;
-tables become GFM tables. Data-URI images are self-contained but not every host renders them (GitHub
+blocks, each followed by its outputs in a blockquote; text outputs are fenced as ```text; figures /
+frozen charts embed as a markdown image whose source is a base64 `data:` URI; tables become GFM
+tables. Data-URI images are self-contained but not every host renders them (GitHub
 strips them) — for those, upload the standalone `.jl` (+ a PNG/SVG) alongside.
 """
 function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs::AbstractString = "all")
@@ -5771,13 +5781,15 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
             end
             o = c.output
             (o === nothing || !anyout) && continue
+            # a cell's outputs go in a blockquote under its code, so they read as its results
+            out = IOBuffer()
             # Markdown has no place to put colour, so it comes off rather than printing literally.
             # Every captured text field, not just stdout: a package whose `show` or `showerror`
             # colours unconditionally (ignoring the stream's `:color`) puts it in the others too.
             plain = ReportEngine.strip_sgr
-            texts && o.exception !== nothing && println(io, "```\n", rstrip(plain(o.exception)), "\n```\n")
+            texts && o.exception !== nothing && println(out, "```text\n", rstrip(plain(o.exception)), "\n```\n")
             texts && !isempty(strip(o.stdout)) &&
-                println(io, "```\n", rstrip(plain(o.stdout)), "\n```\n")
+                println(out, "```text\n", rstrip(plain(o.stdout)), "\n```\n")
             alt = haskey(fignum_of, c.id) ? string("Figure ", fignum_of[c.id]) : "figure"   # meaningful alt when a data-URI won't render
             imgs = 0
             for (i, ch) in pairs(o.display)
@@ -5786,25 +5798,26 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
                 restated = ch.mime in ReportRender._RESTATED_MIMES && i < length(o.display) &&
                            o.display[i + 1].mime == "text/markdown"
                 if startswith(ch.mime, "image/")
-                    println(io, "![", alt, "](data:", ch.mime, ";base64,", Base64.base64encode(ch.data), ")\n"); imgs += 1
+                    println(out, "![", alt, "](data:", ch.mime, ";base64,", Base64.base64encode(ch.data), ")\n"); imgs += 1
                 elseif restated
                     continue
                 elseif ch.mime == "text/latex"
-                    println(io, "\$\$", strip(String(copy(ch.data))), "\$\$\n")
+                    println(out, "\$\$", strip(String(copy(ch.data))), "\$\$\n")
                 elseif ch.mime == "text/markdown"
-                    println(io, strip(String(copy(ch.data))), "\n")
+                    println(out, strip(String(copy(ch.data))), "\n")
                 end
             end
             (texts && imgs == 0 && isempty(o.display) && !isempty(strip(o.value_repr))) &&
-                println(io, "```\n", rstrip(plain(o.value_repr)), "\n```\n")
+                println(out, "```text\n", rstrip(plain(o.value_repr)), "\n```\n")
             if !isempty(_echarts_specs(c))
                 png = _snapshot(nb.id, c.id)
-                png === nothing ? println(io, "*[chart — open in a browser and re-export to capture]*\n") :
-                    println(io, "![", alt, "](data:image/png;base64,", Base64.base64encode(png), ")\n")
+                png === nothing ? println(out, "*[chart — open in a browser and re-export to capture]*\n") :
+                    println(out, "![", alt, "](data:image/png;base64,", Base64.base64encode(png), ")\n")
             end
             for spec in _table_specs(c)
-                t = _md_table(spec); isempty(t) || println(io, t, "")
+                t = _md_table(spec); isempty(t) || println(out, t, "")
             end
+            _md_quote!(io, String(take!(out)))
         end
         refs = _md_references(citectx)
         isempty(strip(refs)) || print(io, refs)
