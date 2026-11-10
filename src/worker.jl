@@ -3762,15 +3762,14 @@ function _gate_workload()
     ctx = sock = nothing
     try
         cpub, csec = KaimonGate.curve_keypair()
-        port = let l = Sockets.listen(Sockets.localhost, 0)
-            p = Int(Sockets.getsockname(l)[2]); close(l); p
-        end
+        # Port 0: the gate binds ports the OS hands it, so no other process can take them first.
         redirect_stdout(devnull) do
-            KaimonGate.serve(; mode = :tcp, host = "127.0.0.1", port = port, stream_port = port + 1,
+            KaimonGate.serve(; mode = :tcp, host = "127.0.0.1", port = 0, stream_port = 0,
                              tools = tools(), force = true, allow_mirror = false,
                              allow_restart = false, spawned_by = "slate",
                              curve = true, allowed_clients = [cpub], _owner_wake_kw()...)
         end
+        port = KaimonGate._tcp_port()
         ctx = ZMQ.Context()
         sock = ZMQ.Socket(ctx, ZMQ.DEALER)
         KaimonGate.make_curve_client!(sock, KaimonGate._curve_server_public(), cpub, csec)
