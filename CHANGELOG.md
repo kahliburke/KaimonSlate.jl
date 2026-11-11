@@ -16,6 +16,9 @@ were written when they went out. They are marked.
 
 - A slide in the PDF deck that is taller than the page shrinks to fit and keeps its items in order.
   The last items of a long list used to print on top of each other, with an empty bullet below them.
+- The figures of a slide in the PDF deck share the page with the text, as on the live deck. The
+  figures shrink before the text does, so a slide with two or more figures stays inside the page.
+  Such a slide used to run off the top and bottom of the page.
 
 ## [2.1.0] - 2026-11-08
 
