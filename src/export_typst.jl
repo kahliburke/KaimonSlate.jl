@@ -376,21 +376,23 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
     #let outblock(s) = block(width: 100%, inset: 7pt, fill: $(p.outbg), radius: 3pt, text(size: 0.7em, fill: $(p.outfg), raw(s)))
     #let valblock(s) = block(width: 100%, inset: 7pt, fill: $(p.valbg), radius: 3pt, text(size: 0.7em, fill: $(p.valfg), raw(s)))
     #let errblock(s) = block(width: 100%, inset: 7pt, fill: $(p.errbg), radius: 3pt, text(size: 0.7em, fill: $(p.errfg), raw(s)))
-    // A figure is a marker that `#slide` sizes for the slide; see `#slide`. Outside `#slide` it fills
-    // the width of its column.
-    #let figureimg(p, width: none) = if width == none { [#metadata(p) <slate-fig>] } else { align(center, image(p, width: width)) }
-    #show <slate-fig>: it => align(center, image(it.value, width: 100%))
+    // A figure is a marker that `#slide` sizes for the slide; see `#slide`. `width` is an upper bound
+    // on its drawn width: a ratio of the column, or a length. Outside `#slide` the figure takes that
+    // width, or the width of its column when `width` is `none`.
+    #let figureimg(p, width: none) = [#metadata((p: p, w: width)) <slate-fig>]
+    #show <slate-fig>: it => align(center, image(it.value.p, width: if it.value.w == none { 100% } else { it.value.w }))
     #let notefig(s) = block(width: 100%, inset: 7pt, text(size: 0.7em, style: "italic", fill: $(p.parlabel), s))
     #let figcaption(lbl, body) = block(width: 100%, inset: (x: 24pt, y: 4pt), text(size: 0.7em, fill: $(p.parlabel))[#text(weight: "bold")[#lbl.] #body])
     #let paramblock(items) = block(width: 100%, inset: (x: 8pt, y: 5pt), fill: $(p.parbg), radius: 3pt, stroke: 0.5pt + $(p.parborder),
       text(size: 0.7em)[#text(fill: $(p.parlabel), weight: "bold")[parameters] #h(6pt) #items.map(it => [#raw(it.at(0)) = #text(weight: "bold", it.at(1))]).join([#h(10pt)])])
     // One slide = one page, vertically centered. The body is drawn at full content width so that it
     // fits the page, as the live deck does:
-    // 1. Each figure takes the width of its column and at most `k` of the page height. `k` is the
-    //    largest value in [0.25, 1] that fits the slide.
+    // 1. Each figure takes the width of its column (or its `width`, if that is smaller) and at most
+    //    `k` of the page height. `k` is the largest value in [0.25, 1] that fits the slide.
     // 2. When the slide is still too tall, the whole body scales down (floor 0.5×).
     // The body is drawn in a box as tall as its measured height, so a tall body does not break
-    // inside the box.
+    // inside the box. The scale uses `reflow`, so the page centres the drawn size of the body, not
+    // its size before the scale.
     // Typst cannot measure a cite() in isolation ("cannot format citation in isolation" — it needs
     // document context to resolve), so the MEASURED copy renders citation sentinels as a fixed
     // stand-in of comparable width; the real body still renders true citations.
@@ -399,8 +401,10 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
         #layout(sz => {
           let draw(k) = {
             show <slate-fig>: it => layout(c => {
-              let n = measure(image(it.value))
-              align(center, image(it.value, height: calc.max(1pt, calc.min(k * sz.height, c.width * (n.height / n.width)))))
+              let (p, w) = (it.value.p, it.value.w)
+              let n = measure(image(p))
+              let cw = if w == none { c.width } else if type(w) == ratio { c.width * w } else { calc.min(c.width, w) }
+              align(center, image(p, height: calc.max(1pt, calc.min(k * sz.height, cw * (n.height / n.width)))))
             })
             body
           }
@@ -412,7 +416,7 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
           }
           let h = tall(k)
           let s = if h > sz.height and h > 0pt { calc.max(0.5, sz.height / h) } else { 1.0 }
-          scale(origin: top + center, x: s * 100%, y: s * 100%, box(width: sz.width, height: h, draw(k)))
+          pad(x: (1 - s) / 2 * sz.width, scale(origin: top + center, x: s * 100%, y: s * 100%, reflow: true, box(width: sz.width, height: h, draw(k))))
         })
       ]
     ]

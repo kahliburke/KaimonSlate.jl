@@ -176,7 +176,9 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
     @testset "a slide taller than the page shrinks without overlapping its items" begin
         # The fit-scaler must draw the body in a box as tall as the body. In a box as tall as the
         # page, a body taller than the page breaks inside the box, and its last items share one y.
-        # `typst query` reads the page position of a marker placed after each list item.
+        # The page must centre the scaled body, so the title stays below the top margin, and the
+        # title keeps its left alignment. `typst query` reads the page position of a marker placed
+        # in the title and after each item.
         plain = try
             NS.export_pdf(_mknb("#%% md id=s\n## One\n\nplain\n"); layout = "slides")
         catch
@@ -187,9 +189,9 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
             @test true
         else
             mark = "<!--raw-typst #context { let p = here().position(); " *
-                   "[#metadata((page: p.page, y: p.y.pt())) <slideitem>] }-->"
+                   "[#metadata((page: p.page, x: p.x.pt(), y: p.y.pt())) <slideitem>] }-->"
             items = join(("- item $i $mark" for i in 1:15), "\n")
-            dir = NS._build_slides_project(_mknb("#%% md id=s\n## Tall\n\n$items\n"))
+            dir = NS._build_slides_project(_mknb("#%% md id=s\n## Tall $mark\n\n$items\n"))
             try
                 out = IOBuffer()
                 query(exe) = run(pipeline(`$exe query --root $dir $(joinpath(dir, "doc.typ")) "<slideitem>" --field value`;
@@ -198,9 +200,11 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
                 sys === nothing ? NS.Typst_jll.typst(query) : query(sys)
                 pos = JSON.parse(String(take!(out)))
                 ys = [p["y"] for p in pos]
-                @test length(pos) == 15
+                @test length(pos) == 16
                 @test all(p -> p["page"] == 1, pos)               # the slide stays on one page
                 @test all(diff(ys) .> 0)                          # no two items share a line
+                @test ys[1] > 12 * 72 / 25.4                      # the title is below the top margin
+                @test pos[1]["x"] < 254 * 72 / 25.4 / 3           # the title stays at the left, not centred
                 @test ys[end] < 142.875 * 72 / 25.4               # the last item is inside the 16:9 page
             finally
                 rm(dir; recursive = true, force = true)
@@ -210,8 +214,8 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
 
     @testset "the figures of a slide share the page" begin
         # Two figures under a title and text must both draw at a visible size, and the slide must
-        # stay inside the page. `typst query` reads the page position of a marker before, between
-        # and after the figures.
+        # stay inside the page margins. A portrait figure with a `width` must not grow taller than
+        # the page. `typst query` reads the page position of markers around the figures.
         plain = try
             NS.export_pdf(_mknb("#%% md id=s\n## One\n\nplain\n"); layout = "slides")
         catch
@@ -225,21 +229,26 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
             try
                 write(joinpath(dir, "media.json"), "{}")
                 write(joinpath(dir, "fig.svg"), """<svg xmlns="http://www.w3.org/2000/svg" width="900" height="450"><rect width="900" height="450" fill="#38c"/></svg>""")
+                write(joinpath(dir, "tall.svg"), """<svg xmlns="http://www.w3.org/2000/svg" width="400" height="900"><rect width="400" height="900" fill="#3c8"/></svg>""")
                 mark = "#context { let p = here().position(); [#metadata((page: p.page, y: p.y.pt())) <slidefig>] }"
-                write(joinpath(dir, "doc.typ"), NS._typst_preamble_slides("T"; theme = "light") *
-                      "#slide[\n== Two figures\n\nSome text above the figures.\n\n$mark\n#figureimg(\"fig.svg\")\n$mark\n#figureimg(\"fig.svg\")\n$mark\n]\n")
-                out = IOBuffer()
-                query(exe) = run(pipeline(`$exe query --root $dir $(joinpath(dir, "doc.typ")) "<slidefig>" --field value`;
-                                          stdin = devnull, stdout = out, stderr = devnull))
-                sys = Sys.which("typst")
-                sys === nothing ? NS.Typst_jll.typst(query) : query(sys)
-                pos = JSON.parse(String(take!(out)))
-                ys = [p["y"] for p in pos]
-                pageh = 142.875 * 72 / 25.4
-                @test length(pos) == 3
-                @test all(p -> p["page"] == 1, pos)
-                @test all(diff(ys) .> 0.2 * pageh)      # each figure is at least a fifth of the page high
-                @test ys[1] > 0 && ys[end] < pageh       # the slide starts and ends inside the page
+                function positions(body)
+                    write(joinpath(dir, "doc.typ"), NS._typst_preamble_slides("T"; theme = "light") * "#slide[\n$body\n]\n")
+                    out = IOBuffer()
+                    query(exe) = run(pipeline(`$exe query --root $dir $(joinpath(dir, "doc.typ")) "<slidefig>" --field value`;
+                                              stdin = devnull, stdout = out, stderr = devnull))
+                    sys = Sys.which("typst")
+                    sys === nothing ? NS.Typst_jll.typst(query) : query(sys)
+                    pos = JSON.parse(String(take!(out)))
+                    @test all(p -> p["page"] == 1, pos)
+                    [p["y"] for p in pos]
+                end
+                pageh, margin = 142.875 * 72 / 25.4, 12 * 72 / 25.4
+                ys = positions("$mark\n== Two figures\n\nSome text above the figures.\n\n$mark\n#figureimg(\"fig.svg\")\n$mark\n#figureimg(\"fig.svg\")\n$mark")
+                @test length(ys) == 4
+                @test all(diff(ys[2:end]) .> 0.2 * pageh)          # each figure is at least a fifth of the page high
+                @test ys[1] >= margin - 0.5 && ys[end] <= pageh - margin + 0.5   # the slide stays inside the margins
+                ys = positions("== Portrait\n\nSome text above the figure.\n\n#figureimg(\"tall.svg\", width: 100%)\n$mark")
+                @test ys[end] <= pageh - margin + 0.5                # the figure does not run off the page
             finally
                 rm(dir; recursive = true, force = true)
             end

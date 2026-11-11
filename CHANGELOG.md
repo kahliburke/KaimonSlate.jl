@@ -19,6 +19,10 @@ were written when they went out. They are marked.
 - The figures of a slide in the PDF deck share the page with the text, as on the live deck. The
   figures shrink before the text does, so a slide with two or more figures stays inside the page.
   Such a slide used to run off the top and bottom of the page.
+- A slide in the PDF deck that shrinks to fit stays centred on the page. Its title used to touch or
+  cross the top edge of the page, with empty space at the bottom.
+- A figure that a component sizes for print, such as a portrait card at full width, now fits the
+  slide in the PDF deck. It used to cover the whole slide and run off the page.
 
 ## [2.1.0] - 2026-11-08
 
