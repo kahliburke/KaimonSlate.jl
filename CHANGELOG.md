@@ -12,6 +12,13 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Added
+
+- An HTML export can carry a table of contents. Turn on **Contents** in the export dialog, or add
+  `?toc=1` to the export route, and the page gets a button that opens a side panel of the
+  document's headings. The panel highlights the section you are reading, and each heading gets an
+  anchor you can link to.
+
 ## [2.1.0] - 2026-11-08
 
 ### Added
