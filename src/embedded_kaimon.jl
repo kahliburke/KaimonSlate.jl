@@ -306,6 +306,15 @@ _embedded_signal!(t::Tachikoma.TerminalWidget) =
         ccall(:kill, Cint, (Cint, Cint), t.pty.child_pid, Base.SIGTERM) == 0
 
 """
+The host's command line: Kaimon run as a module, its options after the module's name. `--headless`
+is left out for the PTY path, where the point is to keep the host's own TUI, the thing the app then
+shows.
+"""
+_host_argv(port::Integer; tui::Bool = false) =
+    [Base.julia_cmd().exec[1], "--project=$(_embedded_env())", "--startup-file=no",
+     "--threads=$(kaimon_threads())", "-m", "Kaimon", (tui ? String[] : ["--headless"])..., "--port", string(port)]
+
+"""
     start_embedded_kaimon!(port; online = nothing) -> Bool
 
 Bring up `kaimon --headless` on `port`, isolated under [`_embedded_root`](@ref). Returns whether it
@@ -348,11 +357,7 @@ function start_embedded_kaimon!(port::Integer; online = nothing, tui::Bool = fal
         register_extension(; announce = false, force = true)
     end
     note("Starting the Kaimon host on port $port")
-    # `--headless` is dropped for the PTY path: the point is to keep the host's own TUI, which is
-    # the thing the app then shows. Everything else about the process is identical.
-    argv = [Base.julia_cmd().exec[1], "--project=$(_embedded_env())", "--startup-file=no",
-            "--threads=$(kaimon_threads())", "-m", "Kaimon", "--port", string(port)]
-    tui || insert!(argv, length(argv) - 2, "--headless")
+    argv = _host_argv(port; tui = tui)
     cmd = addenv(Cmd(argv), envv...)
     log = joinpath(_embedded_root(), "kaimon.log")
     mkpath(dirname(log))
@@ -365,7 +370,8 @@ function start_embedded_kaimon!(port::Integer; online = nothing, tui::Bool = fal
         println(h, "\n=== slate --ai · host starting on port $port at $(Dates.now()) ===")
         flush(h)
         h
-    catch
+    catch e
+        @warn "slate: the Kaimon host's log cannot be written; its output is lost" log exception = e
         devnull
     end
     handle = if tui

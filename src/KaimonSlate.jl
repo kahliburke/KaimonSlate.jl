@@ -28,6 +28,7 @@ include(joinpath(@__DIR__, "expanduser_fix.jl"))
 
 
 import JSON
+import Dates   # when the embedded Kaimon host started, in its log
 import SHA     # the hub's fallback ports, fixed per account
 import Random  # the embedded Kaimon host's API key, from the OS random source
 import TOML    # the specialist roles defined outside the code (`<config>/specialists.toml`)

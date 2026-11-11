@@ -222,6 +222,13 @@ end
                 @test !startswith(KaimonSlate.SlateHome.config_home(), root)   # Slate: not
             end
         end
+        @testset "the host's options come after the module it runs" begin
+            argv = KaimonSlate._host_argv(2828)
+            i = findfirst(==("-m"), argv)
+            @test argv[i+1] == "Kaimon" && argv[i+2:end] == ["--headless", "--port", "2828"]
+            @test KaimonSlate._host_argv(2828; tui = true)[i+1:end] == ["Kaimon", "--port", "2828"]
+            @test isdefined(KaimonSlate, :Dates)                    # the log's start line is dated
+        end
         @testset "Julia's own resolution is ours, not the launcher's" begin
             # The `slate` app shim exports JULIA_LOAD_PATH=<the KaimonSlate checkout>, which REPLACES
             # the whole load path — no `@`. Inheriting that makes `--project=<embedded env>` name an
