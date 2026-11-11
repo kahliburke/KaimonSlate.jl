@@ -395,7 +395,7 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
           }
           let m = measure(box(width: sz.width, plain))
           let s = if m.height > sz.height and m.height > 0pt { calc.max(0.5, sz.height / m.height) } else { 1.0 }
-          scale(origin: top + center, x: s * 100%, y: s * 100%, box(width: sz.width, body))
+          scale(origin: top + center, x: s * 100%, y: s * 100%, box(width: sz.width, height: m.height, body))
         })
       ]
     ]
