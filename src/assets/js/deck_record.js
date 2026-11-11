@@ -446,7 +446,9 @@
     const v = box.querySelector('[data-k=len]').value, secs = _parseLen(v);
     if (!(secs > 0)) { _renderShow(box, { state: 'error', message: 'Give the length as m:ss, e.g. 4:30' }); return; }
     try { localStorage.setItem('slate-render-length', v.trim()); } catch (e) {}
-    fetch(RAPI, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seconds: secs }) })
+    // The headless renderer has no saved theme of its own, so it is told this page's.
+    const theme = typeof curSlateTheme === 'function' ? curSlateTheme() : '';
+    fetch(RAPI, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seconds: secs, theme }) })
       .then(r => r.ok ? r.json() : r.text().then(t => ({ state: 'error', message: t })))
       .then(st => { if (_renderShow(box, st)) setTimeout(() => _renderPoll(box), 1500); })
       .catch(e => _renderShow(box, { state: 'error', message: String(e) }));

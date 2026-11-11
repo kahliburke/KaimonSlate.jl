@@ -12,6 +12,13 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Fixed
+
+- A deck video rendered from the record panel uses the editor's palette. The headless Chrome has no
+  saved theme, so every capture came out in the default palette. A notebook URL takes
+  `?slatetheme=<name>` to set the palette for that page, and `slide_view` and `render_deck` take a
+  `theme` argument.
+
 ## [2.1.0] - 2026-11-08
 
 ### Added
