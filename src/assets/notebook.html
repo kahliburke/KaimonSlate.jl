@@ -565,6 +565,7 @@
     <select id="exfmt">
       <option value="html">HTML — self-contained page</option>
       <option value="pdf">PDF — publication (Typst)</option>
+      <option value="deckpdf">PDF — the live deck as presented (Chrome)</option>
       <option value="markdown">Markdown — file or clipboard</option>
       <option value="website" hidden>Website — publishable page (+ og:image)</option>
       <option value="standalone">Standalone .jl — reproducible bundle</option>
@@ -618,6 +619,8 @@
   <div class="setrow exrow fmt-pdf"><label>Typst source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdftypst"> Also download the editable Typst project (<code>.tar.gz</code>)</label></div>
+  <div class="setrow exrow fmt-deckpdf"><label></label>
+    <span style="font-weight:400;font-size:0.85em;color:var(--dim)">One page per slide at its last step, printed from the live deck in a headless Chrome on the hub's machine: the deck's own look, text and SVG as vector, charts as images.</span></div>
   <div class="setrow exrow fmt-html"><label>Theme</label>
     <select id="htmltheme">
       <option value="asis">As-is — the notebook's current look</option>
@@ -750,7 +753,7 @@
   <div class="row"><button id="excancel" onclick="closeExport(false)">Cancel</button>
     <button class="exrow fmt-markdown" onclick="closeExport('copy')">Copy to clipboard</button>
     <button class="exrow fmt-website primary" id="sitepublishbtn" onclick="publishToSite()">☁ Publish into site</button>
-    <button class="exrow fmt-pdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button>
+    <button class="exrow fmt-pdf fmt-deckpdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button>
     <!-- The app export stays IN the dialog: it writes a folder rather than downloading, so the modal
          is the only place its destination path can be reported back. -->
     <button class="exrow fmt-app primary" id="appexportbtn" onclick="exportApp()">Write app folder</button>

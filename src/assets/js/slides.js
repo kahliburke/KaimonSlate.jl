@@ -1447,8 +1447,10 @@
     host.appendChild(slide);
     _typesetSlide(slide);         // a cell copied before the page typeset it carries raw math and unresolved images
     _sizeCanvas(slide, host.clientWidth, host.clientHeight);
-    const { items } = _scanSteps(slide.querySelector('.slide-body'), sld, null);
-    for (const it of items) { it.el.classList.toggle('on', it.idx <= step); it.el.classList.toggle('current', it.idx === step); }
+    const { items, total } = _scanSteps(slide.querySelector('.slide-body'), sld, null);
+    // A step past the last (`Infinity`) is the slide at its end, whose last step is current, as on the deck.
+    const now = Math.min(step, total);
+    for (const it of items) { it.el.classList.toggle('on', it.idx <= step); it.el.classList.toggle('current', it.idx === now); }
     for (const dv of slide.querySelectorAll('.derive')) {
       let cur = dv.children[0];
       for (const c of dv.children) { const it = items.find(x => x.el === c); if (it && it.idx <= step) cur = c; }
@@ -1526,12 +1528,15 @@
     end: D.idx >= D.slides.length - 1 && D.step >= D.total,
   });
 
-  // Every slide at its last step, numbered, in a grid over the page.
-  function _contactSheet(done, whenLoaded) {
-    // The sheet copies each chart as it stands, so end the charts' entry animations first.
+  // The sheet and the print copy each chart as it stands, so end the charts' entry animations first.
+  function _stillCharts() {
     document.querySelectorAll('#nb .cell').forEach(el => _cellCharts(el).forEach(inst => {
       try { inst.setOption({ animation: false }); } catch (e) {}
     }));
+  }
+  // Every slide at its last step, numbered, in a grid over the page.
+  function _contactSheet(done, whenLoaded) {
+    _stillCharts();
     D.slides = buildSlides();
     document.documentElement.classList.add('deck-sheet-mode');
     const [W, H] = _canvasSize();
@@ -1547,6 +1552,33 @@
       host.appendChild(n);
     });
     whenLoaded(grid, done);
+  }
+  // Every slide at its last step, one page each at the slide's own size (`--u: 1px`), for the hub's
+  // PDF of the deck as presented (server_deckshot.jl `deck_pdf`).
+  function _printDeck(done, whenLoaded) {
+    _stillCharts();
+    D.slides = buildSlides();
+    const [W, H] = _canvasSize();
+    const root = document.createElement('div');
+    root.className = 'deck-print';
+    const page = document.createElement('style');
+    page.textContent = '@page { size: ' + W + 'px ' + H + 'px; margin: 0; }';
+    root.appendChild(page);
+    document.body.appendChild(root);
+    const hosts = D.slides.map(() => {
+      const host = document.createElement('div'); host.className = 'deck-print-page';
+      host.style.width = W + 'px'; host.style.height = H + 'px';
+      return root.appendChild(host);
+    });
+    const draw = () => hosts.forEach((host, i) => _previewInto(host, i, Infinity));
+    // The first drawing fits each slide before its images and the deck's fonts have loaded; the
+    // second fits it again with them in place. The notebook is hidden only after that: a hidden
+    // chart shrinks to nothing, and its snapshot with it.
+    draw();
+    whenLoaded(root, () => document.fonts.ready.then(() => {
+      draw();
+      whenLoaded(root, () => { document.documentElement.classList.add('deck-print-mode'); done(); });
+    }));
   }
   function _renderPreviews() {
     const root = document.getElementById('presenter'); if (!root) return;
@@ -1624,7 +1656,8 @@
   // step), with any clip shown at its end, so a headless browser can capture exactly what the
   // audience sees; `&shot=1` also hides the deck's controls. The page marks
   // `<html data-deck-shot="ready">` once the slide and its images are in.
-  // `?deck=sheet` lays every slide out at its last step, as a contact sheet of the whole deck.
+  // `?deck=sheet` lays every slide out at its last step, as a contact sheet of the whole deck;
+  // `?deck=print` lays them out one per printed page.
   // `&render=1` is the video renderer's mode (server_deckshot.jl `deck_render`): the controls are
   // hidden, but transitions run, since they are what it records.
   const DECK_AT = new URLSearchParams(location.search).get('deck');
@@ -1643,6 +1676,7 @@
     const go = (tries = 0) => {
       if (!settled() && tries < 600) return setTimeout(() => go(tries + 1), 100);
       if (DECK_AT === 'sheet') return _contactSheet(mark, whenLoaded);
+      if (DECK_AT === 'print') return _printDeck(mark, whenLoaded);
       const [s, k] = DECK_AT.split('.');
       enterPresent(Math.max(0, (parseInt(s, 10) || 1) - 1));
       _applyStep(k == null || k === 'end' ? D.total : Math.max(0, parseInt(k, 10) || 0), true);

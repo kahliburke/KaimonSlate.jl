@@ -150,6 +150,34 @@ function deck_shot(url::AbstractString; width::Integer = 1600, height::Integer =
     end
 end
 
+"""
+    deck_pdf(url; timeout = 120) -> Vector{UInt8}
+
+A PDF of the deck at `url` (a notebook URL with `?deck=print&shot=1`) as the audience sees it: one
+page per slide at its last step, each the slide's own size. Text and SVG stay vector; a chart is the
+snapshot the deck shows.
+"""
+function deck_pdf(url::AbstractString; timeout::Real = 120)
+    lock(_DECKSHOT_LOCK) do
+        _with_cdp_tab(_deckshot_browser(); timeout) do call
+            _cdp_open_deck(call, url, 1920, 1080, timeout)
+            # Read back as a stream in chunks: in one reply, a large PDF's base64 would pass the
+            # WebSocket's frame limit (16 MiB in HTTP.jl) and the socket would close.
+            h = call("Page.printToPDF", Dict("preferCSSPageSize" => true, "printBackground" => true,
+                                             "transferMode" => "ReturnAsStream"))["stream"]
+            io = IOBuffer()
+            while true
+                r = call("IO.read", Dict("handle" => h, "size" => 4 * 1024 * 1024))
+                d = r["data"]
+                write(io, get(r, "base64Encoded", false) === true ? Base64.base64decode(d) : codeunits(d))
+                get(r, "eof", false) === true && break
+            end
+            call("IO.close", Dict("handle" => h))
+            return take!(io)
+        end
+    end
+end
+
 # ── Rendering the whole deck to a video ───────────────────────────────────────────────────────────
 # The deck is stepped through once in the headless browser while its screencast records every frame
 # that changes. Only the motion is recorded in real time (a transition, a build, a figure's clip);
