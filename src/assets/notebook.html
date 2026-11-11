@@ -19,8 +19,10 @@
      who HAS a preference keeps it, because an existing key is never overwritten. -->
 <script>try{var _a=window.__SLATE_APP__;if(_a&&_a.defaults){for(var _k in _a.defaults){if(localStorage.getItem(_k)===null)localStorage.setItem(_k,_a.defaults[_k]);}}}catch(e){}</script>
 <!-- Apply the saved Slate UI theme BEFORE any CSS paints, so there's no dark→light flash. The
-     palette lives in notebook.css under html[data-slate-theme="…"]; "midnight" is the bare default. -->
-<script>try{var _t=localStorage.getItem('slateTheme');if(_t&&_t!=='midnight')document.documentElement.dataset.slateTheme=_t;}catch(e){}</script>
+     palette lives in notebook.css under html[data-slate-theme="…"]; "midnight" is the bare default.
+     `?slatetheme=<name>` overrides it for this page only: the hub's headless captures
+     (server_deckshot.jl) run in a fresh browser profile with no saved theme. -->
+<script>try{var _t=new URLSearchParams(location.search).get('slatetheme')||localStorage.getItem('slateTheme');if(_t&&_t!=='midnight')document.documentElement.dataset.slateTheme=_t;}catch(e){}</script>
 <!-- App mode paints from the very first frame: the class goes on <html> here rather than on <body>
      from a script, so the authoring chrome is never briefly visible on a slow load. -->
 <script>try{if(window.__SLATE_APP__&&window.__SLATE_APP__.on)document.documentElement.classList.add('app-boot');}catch(e){}</script>
@@ -563,6 +565,7 @@
     <select id="exfmt">
       <option value="html">HTML — self-contained page</option>
       <option value="pdf">PDF — publication (Typst)</option>
+      <option value="deckpdf">PDF — the live deck as presented (Chrome)</option>
       <option value="markdown">Markdown — file or clipboard</option>
       <option value="website" hidden>Website — publishable page (+ og:image)</option>
       <option value="standalone">Standalone .jl — reproducible bundle</option>
@@ -616,6 +619,8 @@
   <div class="setrow exrow fmt-pdf"><label>Typst source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdftypst"> Also download the editable Typst project (<code>.tar.gz</code>)</label></div>
+  <div class="setrow exrow fmt-deckpdf"><label></label>
+    <span style="font-weight:400;font-size:0.85em;color:var(--dim)">One page per slide at its last step, printed from the live deck in a headless Chrome on the hub's machine: the deck's own look, text and SVG as vector, charts as images.</span></div>
   <div class="setrow exrow fmt-html"><label>Theme</label>
     <select id="htmltheme">
       <option value="asis">As-is — the notebook's current look</option>
@@ -748,7 +753,7 @@
   <div class="row"><button id="excancel" onclick="closeExport(false)">Cancel</button>
     <button class="exrow fmt-markdown" onclick="closeExport('copy')">Copy to clipboard</button>
     <button class="exrow fmt-website primary" id="sitepublishbtn" onclick="publishToSite()">☁ Publish into site</button>
-    <button class="exrow fmt-pdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button>
+    <button class="exrow fmt-pdf fmt-deckpdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button>
     <!-- The app export stays IN the dialog: it writes a folder rather than downloading, so the modal
          is the only place its destination path can be reported back. -->
     <button class="exrow fmt-app primary" id="appexportbtn" onclick="exportApp()">Write app folder</button>

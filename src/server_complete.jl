@@ -2808,6 +2808,10 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.pdf", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         pdf = try
+            # `layout=present`: the live deck printed in headless Chrome (server_deckshot.jl), not
+            # Typst, in Slate palette `slatetheme` (the headless browser has no saved one).
+            get(qp, "layout", "") == "present" ?
+                deck_pdf("$(_hub_url(h))/n/$(nb.id)?deck=print&shot=1" * _slatetheme_qs(get(qp, "slatetheme", ""))) :
             export_pdf(nb; _pdf_export_opts(qp, nb)...)
         catch e
             return HTTP.Response(500, "PDF export failed: " * sprint(showerror, e))

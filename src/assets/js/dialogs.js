@@ -571,6 +571,17 @@ async function _runPdfExport() {
   } catch (e) { await alertDark('PDF export failed: ' + e); }
   finally { hideLoading(); }
 }
+// The live deck as presented: the hub prints it in headless Chrome. It has no options.
+async function _runDeckPrint() {
+  showLoading('Printing the deck in headless Chrome…');
+  try {
+    const theme = typeof curSlateTheme === 'function' ? curSlateTheme() : '';
+    const r = await fetch(_apipath('/api/export.pdf') + '?layout=present&slatetheme=' + encodeURIComponent(theme));
+    if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
+    _saveBlob(await r.blob(), '.pdf');
+  } catch (e) { await alertDark('PDF export failed: ' + e); }
+  finally { hideLoading(); }
+}
 // ── The unified modal ─────────────────────────────────────────────────────────
 function _exFormat() { return document.getElementById('exfmt').value; }
 function closeExportModal() { document.getElementById('exportbg').classList.remove('show'); }
@@ -894,6 +905,7 @@ function closeExport(go) {
   if (fmt === 'website') return;   // publishing runs via the ☁ button → publishToSite(), not through closeExport
   if (fmt === 'app' || fmt === 'docs') return;       // …and the app export via "Write app folder" → exportApp(), which keeps the dialog open
   if (fmt === 'standalone') return exportStandalone();
+  if (fmt === 'deckpdf') return _runDeckPrint();
   return _runPdfExport();
 }
 // Back-compat entry points (palette / keys): open the unified modal, PDF preselecting the deck.

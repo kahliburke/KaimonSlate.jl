@@ -3277,7 +3277,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        slide_view(notebook; slide = 1, step = "end") -> image
+        slide_view(notebook; slide = 1, step = "end", theme = "") -> image
 
     SEE a slide of the notebook's deck as the audience sees it: slide `slide` (counting from 1, as the
     deck numbers them) at build step `step` ("end" for its last step, or a number; 0 is the slide
@@ -3287,16 +3287,17 @@ function create_tools(GateTool::Type)
     the WHOLE DECK as a contact sheet, every slide at its last step: start a review there. The reply
     also gives the deck's position (which slide of how many, which step of how many) and the error of
     any math on the slide that failed to typeset. Needs Chrome or Chromium on the hub's machine (or
-    KAIMONSLATE_CHROME pointing at one).
+    KAIMONSLATE_CHROME pointing at one). `theme` names the Slate palette to paint in (e.g.
+    "daylight", "nord"; "" for the default), since the headless browser does not know the author's.
     """
-    function slide_view(notebook::String; slide::Int = 1, step::String = "end")::String
+    function slide_view(notebook::String; slide::Int = 1, step::String = "end", theme::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         isdefined(Main, :Kaimon) || return "Image view needs the Kaimon host (unavailable in standalone mode)."
         k = lowercase(strip(step))
         (k == "end" || tryparse(Int, k) !== nothing) || return "step must be \"end\" or a number, got '$step'."
         at = slide <= 0 ? "sheet" : "$(slide).$(k)"
         png, pos, errs = try
-            NotebookServer.deck_shot("$(_base())/n/$(nb.id)?deck=$(at)&shot=1")
+            NotebookServer.deck_shot("$(_base())/n/$(nb.id)?deck=$(at)&shot=1" * NotebookServer._slatetheme_qs(theme))
         catch e
             return "Could not capture the slide: " * sprint(showerror, e)
         end
@@ -3306,7 +3307,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        render_deck(notebook; length = "5:00", fps = 30) -> String
+        render_deck(notebook; length = "5:00", fps = 30, theme = "") -> String
 
     Render the notebook's whole deck to a silent MP4 exactly `length` long ("m:ss", or seconds), with a
     chapter per slide (a .vtt beside it), into `recordings/` beside the notebook. The deck is stepped
@@ -3316,14 +3317,15 @@ function create_tools(GateTool::Type)
     is longer than `length`, the reply says how long it needs. Rendering takes about as long as the
     deck's motion plays, not the video's length. Waits up to about four minutes; a longer render keeps
     going, and calling this again reports how far it has got (it does not start a second one). Needs
-    Chrome or Chromium and ffmpeg on the hub's machine.
+    Chrome or Chromium and ffmpeg on the hub's machine. `theme` names the Slate palette to paint in
+    (e.g. "daylight", "nord"; "" for the default), since the headless browser does not know the author's.
     """
-    function render_deck(notebook::String; length::String = "5:00", fps::Int = 30)::String
+    function render_deck(notebook::String; length::String = "5:00", fps::Int = 30, theme::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         m = match(r"^\s*(?:(\d+):)?(\d+(?:\.\d+)?)\s*$", length)
         m === nothing && return "length must be m:ss or seconds, got '$length'."
         secs = parse(Int, something(m.captures[1], "0")) * 60 + parse(Float64, m.captures[2])
-        st = NotebookServer.deck_render_start!(nb, _base(); seconds = secs, fps = clamp(fps, 10, 60))
+        st = NotebookServer.deck_render_start!(nb, _base(); seconds = secs, fps = clamp(fps, 10, 60), theme)
         t0 = time()
         while st["state"] == "running" && time() - t0 < 240
             sleep(2)
@@ -3539,6 +3541,11 @@ function create_tools(GateTool::Type)
     per page, segmented by markdown headings + `slide`/`notes` cell tags (see the live "Present"
     mode). On a deck, code is hidden by default (set `source="1"`/`code` to show it) and
     `notes="1"` appends a speaker-notes section.
+
+    Set `layout="present"` to print the LIVE deck instead, as the audience sees it: one page per
+    slide at its last step, drawn by the deck's own CSS in a headless Chrome (Chrome or Chromium on
+    the hub's machine, or KAIMONSLATE_CHROME), in the Slate palette `charttheme` names ("" for the
+    default). Only `path` and `charttheme` apply; the other options are for Typst.
     """
     function export_pdf_tool(notebook::String; theme::String = "light", charttheme::String = "",
                              override::String = "0", params::String = "0",
@@ -3551,14 +3558,17 @@ function create_tools(GateTool::Type)
         # is the normal case for this tool, and the fallback is quiet: the PDF still builds and
         # those cells come out as plain text. Count them first so the answer can say so, rather
         # than leaving the caller to notice that a grid they expected is missing.
-        # HTML outputs that carry a markdown form are typeset, so they need no tab
-        htmlcells = count(c -> NotebookServer._has_html_output(c) &&
+        # HTML outputs that carry a markdown form are typeset, so they need no tab. A print of the
+        # live deck draws the cards itself.
+        htmlcells = layout == "present" ? 0 : count(c -> NotebookServer._has_html_output(c) &&
                                NotebookServer._output_chunk(c.output, "text/markdown") === nothing, nb.report.cells)
         notab = htmlcells > 0 && lock(nb.llock) do; isempty(nb.listeners); end
         # Deck defaults: code hidden unless the caller explicitly opts in.
         slides = layout == "slides"
         slide_source = slides ? (source == "1") : (source != "0")
         pdf = try
+            layout == "present" ?
+                NotebookServer.deck_pdf("$(_base())/n/$(nb.id)?deck=print&shot=1" * NotebookServer._slatetheme_qs(charttheme)) :
             export_pdf(nb; include_source = slide_source, style = style,
                        columns = something(tryparse(Int, columns), 1), theme = theme,
                        charttheme = charttheme, override = override == "1",

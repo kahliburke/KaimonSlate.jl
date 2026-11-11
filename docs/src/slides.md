@@ -31,8 +31,10 @@ In the deck:
 
 A notebook URL can open the deck at a given place: `…/n/talk?deck=3.2` presents slide 3 at its
 second step (`?deck=3.end` at its last), and `?deck=sheet` lays out every slide at its last step on
-one page. An agent looks at slides the same way, with `slide_view(notebook; slide, step)`, which
-captures that page in a headless Chrome (`slide = 0` for the sheet).
+one page, and `&slatetheme=daylight` paints the page in that Slate palette instead of your saved one.
+An agent looks at slides the same way, with `slide_view(notebook; slide, step)`, which captures that
+page in a headless Chrome (`slide = 0` for the sheet). The headless browser has no saved palette, so
+it uses the default one unless the agent passes `theme`.
 
 ![The contact sheet: every slide of a deck at its last step, on one page](./assets/present-sheet.png)
 
@@ -70,8 +72,8 @@ plays (transitions, builds, figure clips); each step then holds for its share of
 its rehearsed time when it has one and otherwise a reading time from the words it brings in (more for
 a new slide or a figure that changes), all scaled to fill the length. No step is cut shorter than its
 own motion. A render takes about as long as the deck's motion plays, a minute or so for a typical
-deck, not the length of the video. It needs Chrome (or Chromium) and `ffmpeg` on the hub's machine;
-an agent starts one with `render_deck(notebook; length)`.
+deck, not the length of the video. The video uses your palette. It needs Chrome (or Chromium) and
+`ffmpeg` on the hub's machine; an agent starts one with `render_deck(notebook; length, theme)`.
 
 A `notes` cell shows while you are **authoring** — marked with a dashed rule so you can tell at a
 glance which cells are yours alone — and nowhere else. It never reaches a slide, the reading view
@@ -363,6 +365,17 @@ The route is `GET /api/<id>/export.pdf?layout=slides`. `?theme=` sets the deck p
 or dark, as in the dialog), `?notes=1` appends the speaker-notes pages, `?code=` sizes or hides
 listings, and `?columns=` is ignored for decks. See [Export](export.md) for the shared PDF options
 and the editable Typst project (`export.typ`).
+
+### Print the live deck
+
+Format **PDF — the live deck as presented** prints the deck itself instead. The hub opens
+`?deck=print` in a headless Chrome and prints one page per slide, at its last step and at the
+slide's own size. The page has the look of the live deck: your palette, its CSS, its fitting, and
+your own slide styles. Text and SVG stay vector. A chart is the snapshot that the contact sheet
+shows, so it is a raster image. This format has no options. It needs Chrome or Chromium on the hub's
+machine (or `KAIMONSLATE_CHROME`). The route is
+`GET /api/<id>/export.pdf?layout=present&slatetheme=<palette>`, and an agent calls
+`export_pdf(notebook; layout = "present", charttheme = "<palette>")`.
 
 ## Zen mode
 

@@ -12,6 +12,20 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Added
+
+- **Print the live deck.** A new export format, "PDF — the live deck as presented", prints the
+  deck as the audience sees it: the hub opens `?deck=print` in headless Chrome, one page per slide
+  at its last step, with the deck's own CSS. Text and SVG stay vector. `export.pdf?layout=present`,
+  or `export_pdf(notebook; layout = "present")`.
+
+### Fixed
+
+- A deck video rendered from the record panel uses the editor's palette. The headless Chrome has no
+  saved theme, so every capture came out in the default palette. A notebook URL takes
+  `?slatetheme=<name>` to set the palette for that page, and `slide_view` and `render_deck` take a
+  `theme` argument.
+
 ## [2.1.0] - 2026-11-08
 
 ### Added

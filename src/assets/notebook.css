@@ -3114,8 +3114,8 @@ body.presenting { overflow: hidden; }
 
 .deck { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center;
   background: #000; }
-/* The deck palette, shared by the deck and the presenter's previews of it. */
-.deck, .pp-frame, .deck-sheet {
+/* The deck palette, shared by the deck, the presenter's previews of it, the sheet and the print. */
+.deck, .pp-frame, .deck-sheet, .deck-print {
   --deck-fg: var(--text); --deck-strong: var(--strong, var(--text)); --deck-dim: var(--dim);
   --deck-accent: var(--accent); --deck-accent2: #b392f0; --deck-surface: var(--bg);
   --deck-ink: #ff4d6d;
@@ -3155,6 +3155,12 @@ html.deck-sheet-mode body > *:not(.deck-sheet) { display: none !important; }
   outline: 1px solid rgba(255, 255, 255, .08); }
 .deck-sheet-n { position: absolute; left: 8px; top: 6px; font: 600 13px/1 system-ui, sans-serif; color: #fff;
   background: rgba(0, 0, 0, .55); padding: 3px 7px; border-radius: 4px; z-index: 2; }
+
+/* `?deck=print`: every slide at its last step, one page each (the `@page` size is set by slides.js). */
+html.deck-print-mode body > *:not(.deck-print) { display: none !important; }
+html.deck-print-mode, html.deck-print-mode body { margin: 0 !important; padding: 0 !important; overflow: visible !important; }
+.deck-print { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+.deck-print-page { position: relative; overflow: hidden; break-after: page; }
 
 /* The moved-in cells lose their notebook chrome. */
 .deck-slide .cell { border: none !important; background: none !important; margin: 0 !important; padding: 0 !important;

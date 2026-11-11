@@ -117,6 +117,11 @@ function _cdp_open_deck(call, url, width, height, timeout)
     end
 end
 
+# The query part that paints a captured page in Slate palette `theme` (notebook.html reads
+# `?slatetheme=`). The headless browser has a fresh profile with no saved theme, so without it every
+# capture is in the default palette, whatever the author works in. "" or a malformed name: default.
+_slatetheme_qs(theme::AbstractString) = occursin(r"^[a-z0-9-]{1,32}$", theme) ? "&slatetheme=$theme" : ""
+
 """
     deck_shot(url; width = 1600, height = 900, timeout = 90) -> (png, position, tex_errors)
 
@@ -141,6 +146,34 @@ function deck_shot(url::AbstractString; width::Integer = 1600, height::Integer =
             end
             shot = call("Page.captureScreenshot", Dict("format" => "png"))
             return Base64.base64decode(shot["data"]), String(pos), String[string(e) for e in errs]
+        end
+    end
+end
+
+"""
+    deck_pdf(url; timeout = 120) -> Vector{UInt8}
+
+A PDF of the deck at `url` (a notebook URL with `?deck=print&shot=1`) as the audience sees it: one
+page per slide at its last step, each the slide's own size. Text and SVG stay vector; a chart is the
+snapshot the deck shows.
+"""
+function deck_pdf(url::AbstractString; timeout::Real = 120)
+    lock(_DECKSHOT_LOCK) do
+        _with_cdp_tab(_deckshot_browser(); timeout) do call
+            _cdp_open_deck(call, url, 1920, 1080, timeout)
+            # Read back as a stream in chunks: in one reply, a large PDF's base64 would pass the
+            # WebSocket's frame limit (16 MiB in HTTP.jl) and the socket would close.
+            h = call("Page.printToPDF", Dict("preferCSSPageSize" => true, "printBackground" => true,
+                                             "transferMode" => "ReturnAsStream"))["stream"]
+            io = IOBuffer()
+            while true
+                r = call("IO.read", Dict("handle" => h, "size" => 4 * 1024 * 1024))
+                d = r["data"]
+                write(io, get(r, "base64Encoded", false) === true ? Base64.base64decode(d) : codeunits(d))
+                get(r, "eof", false) === true && break
+            end
+            call("IO.close", Dict("handle" => h))
+            return take!(io)
         end
     end
 end
@@ -294,13 +327,13 @@ function _encode_deck(ff, frames, steps, holds, out, fps)
 end
 
 """
-    deck_render_start!(nb, base; seconds, fps = 30) -> Dict
+    deck_render_start!(nb, base; seconds, fps = 30, theme = "") -> Dict
 
 Start rendering notebook `nb`'s deck to a video `seconds` long, served from `base` (the hub's URL),
-in the background, into `recordings/` beside the notebook. One render per notebook at a time.
-Returns the status that `deck_render_status` reports.
+in the background, into `recordings/` beside the notebook, in Slate palette `theme` ("" for the
+default). One render per notebook at a time. Returns the status that `deck_render_status` reports.
 """
-function deck_render_start!(nb, base::AbstractString; seconds::Real, fps::Integer = 30)
+function deck_render_start!(nb, base::AbstractString; seconds::Real, fps::Integer = 30, theme::AbstractString = "")
     st, fresh = lock(_DECK_RENDER_LOCK) do
         cur = get(_DECK_RENDERS, nb.id, nothing)
         cur !== nothing && cur["state"] == "running" && return (cur, false)
@@ -314,7 +347,7 @@ function deck_render_start!(nb, base::AbstractString; seconds::Real, fps::Intege
     end
     fresh || return copy(st)
     set!(k, v) = lock(() -> (st[k] = v), _DECK_RENDER_LOCK)
-    url = "$(base)/n/$(nb.id)?deck=1.0&render=1"
+    url = "$(base)/n/$(nb.id)?deck=1.0&render=1" * _slatetheme_qs(theme)
     Threads.@spawn try
         deck_render(url, st["file"]; seconds, fps, progress = msg -> set!("message", msg))
         set!("message", "done"); set!("state", "done")
