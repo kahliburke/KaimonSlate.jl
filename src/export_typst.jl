@@ -324,12 +324,13 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
     p = _palette(theme)
     csize = _code_size(code == "normal" ? "small" : code)   # listings are tighter on slides
     w, h = _slide_geom(ratio)
+    vmargin = "12mm"
     rawtheme = isempty(p.codetheme) ? "" : "\n    #set raw(theme: \"$(p.codetheme)\")"
     return """
     #import "@preview/cmarker:$(_CMARKER_VER)"
     #import "@preview/mitex:$(_MITEX_VER)": mitex, mi
     #set document(title: "$(_typ_str(title))")
-    #set page(width: $w, height: $h, margin: (x: 16mm, y: 12mm), fill: $(p.page))
+    #set page(width: $w, height: $h, margin: (x: 16mm, y: $vmargin), fill: $(p.page))
     #set text(font: "New Computer Modern", size: 19pt, fill: $(p.text))$(rawtheme)
     #set par(justify: false, leading: 0.7em, spacing: 1.1em)
     #show heading: set text(fill: $(p.title))
@@ -376,7 +377,10 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
     #let outblock(s) = block(width: 100%, inset: 7pt, fill: $(p.outbg), radius: 3pt, text(size: 0.7em, fill: $(p.outfg), raw(s)))
     #let valblock(s) = block(width: 100%, inset: 7pt, fill: $(p.valbg), radius: 3pt, text(size: 0.7em, fill: $(p.valfg), raw(s)))
     #let errblock(s) = block(width: 100%, inset: 7pt, fill: $(p.errbg), radius: 3pt, text(size: 0.7em, fill: $(p.errfg), raw(s)))
-    #let figureimg(p, width: none) = align(center, if width == none { image(p, height: 62%) } else { image(p, width: width) })
+    // A figure is 62% of the body region of the page, as a fixed length. A ratio would resolve
+    // against the container, which has no height limit in the measure box of `#slide`.
+    #let FIGH = 0.62 * ($h - 2 * $vmargin)
+    #let figureimg(p, width: none) = align(center, if width == none { image(p, height: FIGH) } else { image(p, width: width) })
     #let notefig(s) = block(width: 100%, inset: 7pt, text(size: 0.7em, style: "italic", fill: $(p.parlabel), s))
     #let figcaption(lbl, body) = block(width: 100%, inset: (x: 24pt, y: 4pt), text(size: 0.7em, fill: $(p.parlabel))[#text(weight: "bold")[#lbl.] #body])
     #let paramblock(items) = block(width: 100%, inset: (x: 8pt, y: 5pt), fill: $(p.parbg), radius: 3pt, stroke: 0.5pt + $(p.parborder),
@@ -395,7 +399,7 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
           }
           let m = measure(box(width: sz.width, plain))
           let s = if m.height > sz.height and m.height > 0pt { calc.max(0.5, sz.height / m.height) } else { 1.0 }
-          scale(origin: top + center, x: s * 100%, y: s * 100%, box(width: sz.width, body))
+          scale(origin: top + center, x: s * 100%, y: s * 100%, box(width: sz.width, height: m.height, body))
         })
       ]
     ]

@@ -12,6 +12,15 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Fixed
+
+- A slide in the PDF deck that is taller than the page shrinks to fit and keeps its items in order.
+  The last items of a long list used to print on top of each other, with an empty bullet below them.
+- A figure in the PDF deck counts in the height of its slide. A figure is now 62% of the body
+  region of the page, as a fixed length. Before, the figure height was a ratio that the slide
+  measure resolved against an unbounded container, so a slide with text and two figures did not
+  shrink and ran off the top and bottom of the page.
+
 ## [2.1.0] - 2026-11-08
 
 ### Added
