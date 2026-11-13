@@ -1722,7 +1722,11 @@
     const q = new URLSearchParams(location.search);
     if (q.get('shot') === '1') document.documentElement.classList.add('deck-shot');
     if (q.get('render') === '1') document.documentElement.classList.add('deck-render');
-    const settled = () => !document.querySelector('#nb .cell.state-running, #nb .cell.state-queued');
+    // A cell with images fills its markdown or output only after the images decode (`_swapOutput`,
+    // view.js): until then its host is empty. A swap is pending while `__slateSwapSeq` is ahead of
+    // `__slateHoldSeq`. A capture taken before then copies the empty host.
+    const settled = () => !document.querySelector('#nb .cell.state-running, #nb .cell.state-queued')
+      && ![...document.querySelectorAll('#nb .md, #nb .output')].some(o => o.__slateSwapSeq !== o.__slateHoldSeq);
     const whenLoaded = (root, done, n = 0) => {
       const loaded = [...root.querySelectorAll('img, video')].every(m => m.tagName === 'IMG' ?
         (!m.getAttribute('src') || m.complete) : (m.readyState >= 2 && !m.seeking) || !m.getAttribute('src'));
