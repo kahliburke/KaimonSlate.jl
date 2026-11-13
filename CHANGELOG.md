@@ -12,6 +12,17 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Markdown values keep their literal characters in the PDF and the Markdown export.** A `Markdown.MD`
+  value is exported in its `text/markdown` form, which Julia prints without escapes. A literal `*`, `_`,
+  `$` or `!` before a link, and a line that starts with `#`, `-` or `1.`, came out as markup: `_\* note_`
+  printed as `** note*`, and `\*a\*` turned into italic text. A hard line break came out as a soft one.
+  Slate now escapes the text of the value before it prints it, so a CommonMark reader gets the text the
+  page shows. Code, formulas and link targets stay as they are. Brackets stay brackets in the PDF.
+  The text form of an `MD` value (`value_repr`, which the `{{ }}` splice, agents and the debugger read)
+  is now this escaped text, so a locked markdown cell that shows such a value is saved once more.
+
 ## [2.1.0] - 2026-11-08
 
 ### Added

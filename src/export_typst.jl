@@ -619,13 +619,13 @@ end
 #
 # Code is left alone: a fenced block or an inline span may legitimately SHOW `\[…\]` (a LaTeX sample),
 # and rewriting it there would corrupt the listing rather than typeset anything — cmarker's math hook
-# doesn't fire inside code in the first place.
-function _normalize_math_delims(src::AbstractString)
+# doesn't fire inside code in the first place. `tex` rewrites the TeX of each formula, and only that.
+function _normalize_math_delims(src::AbstractString; tex = identity)
     out = IOBuffer()
     for (kind, t) in ReportRender._md_segments(src)
         if kind === :math
-            tex, display = ReportRender._math_parts(t)
-            print(out, display ? "\$\$" : "\$", tex, display ? "\$\$" : "\$")
+            body, display = ReportRender._math_parts(t)
+            print(out, display ? "\$\$" : "\$", tex(body), display ? "\$\$" : "\$")
         elseif kind === :dollar
             print(out, "\\\$")
         else
@@ -989,7 +989,7 @@ function _emit_typeset_output!(io::IO, dir::AbstractString, base::AbstractString
     _has_figure_bytes(o) && return false
     md = _output_chunk(o, "text/markdown")
     if md !== nothing
-        src = _normalize_math_delims(_portable_tex(md))
+        src = _normalize_math_delims(md; tex = _portable_tex)
         if _typst_typesets(:md, src)
             write(joinpath(dir, base * ".md"), src)
             print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn, scope: (image: mdimage))\n")
