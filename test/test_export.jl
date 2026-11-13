@@ -6,6 +6,8 @@ import Base64
 using CodecZlib: GzipDecompressor            # verify the packed-asset round-trip
 using Random: Xoshiro                        # deterministic incompressible bytes
 import JSON                                  # hand the @replay control fixture to node
+import Markdown
+import CommonMark                            # the parser Slate and cmarker use, to read an exported markdown form back
 const ReportEngine = KaimonSlate.ReportEngine
 const NS = KaimonSlate.NotebookServer
 const HTTP = NS.HTTP                         # vendor responses are HTTP.Responses
@@ -1967,6 +1969,109 @@ Base.show(io::IO, ::MIME"text/markdown", p::_MdProse) = print(io, p.text)
     # Strings and numbers splice as before.
     n = _RE._eval_capture(m, "42")
     @test KaimonSlate.ReportRender._markdown_output(n) === nothing && occursin("ival", KaimonSlate.ReportRender._md_html("{{ x }}", [n]))
+end
+
+# A `Markdown.MD` value is captured as `text/markdown` for the PDF and the Markdown export. The stdlib
+# prints text as it is, so a literal `*`, `$`, `[a](b)` or a line that starts with `# ` read back as
+# markup. A CommonMark reader (the parser Slate and cmarker use) must give the document the value shows.
+@testset "an MD value's markdown form reads back as the same document" begin
+    mdchunk(md) = begin
+        chunks = Tuple{String, Vector{UInt8}}[]
+        @test _RE._capture_rich!(chunks, md)
+        String(only(d for (m, d) in chunks if m == "text/markdown"))
+    end
+    parser() = begin
+        p = CommonMark.Parser()
+        CommonMark.enable!(p, CommonMark.TableRule())
+        CommonMark.enable!(p, CommonMark.AdmonitionRule())
+        p
+    end
+    # The two HTML writers spell some things differently: numeric entities, table sections, the
+    # paragraph inside a list item, the line break after a tag. Bring both to one spelling. The
+    # paragraph tags stay, so a split paragraph and a soft line break do not compare equal. The
+    # alignment of table columns is compared on its own.
+    norm(h) = strip(foldl((s, p) -> replace(s, p),
+                          (r"&#(\d+);" => m -> string(Char(parse(Int, m[3:end-1]))),
+                           r"</?(?:thead|tbody)>| align=\"\w+\"" => "",
+                           r"<li><p>(.*?)</p>\s*</li>"s => s"<li>\1</li>",
+                           r"(<br />)\s*" => s"\1", r">\s+<" => "><"); init = h))
+    aligns(h) = [m[1] for m in eachmatch(r"align=\"(\w+)\"", h)]
+    page(md) = Markdown.html(md)
+    reread(text) = CommonMark.html(parser()(text))
+    same(md, text) = norm(reread(text)) == norm(page(md)) && aligns(reread(text)) == aligns(page(md))
+    # What the PDF export does with the chunk: formulas get `$` delimiters, and only they are cleaned.
+    pdftext(chunk) = NS._normalize_math_delims(chunk; tex = NS._portable_tex)
+    nomath(chunk) = :math ∉ first.(KaimonSlate.ReportRender._md_segments(chunk))
+
+    cases = [raw"_\* note_", raw"\*a\*", raw"\_a\_", raw"\`a\`", raw"\$x\$", raw"\# not heading",
+             raw"\[a\](b)", raw"1\. not list", raw"\- item",
+             raw"\![a](b)", raw"\!!! note", raw"# Use \#", raw"# \#",
+             "# Head \\#1\n\nplain \\*text\\*",
+             "- **a\\*b**\n- \\- two",
+             "> \\# quote *i*",
+             "| a | b |\n|:--|--:|\n| `x` | \\*y\\* |\n| p \\| q | **b** |",
+             "| Value [unit] | n |\n|:-:|--:|\n| 7.8 [km/s] | 2 |",
+             "!!! note \"Heads up\"\n    \\*star\\* and **bold**",
+             "![x*y](http://a_b.png/*) [l\\_k](http://a_b.com/x*y)",
+             "a & b &amp; c ~5 ~~s~~ snake\\_case 3.14 non-linear",
+             raw"[see [1] and \[ x](u) ![a [b]](i.png)",
+             raw"see [1] and a[i]", raw"Hello\![a](b)", raw"\\\\server\\share", raw"a \\[x\] b"]
+    for src in cases
+        md = Markdown.parse(src)
+        chunk = mdchunk(md)
+        @test same(md, chunk)
+        # The same text through the PDF path: brackets and backslashes stay text.
+        if any(c -> c in ('[', '\\'), src)
+            @test nomath(chunk)
+            @test same(md, pdftext(chunk))
+        end
+    end
+    @test mdchunk(Markdown.parse("Hello!")) == "Hello!\n"           # a `!` is escaped only before a link
+    @test mdchunk(Markdown.parse("1.5 and 3.14 in non-linear")) == "1.5 and 3.14 in non-linear\n"
+
+    # A footnote is a stdlib construct that CommonMark does not read. The stdlib parser does.
+    md = Markdown.parse("text[^1] \\[x\\]\n\n[^1]: note \\*here\\*")
+    @test Markdown.html(Markdown.parse(mdchunk(md))) == Markdown.html(md)
+
+    # A tree built in code. Strings in table cells are separate texts, so they stay in their columns.
+    md = Markdown.MD(Markdown.Table(Vector{Any}[Any["h1", "h2"], Any["|a*", "b"]], [:l, :r]))
+    @test same(md, mdchunk(md)) && aligns(reread(mdchunk(md))) == ["left", "right", "left", "right"]
+    # A string at block level is not text: `plain` prints it quoted, and the chunk keeps that form.
+    md = Markdown.MD(Any["a*b", "second"])
+    @test mdchunk(md) == Markdown.plain(md) == "\"a*b\"\n\n\"second\"\n"
+    # A hard line break stays one. The stdlib prints it as a newline, which a reader takes as soft.
+    md = Markdown.MD(Markdown.Paragraph(Any["a", Markdown.LineBreak(), "b"]))
+    @test occursin("<br />", reread(mdchunk(md))) && same(md, mdchunk(md))
+    # A hard break with nothing after it means nothing: no stray backslash, in a paragraph, a list
+    # item and a quote.
+    @test mdchunk(Markdown.parse("a\\\n")) == "a\n"
+    @test mdchunk(Markdown.parse("- a\\\n")) == "  * a\n"
+    @test mdchunk(Markdown.parse("> a\\\n")) == "> a\n\n"
+    # Interpolated text with a line that starts with `|` and a delimiter row is not a table, in the
+    # middle of a paragraph and (in a tree built in code) at its start.
+    x = "a\n| b | c |\n|:--|--:|\n| 1 | 2 |"
+    for md in (Markdown.@md_str("pre \$(x) post"), Markdown.MD(Markdown.Paragraph(Any[x, " post"])))
+        @test same(md, mdchunk(md)) && !occursin("<table", reread(mdchunk(md)))
+    end
+    # Text that a cell interpolates into a paragraph is escaped like any other text.
+    s = "a*b"
+    md = Markdown.@md_str "x \$(s) y"
+    @test any(x -> x == "a*b", only(md.content).content) && same(md, mdchunk(md))
+
+    # Math stays math, and an escaped dollar stays a literal one in the PDF source.
+    md = Markdown.parse(raw"Euler: $e^{i\pi} = -1$, cost \$5 and \$x\$.")
+    @test any(x -> x isa Markdown.LaTeX, only(md.content).content)
+    chunk = mdchunk(md)
+    segs = KaimonSlate.ReportRender._md_segments(chunk)
+    @test [t for (k, t) in segs if k === :math] == [raw"$e^{i\pi} = -1$"]
+    @test count(==(:dollar), first.(segs)) == 3
+    pdf = NS._normalize_math_delims(chunk)
+    @test occursin(raw"$e^{i\pi} = -1$", pdf) && occursin(raw"cost \$5 and \$x\$.", pdf)
+    # The TeX cleanup of the PDF path reaches the formula and nothing else: the formula loses its
+    # `\mathllap`, and the bracket text next to it stays text.
+    md = Markdown.parse(raw"see $\mathllap{x}=1$, then a \\[x\] b and [2]")
+    pdf = pdftext(mdchunk(md))
+    @test [t for (k, t) in KaimonSlate.ReportRender._md_segments(pdf) if k === :math] == [raw"${x}=1$"]
 end
 
 # Prose dollar amounts are not math, on screen or in print. KaTeX's auto-render pairs any two `$` in
