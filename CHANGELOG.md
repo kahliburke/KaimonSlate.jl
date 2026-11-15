@@ -12,6 +12,19 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-11-15
+
+### Fixed
+
+- `slate --ai` starts its Kaimon host: `--headless` goes after `-m Kaimon`, where Kaimon reads it.
+  A host log that cannot be opened is reported.
+- Precompiling binds the ports the OS assigns to its gate, so another process cannot take one
+  between the check and the bind.
+- In the markdown export, a cell's outputs sit in a blockquote under its code, and text outputs are
+  fenced as text.
+- A hub running under WSL serves a browser on Windows. The owner check now accepts the connection
+  Windows forwards in, where it used to answer that the hub belongs to another account.
+
 ## [2.1.0] - 2026-11-08
 
 ### Added
