@@ -3646,7 +3646,9 @@ end
 # account on a shared machine (a cluster login node), which can open 127.0.0.1 directly and send any
 # headers it likes. On Linux the kernel says who owns the far end of a loopback connection (see
 # peer_owner.jl), so a loopback request is served only when that is the account running the hub.
-# SSH forwards and VS Code's port forwarding connect as the logged-in user and pass.
+# SSH forwards and VS Code's port forwarding connect as the logged-in user and pass. Under WSL, a
+# browser on Windows reaches the hub through a relay running as root, or with no Linux socket at all,
+# and is served; WSL is then as open as Windows, where the check does not run.
 #
 # Elsewhere the check is skipped: macOS and Windows have no equivalent lookup, and are rarely shared
 # between accounts. A non-loopback peer is not a local account; the bind address governs those. An
@@ -3686,7 +3688,7 @@ function _peer_is_owner(stream)::Bool
         known === nothing || return known
         here = HTTP.TCP.local_addr(tracked.conn)
         uid = PeerOwner.owner_uid(_addr_bytes(peer), peer.port, _addr_bytes(here), here.port)
-        ok = uid !== nothing && uid == PeerOwner.my_uid()
+        ok = PeerOwner.accepts(uid, PeerOwner.my_uid(); wsl = PeerOwner.is_wsl())
         lock(() -> (_PEER_SEEN[tracked] = ok), _PEER_SEEN_LOCK)
         return ok
     catch e

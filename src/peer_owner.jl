@@ -13,7 +13,8 @@
 # per connection; the owner of a connection cannot change.
 #
 # A connection that arrives through an SSH forward (`ssh -L`, VS Code's port forwarding) is opened by
-# the forwarding process, which runs as the account that logged in, so it reads as that user.
+# the forwarding process, which runs as the account that logged in, so it reads as that user. Under
+# WSL a Windows browser's connection reads as root or as no one; `accepts` lets those through there.
 #
 # Pure and dependency-free, so its test can include it on its own (test/test_peer_owner.jl).
 
@@ -184,5 +185,19 @@ end
 
 "This process's real uid."
 my_uid() = ccall(:getuid, Cuint, ())
+
+"Whether this Linux runs under WSL, going by the kernel release Microsoft's kernels carry."
+is_wsl(release::AbstractString) = occursin(r"microsoft|wsl"i, release)
+is_wsl() = is_wsl(try; read("/proc/sys/kernel/osrelease", String); catch; ""; end)
+
+"""
+    accepts(uid, me; wsl = false) -> Bool
+
+Whether a loopback connection whose far end `uid` owns (`nothing` when no local socket holds it) may
+use the hub account `me` runs. Under WSL a Windows program's connection arrives through a relay that
+runs as root (NAT networking), or from the Windows side with no Linux socket behind it (mirrored
+networking), so both pass there. Another ordinary account is refused everywhere.
+"""
+accepts(uid, me; wsl::Bool = false) = uid == me || (wsl && (uid === nothing || uid == 0))
 
 end # module PeerOwner

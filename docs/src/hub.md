@@ -177,7 +177,7 @@ Driving a local model requires Kaimon's Ollama agent backend. Selecting a model 
 | `VMLX_HOST` | vmlx (MLX) API endpoint for the model list (default `http://127.0.0.1:8000`). |
 | `SLATE_BROWSER` | Open a specific browser (e.g. `"Google Chrome"`) instead of the OS default. |
 | `KAIMONSLATE_ALLOWED_HOSTS` | Extra Host/Origin names the hub will answer to (a DNS alias, a proxy). This machine's own names are admitted automatically. |
-| `KAIMONSLATE_ALLOW_OTHER_USERS` | `=1` → on Linux, also answer loopback connections from other accounts on this machine. Off by default, since a shared login node's other users can reach its loopback ports. |
+| `KAIMONSLATE_ALLOW_OTHER_USERS` | `=1` → on Linux, also answer loopback connections from other accounts on this machine. Off by default, since a shared login node's other users can reach its loopback ports. Not needed under WSL, where a Windows browser's connection is served. |
 | `KAIMON_GATE_OWNER_WAKE` | `=0` → a worker serves its gate with the polling loop instead of the event-driven one. |
 | `KAIMONSLATE_BLOB_CAP_GB` | Size cap for the local cache of remote results read by byte range (default a sixteenth of free disk, between 1 and 8 GB). |
 | `KAIMONSLATE_SCHED_BUDGET` | Scheduler commands per minute to one machine above which the hub warns in its log (default 2). |

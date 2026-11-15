@@ -44,6 +44,21 @@ using .PeerOwner
         @test PeerOwner.reply_uid(hdr(PeerOwner.SOCK_DIAG_BY_FAMILY, 16)) === nothing   # truncated
     end
 
+    @testset "who may connect" begin
+        @test PeerOwner.accepts(UInt32(501), UInt32(501))
+        @test !PeerOwner.accepts(UInt32(502), UInt32(501))
+        @test !PeerOwner.accepts(nothing, UInt32(501))
+        @test !PeerOwner.accepts(UInt32(0), UInt32(501))
+        # WSL: the localhost relay runs as root, and mirrored networking leaves no Linux socket.
+        @test PeerOwner.accepts(UInt32(0), UInt32(501); wsl = true)
+        @test PeerOwner.accepts(nothing, UInt32(501); wsl = true)
+        @test !PeerOwner.accepts(UInt32(502), UInt32(501); wsl = true)
+        @test PeerOwner.is_wsl("6.6.87.2-microsoft-standard-WSL2\n")
+        @test PeerOwner.is_wsl("4.4.0-19041-Microsoft")
+        @test !PeerOwner.is_wsl("6.8.0-48-generic")
+        @test !PeerOwner.is_wsl("")
+    end
+
     # The fallback when sock_diag is unavailable (no tcp_diag module, and loading it disabled).
     # /proc prints each address word in host byte order, so these literals are little-endian forms.
     if ENDIAN_BOM == 0x04030201
