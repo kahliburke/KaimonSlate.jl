@@ -3833,8 +3833,13 @@ function _gate_workload()
         # The ZAP handler notices its closed socket on its next receive timeout. Wait for it, or the
         # image build waits on its open poll handle.
         zap = isdefined(KaimonGate, :_zap_task) ? KaimonGate._zap_task() : nothing
+        # The gate's owner-wake tick closes itself on its first firing after the gate stops. Wait
+        # for that too.
+        wake = isdefined(KaimonGate, :_GATE_WAKE) ? KaimonGate._GATE_WAKE[] : nothing
         redirect_stdout(KaimonGate.stop, devnull)
         zap === nothing || timedwait(() -> istaskdone(zap), 5.0)
+        tick = hasproperty(wake, :tick) ? wake.tick : nothing
+        tick isa Timer && timedwait(() -> !isopen(tick), 5.0)
         old === nothing ? delete!(ENV, "XDG_CACHE_HOME") : (ENV["XDG_CACHE_HOME"] = old)
         rm(cache; recursive = true, force = true)
     end
@@ -3871,8 +3876,11 @@ if ccall(:jl_generating_output, Cint, ()) == 1
     _precompile_start()
     try
         _NS[] = _new_ns(_WarmNS)
-        __slate_eval("1 + 1"; filename = "cell:__prewarm__")
-        __slate_eval("x = sum(rand(10)); x"; filename = "cell:__prewarm__")
+        # Their "ran cell" records go nowhere: output during precompilation is reported as a warning.
+        Logging.with_logger(Logging.ConsoleLogger(devnull)) do
+            __slate_eval("1 + 1"; filename = "cell:__prewarm__")
+            __slate_eval("x = sum(rand(10)); x"; filename = "cell:__prewarm__")
+        end
     catch e
         @warn "SlateWorker precompile workload (eval) failed" exception = (e, catch_backtrace())
     end
