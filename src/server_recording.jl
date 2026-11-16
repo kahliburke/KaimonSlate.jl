@@ -134,7 +134,8 @@ function _register_recording_routes!(router, h::Hub)
         secs = something(tryparse(Float64, string(get(b, "seconds", ""))), 0.0)
         secs > 0 || return HTTP.Response(400, "seconds must be a positive number")
         fps = clamp(something(tryparse(Int, string(get(b, "fps", 30))), 30), 10, 60)
-        _json(_render_status_json(nb, deck_render_start!(nb, _hub_url(h); seconds = secs, fps)))
+        _json(_render_status_json(nb, deck_render_start!(nb, _hub_url(h); seconds = secs, fps,
+                                                         theme = string(get(b, "theme", "")))))
     end))
     HTTP.register!(router, "GET", "/api/{id}/deck-render", req -> _withnb(h, req, nb ->
         _json(_render_status_json(nb, deck_render_status(nb)))))

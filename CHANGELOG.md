@@ -35,6 +35,10 @@ were written when they went out. They are marked.
   page shows. Code, formulas and link targets stay as they are. Brackets stay brackets in the PDF.
   The text form of an `MD` value (`value_repr`, which the `{{ }}` splice, agents and the debugger read)
   is now this escaped text, so a locked markdown cell that shows such a value is saved once more.
+- A deck video rendered from the record panel uses the editor's palette. The headless Chrome has no
+  saved theme, so every capture came out in the default palette. A notebook URL takes
+  `?slatetheme=<name>` to set the palette for that page, and `slide_view` and `render_deck` take a
+  `theme` argument.
 
 ## [2.1.1] - 2026-11-15
 

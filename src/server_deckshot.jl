@@ -117,6 +117,11 @@ function _cdp_open_deck(call, url, width, height, timeout)
     end
 end
 
+# The query part that paints a captured page in Slate palette `theme` (notebook.html reads
+# `?slatetheme=`). The headless browser has a fresh profile with no saved theme, so without it every
+# capture is in the default palette, whatever the author works in. "" or a malformed name: default.
+_slatetheme_qs(theme::AbstractString) = occursin(r"^[a-z0-9-]{1,32}$", theme) ? "&slatetheme=$theme" : ""
+
 """
     deck_shot(url; width = 1600, height = 900, timeout = 90) -> (png, position, tex_errors)
 
@@ -294,13 +299,13 @@ function _encode_deck(ff, frames, steps, holds, out, fps)
 end
 
 """
-    deck_render_start!(nb, base; seconds, fps = 30) -> Dict
+    deck_render_start!(nb, base; seconds, fps = 30, theme = "") -> Dict
 
 Start rendering notebook `nb`'s deck to a video `seconds` long, served from `base` (the hub's URL),
-in the background, into `recordings/` beside the notebook. One render per notebook at a time.
-Returns the status that `deck_render_status` reports.
+in the background, into `recordings/` beside the notebook, in Slate palette `theme` ("" for the
+default). One render per notebook at a time. Returns the status that `deck_render_status` reports.
 """
-function deck_render_start!(nb, base::AbstractString; seconds::Real, fps::Integer = 30)
+function deck_render_start!(nb, base::AbstractString; seconds::Real, fps::Integer = 30, theme::AbstractString = "")
     st, fresh = lock(_DECK_RENDER_LOCK) do
         cur = get(_DECK_RENDERS, nb.id, nothing)
         cur !== nothing && cur["state"] == "running" && return (cur, false)
@@ -314,7 +319,7 @@ function deck_render_start!(nb, base::AbstractString; seconds::Real, fps::Intege
     end
     fresh || return copy(st)
     set!(k, v) = lock(() -> (st[k] = v), _DECK_RENDER_LOCK)
-    url = "$(base)/n/$(nb.id)?deck=1.0&render=1"
+    url = "$(base)/n/$(nb.id)?deck=1.0&render=1" * _slatetheme_qs(theme)
     Threads.@spawn try
         deck_render(url, st["file"]; seconds, fps, progress = msg -> set!("message", msg))
         set!("message", "done"); set!("state", "done")

@@ -19,8 +19,10 @@
      who HAS a preference keeps it, because an existing key is never overwritten. -->
 <script>try{var _a=window.__SLATE_APP__;if(_a&&_a.defaults){for(var _k in _a.defaults){if(localStorage.getItem(_k)===null)localStorage.setItem(_k,_a.defaults[_k]);}}}catch(e){}</script>
 <!-- Apply the saved Slate UI theme BEFORE any CSS paints, so there's no dark→light flash. The
-     palette lives in notebook.css under html[data-slate-theme="…"]; "midnight" is the bare default. -->
-<script>try{var _t=localStorage.getItem('slateTheme');if(_t&&_t!=='midnight')document.documentElement.dataset.slateTheme=_t;}catch(e){}</script>
+     palette lives in notebook.css under html[data-slate-theme="…"]; "midnight" is the bare default.
+     `?slatetheme=<name>` overrides it for this page only: the hub's headless captures
+     (server_deckshot.jl) run in a fresh browser profile with no saved theme. -->
+<script>try{var _t=new URLSearchParams(location.search).get('slatetheme')||localStorage.getItem('slateTheme');if(_t&&_t!=='midnight')document.documentElement.dataset.slateTheme=_t;}catch(e){}</script>
 <!-- App mode paints from the very first frame: the class goes on <html> here rather than on <body>
      from a script, so the authoring chrome is never briefly visible on a slow load. -->
 <script>try{if(window.__SLATE_APP__&&window.__SLATE_APP__.on)document.documentElement.classList.add('app-boot');}catch(e){}</script>
