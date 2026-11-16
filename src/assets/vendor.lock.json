@@ -58,12 +58,12 @@
     }
   },
   "preact": {
-    "version": "10.24.3",
+    "version": "10.27.2",
     "files": {
-      "dist/preact.module.js": "sha384-uC5whOdxCWL5wuXeyxgSc6bmTEWxeJaGd5Z5aaIPDhxHO4p/m/bun9ZOqyGIUJlQ",
-      "dist/preact.module.js.map": "sha384-KOHZLp2hUivwyXou+CCqddS2nVvrKyWH2pG/uXX3b/hefsc7EvMN0Bl6cGPcCvUI",
-      "hooks/dist/hooks.module.js": "sha384-kh/sP2hz+dAHS/kZYM6pwqFPGtgktIiEQmld0X0I50NzLTss9qDSOg9Sw4N5X0Rc",
-      "hooks/dist/hooks.module.js.map": "sha384-L9Hd2T4yKCuqPmvOabeq1DO8y/BqrPysI4ZSXS8S2a/guG9oOCzSqQLUSN+aQDmy"
+      "dist/preact.module.js": "sha384-7npnp5xYcizcFQN22V0sj8bfzYRW+GgZV4u+6FfA+rWRsVhy7kF4JNjn9eQJy5dB",
+      "dist/preact.module.js.map": "sha384-SNsEGddQ+pwydXn51LgKIPYVLAjJ70q4WXYJb5x/LoQg2OYJDUU3LWs5QvF3C5Ug",
+      "hooks/dist/hooks.module.js": "sha384-/u2Sb+nVb2XqG9qrJYekxbyFs0/bsv7pKBkIOJph+3oLPojhunv0x6HB7s9CX6qY",
+      "hooks/dist/hooks.module.js.map": "sha384-AhMZEf6tyQ/H+ICyF2IPQC4sWXVBa8Q6HVOfyivVF7TiDbtwPx4va6FmQ4RdTd+6"
     }
   },
   "signals": {

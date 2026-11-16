@@ -77,7 +77,7 @@ end
         @test haskey(ui, k)
         @test startswith(ui[k], "https://")
     end
-    @test occursin("preact@10.24.3", ui["preact"])         # version pinned in vendor.json
+    @test occursin("preact@$(NS._vendor_version("preact"))", ui["preact"])   # version pinned in vendor.json
     @test occursin("htm@3.1.1/preact", ui["htm/preact"])
     # rendered as a <script type="importmap"> carrying those specifiers
     tag = NS._export_importmap(ui)
