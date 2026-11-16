@@ -78,8 +78,10 @@
     }
     return null;
   }
+  // The slide canvas for the notebook's aspect ratio; the same sizes as `deck_canvas` (server_deckshot.jl).
   function _canvasSize() {
-    return ((nbState && nbState.slideRatio) || '16:9') === '4:3' ? [1440, 1080] : [1920, 1080];
+    const r = (nbState && nbState.slideRatio) || '16:9';
+    return r === '4:3' ? [1440, 1080] : r === '16:10' ? [1920, 1200] : [1920, 1080];
   }
 
   // ── Shared deck state ───────────────────────────────────────────────────────

@@ -1282,7 +1282,7 @@ See also `save_asset`, `FileUpload`."""),
         `@bind k SlideSteps(n)` follows the slide's step counter (0…n) so a figure can build from
         computed state. DECK SETTINGS (`settings(notebook)` lists them, `settings(notebook; key, value)` sets
         one): `deckstyle` (a background preset for every slide), `slidetransition`, `slideauto` (autoplay
-        seconds per step), `slideratio` (16:9 or 4:3), `slidelevel`. PRESENTING (what the presenter has, to
+        seconds per step), `slideratio` (16:9, 16:10 or 4:3), `slidelevel`. PRESENTING (what the presenter has, to
         advise on): a presenter window with notes, previews, timer and rehearsal pacing; `t` rehearses and
         saves timings that autoplay (`a`) follows; `o` overview; `l` laser, `d` draw, `b` black screen;
         `r` records the deck (microphone and slide sound chosen with ⇧R) into `recordings/` beside the

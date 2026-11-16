@@ -320,7 +320,7 @@ const _CONFIG_UI = (
     (key = "slideauto", group = "Slides", label = "Autoplay seconds per step", type = :int, default = 8,
      choices = String[], global_default = nothing, restart = false),
     (key = "slideratio", group = "Slides", label = "Slide aspect ratio", type = :enum, default = "16:9",
-     choices = ["16:9", "4:3"], global_default = nothing, restart = false),
+     choices = ["16:9", "16:10", "4:3"], global_default = nothing, restart = false),
     (key = "bibstyle", group = "Export", label = "Citation style", type = :enum, default = "ieee",
      choices = collect(_CITATION_STYLES), global_default = nothing, restart = false),
     (key = "series", group = "Publishing", label = "Series", type = :string, default = "",

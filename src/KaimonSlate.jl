@@ -3545,7 +3545,7 @@ function create_tools(GateTool::Type)
     "hidden")`; `body ∈ ("","large","normal","compact","small")`. `path` overrides the output
     file (default: a temp path). Returns the written path — pass it to `Read` to see the pages.
 
-    Set `layout="slides"` to render a 16:9 (or `slideratio=4:3`) presentation DECK — one slide
+    Set `layout="slides"` to render a 16:9 (or the notebook's `slideratio`, 16:10 or 4:3) presentation DECK — one slide
     per page, segmented by markdown headings + `slide`/`notes` cell tags (see the live "Present"
     mode). On a deck, code is hidden by default (set `source="1"`/`code` to show it) and
     `notes="1"` appends a speaker-notes section.

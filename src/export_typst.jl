@@ -311,9 +311,10 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     """
 end
 
-# ── Slide-deck preamble (16:9 / 4:3 landscape, one slide per page) ────────────────────────────────
+# ── Slide-deck preamble (16:9 / 16:10 / 4:3 landscape, one slide per page) ────────────────────────
 # Slide page geometry (width, height) for a 254mm-wide canvas. 16:9 is the default deck size.
-_slide_geom(ratio) = ratio == "4:3" ? ("254mm", "190.5mm") : ("254mm", "142.875mm")
+_slide_geom(ratio) = ratio == "4:3" ? ("254mm", "190.5mm") :
+                     ratio == "16:10" ? ("254mm", "158.75mm") : ("254mm", "142.875mm")
 
 # Preamble for the slides layout. Reuses the same block helpers as the article preamble but on a
 # landscape slide page with bigger type, and adds `#let slide(body)` — one page per slide that

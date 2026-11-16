@@ -122,6 +122,10 @@ end
 # capture is in the default palette, whatever the author works in. "" or a malformed name: default.
 _slatetheme_qs(theme::AbstractString) = occursin(r"^[a-z0-9-]{1,32}$", theme) ? "&slatetheme=$theme" : ""
 
+# The slide canvas in pixels for a notebook's `slideratio`, as the deck draws it (`_canvasSize` in
+# slides.js). A video is recorded at this size, so it has no bars at the deck's own ratio.
+deck_canvas(ratio::AbstractString) = ratio == "4:3" ? (1440, 1080) : ratio == "16:10" ? (1920, 1200) : (1920, 1080)
+
 # The page `deck_pdf` prints for notebook `id` on the hub at `base`: every slide at its last step, or
 # with `steps = "all"` a page for each step of each slide, in Slate palette `theme`.
 deck_print_url(base::AbstractString, id::AbstractString; theme::AbstractString = "", steps::AbstractString = "") =
@@ -353,8 +357,9 @@ function deck_render_start!(nb, base::AbstractString; seconds::Real, fps::Intege
     fresh || return copy(st)
     set!(k, v) = lock(() -> (st[k] = v), _DECK_RENDER_LOCK)
     url = "$(base)/n/$(nb.id)?deck=1.0&render=1" * _slatetheme_qs(theme)
+    width, height = deck_canvas(String(get(nb.report.meta, "slideratio", "16:9")))
     Threads.@spawn try
-        deck_render(url, st["file"]; seconds, fps, progress = msg -> set!("message", msg))
+        deck_render(url, st["file"]; seconds, fps, width, height, progress = msg -> set!("message", msg))
         set!("message", "done"); set!("state", "done")
     catch e
         set!("message", sprint(showerror, e)); set!("state", "error")
