@@ -15,6 +15,7 @@
 
 import REPL       # for `REPL.softscope` — REPL-style cell eval (stdlib; always available)
 import Logging    # to capture a cell's `@warn`/`@info` onto the redirected stderr (stdlib)
+import Markdown   # `_markdown_source` prints an `MD` value (stdlib; always available)
 
 # The Slate display MIMEs (SlateExtensionsBase) lead the priority list, so a value with a `slate_render`
 # method is captured as a component descriptor / HTML fragment IN PREFERENCE to text/html or text/plain —
@@ -345,11 +346,139 @@ end
 # a screenshot. The chunk follows the form it restates, which is how `_render_chunks` knows to leave
 # it out.
 const _EXPORT_MD_MIME = "text/markdown"
+
+# `Markdown.plain`, which is what `show` with `text/markdown` calls for an `MD`, prints text as it is.
+# A literal `*`, `_`, `$`, `\`, or a line that starts with `#`, `-` or `1.` reads back as markup. So
+# `_\* note_` becomes `** note*`. The export reads this form with a CommonMark parser, so the text
+# nodes of a copy of the tree get backslash escapes before `plain` prints it. `Markdown.plain` and
+# `plaininline` stay as they are. These stay as they are: `Code`, `LaTeX`, `HorizontalRule`, a link
+# target, a value that is not a string, a string at block level (`plain` prints it quoted, with
+# `show`), the title of an `Admonition` (it sits in quotes) and the id of a `Footnote`. A string that
+# a cell interpolates into a paragraph is text, so it gets the escapes.
+#
+# Where the text can start markup, the character gets a backslash: `\`, `` ` ``, `*`, `_`, `]`, `$`
+# and `~` everywhere, `<` before a tag and `&` before an entity, and `#`, `>`, `+`, `-`, `=`, `!`
+# and `1.` (a number, a dot and a space) at the start of a line. So "non-linear" and "3.14" stay
+# readable, except at the start of a line or a table cell. A `|` after a line break gets one too: a
+# line of `|` cells before a delimiter row makes a table. A `|` inside a table cell is escaped by
+# `plain` itself, and a cell has no line break.
+#
+# A `[` gets no backslash. The PDF path reads `\[…\]` as display math (`_md_segments`), and an escaped
+# `]` already stops a link, an image, a footnote and a `[@ref]`. Two cases need the `[` as an entity
+# (`&#91;`, which CommonMark and cmarker read as `[`): inside the text of a link or an image, where
+# it pairs with the `]` of that node, and after a backslash (`\\[`), where `_md_segments` would read
+# `\[` as the start of display math. `(` after a backslash gets the same treatment for `\(`.
+#
+# `before_link` is true for the text that comes just before a link: a `!` at its end would make the
+# link an image.
+function _md_escape(s::AbstractString; before_link::Bool = false)
+    # Any one of `\`, `` ` ``, `*`, `_`, `]`, `$`, `~`; a `<` before a letter, `/`, `!` or `?` (the
+    # start of an HTML tag or comment); a `&` before `name;` or `#123;` (an entity).
+    s = replace(s, r"[\\`*_\]$~]|<(?=[A-Za-z/!?])|&(?=#?\w+;)" => c -> "\\" * c)
+    # A `!` at the very end of the text: with the link after it, `![…](…)` is an image.
+    before_link && (s = replace(s, r"!\z" => "\\!"))
+    # At the start of each line, after up to 3 spaces: `#` (heading), `>` (quote), `+`/`-` (list
+    # item, rule), `=` (setext underline) or `!` (`!!!` admonition).
+    s = replace(s, r"^([ ]{0,3})([#>+\-=!])"m => s"\1\\\2")
+    # A `|` after a line break and up to 3 spaces: a row of table cells. `(?<=\n)` and not `^`, so
+    # the first line of the text is left to `_md_paragraph`, and a table cell (no line break) is
+    # left to `plain`.
+    s = replace(s, r"(?<=\n)([ ]{0,3})\|" => s"\1\\|")
+    # At the start of each line, after up to 3 spaces: digits, then `.` or `)`, then a space, a tab
+    # or the end of the line (an ordered list item). "3.14" has no space after the dot, so it stays.
+    s = replace(s, r"^([ ]{0,3}\d+)([.)])(?=[ \t]|$)"m => s"\1\\\2")
+    # A `[` or `(` just after a backslash: `\[` and `\(` would open a formula in `_md_segments`.
+    # The backslash stays; the bracket becomes an entity.
+    return replace(s, r"(?<=\\)[\[(]" => c -> c == "[" ? "&#91;" : "&#40;")
+end
+
+# The closing `#` run of a heading (`# Use #`) is markup, and so is a heading text that is only `#`s.
+# The pattern: one or more `#` at the end of the text, then only spaces or tabs, with a space, a tab
+# or the start of the text before them (`(?<![^ \t])`). So the `#` of "C#" stays.
+_md_closing_hash(s::AbstractString) = replace(s, r"(?<![^ \t])#+[ \t]*\z" => m -> "\\" * m)
+
+# A hard line break. `Markdown.plain` prints a `LineBreak` as a bare newline, which a reader takes
+# as a soft break.
+struct _MdHardBreak end
+Markdown.plaininline(io::IO, ::_MdHardBreak) = print(io, "\\\n")
+
+# A vector of inline content is one run of text. The parser splits the text at an escaped character
+# (`1\. a` is "1" then ". a", `&\*` is "&" then "*"), so the neighbouring strings join first. Then
+# the `<` and `&` rules and the line-start rules see the whole text. The join writes into one buffer, so it takes linear time.
+function _md_inline(xs::AbstractVector)
+    out, buf = Any[], IOBuffer()
+    flush!(before_link) = position(buf) > 0 && push!(out, _md_escape(String(take!(buf)); before_link))
+    for x in xs
+        if x isa AbstractString
+            print(buf, x)
+        else
+            flush!(x isa Markdown.Link)
+            push!(out, _md_escape_tree(x))
+        end
+    end
+    flush!(false)
+    return out
+end
+_md_inline(s::AbstractString) = _md_escape(s)
+_md_inline(x) = _md_escape_tree(x)
+
+function _md_header_text(text)
+    out = _md_inline(text)
+    out isa AbstractString && return _md_closing_hash(out)
+    out isa AbstractVector && !isempty(out) && out[end] isa AbstractString &&
+        (out[end] = _md_closing_hash(out[end]))
+    return out
+end
+
+# In the text of a link or an image, a `[` pairs with the `]` of that node. An entity does not.
+_md_nobracket(s::AbstractString) = replace(s, "[" => "&#91;")
+_md_nobracket(xs::AbstractVector) = Any[_md_nobracket(x) for x in xs]
+_md_nobracket(x::Union{Markdown.Bold, Markdown.Italic}) = typeof(x)(_md_nobracket(x.text))
+_md_nobracket(x) = x
+
+# The content of a paragraph. A hard break with nothing after it means nothing, and `plain` would
+# print a stray backslash for it. A `|` at the start of the paragraph needs the escape that
+# `_md_escape` gives only after a line break.
+function _md_paragraph(content)
+    content isa AbstractVector || return _md_inline(content)
+    n = findlast(x -> !(x isa Markdown.LineBreak), content)
+    out = _md_inline(n === nothing ? empty(content) : content[1:n])
+    # A `|` at the start of the first string, after up to 3 spaces: the first line of a table row.
+    !isempty(out) && out[1] isa AbstractString && (out[1] = replace(out[1], r"^([ ]{0,3})\|" => s"\1\\|"))
+    return out
+end
+
+# The copy of a node with its text escaped. A vector here holds blocks, the items of a list or the
+# rows of a table. A vector of inline content goes through `_md_inline`.
+_md_escape_tree(xs::AbstractVector) = Any[_md_escape_tree(x) for x in xs]
+_md_escape_tree(x) = x
+_md_escape_tree(md::Markdown.MD) = Markdown.MD(_md_escape_tree(md.content), md.meta)
+_md_escape_tree(x::Markdown.Paragraph) = Markdown.Paragraph(_md_paragraph(x.content))
+_md_escape_tree(x::Markdown.Header{N}) where {N} = Markdown.Header{N}(_md_header_text(x.text))
+_md_escape_tree(x::Markdown.Bold) = Markdown.Bold(_md_inline(x.text))
+_md_escape_tree(x::Markdown.Italic) = Markdown.Italic(_md_inline(x.text))
+_md_escape_tree(x::Markdown.Link) = Markdown.Link(_md_nobracket(_md_inline(x.text)), x.url)
+_md_escape_tree(x::Markdown.Image) = Markdown.Image(x.url, _md_nobracket(_md_escape(x.alt)))
+_md_escape_tree(x::Markdown.List) = Markdown.List(_md_escape_tree(x.items), x.ordered, x.loose)
+_md_escape_tree(x::Markdown.BlockQuote) = Markdown.BlockQuote(_md_escape_tree(x.content))
+_md_escape_tree(x::Markdown.Admonition) = Markdown.Admonition(x.category, x.title, _md_escape_tree(x.content))
+_md_escape_tree(x::Markdown.Footnote) = Markdown.Footnote(x.id, _md_escape_tree(x.text))
+_md_escape_tree(x::Markdown.Table) =
+    Markdown.Table(Vector{Any}[Any[_md_inline(c) for c in row] for row in x.rows], x.align)
+_md_escape_tree(::Markdown.LineBreak) = _MdHardBreak()
+
+"""
+The markdown text of `md`, with the escapes that keep its text literal for a CommonMark reader.
+Constructs that CommonMark does not read (a footnote) print as `Markdown.plain` prints them.
+"""
+_markdown_source(md::Markdown.MD) = Markdown.plain(_md_escape_tree(md))
+
 function _capture_export_markdown!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
     any(c -> c[1] == _EXPORT_MD_MIME, chunks) && return
     try
         Base.invokelatest(showable, MIME(_EXPORT_MD_MIME), x) || return
-        bytes = Base.invokelatest(_mime_bytes, MIME(_EXPORT_MD_MIME), x)
+        bytes = x isa Markdown.MD ? Vector{UInt8}(_markdown_source(x)) :
+                Base.invokelatest(_mime_bytes, MIME(_EXPORT_MD_MIME), x)
         isempty(bytes) || push!(chunks, (_EXPORT_MD_MIME, bytes))
     catch
     end
