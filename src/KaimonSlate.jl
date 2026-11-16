@@ -3541,6 +3541,11 @@ function create_tools(GateTool::Type)
     per page, segmented by markdown headings + `slide`/`notes` cell tags (see the live "Present"
     mode). On a deck, code is hidden by default (set `source="1"`/`code` to show it) and
     `notes="1"` appends a speaker-notes section.
+
+    Set `layout="present"` to print the LIVE deck instead, as the audience sees it: one page per
+    slide at its last step, drawn by the deck's own CSS in a headless Chrome (Chrome or Chromium on
+    the hub's machine, or KAIMONSLATE_CHROME), in the Slate palette `charttheme` names ("" for the
+    default). Only `path` and `charttheme` apply; the other options are for Typst.
     """
     function export_pdf_tool(notebook::String; theme::String = "light", charttheme::String = "",
                              override::String = "0", params::String = "0",
@@ -3553,14 +3558,17 @@ function create_tools(GateTool::Type)
         # is the normal case for this tool, and the fallback is quiet: the PDF still builds and
         # those cells come out as plain text. Count them first so the answer can say so, rather
         # than leaving the caller to notice that a grid they expected is missing.
-        # HTML outputs that carry a markdown form are typeset, so they need no tab
-        htmlcells = count(c -> NotebookServer._has_html_output(c) &&
+        # HTML outputs that carry a markdown form are typeset, so they need no tab. A print of the
+        # live deck draws the cards itself.
+        htmlcells = layout == "present" ? 0 : count(c -> NotebookServer._has_html_output(c) &&
                                NotebookServer._output_chunk(c.output, "text/markdown") === nothing, nb.report.cells)
         notab = htmlcells > 0 && lock(nb.llock) do; isempty(nb.listeners); end
         # Deck defaults: code hidden unless the caller explicitly opts in.
         slides = layout == "slides"
         slide_source = slides ? (source == "1") : (source != "0")
         pdf = try
+            layout == "present" ?
+                NotebookServer.deck_pdf("$(_base())/n/$(nb.id)?deck=print&shot=1" * NotebookServer._slatetheme_qs(charttheme)) :
             export_pdf(nb; include_source = slide_source, style = style,
                        columns = something(tryparse(Int, columns), 1), theme = theme,
                        charttheme = charttheme, override = override == "1",

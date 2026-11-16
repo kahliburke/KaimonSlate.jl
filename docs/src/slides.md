@@ -366,6 +366,17 @@ or dark, as in the dialog), `?notes=1` appends the speaker-notes pages, `?code=`
 listings, and `?columns=` is ignored for decks. See [Export](export.md) for the shared PDF options
 and the editable Typst project (`export.typ`).
 
+### Print the live deck
+
+Format **PDF — the live deck as presented** prints the deck itself instead. The hub opens
+`?deck=print` in a headless Chrome and prints one page per slide, at its last step and at the
+slide's own size. The page has the look of the live deck: your palette, its CSS, its fitting, and
+your own slide styles. Text and SVG stay vector. A chart is the snapshot that the contact sheet
+shows, so it is a raster image. This format has no options. It needs Chrome or Chromium on the hub's
+machine (or `KAIMONSLATE_CHROME`). The route is
+`GET /api/<id>/export.pdf?layout=present&slatetheme=<palette>`, and an agent calls
+`export_pdf(notebook; layout = "present", charttheme = "<palette>")`.
+
 ## Zen mode
 
 **☰ → 🧘 Zen mode** is the other full-page reading view. It hides code and chrome on the same
