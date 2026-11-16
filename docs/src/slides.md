@@ -352,7 +352,7 @@ The live deck follows the editor theme. A PDF deck takes its theme from the expo
 
 ## Export a PDF deck
 
-**☰ → ⬆ Export…**, format **PDF**, layout **🎞 Slides — presentation deck**. This renders a
+**☰ → ⬆ Export…**, format **PDF**, layout **🎞 Slides — typeset (Typst)**. This renders a
 typeset landscape deck **server-side via Typst** — one slide per page at the deck's aspect ratio, auto-fit:
 
 - **Code listings are hidden by default** on slides, since a deck usually shows results rather than
@@ -381,10 +381,14 @@ the usual install places or on the `PATH`, or the one `KAIMONSLATE_CHROME` names
 renders a deck video and the slide views an agent asks for. Without one, the layout is listed but
 cannot be chosen, the record panel's **Render** button is disabled, and each says what is missing.
 
+![The PDF export dialog with the Chrome layout: Theme, Slide ratio and Steps](./assets/export-deck-print.png)
+
 **Steps** chooses what a slide with builds prints. **Last step** prints each slide once, as it ends.
 **Every step** prints a page for each step, from the slide before its first build to its end, with
 a row of dots that shows the step. A build that replaces what came before, such as a `derive`
 chain, then keeps every state. All the pages of a slide carry its number.
+
+![A printed page of a slide on its second step, with the step dots in the corner](./assets/deck-print-step.png)
 
 The route is `GET /api/<id>/export.pdf?layout=present&slatetheme=<palette>&steps=all`, and an agent
 calls `export_pdf(notebook; layout = "present", charttheme = "<palette>", steps = "all")`.

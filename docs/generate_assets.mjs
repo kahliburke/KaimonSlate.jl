@@ -1322,8 +1322,44 @@ async function slideShots(browser) {
     await presenter.goto(`${BASE}/n/slides?present=1`, { waitUntil: 'domcontentloaded' })
     await sleep(2500)
     await presenter.screenshot({ path: join(OUT, 'presenter.png') }); log('✓ presenter.png')
+    await presenter.close()
+
+    // The export dialog set to print the live deck. The layout is listed as unavailable when the
+    // hub finds no browser, which is a property of the machine and not of the dialog.
+    await page.goto(`${BASE}/n/slides`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('.cell', { timeout: 30_000 })
+    await page.evaluate(() => {
+      nbState.deckBrowser = ''
+      openExport('slides')
+      document.getElementById('pdflayout').value = 'present|1'
+      document.getElementById('pdfsteps').value = 'all'
+      document.getElementById('pdflayout').dispatchEvent(new Event('change'))
+    })
+    await sleep(400)
+    await elShot(page, '#exportbg .modal', 'export-deck-print.png')
   } catch (e) { log('! slide shots skipped:', e.message.split('\n')[0]) }
   await ctx.close()
+
+  // One page of the printed deck, at the slide's own size: the first page that is on the second
+  // step of a slide with three or more.
+  const pctx = await newContext(browser, { viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 })
+  try {
+    const page = await pctx.newPage()
+    await page.goto(`${BASE}/n/slides?deck=print&shot=1&steps=all`, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(() => document.documentElement.dataset.deckShot === 'ready', null, { timeout: 60_000 })
+    const found = await page.evaluate(() => {
+      const pg = [...document.querySelectorAll('.deck-print-page')].find(p => {
+        const d = p.querySelectorAll('.deck-print-steps i')
+        return d.length >= 3 && p.querySelectorAll('.deck-print-steps i.on').length === 2
+      })
+      if (pg) pg.id = 'docshot-page'
+      return !!pg
+    })
+    if (!found) throw new Error('no page on the second of three or more steps')
+    await sleep(600)
+    await elShot(page, '#docshot-page', 'deck-print-step.png')
+  } catch (e) { log('! deck print shot skipped:', e.message.split('\n')[0]) }
+  await pctx.close()
 }
 
 // The profiler and the debugger, on the hub's own kernel. Both run for real: the profile notebook's
@@ -1546,7 +1582,10 @@ async function main() {
 
         // export dialog (the unified Export modal — shown without triggering a download)
         try {
-          await page.evaluate(() => window.openExport && window.openExport())
+          await page.evaluate(() => {   // a fresh browser opens on HTML; the docs show the PDF options
+            window.openExport && window.openExport()
+            const f = document.getElementById('exfmt'); f.value = 'pdf'; f.dispatchEvent(new Event('change'))
+          })
           await sleep(400)
           await elShot(page, '#exportbg .modal', 'export-dialog.png')
           await page.evaluate(() => document.getElementById('exportbg')?.classList.remove('show'))
