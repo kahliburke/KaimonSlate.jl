@@ -2747,8 +2747,8 @@ end
 # data: modules too); any single module that can't be resolved keeps its CDN url.
 function _slate_ui_imports(offline::Bool = false)
     subs = Dict{String,Tuple{String,String}}(
-        "preact"               => ("preact", "dist/preact.module.js"),
-        "preact/hooks"         => ("preact", "hooks/dist/hooks.module.js"),
+        "preact"               => ("preact", "dist/preact.mjs"),
+        "preact/hooks"         => ("preact", "hooks/dist/hooks.mjs"),
         "@preact/signals-core" => ("signals-core", "dist/signals-core.module.js"),
         "@preact/signals"      => ("signals", "dist/signals.module.js"),
         "htm"                  => ("htm", "dist/htm.module.js"),

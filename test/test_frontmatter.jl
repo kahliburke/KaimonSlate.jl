@@ -128,7 +128,7 @@ x = 1
         ec.output = RE.CellOutput("", RE.MimeChunk[], Any[Dict("series" => [Dict("type" => "bar", "data" => [1, 2, 3])])],
                                   Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
         eh = NS.export_html(enb)
-        @test occursin("echarts@5", eh)                      # CDN loaded
+        @test occursin("echarts@$(NS._vendor_version("echarts"))", eh)   # CDN loaded
         @test occursin("_slateCharts", eh) && occursin("\"type\":\"bar\"", eh)   # spec embedded for client render
     end
 
