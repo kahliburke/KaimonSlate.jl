@@ -93,6 +93,17 @@ end
         @test got2 !== nothing && got2.region === nothing && got2.side == ""
     end
 
+    @testset "taking back what no cell defines keeps the namespace's own names" begin
+        # A cell that imported `echart` and then stopped lists it among the names no cell writes now.
+        # The namespace defines `echart` itself, so removing the binding took the helper away.
+        r = parse_report("#%% code id=a\ny = 2\n")
+        ReportEngine.eval_capture(InProcessKernel(), r, r.cells[1].source, "cell:a")
+        ReportEngine.forget!(InProcessKernel(), r, String[], ["echart", "series", "y"])
+        m = ReportEngine.report_module(r)
+        @test Base.invokelatest(isdefinedglobal, m, :echart) && Base.invokelatest(isdefinedglobal, m, :series)
+        @test !Base.invokelatest(isdefinedglobal, m, :y) || !isdefined(Base, :delete_binding)
+    end
+
     @testset "cell-effects channel (declare → harvest → CellOutput.effects)" begin
         run1(src) = (r = parse_report("#%% code id=x\n" * src);
                      eval_report!(r); r.cells[1].output)

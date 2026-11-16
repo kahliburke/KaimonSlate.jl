@@ -48,6 +48,8 @@ were written when they went out. They are marked.
   saved theme, so every capture came out in the default palette. A notebook URL takes
   `?slatetheme=<name>` to set the palette for that page, and `slide_view` and `render_deck` take a
   `theme` argument.
+- A cell that stops importing a name the notebook provides, such as `echart`, no longer takes that
+  name away. Removing the globals no cell defines any more now leaves the names a notebook starts with.
 
 ## [2.1.1] - 2026-11-15
 

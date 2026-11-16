@@ -316,14 +316,18 @@ end
 
 Remove globals that no cell defines any more, so reading one throws `UndefVarError` the way a fresh
 run would, instead of serving the value of a deleted or renamed definition. Only bindings the
-namespace owns are removed; an imported name is left alone. A no-op on a Julia without
+namespace owns are removed; an imported name, and a name the namespace was born with
+(`__slate_prelude`, such as `echart`), are left alone. A no-op on a Julia without
 `Base.delete_binding`.
 """
 function _unbind_globals!(mod::Module, names)
     out = Symbol[]
     isdefined(Base, :delete_binding) || return out
+    prelude = Base.invokelatest(isdefinedglobal, mod, :__slate_prelude) ?
+              Base.invokelatest(getglobal, mod, :__slate_prelude) : Set{Symbol}()
     for n in names
         s = Symbol(n)
+        s in prelude && continue
         Base.invokelatest(isdefinedglobal, mod, s) || continue
         Base.binding_module(mod, s) === mod || continue
         try

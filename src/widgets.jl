@@ -2538,6 +2538,10 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
             Expr(:kw, :css,  secexpr(:css)),
             Expr(:kw, :js,   jsx)))
     end))
+    # The names the namespace is born with. They are not any cell's definitions, so removing what no
+    # cell defines any more (`_unbind_globals!`) must leave them. `invokelatest`: the bindings above
+    # are newer than this function's world, and `names` in it would not see them.
+    Core.eval(m, :(const __slate_prelude = $(Set{Symbol}(Base.invokelatest(names, m; all = true)))))
     return m
 end
 
