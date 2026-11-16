@@ -12,6 +12,8 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-16
+
 ### Added
 
 - An HTML export can carry a table of contents. Turn on **Contents** in the export dialog, or add
