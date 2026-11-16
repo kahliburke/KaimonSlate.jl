@@ -164,7 +164,7 @@ window.slateUnregisterCommand = function (id) {
 // puts it here on purpose. Everything listed either reads the document or runs the reader's own code —
 // the two things a workbook already permits.
 const _WORKBOOK_CMDS = ['view.docs', 'view.settings', 'view.keymap', 'view.scratch', 'view.toc',
-                        'nb.runStale', 'cell.run', 'cell.runAdvance'];
+                        'nb.runStale', 'cell.run', 'cell.runAdvance', 'cell.format', 'nb.formatAll'];
 
 // One registry command → one palette row. The hint is asked for at render time, so reopening the
 // palette after a rebind shows the new chord with nothing to invalidate.
@@ -213,13 +213,24 @@ function _mruLoad() { try { return JSON.parse(localStorage.getItem(_MRU_KEY) || 
 function _mruBump(label) {
   try { let a = _mruLoad().filter(l => l !== label); a.unshift(label); localStorage.setItem(_MRU_KEY, JSON.stringify(a.slice(0, 12))); } catch (_) {}
 }
+// Focus goes back where it was when the palette closes, so a command run from a cell editor leaves
+// you typing in that editor. A command that moves focus itself (opening a panel) keeps it there.
+let _paletteReturn = null;
 function openPalette() {
-  document.getElementById('cmdbg').classList.add('show');
+  const bg = document.getElementById('cmdbg');
+  const a = document.activeElement;
+  if (!bg.classList.contains('show')) _paletteReturn = a && a !== document.body ? a : null;
+  bg.classList.add('show');
   const inp = document.getElementById('cmdin'); inp.value = '';
   inp.oninput = () => renderPaletteList(inp.value);
   renderPaletteList(''); inp.focus();
 }
-function closePalette() { document.getElementById('cmdbg').classList.remove('show'); }
+function closePalette() {
+  document.getElementById('cmdbg').classList.remove('show');
+  const back = _paletteReturn; _paletteReturn = null;
+  const a = document.activeElement;
+  if (back && back.isConnected && (!a || a === document.body || a.id === 'cmdin')) back.focus({ preventScroll: true });
+}
 // What the `view.palette` command runs: a second press of the chord dismisses the palette rather than
 // reopening it on itself.
 window.slateTogglePalette = () =>

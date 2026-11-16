@@ -171,8 +171,10 @@ function update_vendor_lock(; path::AbstractString = _VENDOR_LOCK_JSON)
     lines = String[]
     for pkg in _vendor_packages(man)
         ver, base = _vendor_version(pkg, man), _vendor_base(pkg, man)
-        globs = _vendor_glob.(get(man[pkg], "files", String[]))
-        subs = filter(s -> any(g -> occursin(g, s), globs), _jsdelivr_files(base))
+        pats = String.(get(man[pkg], "files", String[]))
+        # A package served from somewhere other than jsDelivr (a release asset) lists its files by name.
+        subs = occursin("cdn.jsdelivr.net/npm/", base) ?
+               filter(s -> any(g -> occursin(_vendor_glob(g), s), pats), _jsdelivr_files(base)) : pats
         isempty(subs) && error("$pkg@$ver: no files match its `files` patterns in vendor.json")
         files = map(subs) do s
             r = HTTP.get(base * s; redirect = true, status_exception = true, connect_timeout = 10, request_timeout = 60)

@@ -585,6 +585,15 @@ function openSettings(scope, section) {
   const chkr = document.getElementById('setcheckeron');
   if (chkr) chkr.onchange = () => setAgentRole({ checker_on: chkr.checked });
   loadAgentRoles();
+  const fmtSel = document.getElementById('setformatter');
+  if (fmtSel) {
+    api('GET', '/api/formatter').then(r => { if (r && r.default) fmtSel.value = r.default; }).catch(() => {});
+    fmtSel.onchange = async () => {
+      const r = await api('POST', '/api/formatter-default', { name: fmtSel.value }).catch(() => null);
+      if (!r || r.ok === false) { window.toast && window.toast('Could not save the formatter', 3000); return; }
+      fmtSel.value = r.default;
+    };
+  }
   // Autocomplete: typing delay before the popup auto-opens (applies to newly opened editors), and what
   // Tab does when the popup is open (applies live). Defaults: 250ms, Accept (the standard convention).
   const cd = document.getElementById('setcompdelay'), cdv = document.getElementById('setcompdelayv');

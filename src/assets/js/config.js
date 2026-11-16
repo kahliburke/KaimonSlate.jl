@@ -36,6 +36,8 @@ function _cfgEffective(it) {
 }
 function _cfgSource(it) {
   if (it.overridden) return { cls: 'override', txt: 'notebook' };
+  // The server names the source when a setting inherits from something besides the global default.
+  if (it.from) return it.from === 'default' ? { cls: 'default', txt: 'default' } : { cls: 'global', txt: it.from };
   if (it.key === 'agentmodel') return agentModel() ? { cls: 'global', txt: 'global' } : { cls: 'default', txt: 'default' };
   if (it.global != null && String(it.global) !== '' && String(it.global) !== String(it.default))
     return { cls: 'global', txt: 'global' };

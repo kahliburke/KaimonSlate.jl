@@ -754,6 +754,72 @@ end
     end
 end
 
+@testset "formatting code cells computes new text and skips what does not parse" begin
+    NS.SlateHistory._ROOT[] = mktempdir()
+    hub = NS.start_hub(; port = freeport())
+    saved_default = NS.FORMATTER_DEFAULT[]
+    try
+        dir = mktempdir(); mkdir(joinpath(dir, ".git"))
+        nbp = joinpath(dir, "fmt.jl")
+        write(nbp, "#%% md id=intro\n@md\"\"\"\nx=1 stays as prose\n\"\"\"\n" *
+                   "#%% code id=a\nx=1\n#%% code id=b\nfor i=1:3\n  println(i,x)\nend\n" *
+                   "#%% code id=c\ny = 2\n")
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        src(id) = nb.report.cells[findfirst(c -> c.id == id, nb.report.cells)].source
+        before = Dict(c.id => c.source for c in nb.report.cells)
+
+        # The browser sends each cell's editor text, which may be unsaved: `c` arrives half-typed.
+        r = NS.format_texts(nb, Dict("intro" => src("intro"), "a" => src("a"), "b" => src("b"),
+                                     "c" => "y = (2, "))
+        @test r.formatter == "runic"
+        @test r.formatted == Dict("a" => "x = 1", "b" => "for i in 1:3\n    println(i, x)\nend")
+        @test collect(keys(r.failed)) == ["c"] && startswith(r.failed["c"], "line 1: Expected")
+        @test all(c.source == before[c.id] for c in nb.report.cells)   # computing changes nothing
+
+        # A browser-side formatter's output is checked, not trusted: one that mangles code is refused,
+        # and the trailing newline it adds is dropped.
+        r = NS.format_texts(nb, Dict("a" => "x=1", "b" => "f(1)");
+                            formatted = Dict("a" => "x = 1\n", "b" => "f(1,\n"))
+        @test r.formatted == Dict("a" => "x = 1")
+        @test occursin("does not parse", r.failed["b"])
+        # Output that parses but changes the program is refused too; dropped line breaks, an added
+        # `return` and `;`-joined statements split onto lines are not changes.
+        r = NS.format_texts(nb, Dict("a" => "x=1", "b" => "f(1)",
+                                     "c" => "function g()\n  1\nend\nb = 2; c = 3"),
+                            formatted = Dict("a" => "x = 2", "b" => "f(\n    1,\n)",
+                                             "c" => "function g()\n    return 1\nend\nb = 2\nc = 3"))
+        @test collect(keys(r.formatted)) |> sort == ["b", "c"]
+        @test occursin("change what the code does", r.failed["a"])
+        # A cell that does not parse yet: a browser-side formatter may format around the broken part,
+        # but the statements around it must stay the same and the broken part must keep its tokens.
+        r = NS.format_texts(nb, Dict("a" => "x=1\ny=2 +* 3\nz=x+y", "b" => "u=foo(1,2\nv=3+4", "c" => "w=(1+2))"),
+                            formatted = Dict("a" => "x = 1\ny = 2 + * 3\nz = x + y\n", "b" => "u = foo(1,2\nv = 3 + 5",
+                                             "c" => "w = (1 + 2)"))
+        @test r.formatted == Dict("a" => "x = 1\ny = 2 + * 3\nz = x + y")
+        @test startswith(r.failed["b"], "line 1: Expected") && occursin("extra tokens", r.failed["c"])
+        # Code a formatter can only read by guessing is refused with the parse error, not rewritten.
+        r = NS.format_texts(nb, Dict("a" => "y = cos.(3.*xs)"); formatted = Dict("a" => "y = cos.(3.0 * xs)"))
+        @test isempty(r.formatted) && occursin("ambiguous `.` syntax", r.failed["a"])
+
+        # Which formatter: a project's fatou.toml (up to the repository root), then the global default,
+        # with the notebook's own setting over both.
+        @test NS.notebook_formatter(nb)["from"] == "default"
+        NS.FORMATTER_DEFAULT[] = "fatou"
+        @test NS.notebook_formatter(nb)["name"] == "fatou" && NS.notebook_formatter(nb)["from"] == "global"
+        NS.FORMATTER_DEFAULT[] = "runic"
+        write(joinpath(dir, "fatou.toml"), "[format]\nline-width = 100\n")
+        f = NS.notebook_formatter(nb)
+        @test (f["name"], f["from"], f["config"]) == ("fatou", "fatou.toml", Dict{String,Any}("lineWidth" => 100))
+        @test occursin("formats in the browser", NS.format_texts(nb, Dict("a" => "x=1")).failed["a"])
+        NS.set_notebook_config!(nb, "formatter", "runic")
+        @test NS.notebook_formatter(nb)["from"] == "notebook"
+        @test NS.format_texts(nb, Dict("a" => "x=1")).formatted["a"] == "x = 1"
+    finally
+        NS.FORMATTER_DEFAULT[] = saved_default
+        NS.stop_hub(hub)
+    end
+end
+
 # Liveness reporting for a BLOCKED agent call. `_note_run_progress` only fires after
 # _AGENT_PROGRESS_EVERY seconds of blocking, so no ordinary test path reaches it — call it
 # directly, or a rename/typo here (it reaches across into ReportEngine) ships silently.

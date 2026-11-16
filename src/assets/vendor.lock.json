@@ -6,10 +6,28 @@
       "dagre.min.js.map": "sha384-bz1Px01tGSKzkzp3rT0s/E1XnUNv2ehVukMdvo7l940hPdpnUB1yF/AEkxKEpvJ9"
     }
   },
+  "dprint-formatter": {
+    "version": "0.6.0",
+    "files": {
+      "_dnt.polyfills.js": "sha384-yDb09mwHDmK8LGVPqsP5nx86dp9T685T3mhrjMFVpDnpajVaInIJZrcwcj628Zhm",
+      "_dnt.shims.js": "sha384-xzxzOOmtngUpFaQZGZh5j1SlURJF6p9DwzEVoqiUlHoB0h86s6NA75J/68BHoR6t",
+      "common.js": "sha384-z0dQZuTpVhlJhRpzBVjQTCgdq+BUSh89DMD4c8ea5gn4XTF+416jeLVKPWSl2O8q",
+      "mod.js": "sha384-v30fmsRHhi+9D6xRw5eWvw7qYtkDWi8YrwUFsggzG4EZsL9XrdCxsCCXq3qWJ+nr",
+      "v3.js": "sha384-HOLwtq0Pbvi8bVzYBrR6TaczH2IY+JhGH5q5CCvh9tPetI+lj0JQUsNv7OK3uL7q",
+      "v4.js": "sha384-zeIO2OwsL8hJZFxyto4ckDZyIvvphDqButwjWirbpPFMnc3ewrxb7q5R8s7KhN/W",
+      "wasi.js": "sha384-KTQKlRsF/w/HYwi1bQROGIoHrqjDcp+iCXb7pEIjoGlZEymVpRhtJEsff3G4nHUs"
+    }
+  },
   "echarts": {
     "version": "6.1.0",
     "files": {
       "echarts.min.js": "sha384-C2iskrW/uPW46KzOjrvJIQo4YkV8lkD+QS0CrDN18IIPIpT/g2USu8bTP3nvmIAD"
+    }
+  },
+  "fatou": {
+    "version": "0.8.1",
+    "files": {
+      "plugin.wasm": "sha384-CSaaVRn/pxKBVP/PJ+BQt4gv2xtRI3JD5J9ZtnoBzqZ19FSgHKO5gN1ZLv0zOswi"
     }
   },
   "htm": {

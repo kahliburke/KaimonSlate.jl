@@ -169,7 +169,7 @@
   // served at all (server_app.jl), so this layer is convenience rather than the security boundary.
   const _READER_CMDS = ['view.toc', 'view.settings', 'view.keymap'];
   const _WORKBOOK_CMDS = ['view.palette', 'view.docs', 'view.scratch', 'nb.runStale',
-                          'cell.run', 'cell.runAdvance', 'nb.cancel'];
+                          'cell.run', 'cell.runAdvance', 'nb.cancel', 'cell.format', 'nb.formatAll'];
   function _readerKeyAllowed(e) {
     const km = window.slateKeymap;
     if (!km) return false;

@@ -156,6 +156,100 @@ function rebaselineAll(state) {
 }
 window.slateRebaseline = _rebaseline;
 window.slateRebaselineAll = rebaselineAll;
+
+// Format code cells: the given ids, or every code cell when `ids` is empty. Each cell's text comes
+// from its editor, so unsaved edits are formatted with it. The hub says which formatter applies:
+// Runic runs on the hub, Fatou runs here and the hub checks what it produced. Authoring applies the
+// result as one notebook undo entry, like Replace All. A workbook reader formats only their own
+// cells, and the result goes into the editors for them to run.
+async function formatCells(ids) {
+  const reader = SLATE_IS_APP;
+  const all = !ids || !ids.length;
+  const sources = {};
+  for (const id of all ? cellIds() : ids) {
+    const c = window._cellById && window._cellById(id);
+    if (c && c.kind === 'code' && (!reader || c.workbook)) sources[id] = window.edText(id);
+  }
+  if (!Object.keys(sources).length) { window.toast && window.toast('No code cell selected', 2500); return; }
+  const fmt = await api('GET', '/api/formatter').catch(() => null);
+  const body = { sources };
+  if (fmt && fmt.name === 'fatou') {
+    let f;
+    try { f = await _fatou(); }
+    catch (_) { window.toast && window.toast('Fatou could not be loaded', 4000); return; }
+    f.setConfig({}, fmt.config || {});
+    body.formatted = {};
+    for (const id in sources) {
+      try { body.formatted[id] = f.formatText({ filePath: 'cell.jl', fileText: sources[id] }); } catch (_) {}
+    }
+  }
+  const r = await api('POST', '/api/format', body).catch(() => null);
+  if (!r || r.ok === false) { window.toast && window.toast('Format failed', 3000); return; }
+  const edits = {};
+  for (const [id, out] of Object.entries(r.formatted || {})) if (out !== sources[id]) edits[id] = out;
+  const n = Object.keys(edits).length;
+  // A formatter mostly moves whitespace, so a cursor is carried across as the number of
+  // non-whitespace characters before it.
+  const marks = {};
+  for (const id in edits) {
+    const v = editors[id];
+    if (v) marks[id] = _nonWs(v.state.doc.toString(), v.state.selection.main.head);
+  }
+  let undoable = false;
+  if (n && reader) {
+    for (const id in edits) window.edSetText(id, edits[id]);
+  } else if (n) {
+    let st = null;
+    try { st = await api('POST', '/api/cells-replace', { edits, label: `format (${n} ${n === 1 ? 'cell' : 'cells'})` }); }
+    catch (_) { window.toast && window.toast('Format failed', 3000); return; }
+    undoable = !!(st && st.changed);
+    if (st && st.cells) {
+      rebaselineAll(st);
+      // A cell whose formatted text equals its saved source is not changed on the hub, so the
+      // rebaseline above skips it and its editor would keep the unformatted edit.
+      for (const id in edits) {
+        const c = st.cells.find(x => x.id === id);
+        if (c && window.edText(id) !== c.source) _rebaseline(id, c.source);
+      }
+      renderAll(st);
+      if (st.version != null) lastVersion = st.version;
+    }
+  }
+  for (const id in marks) {
+    const v = editors[id];
+    if (v) v.dispatch({ selection: { anchor: _atNonWs(v.state.doc.toString(), marks[id]) } });
+  }
+  // Failures in notebook order, so a click on the toast goes to the first one in the document.
+  const order = cellIds();
+  const bad = Object.entries(r.failed || {}).sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+  const name = _FMT_NAMES[r.formatter] || r.formatter;
+  const msg = bad.length === 1 ? (bad[0][0] ? `${bad[0][0]} not formatted: ${bad[0][1]}` : bad[0][1])
+            : bad.length ? `${bad.length} cells not formatted, first ${bad[0][0]}: ${bad[0][1]}`
+            : n ? `Formatted ${n} ${n === 1 ? 'cell' : 'cells'} (${name})` + (undoable ? ' · ⌘Z to undo' : '')
+            : 'Already formatted';
+  const [badId, why] = bad.length ? bad[0] : ['', ''];
+  const line = +((/^line (\d+):/.exec(why) || [])[1] || 1);
+  const go = badId && window.jumpToCellLine ? () => window.jumpToCellLine(badId, line) : null;
+  window.toast && window.toast(msg, bad.length ? 8000 : 2500, '', go);
+}
+window.formatCells = formatCells;
+const _FMT_NAMES = { runic: 'Runic', fatou: 'Fatou' };
+// Fatou's WASM build and dprint's host for it, loaded on the first format that needs them and kept.
+let _fatouP = null;
+function _fatou() {
+  return _fatouP || (_fatouP = (async () => {
+    const host = await import('/assets/vendor/dprint-formatter/mod.js');
+    const r = await fetch('/assets/vendor/fatou/plugin.wasm');
+    if (!r.ok) throw new Error('plugin.wasm: ' + r.status);
+    return host.createFromBuffer(await r.arrayBuffer());
+  })().catch(e => { _fatouP = null; throw e; }));
+}
+const _nonWs = (s, at) => { let n = 0; for (let i = 0; i < at; i++) if (!/\s/.test(s[i])) n++; return n; };
+function _atNonWs(s, n) {
+  let i = 0;
+  for (; i < s.length && n > 0; i++) if (!/\s/.test(s[i])) n--;
+  return i;
+}
 // What a state push means for ONE cell's open editor.
 //
 // Pure on purpose: the caller gathers the facts and acts on the verdict. This decision has been wrong
@@ -220,7 +314,7 @@ async function delCell(id) {
   // Select the PREVIOUS cell (idx-1), not the one that shifted up into the gap; clamp so
   // deleting the first cell falls back to the new first. selectCell scrolls it into view.
   after.length ? selectCell(after[Math.min(Math.max(0, idx - 1), after.length - 1)], true) : selectCell(null);
-  toast('Deleted ' + id, 2000);
+  _toastUndoable('Deleted ' + id);
 }
 // Delete several cells atomically (multi-select dd / cut). Selects the cell before the first
 // removed. `verb` ("delete"/"cut") labels the undo entry so it reads "Undo cut 2 cells". A plain
@@ -231,7 +325,18 @@ async function delCells(ids, verb) {
   renderAll(await api('POST', '/api/cells-delete', { ids, verb: verb || 'delete' }));
   const after = cellIds();
   after.length ? selectCell(after[Math.min(Math.max(0, firstIdx - 1), after.length - 1)], true) : selectCell(null);
-  if (verb !== 'cut') toast('Deleted ' + _idsLabel(ids), 2000);
+  if (verb !== 'cut') _toastUndoable('Deleted ' + _idsLabel(ids));
+}
+// A toast for an action that has just become the top of the notebook's undo stack, clickable to undo
+// it. The click undoes only while that action is still the top: anything done after it would be
+// what an undo reverses instead.
+function _toastUndoable(msg) {
+  const label = nbState && nbState.undoLabel;
+  if (!label) { toast(msg, 2000); return; }
+  toast(msg + ' · Undo', 5000, '', () => {
+    if (nbState && nbState.undoLabel === label) undoNb();
+    else toast('Not undone: other changes came after it', 3000);
+  });
 }
 async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-move/' + id, { dir })); }
 // ── Upstream-dependency navigation (🔗) ───────────────────────────────────────
@@ -317,7 +422,16 @@ async function toggleType(id, kind)  {
   // edit, so the convert accused an agent of it. Rebaseline, the way undo and split already do.
   renderAll(rebaselineAll(await api('POST', '/api/cell-type/' + id, body)));
 }
-async function undoNb() { const s = await api('POST', '/api/undo'); renderAll(rebaselineAll(s)); if (s && s.undid) toast('Undid ' + s.undid, 2000); }
+async function undoNb() {
+  const s = await api('POST', '/api/undo'); renderAll(rebaselineAll(s));
+  if (!(s && s.undid)) return;
+  // Clickable to redo, while what was undone is still the top of the redo stack.
+  const label = s.redoLabel;
+  toast('Undid ' + s.undid + (label ? ' · Redo' : ''), label ? 4000 : 2000, '', label ? () => {
+    if (nbState && nbState.redoLabel === label) redoNb();
+    else toast('Not redone: other changes came after it', 3000);
+  } : null);
+}
 async function redoNb() { const s = await api('POST', '/api/redo'); renderAll(rebaselineAll(s)); if (s && s.redid) toast('Redid ' + s.redid, 2000); }
 // ── Cell clipboard: copy / cut / paste (command-mode c / x / v) ────────────────
 // An internal clipboard of {kind, source} cells, mirrored to localStorage so you can copy

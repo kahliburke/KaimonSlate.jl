@@ -1606,6 +1606,8 @@ body.celldnd #nb { padding-bottom: 96px; }
 .toast.show { opacity:1; transform:none; }
 .toast.err { border-left-color:var(--red); }
 .toast.ok { border-left-color:var(--green, #56d364); }
+.toast.act { pointer-events:auto; cursor:pointer; }
+.toast.act:hover { border-color:var(--accent); }
 /* Connection-lost modal — full-screen blocking overlay; informs and waits for reconnect. */
 .disconnmodal { position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center;
                 background:#0a0c10cc; backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }

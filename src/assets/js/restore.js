@@ -129,7 +129,7 @@ function reconcileBackup(state) {
   const b = _readBackup();
   if (!Object.keys(b).length) return;
   const byId = {}; (state.cells || []).forEach(c => byId[c.id] = c);
-  const cands = [], keep = {}; let autoFilled = 0;
+  const cands = [], keep = {}, filled = [];
   for (const id of Object.keys(b)) {
     const { mine, base } = b[id] || {};
     const cell = byId[id];
@@ -140,14 +140,20 @@ function reconcileBackup(state) {
     if (SLATE_IS_WORKBOOK && !cell.workbook) continue;
     const server = cell.source != null ? cell.source : '';
     if (_sameEdit(server, mine)) continue;                       // already saved (or never differed) — drop
-    if (_isEmpty(server) && !_isEmpty(mine)) { _applyRestore(id, mine); keep[id] = b[id]; autoFilled++; continue; }  // empty cell ← content: silent auto-accept
+    if (_isEmpty(server) && !_isEmpty(mine)) { _applyRestore(id, mine); keep[id] = b[id]; filled.push(id); continue; }  // empty cell ← content: silent auto-accept
     // ts = when the browser snapshot was captured; serverTs = the notebook file's on-disk mtime.
     cands.push({ id, mine, server, conflict: !_sameEdit(server, base), ts: (b[id] || {}).ts, serverTs: state.savedAt || 0 });
     keep[id] = b[id];
   }
   _writeBackup(keep);
   Object.keys(keep).forEach(id => _pendingIds.add(id));   // protect these from the sweep until restored/discarded
-  autoFilled && window.toast && window.toast(`Restored ${autoFilled} new cell${autoFilled === 1 ? '' : 's'} from your last session`, 3500, 'ok');
+  if (filled.length && window.toast) {
+    // Clickable to the first restored cell in notebook order, so you can see what came back.
+    const order = (state.cells || []).map(c => c.id);
+    const first = filled.slice().sort((a, b) => order.indexOf(a) - order.indexOf(b))[0];
+    window.toast(`Restored ${filled.length} new cell${filled.length === 1 ? '' : 's'} from your last session · Show`, 6000, 'ok',
+                 () => window.selectCell && window.selectCell(first, true));
+  }
   cands.length && _startReconcile(cands);
 }
 window.reconcileBackup = reconcileBackup;
