@@ -122,6 +122,11 @@ end
 # capture is in the default palette, whatever the author works in. "" or a malformed name: default.
 _slatetheme_qs(theme::AbstractString) = occursin(r"^[a-z0-9-]{1,32}$", theme) ? "&slatetheme=$theme" : ""
 
+# The page `deck_pdf` prints for notebook `id` on the hub at `base`: every slide at its last step, or
+# with `steps = "all"` a page for each step of each slide, in Slate palette `theme`.
+deck_print_url(base::AbstractString, id::AbstractString; theme::AbstractString = "", steps::AbstractString = "") =
+    string(base, "/n/", id, "?deck=print&shot=1", steps == "all" ? "&steps=all" : "", _slatetheme_qs(theme))
+
 """
     deck_shot(url; width = 1600, height = 900, timeout = 90) -> (png, position, tex_errors)
 
@@ -153,9 +158,9 @@ end
 """
     deck_pdf(url; timeout = 120) -> Vector{UInt8}
 
-A PDF of the deck at `url` (a notebook URL with `?deck=print&shot=1`) as the audience sees it: one
-page per slide at its last step, each the slide's own size. Text and SVG stay vector; a chart is the
-snapshot the deck shows.
+A PDF of the deck at `url` (from `deck_print_url`) as the audience sees it: one page per slide at its
+last step, or per step of each slide, each the slide's own size. Text and SVG stay vector; a chart is
+the snapshot the deck shows.
 """
 function deck_pdf(url::AbstractString; timeout::Real = 120)
     lock(_DECKSHOT_LOCK) do

@@ -21,7 +21,8 @@ were written when they went out. They are marked.
 - **Print the live deck.** A new PDF layout, "Slides — as presented (Chrome)", prints the
   deck as the audience sees it: the hub opens `?deck=print` in headless Chrome, one page per slide
   at its last step, with the deck's own CSS. Text and SVG stay vector. `export.pdf?layout=present`,
-  or `export_pdf(notebook; layout = "present")`.
+  or `export_pdf(notebook; layout = "present")`. Steps "Every step" (`steps=all`) prints a page for
+  each build step of a slide instead.
 - **Format cells.** "Format selected cell(s)" (⌘⌥L) and "Format all cells" in the command palette
   format code with Runic, on the hub, or Fatou, in the browser from its WASM build. A notebook's
   Formatter setting picks one; otherwise a `fatou.toml` up to the repository root selects Fatou,

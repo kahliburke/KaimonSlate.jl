@@ -1455,10 +1455,11 @@
     });
     root.querySelectorAll('style').forEach(st => { st.textContent = refs(st.textContent); });
   }
-  // Slide `i` at step `step`, drawn into `host` the way the deck draws it.
+  // Slide `i` at step `step`, drawn into `host` the way the deck draws it. Returns the slide's number
+  // of steps.
   function _previewInto(host, i, step) {
     host.innerHTML = '';
-    if (i >= D.slides.length) { host.innerHTML = '<div class="pv-end">end of deck</div>'; return; }
+    if (i >= D.slides.length) { host.innerHTML = '<div class="pv-end">end of deck</div>'; return 0; }
     const sld = D.slides[i];
     const nodes = sld.ids.map(id => document.getElementById('cell-' + id)).filter(Boolean)
       .map(el => ({ id: el.id.replace(/^cell-/, ''), el: _snapshotCell(el) }));
@@ -1482,6 +1483,7 @@
     _fitFigures(body, body.scrollHeight - body.clientHeight);
     _fitMath(body);
     _shrinkText(body);
+    return total;
   }
   // ── Rendering the deck to a video ───────────────────────────────────────────
   // The renderer (server_deckshot.jl `deck_render`) steps the deck with `slideNext` and, after each
@@ -1573,24 +1575,37 @@
     });
     whenLoaded(grid, done);
   }
-  // Every slide at its last step, one page each at the slide's own size (`--u: 1px`), for the hub's
-  // PDF of the deck as presented (server_deckshot.jl `deck_pdf`).
+  // The deck one page per slide at the slide's own size (`--u: 1px`), for the hub's PDF of the deck
+  // as presented (server_deckshot.jl `deck_pdf`). Each slide is at its last step, or with `&steps=all`
+  // on a page for every step from its first, marked by a row of step dots.
   function _printDeck(done, whenLoaded) {
     _stillCharts();
     D.slides = buildSlides();
     const [W, H] = _canvasSize();
+    const every = new URLSearchParams(location.search).get('steps') === 'all';
     const root = document.createElement('div');
     root.className = 'deck-print';
     const page = document.createElement('style');
     page.textContent = '@page { size: ' + W + 'px ' + H + 'px; margin: 0; }';
     root.appendChild(page);
     document.body.appendChild(root);
-    const hosts = D.slides.map(() => {
+    const newHost = () => {
       const host = document.createElement('div'); host.className = 'deck-print-page';
       host.style.width = W + 'px'; host.style.height = H + 'px';
       return root.appendChild(host);
+    };
+    const pages = [];
+    D.slides.forEach((_, i) => {
+      if (!every) return pages.push({ host: newHost(), i, step: Infinity, total: 0 });
+      const first = newHost(), total = _previewInto(first, i, 0);
+      for (let k = 0; k <= total; k++) pages.push({ host: k ? newHost() : first, i, step: k, total });
     });
-    const draw = () => hosts.forEach((host, i) => _previewInto(host, i, Infinity));
+    const dots = (p) => {
+      const row = document.createElement('div'); row.className = 'deck-print-steps';
+      for (let k = 1; k <= p.total; k++) row.appendChild(document.createElement('i')).className = k <= p.step ? 'on' : '';
+      p.host.appendChild(row);
+    };
+    const draw = () => pages.forEach(p => { _previewInto(p.host, p.i, p.step); if (p.total) dots(p); });
     // The first drawing fits each slide before its images and the deck's fonts have loaded; the
     // second fits it again with them in place. The notebook is hidden only after that: a hidden
     // chart shrinks to nothing, and its snapshot with it.

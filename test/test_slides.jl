@@ -383,6 +383,14 @@ end
     @test NS._slidefig_final_png((; display = [(; mime = "text/html", data = UInt8[0x3c])], assets)) === nothing
 end
 
+@testset "deck print: the page asks for the steps and palette given" begin
+    @test NS.deck_print_url("http://h:1", "nb") == "http://h:1/n/nb?deck=print&shot=1"
+    @test NS.deck_print_url("http://h:1", "nb"; steps = "all", theme = "daylight") ==
+          "http://h:1/n/nb?deck=print&shot=1&steps=all&slatetheme=daylight"
+    @test NS.deck_print_url("http://h:1", "nb"; steps = "last", theme = "x\"><script>") ==
+          "http://h:1/n/nb?deck=print&shot=1"                    # an unknown value or a bad name: the default
+end
+
 @testset "deck video: the length is shared out among the steps" begin
     st(t0, t1; words = 0, step = 1, timing = nothing) =
         Dict{String,Any}("t0" => t0, "t1" => t1, "words" => words, "step" => step, "timing" => timing)

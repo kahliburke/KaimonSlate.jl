@@ -3553,13 +3553,14 @@ function create_tools(GateTool::Type)
     Set `layout="present"` to print the LIVE deck instead, as the audience sees it: one page per
     slide at its last step, drawn by the deck's own CSS in a headless Chrome (Chrome or Chromium on
     the hub's machine, or KAIMONSLATE_CHROME), in the Slate palette `charttheme` names ("" for the
-    default). Only `path` and `charttheme` apply; the other options are for Typst.
+    default). `steps="all"` prints a page for every step of each slide instead. Only `path`,
+    `charttheme` and `steps` apply; the other options are for Typst.
     """
     function export_pdf_tool(notebook::String; theme::String = "light", charttheme::String = "",
                              override::String = "0", params::String = "0",
                              source::String = "1", style::String = "article", columns::String = "1",
                              code::String = "normal", body::String = "", path::String = "",
-                             layout::String = "article", notes::String = "0")::String
+                             layout::String = "article", notes::String = "0", steps::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         # A cell whose output is HTML (a record grid, a custom card) has no figure bytes behind it,
         # so the PDF gets one by rasterising the rendered card IN AN OPEN TAB. Exporting headless
@@ -3576,7 +3577,7 @@ function create_tools(GateTool::Type)
         slide_source = slides ? (source == "1") : (source != "0")
         pdf = try
             layout == "present" ?
-                NotebookServer.deck_pdf("$(_base())/n/$(nb.id)?deck=print&shot=1" * NotebookServer._slatetheme_qs(charttheme)) :
+                NotebookServer.deck_pdf(NotebookServer.deck_print_url(_base(), nb.id; theme = charttheme, steps)) :
             export_pdf(nb; include_source = slide_source, style = style,
                        columns = something(tryparse(Int, columns), 1), theme = theme,
                        charttheme = charttheme, override = override == "1",

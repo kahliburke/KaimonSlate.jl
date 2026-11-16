@@ -576,11 +576,12 @@ async function _runPdfExport() {
 // picker resolves to. The Typst options do not apply.
 const _pdfPresent = () => (document.getElementById('pdflayout').value || '').startsWith('present');
 async function _runDeckPrint() {
-  ['pdftheme', 'pdflayout'].forEach(id => localStorage.setItem('slate_' + id, document.getElementById(id).value));
+  ['pdftheme', 'pdflayout', 'pdfsteps'].forEach(id => localStorage.setItem('slate_' + id, document.getElementById(id).value));
   showLoading('Printing the deck in headless Chrome…');
   try {
     const { charttheme } = _resolveExportTheme(document.getElementById('pdftheme').value);
-    const r = await fetch(_apipath('/api/export.pdf') + '?layout=present&slatetheme=' + encodeURIComponent(charttheme));
+    const steps = document.getElementById('pdfsteps').value;
+    const r = await fetch(_apipath('/api/export.pdf') + '?layout=present&slatetheme=' + encodeURIComponent(charttheme) + '&steps=' + steps);
     if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
     _saveBlob(await r.blob(), '.pdf');
   } catch (e) { await alertDark('PDF export failed: ' + e); }
@@ -609,6 +610,7 @@ function _exSyncRows() {
   if (f === 'pdf') {
     _pdfSyncSlides(); _pdfSyncThemeWarn();
     if (_pdfPresent()) document.querySelectorAll('#exportbg .typst-only').forEach(el => { el.style.display = 'none'; });
+    document.getElementById('pdfstepsrow').style.display = _pdfPresent() ? '' : 'none';
   }
   if (f === 'docs') _docsPrefill();
   // A write's log row is part of its format's rows, but has nothing to show until something is written.
@@ -808,7 +810,7 @@ function openExport(preset) {
   const exf = document.getElementById('exfmt');
   if (![...exf.options].some(o => o.value === fmt)) fmt = 'html';   // a saved format the dialog no longer offers
   exf.value = fmt;
-  ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => {
+  ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode', 'pdfsteps'].forEach(id => {
     const v = localStorage.getItem('slate_' + id); if (v != null) document.getElementById(id).value = v;
   });
   { const el = document.getElementById('appworkbook');

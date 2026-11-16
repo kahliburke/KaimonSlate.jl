@@ -373,9 +373,15 @@ Layout **Slides — as presented (Chrome)** in the PDF export prints the deck it
 slide's own size. The page has the look of the live deck: your palette, its CSS, its fitting, and
 your own slide styles. Text and SVG stay vector. A chart is the snapshot that the contact sheet
 shows, so it is a raster image. Theme picks the palette, and the Typst options do not apply. It needs Chrome or Chromium on the hub's
-machine (or `KAIMONSLATE_CHROME`). The route is
-`GET /api/<id>/export.pdf?layout=present&slatetheme=<palette>`, and an agent calls
-`export_pdf(notebook; layout = "present", charttheme = "<palette>")`.
+machine (or `KAIMONSLATE_CHROME`).
+
+**Steps** chooses what a slide with builds prints. **Last step** prints each slide once, as it ends.
+**Every step** prints a page for each step, from the slide before its first build to its end, with
+a row of dots that shows the step. A build that replaces what came before, such as a `derive`
+chain, then keeps every state. All the pages of a slide carry its number.
+
+The route is `GET /api/<id>/export.pdf?layout=present&slatetheme=<palette>&steps=all`, and an agent
+calls `export_pdf(notebook; layout = "present", charttheme = "<palette>", steps = "all")`.
 
 ## Zen mode
 
