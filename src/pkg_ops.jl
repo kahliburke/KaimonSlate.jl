@@ -15,6 +15,28 @@ function _await_loads(; timeout::Real = 300)
     end
 end
 
+# The other direction: a load nobody asked for (docs harvesting, module help) must not run while this
+# process changes the environment or compiles it. A package image read while its compile is being
+# written can take the process down. `with_env_work` marks a Pkg operation or a precompile pass, and
+# `env_work_idle` waits for none to be running.
+const _ENV_WORK = Threads.Atomic{Int}(0)
+function with_env_work(f)
+    Threads.atomic_add!(_ENV_WORK, 1)
+    try
+        return f()
+    finally
+        Threads.atomic_sub!(_ENV_WORK, 1)
+    end
+end
+"Wait up to `timeout` seconds for no environment work to be running; whether none is."
+function env_work_idle(; timeout::Real = 100)
+    t0 = time()
+    while _ENV_WORK[] > 0 && time() - t0 < timeout
+        sleep(0.1)
+    end
+    return _ENV_WORK[] == 0
+end
+
 # Classify each add-token into a registry/git spec (→ Pkg.add) or a local-path spec (→ Pkg.develop),
 # with a human label. Shared by the notebook-env add and the parent-project add.
 function _pkg_add_specs(tokens)
@@ -53,6 +75,9 @@ function _pkg_apply(op, name)
     isempty(tokens) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
     o = String(op)
     _await_loads()
+    with_env_work(() -> _pkg_apply_now(o, tokens))
+end
+function _pkg_apply_now(o, tokens)
     try
         if o == "rm"
             Pkg.rm(String.(tokens))

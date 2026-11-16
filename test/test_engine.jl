@@ -249,6 +249,21 @@ mean(data)
         @test ReportEngine._pkg_apply("add", " , ")["ok"] == false            # nothing named
     end
 
+    @testset "a load that waits for environment work waits until it ends" begin
+        RE = ReportEngine
+        @test RE.env_work_idle(; timeout = 0)
+        started, release = Channel{Nothing}(1), Channel{Nothing}(1)
+        t = Threads.@spawn RE.with_env_work(() -> (put!(started, nothing); take!(release); :done))
+        take!(started)
+        @test !RE.env_work_idle(; timeout = 0.2)                 # still running: the wait gives up
+        waiter = Threads.@spawn RE.env_work_idle(; timeout = 30)
+        put!(release, nothing)
+        @test fetch(t) === :done && fetch(waiter)                # the waiter sees it end
+        # An operation that throws still ends its work.
+        @test_throws ErrorException RE.with_env_work(() -> error("resolve failed"))
+        @test RE.env_work_idle(; timeout = 0)
+    end
+
     @testset "a repeated explicit id gets a free suffix" begin
         r = @test_logs (:warn, r"`a`.*`a_2`") (:warn, r"`a`.*`a_3`") parse_report(
             "#%% code id=a\nx = 1\n#%% code id=a\ny = 2\n#%% code id=a_2_x\nw = 0\n#%% code id=a\nz = 3\n")

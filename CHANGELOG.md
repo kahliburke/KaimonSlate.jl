@@ -53,6 +53,10 @@ were written when they went out. They are marked.
   stopped before mounting a chart.
 - The deck's contact sheet and the presenter's slide previews draw a diagram's arrowheads and other
   parts that its SVG refers to by id. A copy of a slide now has ids of its own.
+- A worker that rebuilds its notebook's environment (on the first open under a new Julia, for one)
+  no longer crashes while the hub indexes the notebook's docs. A package operation in a worker
+  leaves compiling to the background pass that shows "Preparing packages", and docs indexing
+  waits until the environment is ready.
 - A cell that stops importing a name the notebook provides, such as `echart`, no longer takes that
   name away. Removing the globals no cell defines any more now leaves the names a notebook starts with.
 
