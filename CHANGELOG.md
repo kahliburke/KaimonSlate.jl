@@ -51,6 +51,8 @@ were written when they went out. They are marked.
 - An exported HTML page whose only rich output is charts draws them. The chart runtime called
   `Slate.roots()`, which is defined only on a page with data assets, so on any other page it
   stopped before mounting a chart.
+- The deck's contact sheet and the presenter's slide previews draw a diagram's arrowheads and other
+  parts that its SVG refers to by id. A copy of a slide now has ids of its own.
 - A cell that stops importing a name the notebook provides, such as `echart`, no longer takes that
   name away. Removing the globals no cell defines any more now leaves the names a notebook starts with.
 
