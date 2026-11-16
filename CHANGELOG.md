@@ -18,7 +18,7 @@ were written when they went out. They are marked.
   `?toc=1` to the export route, and the page gets a button that opens a side panel of the
   document's headings. The panel highlights the section you are reading, and each heading gets an
   anchor you can link to.
-- **Print the live deck.** A new export format, "PDF — the live deck as presented", prints the
+- **Print the live deck.** A new PDF layout, "Slides — as presented (Chrome)", prints the
   deck as the audience sees it: the hub opens `?deck=print` in headless Chrome, one page per slide
   at its last step, with the deck's own CSS. Text and SVG stay vector. `export.pdf?layout=present`,
   or `export_pdf(notebook; layout = "present")`.

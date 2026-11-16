@@ -566,15 +566,14 @@
   <div class="setrow" id="exfmtrow"><label>Format</label>
     <select id="exfmt">
       <option value="html">HTML — self-contained page</option>
-      <option value="pdf">PDF — publication (Typst)</option>
-      <option value="deckpdf">PDF — the live deck as presented (Chrome)</option>
+      <option value="pdf">PDF</option>
       <option value="markdown">Markdown — file or clipboard</option>
       <option value="website" hidden>Website — publishable page (+ og:image)</option>
       <option value="standalone">Standalone .jl — reproducible bundle</option>
       <option value="app">App — a folder that runs as an application</option>
       <option value="docs">Docs — a bundle for a Documenter site</option>
     </select></div>
-  <div class="setrow exrow fmt-pdf fmt-html fmt-website fmt-markdown"><label title="Filter which cell outputs appear">Outputs</label>
+  <div class="setrow exrow fmt-pdf fmt-html fmt-website fmt-markdown typst-only"><label title="Filter which cell outputs appear">Outputs</label>
     <select id="exoutputs">
       <option value="all">All (text, values, figures)</option>
       <option value="figures">Figures only (images / charts / tables)</option>
@@ -595,11 +594,12 @@
       <option value="report|1">Report — single column</option>
       <option value="report|2">Report — two column</option>
       <option value="slides|1">🎞 Slides — presentation deck (16:9)</option>
+      <option value="present|1">🎞 Slides — as presented (Chrome)</option>
     </select></div>
   <div class="setrow exrow fmt-pdf" id="pdfnotesrow" style="display:none"><label title="Append a speaker-notes section (one page per slide that has `notes` cells)">Speaker notes</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdfnotes"> Append speaker-notes pages to the deck</label></div>
-  <div class="setrow exrow fmt-pdf"><label>Body text</label>
+  <div class="setrow exrow fmt-pdf typst-only"><label>Body text</label>
     <select id="pdfbody">
       <option value="">Auto (compact for two-column)</option>
       <option value="large">Large</option>
@@ -607,7 +607,7 @@
       <option value="compact">Compact</option>
       <option value="small">Small</option>
     </select></div>
-  <div class="setrow exrow fmt-pdf"><label>Code listings</label>
+  <div class="setrow exrow fmt-pdf typst-only"><label>Code listings</label>
     <select id="pdfcode">
       <option value="normal">Normal</option>
       <option value="small">Small</option>
@@ -615,14 +615,12 @@
       <option value="tiny">Tiny</option>
       <option value="hidden">Hidden (outputs only)</option>
     </select></div>
-  <div class="setrow exrow fmt-pdf"><label>Parameters</label>
+  <div class="setrow exrow fmt-pdf typst-only"><label>Parameters</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdfparams"> Show <code>@bind</code> controls as a parameter strip</label></div>
-  <div class="setrow exrow fmt-pdf"><label>Typst source</label>
+  <div class="setrow exrow fmt-pdf typst-only"><label>Typst source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdftypst"> Also download the editable Typst project (<code>.tar.gz</code>)</label></div>
-  <div class="setrow exrow fmt-deckpdf"><label></label>
-    <span style="font-weight:400;font-size:0.85em;color:var(--dim)">One page per slide at its last step, printed from the live deck in a headless Chrome on the hub's machine: the deck's own look, text and SVG as vector, charts as images.</span></div>
   <div class="setrow exrow fmt-html"><label>Theme</label>
     <select id="htmltheme">
       <option value="asis">As-is — the notebook's current look</option>
@@ -758,7 +756,7 @@
   <div class="row"><button id="excancel" onclick="closeExport(false)">Cancel</button>
     <button class="exrow fmt-markdown" onclick="closeExport('copy')">Copy to clipboard</button>
     <button class="exrow fmt-website primary" id="sitepublishbtn" onclick="publishToSite()">☁ Publish into site</button>
-    <button class="exrow fmt-pdf fmt-deckpdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button>
+    <button class="exrow fmt-pdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button>
     <!-- The app export stays IN the dialog: it writes a folder rather than downloading, so the modal
          is the only place its destination path can be reported back. -->
     <button class="exrow fmt-app primary" id="appexportbtn" onclick="exportApp()">Write app folder</button>
