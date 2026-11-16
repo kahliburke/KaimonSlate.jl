@@ -69,16 +69,37 @@ const _snapPending = {};
 // ECharts draws into either a <canvas> or an <svg> child — ask the DOM rather than a painter
 // internal, which is a zrender detail that moves between versions.
 const _isSvgChart = inst => { try { return !!inst.getDom().querySelector('svg'); } catch (_) { return false; } };
-window._cancelSnap = cellId => { clearTimeout(_snapPending[cellId]); delete _snapPending[cellId]; };
+const _snapUnwait = {};   // cellId → stops waiting for that chart's `finished`
+window._cancelSnap = cellId => {
+  clearTimeout(_snapPending[cellId]); delete _snapPending[cellId];
+  if (_snapUnwait[cellId]) { _snapUnwait[cellId](); delete _snapUnwait[cellId]; }
+};
 function _snapCell(cellId, insts, spec) {
   // The snapshot exists for the AGENT's slate_view and for PDF export — neither of which an app
   // has. Skipping saves a repeated 403 on every settle AND the `getDataURL` that precedes it,
   // which rasterises the whole chart at 2× before we'd have thrown the result away.
   if (SLATE_IS_APP) return;
-  clearTimeout(_snapPending[cellId]);
-  _snapPending[cellId] = setTimeout(() => {
+  window._cancelSnap(cellId);
+  const inst = insts[0]; if (!inst) return;
+  // Taken once the chart reports it has drawn everything, its entrance animation included (ECharts'
+  // `finished`), after a short settle; or after a fixed wait if that never comes. A hidden tab does
+  // not animate, so there it waits for the tab to be shown. A fixed delay alone caught charts with
+  // their series not yet drawn.
+  const settle = (ms) => { clearTimeout(_snapPending[cellId]); _snapPending[cellId] = setTimeout(shoot, ms); };
+  const done = () => { if (!document.hidden) { unwait(); settle(150); } };
+  const shown = () => { if (!document.hidden) settle(2500); };
+  const unwait = () => {
+    try { inst.off('finished', done); } catch (_) {}
+    document.removeEventListener('visibilitychange', shown);
+    _snapUnwait[cellId] === unwait && delete _snapUnwait[cellId];
+  };
+  inst.on('finished', done); document.addEventListener('visibilitychange', shown); _snapUnwait[cellId] = unwait;
+  document.hidden || settle(2500);
+  function shoot() {
     delete _snapPending[cellId];
-    const inst = insts[0]; if (!inst) return;
+    if (document.hidden) return;                      // shown again: `shown` sets the wait going
+    unwait();
+    if (inst.isDisposed && inst.isDisposed()) return;
     // `getDataURL({type:'png'})` reads the raster backing, which an SVG-rendered instance does not
     // have — so it cannot return a PNG, and posting whatever it does return would store a non-image
     // under a PNG's name. Skipping degrades cleanly: PDF export re-renders the spec on demand
@@ -104,7 +125,7 @@ function _snapCell(cellId, insts, spec) {
     if (png) fetch(_apipath('/api/snapshot'), { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cell: cellId, image: png }) }).catch(() => {});
-  }, 700);
+  }
 }
 
 // ON-DEMAND vector SVG for one cell, called via `request_live_eval` (server_snapshots.jl) only
