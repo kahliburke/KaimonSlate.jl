@@ -569,7 +569,7 @@ Pin an exact version rather than a range: an export resolves the URL to bytes, a
 means two exports of the same notebook can ship different libraries.
 
 ```julia
-provide_import!("mermaid", "https://esm.sh/mermaid@11.4.1")
+provide_import!("mermaid", "https://esm.sh/mermaid@12.3.0")
 ```
 """
 function provide_import!(spec::AbstractString, url::AbstractString)
