@@ -27,7 +27,10 @@ were written when they went out. They are marked.
   format code with Runic, on the hub, or Fatou, in the browser from its WASM build. A notebook's
   Formatter setting picks one; otherwise a `fatou.toml` up to the repository root selects Fatou,
   then the global default in Settings. Formatted text is applied only when it parses to the same
-  program as the source.
+  program as the source. See "Formatting code" in the notebook basics.
+- A deck can be 16:10 (Settings → This notebook → Slide aspect ratio), the shape of a MacBook screen
+  and of many projectors. The live deck, both slide PDF layouts and a rendered video use it. A
+  video is now recorded at the deck's own ratio, so a 4:3 deck's video has no bars either.
 
 ### Fixed
 

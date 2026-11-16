@@ -57,6 +57,7 @@ Six sections: Display, Appearance, Keyboard, Editing, Agent and Specialists.
 | **Autocomplete delay** | How long to wait before the completion popup opens. |
 | **Tooltip delay** | How long the pointer rests on a control before its tooltip shows. 0 shows them at once; the far end of the slider turns them off. |
 | **Tab in autocomplete** | Whether ⇥ accepts the highlighted completion. |
+| **Formatter** | The code formatter, Runic or Fatou, for a notebook that does not choose one and has no `fatou.toml` above it. See [Formatting code](notebook-basics.md#Formatting-code). |
 
 #### Saving under the Vim and Emacs keymaps
 
@@ -130,7 +131,10 @@ It holds:
 - **Macro-aware deps** — expand unknown macros in the kernel to recover their real reads and writes.
   Off falls back to conservative static analysis, which is what you want for the rare macro with
   expansion-time side effects.
-- **Slides** — heading level, transition, and PDF aspect ratio for a [slide deck](slides.md).
+- **Slides** — heading level, transition, and aspect ratio for a [slide deck](slides.md). The
+  ratio sets the deck on screen and in both slide PDF layouts.
+- **Formatter** — Runic or Fatou for this notebook's code cells. See
+  [Formatting code](notebook-basics.md#Formatting-code).
 - **Citation style**, under Export: see [Documents & Citations](documents.md).
 - **Agent model**: override the global agent default for this notebook.
 - **Carry findings in the file**: keep what the agent's specialists concluded in the notebook's

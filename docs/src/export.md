@@ -49,8 +49,9 @@ document, `?toc=1` for the Contents panel).
 
 ## Publication PDF (Typst)
 
-The **PDF** format renders a typeset document **server-side via Typst** — not a browser print. It
-offers:
+The **PDF** format renders a typeset document **server-side via Typst**, except for the layout
+**Slides — as presented (Chrome)**, which prints the live deck in a headless Chrome (see
+[Print the live deck](slides.md#Print-the-live-deck)). It offers:
 
 - **Theme** — *As-is*, *Light* (publication), or *Dark*. **As-is** reuses each figure exactly as
   it's already rendered in the live UI (fastest — nothing re-renders). **Light** and **Dark**
@@ -59,7 +60,11 @@ offers:
   the worker under the chosen palette, and **ECharts** are re-drawn in the matching chart theme.
   (The dialog flags an override, since re-rendering takes a moment.)
 - **Layout** — *Article* / *Report* × *single* / *two-column* (the title and abstract span the
-  full width above the columns), or *Slides* for a 16:9 presentation deck.
+  full width above the columns), *Slides* for a presentation deck typeset by Typst, or *Slides — as
+  presented (Chrome)* for the live deck printed as it looks. Both slide layouts use the notebook's
+  **Slide aspect ratio** (16:9, 16:10 or 4:3, under Settings → This notebook → Slides). With the Chrome
+  layout the dialog shows only **Theme** and **Steps** (the last step of each slide, or a page for
+  every step); the other options are Typst's.
 - **Speaker notes** — on a slides layout, append one notes page per slide that has `notes` cells.
 - **Body text** — *Auto* (compact for two-column), *Large*, *Normal*, *Compact*, *Small*.
 - **Code listings** — *Normal* / *Small* / *Smaller* / *Tiny* font, or *Hidden* (outputs only).

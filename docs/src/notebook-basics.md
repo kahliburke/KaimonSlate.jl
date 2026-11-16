@@ -294,6 +294,32 @@ folder, the same place `@asset` reads from. The notebook loads it from there, an
 carries it: a standalone page and the PDF embed it, a published site copies it beside the page, and
 an app or bundle takes the file along.
 
+## Formatting code
+
+**Format selected cell(s)** (`⌘⌥L`, or `⇧⌥F` outside an editor) and **Format all cells**, both in the
+[command palette](palette-and-help.md), lay out code cells with one of two formatters:
+
+| Formatter | Where it runs | What it does |
+| --- | --- | --- |
+| **Runic** | the hub | Keeps the line breaks you wrote and has no settings. `# runic: off` and `#! format: off` exclude a region. |
+| **Fatou** | the browser, from its WASM build | Lays each expression out to a line width, joining short calls that span lines. |
+
+A notebook uses its own **Formatter** setting (Settings → This notebook) if it has one. Otherwise a
+`fatou.toml` found by walking up from the notebook to the repository root selects Fatou, with that
+file's line width and indent. After that comes the global default (Settings → Editing →
+**Formatter**), then Runic.
+
+Formatted text replaces a cell only when it is the same program as the source. Line positions, an
+added `return`, and `;`-joined statements split onto lines of their own do not count as changes.
+Fatou also formats a cell that does not parse yet, provided the statements around the broken one
+are unchanged and the broken one keeps its tokens; Runic leaves such a cell alone. A cell that is
+refused keeps its text, and the toast says why: click it to go to the cell, with the cursor on the
+reported line.
+
+Formatting reads each editor's current text, so unsaved edits are included. In a notebook being
+authored, one format is one undo step. A reader of a [workbook](app-mode.md) can format the cells
+they write; a plain app and a static export have no formatting.
+
 ## Completion
 
 Tab-completion uses Julia's REPL completions against the live kernel **plus** the cell's own
