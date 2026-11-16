@@ -1495,8 +1495,10 @@ const _EXPORT_CHART_RUNTIME_JS = string(
     "var el=r.getElementById?r.getElementById(id):r.querySelector('[id=\"'+id+'\"]');if(el)return el;}return null;}",
     # Mount `[[domid, option], …]` found under `scope.roots` (default: the page), themed from the CSS
     # variables on `scope.themeEl`. Returns one record per chart so a caller can re-theme
-    # (`_slateRethemeCharts`) or dispose (`_slateDisposeCharts`) them — the docs embed does both.
-    "function _slateMountCharts(list,scope){scope=scope||{};var roots=scope.roots||Slate.roots(),out=[];",
+    # (`_slateRethemeCharts`) or dispose (`_slateDisposeCharts`) them — the docs embed does both. A page
+    # with no data assets has no asset runtime, so no `Slate`; its charts are all in the one document.
+    "function _slateMountCharts(list,scope){scope=scope||{};",
+    "var roots=scope.roots||(window.Slate&&Slate.roots?Slate.roots():[document]),out=[];",
     "if(!window.echarts)return out;",
     "try{echarts.registerTheme('slate',_slateExportTheme(scope.themeEl));}catch(e){}",
     "list.forEach(function(c){var el=_slateFindIn(roots,c[0]);if(!el)return;var opt=c[1];",

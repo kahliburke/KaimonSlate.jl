@@ -151,6 +151,37 @@ x = 1
         eh = NS.export_html(enb)
         @test occursin("echarts@$(NS._vendor_version("echarts"))", eh)   # CDN loaded
         @test occursin("_slateCharts", eh) && occursin("\"type\":\"bar\"", eh)   # spec embedded for client render
+        # A page with no data assets carries no asset runtime, so no `Slate`, and its charts still mount.
+        @test !occursin("Slate.roots=", eh)
+        node = Sys.which("node")
+        if node === nothing
+            @info "node not found: skipping the chart mount on a page without Slate"
+        else
+            js = string("""
+                var inits=0,el={style:{},clientWidth:400,clientHeight:300,dataset:{},parentElement:null,
+                  getBoundingClientRect:function(){return {width:400,height:300};},setAttribute:function(){},
+                  getAttribute:function(){return null;},querySelector:function(){return null;},
+                  querySelectorAll:function(){return [];},appendChild:function(){},
+                  classList:{add:function(){},remove:function(){},contains:function(){return false;}}};
+                globalThis.window=globalThis;window.addEventListener=function(){};
+                globalThis.document={documentElement:el,body:el,getElementById:function(){return el;},
+                  querySelector:function(){return null;},querySelectorAll:function(){return [];},addEventListener:function(){}};
+                globalThis.getComputedStyle=function(){return {getPropertyValue:function(){return '';}};};
+                globalThis.ResizeObserver=function(){return {observe:function(){},disconnect:function(){}};};
+                globalThis.matchMedia=function(){return {matches:false,addEventListener:function(){}};};
+                globalThis.echarts={registerTheme:function(){},init:function(){inits++;return {setOption:function(){},
+                  on:function(){},resize:function(){},dispose:function(){},getDom:function(){return el;}};}};
+                """, NS._EXPORT_ECHARTS_THEME_JS, "\nvar _slateMaps={};\n", NS._EXPORT_CHART_RUNTIME_JS,
+                "\nvar _slateCharts=[['c1',{series:[{type:'bar',data:[1,2,3]}]}]];\n", NS._EXPORT_CHART_BOOT_JS,
+                "\nsetTimeout(function(){console.log('inits='+inits);},50);\n")
+            mktempdir() do d
+                f = joinpath(d, "charts.js")
+                write(f, js)
+                out = IOBuffer()
+                p = run(pipeline(ignorestatus(`$node $f`); stdout = out, stderr = out))
+                @test p.exitcode == 0 && occursin("inits=1", String(take!(out)))
+            end
+        end
     end
 
     @testset "Markdown export (copy-to-clipboard)" begin
