@@ -159,8 +159,11 @@
       img.src = _mediaUrl(v); img.alt = ''; img.className = 'slide-bg-media';
       bgEl.appendChild(img); slide.classList.add('bg-media');
     } else bgEl.style.background = v;      // a colour or a (space-free) gradient
+    // The dimming is a translucent fill rather than an `opacity` layer. A PDF of the deck draws an
+    // `opacity` layer as a transparency group, which a viewer may soften at the page edge, so the
+    // undimmed background shows there as a light line.
     const dim = parseFloat(cfg.bgdim);
-    if (dim > 0) { const s = document.createElement('div'); s.className = 'slide-bg-dim'; s.style.opacity = Math.min(dim, 1); bgEl.appendChild(s); }
+    if (dim > 0) { const s = document.createElement('div'); s.className = 'slide-bg-dim'; s.style.background = 'rgba(0, 0, 0, ' + Math.min(dim, 1) + ')'; bgEl.appendChild(s); }
   }
 
   // The deck style gives every slide without its own `bg` a background; content slides get it dimmed
