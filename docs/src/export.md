@@ -62,7 +62,8 @@ The **PDF** format renders a typeset document **server-side via Typst**, except 
 - **Layout** — *Article* / *Report* × *single* / *two-column* (the title and abstract span the
   full width above the columns), *Slides* for a presentation deck typeset by Typst, or *Slides — as
   presented (Chrome)* for the live deck printed as it looks. Both slide layouts use the notebook's
-  **Slide aspect ratio** (16:9, 16:10 or 4:3, under Settings → This notebook → Slides). With the Chrome
+  slide aspect ratio (16:9, 16:10 or 4:3), shown for them as **Slide ratio**. It is the same setting
+  as Settings → This notebook → Slides, so changing it here changes the live deck too. With the Chrome
   layout the dialog shows only **Theme** and **Steps** (the last step of each slide, or a page for
   every step); the other options are Typst's.
 - **Speaker notes** — on a slides layout, append one notes page per slide that has `notes` cells.

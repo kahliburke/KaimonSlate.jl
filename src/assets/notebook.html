@@ -596,6 +596,12 @@
       <option value="slides|1">🎞 Slides — presentation deck (16:9)</option>
       <option value="present|1">🎞 Slides — as presented (Chrome)</option>
     </select></div>
+  <div class="setrow exrow fmt-pdf" id="pdfratiorow" style="display:none"><label title="This notebook's slide aspect ratio, the same setting as Settings → This notebook → Slides">Slide ratio</label>
+    <select id="pdfratio" onchange="cfgSet('slideratio', this.value)">
+      <option value="16:9">16:9</option>
+      <option value="16:10">16:10</option>
+      <option value="4:3">4:3</option>
+    </select></div>
   <div class="setrow exrow fmt-pdf" id="pdfstepsrow" style="display:none"><label>Steps</label>
     <select id="pdfsteps">
       <option value="last">Last step</option>

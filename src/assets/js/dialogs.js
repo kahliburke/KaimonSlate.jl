@@ -611,6 +611,10 @@ function _exSyncRows() {
     _pdfSyncSlides(); _pdfSyncThemeWarn();
     if (_pdfPresent()) document.querySelectorAll('#exportbg .typst-only').forEach(el => { el.style.display = 'none'; });
     document.getElementById('pdfstepsrow').style.display = _pdfPresent() ? '' : 'none';
+    // The deck's own ratio (a notebook setting), shown where a slide layout is chosen.
+    const deck = /^(slides|present)\|/.test(document.getElementById('pdflayout').value || '');
+    document.getElementById('pdfratiorow').style.display = deck ? '' : 'none';
+    document.getElementById('pdfratio').value = (nbState && nbState.slideRatio) || '16:9';
   }
   if (f === 'docs') _docsPrefill();
   // A write's log row is part of its format's rows, but has nothing to show until something is written.
