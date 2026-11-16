@@ -1785,6 +1785,7 @@ function state_json(nb::LiveNotebook)
     meta["slideTimings"] = get(nb.report.meta, "slidetimings", "")           # rehearsed seconds, `<slide>:<step>=<s>,…`
     meta["slideTheme"] = get(nb.report.meta, "slidetheme", "")               # "" = follow the editor theme
     meta["slideRatio"] = get(nb.report.meta, "slideratio", "16:9")           # PDF deck aspect ratio
+    meta["deckBrowser"] = chrome_status_cached().problem                    # "" = the deck print, video and captures can run
     meta["bibStyle"] = get(nb.report.meta, "bibstyle", "ieee")               # CSL citation/reference style
     meta["agentModel"] = get(nb.report.meta, "agentmodel", "")               # per-notebook agent-model override ("" = browser global)
     meta["agentAvailable"] = _agent_available()   # false on a standalone hub (slate --own / serve_notebook) → the UI disables agent chat

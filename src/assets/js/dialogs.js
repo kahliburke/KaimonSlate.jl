@@ -608,6 +608,13 @@ function _exSyncRows() {
   const f = _exFormat();
   document.querySelectorAll('#exportbg .exrow').forEach(el => { el.style.display = el.classList.contains('fmt-' + f) ? '' : 'none'; });
   if (f === 'pdf') {
+    // The Chrome layout needs a browser on the hub's machine: without one it is listed but cannot
+    // be chosen, and its tooltip says what is missing.
+    const why = (nbState && nbState.deckBrowser) || '';
+    const lay = document.getElementById('pdflayout');
+    const chromeOpt = lay.querySelector('option[value="present|1"]');
+    if (chromeOpt) { chromeOpt.disabled = !!why; chromeOpt.title = why; }
+    if (why && _pdfPresent()) lay.value = 'slides|1';
     _pdfSyncSlides(); _pdfSyncThemeWarn();
     if (_pdfPresent()) document.querySelectorAll('#exportbg .typst-only').forEach(el => { el.style.display = 'none'; });
     document.getElementById('pdfstepsrow').style.display = _pdfPresent() ? '' : 'none';

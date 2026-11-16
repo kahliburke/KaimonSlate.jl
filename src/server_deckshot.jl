@@ -13,28 +13,74 @@
 const _DECKSHOT_LOCK = ReentrantLock()
 const _DECKSHOT_BROWSER = Ref{Any}(nothing)    # (process, port, profile dir)
 
-function _chrome_path()
+# Where a Chrome-family browser is installed, in the order they are tried. Any of them drives the
+# same way over the DevTools protocol.
+const _MAC_BROWSERS = ("Google Chrome", "Chromium", "Microsoft Edge", "Brave Browser",
+                       "Google Chrome Beta", "Google Chrome Canary")
+const _WIN_BROWSERS = (joinpath("Google", "Chrome", "Application", "chrome.exe"),
+                       joinpath("Microsoft", "Edge", "Application", "msedge.exe"),
+                       joinpath("BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                       joinpath("Chromium", "Application", "chrome.exe"))
+const _PATH_BROWSERS = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome",
+                        "microsoft-edge", "microsoft-edge-stable", "msedge", "brave-browser")
+
+function _browser_files()
+    out = String[]
+    for dir in ("/Applications", joinpath(homedir(), "Applications")), app in _MAC_BROWSERS
+        push!(out, joinpath(dir, app * ".app", "Contents", "MacOS", app))
+    end
+    for var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")
+        root = get(ENV, var, "")
+        isempty(root) && continue
+        append!(out, joinpath(root, rel) for rel in _WIN_BROWSERS)
+    end
+    return out
+end
+
+"""
+    chrome_status() -> (; path, problem)
+
+The browser the deck captures, prints and videos use: `KAIMONSLATE_CHROME` if it is set, else the
+first Chrome, Chromium, Edge or Brave found in the usual install places or on the PATH. `path` is
+`nothing` when there is none, and `problem` then says why, naming a `KAIMONSLATE_CHROME` that points
+at no file.
+"""
+function chrome_status()
     p = get(ENV, "KAIMONSLATE_CHROME", "")
-    isempty(p) || return isfile(p) ? p : nothing
-    for c in ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-              "/Applications/Chromium.app/Contents/MacOS/Chromium",
-              raw"C:\Program Files\Google\Chrome\Application\chrome.exe",
-              raw"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")
-        isfile(c) && return c
+    if !isempty(p)
+        isfile(p) && return (path = p, problem = "")
+        return (path = nothing, problem = "KAIMONSLATE_CHROME is set to $p, which does not exist")
     end
-    for c in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome")
+    for c in _browser_files()
+        isfile(c) && return (path = c, problem = "")
+    end
+    for c in _PATH_BROWSERS
         q = Sys.which(c)
-        q === nothing || return q
+        q === nothing || return (path = q, problem = "")
     end
-    return nothing
+    return (path = nothing, problem = "no Chrome, Chromium, Edge or Brave on the hub's machine " *
+                                      "(set KAIMONSLATE_CHROME to one)")
+end
+
+# The status a page shows, looked up again at most once a minute: the notebook state carries it on
+# every push, and a browser installed while the hub runs is found within the minute.
+const _CHROME_SEEN = Ref{Any}((0.0, nothing))
+function chrome_status_cached(; ttl::Real = 60)
+    t, s = _CHROME_SEEN[]
+    if s === nothing || time() - t > ttl
+        s = chrome_status()
+        _CHROME_SEEN[] = (time(), s)
+    end
+    return s
 end
 
 # The running browser's DevTools port, starting it if need be.
 function _deckshot_browser()
     b = _DECKSHOT_BROWSER[]
     b !== nothing && process_running(b[1]) && return b[2]
-    exe = _chrome_path()
-    exe === nothing && error("no Chrome or Chromium found (set KAIMONSLATE_CHROME to its executable)")
+    st = chrome_status()
+    st.path === nothing && error(st.problem)
+    exe = st.path
     prof = mktempdir(; cleanup = true)
     proc = run(pipeline(`$exe --headless=new --remote-debugging-port=0 --user-data-dir=$prof --no-first-run
                          --no-default-browser-check --hide-scrollbars --mute-audio --force-dark-mode about:blank`;

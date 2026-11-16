@@ -376,7 +376,10 @@ your own slide styles. Text and SVG stay vector. A chart is the snapshot that th
 shows, so it is a raster image. Theme picks the palette, and the Typst options do not apply. The page
 size follows the notebook's **Slide aspect ratio**: 1920 × 1080 px at 16:9, 1920 × 1200 px at 16:10,
 1440 × 1080 px at 4:3.
-It needs Chrome or Chromium on the hub's machine (or `KAIMONSLATE_CHROME`).
+It needs a Chrome-family browser on the hub's machine: Chrome, Chromium, Edge or Brave, found in
+the usual install places or on the `PATH`, or the one `KAIMONSLATE_CHROME` names. The same browser
+renders a deck video and the slide views an agent asks for. Without one, the layout is listed but
+cannot be chosen, the record panel's **Render** button is disabled, and each says what is missing.
 
 **Steps** chooses what a slide with builds prints. **Last step** prints each slide once, as it ends.
 **Every step** prints a page for each step, from the slide before its first build to its end, with

@@ -72,6 +72,7 @@
       .deck-rec-opts button { flex: 1; padding: 6px; border-radius: 8px; border: 1px solid var(--border, #333);
         background: var(--bg3, #262b38); color: inherit; cursor: pointer; font: inherit; }
       .deck-rec-opts button.go { background: #e5484d; border-color: #e5484d; color: #fff; }
+  .deck-rec-opts button:disabled { opacity: .5; cursor: default; }
       .deck-rec-opts .rnd { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border, #333); }
       .deck-rec-opts input[data-k=len] { width: 5.5em; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--border, #333);
         background: var(--bg, #11141c); color: inherit; font: inherit; font-variant-numeric: tabular-nums; }
@@ -412,6 +413,10 @@
       '<div class="bt"><button class="rn">Render</button></div><div class="rstat"></div>';
     const read = () => ({ mic: box.querySelector('[data-k=mic]').checked, tab: box.querySelector('[data-k=tab]').checked });
     box.querySelector('.rn').onclick = () => _renderStart(box);
+    // A video is rendered in a browser on the hub's machine: without one the button is disabled and
+    // its tooltip says what is missing.
+    const noBrowser = (typeof nbState !== 'undefined' && nbState && nbState.deckBrowser) || '';
+    if (noBrowser) { const rn = box.querySelector('.rn'); rn.disabled = true; rn.title = noBrowser; }
     _renderPoll(box);
     box.querySelector('.go').onclick = () => { const q = read(); _savePrefs(q); box.remove(); start(q); };
     box.querySelector('.no').onclick = () => box.remove();

@@ -3294,8 +3294,8 @@ function create_tools(GateTool::Type)
     figure, that a step brings in what it should, and that nothing is cut off. `slide = 0` shows
     the WHOLE DECK as a contact sheet, every slide at its last step: start a review there. The reply
     also gives the deck's position (which slide of how many, which step of how many) and the error of
-    any math on the slide that failed to typeset. Needs Chrome or Chromium on the hub's machine (or
-    KAIMONSLATE_CHROME pointing at one). `theme` names the Slate palette to paint in (e.g.
+    any math on the slide that failed to typeset. Needs Chrome, Chromium, Edge or Brave on the hub's
+    machine (or KAIMONSLATE_CHROME pointing at one). `theme` names the Slate palette to paint in (e.g.
     "daylight", "nord"; "" for the default), since the headless browser does not know the author's.
     """
     function slide_view(notebook::String; slide::Int = 1, step::String = "end", theme::String = "")::String
@@ -3325,7 +3325,7 @@ function create_tools(GateTool::Type)
     is longer than `length`, the reply says how long it needs. Rendering takes about as long as the
     deck's motion plays, not the video's length. Waits up to about four minutes; a longer render keeps
     going, and calling this again reports how far it has got (it does not start a second one). Needs
-    Chrome or Chromium and ffmpeg on the hub's machine. `theme` names the Slate palette to paint in
+    Chrome, Chromium, Edge or Brave and ffmpeg on the hub's machine. `theme` names the Slate palette to paint in
     (e.g. "daylight", "nord"; "" for the default), since the headless browser does not know the author's.
     """
     function render_deck(notebook::String; length::String = "5:00", fps::Int = 30, theme::String = "")::String
@@ -3551,8 +3551,8 @@ function create_tools(GateTool::Type)
     `notes="1"` appends a speaker-notes section.
 
     Set `layout="present"` to print the LIVE deck instead, as the audience sees it: one page per
-    slide at its last step, drawn by the deck's own CSS in a headless Chrome (Chrome or Chromium on
-    the hub's machine, or KAIMONSLATE_CHROME), in the Slate palette `charttheme` names ("" for the
+    slide at its last step, drawn by the deck's own CSS in a headless browser (Chrome, Chromium,
+    Edge or Brave on the hub's machine, or KAIMONSLATE_CHROME), in the Slate palette `charttheme` names ("" for the
     default). `steps="all"` prints a page for every step of each slide instead. Only `path`,
     `charttheme` and `steps` apply; the other options are for Typst.
     """

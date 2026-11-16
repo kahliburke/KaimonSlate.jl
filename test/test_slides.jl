@@ -391,6 +391,23 @@ end
           "http://h:1/n/nb?deck=print&shot=1"                    # an unknown value or a bad name: the default
 end
 
+@testset "deck browser: KAIMONSLATE_CHROME is used, and a wrong one is named" begin
+    exe = tempname(); write(exe, "")
+    withenv("KAIMONSLATE_CHROME" => exe) do
+        @test NS.chrome_status() == (path = exe, problem = "")
+    end
+    gone = joinpath(tempdir(), "no-such-browser-$(rand(UInt32))")
+    withenv("KAIMONSLATE_CHROME" => gone) do
+        st = NS.chrome_status()
+        @test st.path === nothing && occursin(gone, st.problem)
+    end
+    rm(exe)
+    # The places searched cover the browsers that drive the same way, on each system.
+    files = NS._browser_files()
+    @test any(endswith("Microsoft Edge"), files) && any(endswith("Brave Browser"), files)
+    @test any(f -> startswith(f, joinpath(homedir(), "Applications")), files)
+end
+
 @testset "deck aspect ratios: canvas, video and Typst page agree" begin
     for (r, (w, h)) in ("16:9" => (1920, 1080), "16:10" => (1920, 1200), "4:3" => (1440, 1080))
         @test NS.deck_canvas(r) == (w, h)

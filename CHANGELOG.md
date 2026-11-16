@@ -28,6 +28,9 @@ were written when they went out. They are marked.
   Formatter setting picks one; otherwise a `fatou.toml` up to the repository root selects Fatou,
   then the global default in Settings. Formatted text is applied only when it parses to the same
   program as the source. See "Formatting code" in the notebook basics.
+- The deck print, deck video and slide views run in Edge or Brave as well as Chrome or Chromium, and
+  find a browser installed for one user. Without one, the Chrome layout and the video's Render button
+  are disabled and say what is missing; a `KAIMONSLATE_CHROME` that names no file is reported as such.
 - A deck can be 16:10 (Settings → This notebook → Slide aspect ratio), the shape of a MacBook screen
   and of many projectors. The live deck, both slide PDF layouts and a rendered video use it. A
   video is now recorded at the deck's own ratio, so a 4:3 deck's video has no bars either.
