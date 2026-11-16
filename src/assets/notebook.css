@@ -3161,6 +3161,8 @@ html.deck-sheet-mode body > *:not(.deck-sheet) { display: none !important; }
 /* `?deck=print`: every slide at its last step, one page each (the `@page` size is set by slides.js). */
 html.deck-print-mode body > *:not(.deck-print) { display: none !important; }
 html.deck-print-mode, html.deck-print-mode body { margin: 0 !important; padding: 0 !important; overflow: visible !important; }
+html.deck-print-mode, html.deck-print-mode body { background: var(--deck-print-under, #000) !important;
+  print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 .deck-print { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 .deck-print-page { position: relative; overflow: hidden; break-after: page; }
 .deck-print-steps { position: absolute; left: 40px; bottom: 30px; display: flex; gap: 9px; z-index: 3; }

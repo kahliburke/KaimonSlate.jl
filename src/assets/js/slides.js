@@ -1626,6 +1626,11 @@
     draw();
     whenLoaded(root, () => document.fonts.ready.then(() => {
       draw();
+      // The page behind the slides takes the slides' colour. A viewer that scales a page to a size
+      // that falls between two pixels shows a sliver of it at the edge, which would otherwise be white.
+      const sl = root.querySelector('.deck-slide');
+      const under = sl ? getComputedStyle(sl).backgroundColor : '';
+      if (under) document.documentElement.style.setProperty('--deck-print-under', under);
       whenLoaded(root, () => { document.documentElement.classList.add('deck-print-mode'); done(); });
     }));
   }
