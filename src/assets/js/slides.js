@@ -1433,7 +1433,27 @@
       t.innerHTML = url ? '<img alt="" src="' + url + '">' : '';
     });
     c.querySelectorAll('video, audio').forEach(m => { m.removeAttribute('data-autoplay'); m.autoplay = false; m.preload = 'metadata'; });
+    _uniqueIds(c);
     return c;
+  }
+  // Give the ids in a copy a suffix of their own, and point the copy's references at them. An SVG
+  // refers to its own markers, gradients and clip paths by id (`url(#…)`, `href="#…"`, `#…` in its
+  // <style>); with the original's ids those resolve to the original, which the print hides.
+  let _copyN = 0;
+  const _ID_LISTS = ['aria-labelledby', 'aria-describedby', 'aria-controls', 'aria-owns', 'for'];
+  function _uniqueIds(root) {
+    const ids = new Map(), sfx = '-pv' + (++_copyN);
+    root.querySelectorAll('[id]').forEach(el => { ids.set(el.id, el.id + sfx); el.id += sfx; });
+    if (!ids.size) return;
+    const refs = s => s.replace(/#([A-Za-z_][\w.:-]*)/g, (m, id) => ids.has(id) ? '#' + ids.get(id) : m);
+    root.querySelectorAll('*').forEach(el => {
+      for (const a of Array.from(el.attributes)) {
+        const v = _ID_LISTS.includes(a.name) ? a.value.split(/\s+/).map(t => ids.get(t) || t).join(' ')
+                : a.value.includes('#') ? refs(a.value) : a.value;
+        if (v !== a.value) el.setAttribute(a.name, v);
+      }
+    });
+    root.querySelectorAll('style').forEach(st => { st.textContent = refs(st.textContent); });
   }
   // Slide `i` at step `step`, drawn into `host` the way the deck draws it.
   function _previewInto(host, i, step) {
@@ -1673,10 +1693,23 @@
       done();
     };
     const mark = () => setTimeout(() => { document.documentElement.dataset.deckShot = 'ready'; }, 600);
+    // The sheet and the print copy the cells once. A front-end component renders on its own after its
+    // cell has run (a diagram loads its library, then draws), so the copy waits until nothing has been
+    // added to or removed from the notebook for `calm` ms, or `cap` ms in all.
+    const quiet = (done, calm = 500, cap = 15000) => {
+      const nb = document.getElementById('nb');
+      if (!nb) return done();
+      let t = null, fin = false;
+      const end = () => { if (fin) return; fin = true; ob.disconnect(); clearTimeout(t); clearTimeout(c); done(); };
+      const ob = new MutationObserver(() => { clearTimeout(t); t = setTimeout(end, calm); });
+      ob.observe(nb, { childList: true, subtree: true });
+      t = setTimeout(end, calm);
+      const c = setTimeout(end, cap);
+    };
     const go = (tries = 0) => {
       if (!settled() && tries < 600) return setTimeout(() => go(tries + 1), 100);
-      if (DECK_AT === 'sheet') return _contactSheet(mark, whenLoaded);
-      if (DECK_AT === 'print') return _printDeck(mark, whenLoaded);
+      if (DECK_AT === 'sheet') return quiet(() => _contactSheet(mark, whenLoaded));
+      if (DECK_AT === 'print') return quiet(() => _printDeck(mark, whenLoaded));
       const [s, k] = DECK_AT.split('.');
       enterPresent(Math.max(0, (parseInt(s, 10) || 1) - 1));
       _applyStep(k == null || k === 'end' ? D.total : Math.max(0, parseInt(k, 10) || 0), true);
