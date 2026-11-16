@@ -9,10 +9,10 @@
     "docs:assets": "node generate_assets.mjs"
   },
   "devDependencies": {
-    "mermaid": "^11.12.3",
-    "playwright": "^1.65.0",
-    "vitepress": "^1.6.3",
+    "mermaid": "^11.17.2",
+    "playwright": "^1.65.1",
+    "vitepress": "^1.6.4",
     "vitepress-plugin-mermaid": "^2.0.17",
-    "vitepress-plugin-tabs": "^0.5.0"
+    "vitepress-plugin-tabs": "^0.9.1"
   }
 }
