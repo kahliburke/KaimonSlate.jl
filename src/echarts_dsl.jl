@@ -380,21 +380,14 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
         opt["tooltip"] = _ec(tooltip)
     end
     # Legend. An explicit `legend=<spec>` is the caller's to position — left untouched. An AUTO legend
-    # (legend=true, or several named series) is an empty dict ECharts fills from the series names; that
-    # and a title both default to the top row, so a wide title overlaps the centered legend. When both
-    # are present, drop the auto legend to its own row beneath the title and reserve plotting space
-    # below it (cartesian only — pie/radar ignore `grid`; a series- or caller-supplied grid wins).
+    # (legend=true, or several named series) is an empty dict ECharts fills from the series names and
+    # places at the bottom, clear of a title at the top.
     if legend === false
         # no legend
     elseif legend !== true && legend !== nothing
         opt["legend"] = _ec(legend)
     elseif legend === true || count(s -> haskey(s.opt, "name"), slist) > 1
-        leg = Dict{String,Any}()
-        if haskey(opt, "title")
-            leg["top"] = 30
-            (noaxis || haskey(opt, "grid")) || (opt["grid"] = Dict{String,Any}("top" => 72, "containLabel" => true))
-        end
-        opt["legend"] = leg
+        opt["legend"] = Dict{String,Any}()
     end
     # A kwarg DECORATES what the layout built, rather than discarding it. `:heatmap` generates its
     # category axes from the labels it was given, so `echart(:heatmap, xs, ys, z; yAxis = (name="b",))`

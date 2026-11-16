@@ -97,6 +97,15 @@ const RE = ReportEngine
         @test haskey(o, "legend")
     end
 
+    @testset "an auto legend is left where ECharts puts it, clear of a title" begin
+        o = RE.echart(RE.series(:line, [1, 2], [1, 2]; name = "a"), RE.series(:line, [1, 2], [2, 1]; name = "b");
+                      title = "Two").option
+        @test o["legend"] == Dict{String,Any}()          # ECharts places it at the bottom; the title keeps the top
+        @test !haskey(o, "grid")
+        mine = RE.echart(:line, [1, 2], [3, 4]; legend = (top = 10,)).option
+        @test mine["legend"]["top"] == 10                # a caller's legend keeps its position
+    end
+
     @testset "Ergonomic kinds bring their implied components" begin
         heat = RE.echart(:heatmap, ["a", "b"], ["x", "y"], [1 2; 3 4]).option
         @test heat["xAxis"]["type"] == "category" && heat["yAxis"]["type"] == "category"
