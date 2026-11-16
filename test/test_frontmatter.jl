@@ -105,6 +105,27 @@ x = 1
         @test occursin("A reactive study", h)
     end
 
+    @testset "HTML export: table of contents" begin
+        src = "#%% md id=intro\n# Orbit Study\nIntro.\n\n## Results\n\n#%% md id=more\n## Results\n" *
+              "### Über alles\n<h3 id=\"mine\">Own anchor</h3>\n<h3 ID='single'>Single quoted</h3>\n\n" *
+              "## Fig orbit\n\n#%% md id=n notes\n## Speaker only\n"
+        h = NS.export_html(_mknb(src); toc = true)
+        items = [(m[1], m[2]) for m in eachmatch(r"<a class=\"exp-tocitem lvl\d\" href=\"#([^\"]+)\"[^>]*>([^<]*)</a>", h)]
+        # The hoisted title comes first, then every body heading in order. The duplicate heading gets a
+        # distinct anchor, an author's own id is kept however it is quoted, a slug stays out of the ids
+        # the export writes itself (`fig-…`), and speaker notes are not listed.
+        @test items == [("exp-top", "Orbit Study"), ("results", "Results"), ("results-2", "Results"),
+                        ("über-alles", "Über alles"), ("mine", "Own anchor"), ("single", "Single quoted"),
+                        ("s-fig-orbit", "Fig orbit")]
+        art = h[findfirst("<article", h).start:findfirst("</article>", h).stop]
+        ids = [m[1] for m in eachmatch(r"\sid\s*=\s*[\"']([^\"']+)"i, art)]
+        @test allunique(ids) && all(in(ids), first.(items))     # every entry has one target
+        @test findfirst("id=\"exp-toc-btn\"", h).start < findfirst("<article", h).start
+        # Off by default; and a document with no heading but its title gets no panel.
+        @test !occursin("exp-toc", NS.export_html(_mknb(src)))
+        @test !occursin("id=\"exp-toc-btn\"", NS.export_html(_mknb("#%% md id=a\n# Only Title\nbody\n"); toc = true))
+    end
+
     @testset "HTML export: citations rendered + References + echarts embedded client-side" begin
         cnb = _mknb("#%% md id=body\nSee [@knuth1984, p. 7].\n\n" *
                     "#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}, year={1984}}\n")

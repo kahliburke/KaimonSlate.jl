@@ -30,6 +30,7 @@ Options for this format:
 | **Code size** | Normal down to tiny. |
 | **Page width** | The content column, from 620px to full width. |
 | **Source** | Include cell sources, or export outputs only. |
+| **Contents** | Add a **Contents** button that opens a side panel listing the document's headings, like the notebook's own Contents panel. The panel highlights the section you are reading, and each heading gets an anchor you can link to. |
 | **Offline** | Inline KaTeX, ECharts and the widget stack instead of linking a CDN, so the page renders with no network at all. Adds roughly a megabyte. |
 | **Data** | Gzip the inlined libraries and data. Typically halves the file, and needs Chrome 80, Safari 16.4 or Firefox 113 to inflate. Numeric arrays are narrowed to 32-bit either way. |
 | **Runnable** | Embed the reproducible bundle and a "Run live" button, so a reader can run the notebook on their own machine. |
@@ -44,7 +45,7 @@ If the notebook has any `@replay` marks, confirming opens a second step for choo
 sweep each control. See [Offline interactivity](replay.md).
 
 The route is `GET /api/<id>/export.html` (`?dl=1` to download, `?source=0` for an output-only
-document).
+document, `?toc=1` for the Contents panel).
 
 ## Publication PDF (Typst)
 

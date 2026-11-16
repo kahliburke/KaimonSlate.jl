@@ -196,6 +196,7 @@ function _htmlBaseParts() {
   if (override) parts.push('override=1');
   if (code !== 'normal') parts.push('code=' + code);
   const wqs = _htmlWidthQS(); if (wqs) parts.push('width=' + wqs);
+  if ((document.getElementById('htmltoc') || {}).checked) parts.push('toc=1');
   // Force one renderer for every chart in this export ('' = each chart keeps its own `renderer=`).
   const rend = (document.getElementById('htmlrenderer') || {}).value || ''; if (rend) parts.push('renderer=' + rend);
   const outv = (document.getElementById('exoutputs') || {}).value || 'all'; if (outv !== 'all') parts.push('outputs=' + outv);
@@ -800,6 +801,7 @@ function openExport(preset) {
   const hr = document.getElementById('htmlrunnable'); if (hr) hr.checked = localStorage.getItem('slate_htmlrunnable') === '1';
   const hh = document.getElementById('htmlhistory'); if (hh) hh.checked = localStorage.getItem('slate_htmlhistory') === '1';
   const ho = document.getElementById('htmloffline'); if (ho) ho.checked = localStorage.getItem('slate_htmloffline') === '1';
+  const ht = document.getElementById('htmltoc'); if (ht) ht.checked = localStorage.getItem('slate_htmltoc') === '1';
   const hc = document.getElementById('htmlcompress'); if (hc) hc.checked = localStorage.getItem('slate_htmlcompress') !== '0';   // on unless turned off
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
@@ -878,6 +880,7 @@ function closeExport(go) {
     const hr = document.getElementById('htmlrunnable'); if (hr) localStorage.setItem('slate_htmlrunnable', hr.checked ? '1' : '0');
     const hh = document.getElementById('htmlhistory'); if (hh) localStorage.setItem('slate_htmlhistory', hh.checked ? '1' : '0');
     const ho = document.getElementById('htmloffline'); if (ho) localStorage.setItem('slate_htmloffline', ho.checked ? '1' : '0');
+    const ht = document.getElementById('htmltoc'); if (ht) localStorage.setItem('slate_htmltoc', ht.checked ? '1' : '0');
     const hc = document.getElementById('htmlcompress'); if (hc) localStorage.setItem('slate_htmlcompress', hc.checked ? '1' : '0');
     ['htmltheme', 'htmlcode', 'htmlrenderer'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
     // A notebook with `@replay` marks gets a SECOND step before anything is produced: those controls

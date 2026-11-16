@@ -1871,12 +1871,14 @@ end
 _export_theme_vars(name::AbstractString) =
     string(_export_palette_root(name), _export_hl_vars(_export_is_light(name) ? "light" : "dark"))
 
-function _export_css(theme::AbstractString = "dark", code::AbstractString = "normal", width::Integer = 900)
+function _export_css(theme::AbstractString = "dark", code::AbstractString = "normal", width::Integer = 900;
+                     toc::Bool = false)
     name = _resolve_export_theme(theme)                       # a Slate palette name (charttheme or dark/light)
     # Content column width from the export/publish slider: a px cap (already responsive DOWN — max-width
     # shrinks on a narrow screen), or `≤ 0` = full-width (100%, the slider's far "Full" stop).
     mw = Int(width) <= 0 ? "100%" : string(clamp(Int(width), 480, 2400), "px")
-    return string(":root{", _export_theme_vars(name), "}\n", _export_page_css(mw), _export_component_css(code))
+    return string(":root{", _export_theme_vars(name), "}\n", _export_page_css(mw), _export_component_css(code),
+                  toc ? _export_toc_css(mw) : "")
 end
 
 # The page around the cells: body, article column, title block, footer, "run this live" modal. A docs
@@ -2143,6 +2145,162 @@ $(_EXPORT_HL_CSS)
 .exp-ctl-wide{align-items:flex-start;flex-direction:column;gap:4px;width:100%;}
 @media print{ .exp-ctls{opacity:.7;} }
 @media print{ body{-webkit-print-color-adjust:exact;print-color-adjust:exact;} .exp-code{break-inside:avoid;} }
+"""
+
+# ── Table of contents ─────────────────────────────────────────────────────────────────────────────
+# The reader-side counterpart of the live notebook's Contents panel (toc.js + `.tocpanel` in
+# notebook.css): the same slide-in list from the left, the same indentation by heading level, the
+# same scroll-spy. The live panel's cell-history buttons have no meaning on a static page, so a
+# fixed "Contents" button and the panel's close button are the only controls.
+
+# The panel's own sheet. `mw` is the content column width. The open panel pushes the column right
+# only as far as it must to stay clear of it. The fixed button needs about 200px more than the column
+# to sit in the left margin; on a narrower window the column moves down below it, and a heading that
+# a jump lands on stops below it too.
+function _export_toc_css(mw::AbstractString)
+    crowded = endswith(mw, "px") ? string("(max-width:", parse(Int, chop(mw; tail = 2)) + 200, "px)") : "screen"
+    return """
+.exp-toc-btn{position:fixed;top:12px;left:12px;z-index:24;background:var(--bg2);color:var(--text);
+  border:1px solid var(--border);border-radius:6px;padding:5px 10px;font:inherit;font-size:.82rem;cursor:pointer;
+  box-shadow:0 2px 8px rgba(0,0,0,.18);}
+.exp-toc-btn:hover{border-color:var(--accent);color:var(--accent);}
+.exp-toc{position:fixed;top:0;left:0;width:300px;max-width:85vw;height:100vh;background:var(--bg2);
+  border-right:1px solid var(--border);z-index:25;display:flex;flex-direction:column;
+  box-shadow:2px 0 14px rgba(0,0,0,.32);transform:translateX(-100%);visibility:hidden;
+  transition:transform .18s ease,visibility 0s linear .18s;}
+body.exp-toc-open .exp-toc{transform:translateX(0);visibility:visible;transition:transform .18s ease;}
+.exp-toc-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);}
+.exp-toc-head strong{flex:1;font-size:.9rem;color:var(--titlefg);}
+.exp-toc-close{background:none;border:none;color:var(--dim);cursor:pointer;font-size:.9rem;padding:2px 4px;}
+.exp-toc-close:hover{color:var(--text);}
+.exp-toclist{overflow:auto;padding:6px 0 18px;flex:1;}
+.exp-tocitem{display:block;padding:4px 10px 4px 12px;font-size:.82rem;color:var(--dim);text-decoration:none;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-left:2px solid transparent;}
+.exp-tocitem:hover{background:var(--bg3);color:var(--text);border-left-color:var(--accent);}
+.exp-tocitem.lvl0{color:var(--text);font-weight:600;}
+.exp-tocitem.active{background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent);border-left-color:var(--accent);}
+.exp-toc-hit{animation:exp-toc-flash 1.4s ease-out;border-radius:4px;}
+@keyframes exp-toc-flash{0%,30%{background:color-mix(in srgb,var(--accent) 22%,transparent);}100%{background:transparent;}}
+.export [id]{scroll-margin-top:16px;}
+body.exp-toc-open .export,body.exp-toc-open .exp-ft{margin-left:max(312px,calc((100% - $(mw)) / 2));}
+@media $(crowded){
+  body:has(.exp-toc-btn) .export{padding-top:56px;}
+  body:has(.exp-toc-btn) .export [id]{scroll-margin-top:56px;}
+}
+@media (max-width:900px){
+  body.exp-toc-open .export,body.exp-toc-open .exp-ft{margin-left:auto;}
+}
+@media print{
+  .exp-toc,.exp-toc-btn{display:none;}
+  body.exp-toc-open .export,body.exp-toc-open .exp-ft{margin-left:auto;}
+}
+"""
+end
+
+const _TOC_HEADING_RE = r"<h([1-6])((?:\s[^>]*)?)>(.*?)</h\1>"s
+const _TOC_ID_ATTR_RE = r"\sid\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s\"'=<>`]+))"i
+
+# The panel entries of one page, collected as its cells are written. The title block is the first
+# entry, as in the live panel. `ids` holds the anchors that the panel gave out, so two headings never
+# get the same slug. The export writes its own ids with the prefixes `exp-`, `fig-`, `ref-`, `chart-`
+# and `slate-`, so `_toc_anchor!` keeps slugs out of those.
+struct _ExportToc
+    entries::Vector{Tuple{Int,String,String}}   # (heading level, anchor id, label HTML) in page order
+    ids::Set{String}
+end
+_ExportToc(title::AbstractString) = _ExportToc([(1, "exp-top", _esc(title))], Set{String}())
+
+# Give each `<h1>`…`<h6>` in `html` an anchor and add it to `toc`. An `id` the author wrote is kept.
+# Other ids are slugs of the heading text, made unique against `toc.ids`, so two "Results" headings
+# get `results` and `results-2`. The label is the heading text with its tags removed; entities stay.
+function _toc_anchor!(toc::_ExportToc, html::AbstractString)
+    used = toc.ids
+    return replace(html, _TOC_HEADING_RE => function (s)
+        m = match(_TOC_HEADING_RE, s)
+        label = replace(String(strip(replace(m[3], r"<[^>]*>" => ""))), '<' => "&lt;")
+        isempty(label) && return String(s)
+        own = match(_TOC_ID_ATTR_RE, m[2])
+        if own === nothing
+            base = String(strip(replace(lowercase(replace(label, r"&#?\w+;" => " ")), r"[^\p{L}\p{N}]+" => "-"), '-'))
+            isempty(base) && (base = "section")
+            occursin(r"^(?:exp|fig|ref|chart|slate)-", base) && (base = "s-" * base)
+            id, k = base, 1
+            while id in used
+                k += 1
+                id = string(base, "-", k)
+            end
+        else
+            id = String(something(own[1], own[2], own[3]))
+        end
+        push!(used, id)
+        push!(toc.entries, (parse(Int, m[1]), id, label))
+        own === nothing || return String(s)
+        return string("<h", m[1], " id=\"", id, "\"", m[2], ">", m[3], "</h", m[1], ">")
+    end)
+end
+
+# The toggle button and the panel. An entry is indented by its heading level, so the title and a `#`
+# heading are at the left edge and a `##` heading is one step in, as in toc.js.
+function _toc_html(toc::_ExportToc)
+    io = IOBuffer()
+    print(io, "<button id=\"exp-toc-btn\" class=\"exp-toc-btn\" type=\"button\" aria-controls=\"exp-toc\" ",
+          "aria-expanded=\"false\" title=\"Table of contents\"><span aria-hidden=\"true\">📑</span> Contents</button>",
+          "<aside id=\"exp-toc\" class=\"exp-toc\"><div class=\"exp-toc-head\"><strong>Contents</strong>",
+          "<button class=\"exp-toc-close\" type=\"button\" title=\"Close\" aria-label=\"Close contents\">✕</button></div>",
+          "<nav class=\"exp-toclist\" aria-label=\"Table of contents\">")
+    for (lvl, id, label) in toc.entries
+        d = lvl - 1
+        print(io, "<a class=\"exp-tocitem lvl", d, "\" href=\"#", id, "\" style=\"padding-left:", d * 14 + 12,
+              "px\" title=\"", replace(label, '"' => "&quot;"), "\">", label, "</a>")
+    end
+    print(io, "</nav></aside>")
+    return String(take!(io))
+end
+
+# Open/close, jump with a short highlight on the target heading, and the scroll-spy. The spy marks
+# the last heading whose top has passed 90px from the top of the viewport, the rule toc.js uses.
+# On a narrow screen the panel covers the text, so a jump also closes it. A jump moves the focus to
+# the heading, and a close with ✕ or Escape moves it back to the button. The spy scrolls only the
+# list: `scrollIntoView` on an entry would also scroll the window, and that stops a smooth jump half way.
+const _EXPORT_TOC_JS = raw"""
+(function(){
+var b=document.body,btn=document.getElementById('exp-toc-btn'),panel=document.getElementById('exp-toc');
+if(!btn||!panel)return;
+var items=[].slice.call(panel.querySelectorAll('.exp-tocitem')),list=panel.querySelector('.exp-toclist'),
+    heads=items.map(function(a){return document.getElementById(a.getAttribute('href').slice(1));}),
+    narrow=matchMedia('(max-width:900px)'),tick=0;
+function isOpen(){return b.classList.contains('exp-toc-open');}
+function spy(){
+  if(!isOpen())return;
+  var act=0;
+  for(var i=0;i<heads.length;i++){if(heads[i]&&heads[i].getBoundingClientRect().top<=90)act=i;}
+  items.forEach(function(a,i){a.classList.toggle('active',i===act);if(i===act)a.setAttribute('aria-current','location');else a.removeAttribute('aria-current');});
+  var it=items[act],y=it.offsetTop-list.offsetTop;
+  if(y<list.scrollTop)list.scrollTop=y;
+  else if(y+it.offsetHeight>list.scrollTop+list.clientHeight)list.scrollTop=y+it.offsetHeight-list.clientHeight;
+}
+function set(open,refocus){
+  b.classList.toggle('exp-toc-open',open);btn.setAttribute('aria-expanded',String(open));
+  if(open)spy();else if(refocus)btn.focus();
+}
+btn.onclick=function(){set(!isOpen());};
+panel.querySelector('.exp-toc-close').onclick=function(){set(false,true);};
+addEventListener('keydown',function(e){if(e.key==='Escape'&&isOpen())set(false,true);});
+items.forEach(function(a,i){a.onclick=function(e){
+  var h=heads[i];if(!h)return;
+  e.preventDefault();
+  h.scrollIntoView({block:'start',behavior:'smooth'});   // the offset is the heading's scroll-margin-top
+  try{history.replaceState(null,'','#'+h.id);}catch(_){}
+  h.classList.remove('exp-toc-hit');void h.offsetWidth;h.classList.add('exp-toc-hit');
+  setTimeout(function(){h.classList.remove('exp-toc-hit');},1400);
+  if(!h.hasAttribute('tabindex'))h.tabIndex=-1;
+  h.focus({preventScroll:true});
+  if(narrow.matches)set(false);
+};});
+addEventListener('scroll',function(){
+  if(isOpen()&&!tick)tick=requestAnimationFrame(function(){tick=0;spy();});
+},{passive:true});
+})();
 """
 
 # A themed-override figure (re-rendered raster/svg) as an HTML fragment: inline for SVG, a base64
@@ -3005,13 +3163,14 @@ mutable struct _ExportCtx
     surfaced_names::Any
     ext_mapped::Dict{String,String}       # `/ext-assets/` JS urls the page's import map carries (standalone)
     idprefix::String                      # prefix for generated DOM ids; "" on a single page
+    toc::Union{Nothing,_ExportToc}        # the page's table of contents, or `nothing` when it has none
 end
 
 # Must be called with `nb.lock` held: it reads the report and evaluates the `@replay` sweeps.
 function _export_ctx(nb::LiveNotebook; inline::Bool, show_source::Bool = true, outputs::String = "all",
                      override::Bool = false, palette::AbstractString = "midnight",
                      replay_stride::Integer = 1, replay_strides = nothing, idprefix::AbstractString = "",
-                     ext_mapped::AbstractDict = Dict{String,String}())
+                     ext_mapped::AbstractDict = Dict{String,String}(), toc::Bool = false)
     fm = report_frontmatter(nb.report)
     figidx = figure_index(nb.report)
     citectx = _md_cite_ctx(nb)
@@ -3055,7 +3214,8 @@ function _export_ctx(nb::LiveNotebook; inline::Bool, show_source::Bool = true, o
                       citectx, citekeys, figidx, rw, chain_marks, replay_assets, replay_table,
                       replay_rows, replay_frozen, mediareg, media, Dict{String,Any}[], Tuple{String,String}[],
                       Dict{String,String}(), _bind_index(nb.report.cells),
-                      _surfaced_names(nb.report.cells), Dict{String,String}(ext_mapped), String(idprefix))
+                      _surfaced_names(nb.report.cells), Dict{String,String}(ext_mapped), String(idprefix),
+                      toc ? _ExportToc(fm.title) : nothing)
 end
 
 # The page's data assets (`save_asset` blobs, `@replay` sweeps, web-cell modules) as registry entries
@@ -3142,8 +3302,9 @@ function _export_cell_html!(io::IO, ctx::_ExportCtx, c::Cell)
             # cell's, which are numbered from zero just the same.
             pm = get(ctx.chain_marks, string("prose:", c.id), nothing)
             pattr = pm isa AbstractDict ? string(" data-replay=\"", _esc(String(get(pm, "id", ""))), "\"") : ""
-            print(io, "<section class=\"exp-md\"", pattr, ">",
-                  _strip_attr_templates(embed(markdown_html(mdsrc, mdinterp))), "</section>")
+            mdhtml = _strip_attr_templates(embed(markdown_html(mdsrc, mdinterp)))
+            ctx.toc === nothing || (mdhtml = _toc_anchor!(ctx.toc, mdhtml))
+            print(io, "<section class=\"exp-md\"", pattr, ">", mdhtml, "</section>")
         end
         return nothing
     end
@@ -3272,7 +3433,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      # write beside `index.html`. Every `@replay` control on a published site rendered
                      # disabled without it — the page asked for a file nobody had written.
                      asset_sink::Union{Nothing,AbstractDict} = nothing,
-                     credit::Bool = true, site_home::AbstractString = "", site_home_label::AbstractString = "")
+                     credit::Bool = true, site_home::AbstractString = "", site_home_label::AbstractString = "",
+                     # A reader-facing table of contents: a toggleable side panel built from the
+                     # markdown headings, like the live notebook's Contents panel. Off by default,
+                     # because it gives each heading an `id` and adds a fixed button to the page.
+                     toc::Bool = false)
     _t_start = time()
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     # One Slate palette drives the page chrome, code AND the client-rendered ECharts (they read its CSS
@@ -3305,7 +3470,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         title = _esc(fm0.title)
         ctx = _export_ctx(nb; inline = inline_assets, show_source = show_source, outputs = String(outputs),
                           override = override, palette = palette, ext_mapped = extmap,
-                          replay_stride = replay_stride, replay_strides = replay_strides)
+                          replay_stride = replay_stride, replay_strides = replay_strides, toc = toc)
         # The BODY rewriter (`ctx.rw`) emits HTML citations that LINK to the References section; this
         # plain-text one is for places that can't take HTML — the OG/meta description below — so neither
         # ever shows a raw `[@key]`.
@@ -3335,8 +3500,12 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               (let libs = _page_libs(nb)
                    _thirdparty_head(offline; needs_echarts = libs.echarts, needs_dagre = libs.dagre)
                end),
-              "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head,
-              _frontend_export_head(nb, inline_assets, compress_data), "<article class=\"export\">")
+              "<style>", _export_css(palette, code, width; toc = toc), "</style></head><body>", _asset_head,
+              _frontend_export_head(nb, inline_assets, compress_data))
+        # The panel goes before the article, so its button comes first in the tab order. Its entries are
+        # only known when the body is written, so the panel is put in at this offset at the end.
+        tocpos = position(io)
+        print(io, "<article class=\"export\">")
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
         fm = fm0
@@ -3345,7 +3514,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         isempty(strip(site_home)) || print(io,
             "<nav class=\"exp-topnav\"><a href=\"", _esc(site_home), "\">← ",
             _esc(isempty(strip(site_home_label)) ? "Home" : site_home_label), "</a></nav>")
-        print(io, "<header class=\"exp-titleblock\"><h1 class=\"exp-title\">",
+        print(io, "<header class=\"exp-titleblock\"", toc ? " id=\"exp-top\"" : "", "><h1 class=\"exp-title\">",
               _esc(fm.title), "</h1>")
         isempty(strip(fm.subtitle)) || print(io, "<div class=\"exp-subtitle\">", _esc(fm.subtitle), "</div>")
         isempty(strip(fm.byline)) || print(io, "<div class=\"exp-byline\">", _esc(fm.byline), "</div>")
@@ -3388,7 +3557,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # References — as HTML with per-entry `id="ref-<key>"` anchors, so the inline citation links
         # (emit_html) jump to them. (The raw BibTeX cell itself is skipped above.)
         refs = _html_references(citectx)
+        ctx.toc === nothing || isempty(refs) || (refs = _toc_anchor!(ctx.toc, refs))
         isempty(refs) || print(io, "<section class=\"exp-md exp-refs\">", refs, "</section>")
+        # The title alone is not worth a panel: a TOC needs at least one heading of the body.
+        hastoc = ctx.toc !== nothing && length(ctx.toc.entries) > 1
         print(io, "</article>")
         # Page footer: an optional "← <site>" home link (sub-pages) + the "Published by Kaimon Slate"
         # credit. Full-width, outside the article column, on every exported page unless `credit=false`.
@@ -3529,9 +3701,15 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               "{left:'\$\$',right:'\$\$',display:true},{left:'\\\\[',right:'\\\\]',display:true},",
               "{left:'\$',right:'\$',display:false},{left:'\\\\(',right:'\\\\)',display:false}],",
               # don't math-render code listings / table cells (a literal $x$ in code)
-              "ignoredClasses:['exp-src','exp-table'],throwOnError:false});});",
-              "</script></body></html>")
-        return String(take!(io))
+              "ignoredClasses:['exp-src','exp-table'],throwOnError:false});});</script>")
+        # A script of its own, so a fault in the panel cannot stop the math typesetting above.
+        hastoc && print(io, "<script>", _EXPORT_TOC_JS, "</script>")
+        print(io, "</body></html>")
+        hastoc || return String(take!(io))
+        page = take!(io)
+        out = IOBuffer(sizehint = length(page) + 256 * length(ctx.toc.entries))
+        write(out, view(page, 1:tocpos), _toc_html(ctx.toc), view(page, (tocpos + 1):length(page)))
+        return String(take!(out))
     end
 end
 
