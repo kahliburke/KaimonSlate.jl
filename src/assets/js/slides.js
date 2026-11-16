@@ -1550,15 +1550,25 @@
     end: D.idx >= D.slides.length - 1 && D.step >= D.total,
   });
 
-  // The sheet and the print copy each chart as it stands, so end the charts' entry animations first.
-  function _stillCharts() {
+  // The sheet and the print copy each chart as it stands. Animation is turned off, and the copy waits
+  // for every chart to report that it has drawn everything (ECharts' `finished`), or `cap` ms: an entry
+  // animation already running when the copy is taken would come out half drawn.
+  function _stillCharts(cap = 3000) {
+    const waits = [];
     document.querySelectorAll('#nb .cell').forEach(el => _cellCharts(el).forEach(inst => {
-      try { inst.setOption({ animation: false }); } catch (e) {}
+      waits.push(new Promise(res => {
+        const t = setTimeout(res, cap);
+        const fin = () => { clearTimeout(t); try { inst.off('finished', fin); } catch (e) {} res(); };
+        try { inst.on('finished', fin); inst.setOption({ animation: false }); } catch (e) { fin(); }
+      }));
     }));
+    return Promise.all(waits);
   }
   // Every slide at its last step, numbered, in a grid over the page.
   function _contactSheet(done, whenLoaded) {
-    _stillCharts();
+    _stillCharts().then(() => _drawSheet(done, whenLoaded));
+  }
+  function _drawSheet(done, whenLoaded) {
     D.slides = buildSlides();
     document.documentElement.classList.add('deck-sheet-mode');
     const [W, H] = _canvasSize();
@@ -1579,7 +1589,9 @@
   // as presented (server_deckshot.jl `deck_pdf`). Each slide is at its last step, or with `&steps=all`
   // on a page for every step from its first, marked by a row of step dots.
   function _printDeck(done, whenLoaded) {
-    _stillCharts();
+    _stillCharts().then(() => _drawPrint(done, whenLoaded));
+  }
+  function _drawPrint(done, whenLoaded) {
     D.slides = buildSlides();
     const [W, H] = _canvasSize();
     const every = new URLSearchParams(location.search).get('steps') === 'all';
