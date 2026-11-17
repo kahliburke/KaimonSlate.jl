@@ -208,6 +208,38 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
         end
     end
 
+    @testset "a slide taller than the page starts below the top margin" begin
+        # The fit-scaler shrinks a tall body. The shrunk body must be centred at its scaled
+        # height. Centred at its unscaled height, the title starts above the page. `typst query`
+        # reads the page position of a marker at the start of the title.
+        plain = try
+            NS.export_pdf(_mknb("#%% md id=s\n## One\n\nplain\n"); layout = "slides")
+        catch
+            nothing
+        end
+        if plain === nothing
+            @info "tall slide centring check skipped (typst unavailable)"
+            @test true
+        else
+            mark = "<!--raw-typst #context { let p = here().position(); " *
+                   "[#metadata((y: p.y.pt())) <slidetop>] }-->"
+            items = join(("- item $i" for i in 1:15), "\n")
+            dir = NS._build_slides_project(_mknb("#%% md id=s\n## $mark Tall\n\n$items\n"))
+            try
+                out = IOBuffer()
+                query(exe) = run(pipeline(`$exe query --root $dir $(joinpath(dir, "doc.typ")) "<slidetop>" --field value`;
+                                          stdin = devnull, stdout = out, stderr = devnull))
+                sys = Sys.which("typst")
+                sys === nothing ? NS.Typst_jll.typst(query) : query(sys)
+                pos = JSON.parse(String(take!(out)))
+                @test length(pos) == 1
+                @test pos[1]["y"] >= 12 * 72 / 25.4 - 1       # the title is not above the 12 mm top margin
+            finally
+                rm(dir; recursive = true, force = true)
+            end
+        end
+    end
+
     @testset "the figures of a slide share the page" begin
         # Two figures under a title and text must both draw at a visible size, and the slide must
         # stay inside the page. `typst query` reads the page position of a marker before, between

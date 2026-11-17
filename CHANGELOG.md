@@ -12,6 +12,11 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+### Fixed
+
+- A tall slide in the PDF deck starts below the top margin. The fit shrinks the slide, but the
+  page centred it at its height before the shrink, so the title sat above the page edge.
+
 ## [2.2.0] - 2026-11-16
 
 ### Added
