@@ -497,6 +497,9 @@ function _site_steps!(step, host::AbstractString, m, facts; own::AbstractString 
         if isempty(m.julia)
             _ensure_julia!(host; version = ok ? out : "") || return ("fail", "no working julia after the install; see remote.log")
             ok || ((ok, out) = _run_on(host, machine_setup(m) * "julia --version"))
+            v = ok ? match(r"(\d+\.\d+\.\d+)", out) : nothing
+            (v !== nothing && v.captures[1] != string(VERSION) && _use_hub_julia!(host, m)) &&
+                ((ok, out) = _run_on(host, machine_setup(m) * "julia --version"))
         end
         ok || return ("fail", strip(out))
         v = match(r"(\d+\.\d+\.\d+)", out)
@@ -530,6 +533,18 @@ function _site_steps!(step, host::AbstractString, m, facts; own::AbstractString 
                d * (isempty(m.depot) ? " (scratch)" : ""))
     end
     return signed
+end
+
+# A machine whose juliaup runs another version than the hub: the hub's is added there and recorded,
+# and `machine_setup` asks for it by channel. Results and environments then carry across, and the
+# user's default stays theirs. `false` when there is no juliaup or the version would not install.
+function _use_hub_julia!(host::AbstractString, m)
+    ver = string(VERSION)
+    _run_on(host, machine_setup(m) * "juliaup add " * ver; timeout = 1800.0)   # fails when already added
+    ok, out = _run_on(host, machine_setup(m) * "JULIAUP_CHANNEL=" * ver * " julia --version")
+    (ok && occursin(ver, out)) || return false
+    host_facts_merge!(host, Dict{String,Any}("julia_channel" => ver))
+    return true
 end
 
 # The shell a prepare's own Julia runs in on a host of `r`: the machine's setup, which already carries

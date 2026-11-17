@@ -634,7 +634,7 @@ function _ensure_julia!(host; version::AbstractString = "", setup::AbstractStrin
         # gate) and Manifest resolution can differ across Julia versions. `juliaup add $ver` fixes it.
         m = match(r"(\d+\.\d+\.\d+)", out)
         m !== nothing && m.captures[1] != ver &&
-            _rlog("provision: $host runs Julia $(m.captures[1]) but the hub runs $ver — version skew (Serialization/Manifest may differ); run `juliaup add $ver && juliaup default $ver` on $host to match")
+            _rlog("provision: $host runs Julia $(m.captures[1]) but the hub runs $ver — version skew (Serialization/Manifest may differ); preparing the machine adds $ver with juliaup when it has it")
         return true
     end
     # A compute node shares its home directory with the login node it is reached through, so Julia is

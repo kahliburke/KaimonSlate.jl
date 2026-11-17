@@ -514,6 +514,10 @@ function machine_setup(m::Machine)
     # juliaup's launcher, or the directory of the julia the machine names, first on PATH.
     push!(parts, isempty(m.julia) ? "export PATH=\"\$HOME/.juliaup/bin:\$PATH\"" :
                  "export PATH=" * Sweep.shq_path(dirname(m.julia)) * ":\"\$PATH\"")
+    # The version a prepare added there for the hub (`_use_hub_julia!`), asked for by channel so the
+    # user's own default is left as it is.
+    ch = isempty(m.julia) ? String(get(host_facts(m.host), "julia_channel", "")) : ""
+    isempty(ch) || push!(parts, "export JULIAUP_CHANNEL=" * Sweep.shq(ch))
     d = machine_depot(m)
     # The trailing `:` keeps the bundled depots after it, where the standard library's caches are;
     # without it every stdlib is compiled again into `d`. juliaup keeps its own installs under the

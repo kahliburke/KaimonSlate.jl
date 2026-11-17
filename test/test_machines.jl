@@ -158,6 +158,11 @@ const RE = KaimonSlate.ReportEngine
             # A machine that names its own julia puts that directory first instead of juliaup's.
             j = RE.machine_setup(RE.Machine("pm", "hpc1", :slurm, "", "/opt/julia/bin/julia", "", ""))
             @test occursin("'/opt/julia/bin':", j) && !occursin("juliaup", j)
+            # The hub's version, once a prepare added it with juliaup, is asked for by channel; a
+            # machine naming its own julia is not.
+            RE.host_facts_merge!("hpc1", Dict{String,Any}("julia_channel" => "1.13.4"))
+            @test occursin("export JULIAUP_CHANNEL='1.13.4'", RE.machine_setup(m))
+            @test !occursin("JULIAUP_CHANNEL", RE.machine_setup(RE.Machine("pm", "hpc1", :slurm, "", "/opt/julia/bin/julia", "", "")))
             RE.host_facts_set!("hpc1", Dict{String,Any}())
             @test RE.machine_setup(RE.Machine("", "box", :exec, "", "", "", "")) ==
                   "export PATH=\"\$HOME/.juliaup/bin:\$PATH\"; "
