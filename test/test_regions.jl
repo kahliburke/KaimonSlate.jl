@@ -2383,6 +2383,56 @@ end
         end
     end
 
+    @testset "a hub-resolved sweep runs its developed packages as they are at submit" begin
+        mktempdir() do dir
+            home = mkpath(joinpath(dir, "home"))
+            pkg(name, uuid, body; deps = Pair{String,String}[], sources = "") = begin
+                d = mkpath(joinpath(dir, name, "src"))
+                write(joinpath(d, "$name.jl"), "module $name\n$body\nend\n")
+                write(joinpath(dir, name, "Project.toml"), "name = \"$name\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n" *
+                      (isempty(deps) ? "" : "[deps]\n" * join(("$n = \"$u\"" for (n, u) in deps), "\n") * "\n") * sources)
+                dirname(d)
+            end
+            u1, u2 = "6e0b2a52-5c43-4c84-9f39-6d9e3c6a0f01", "6e0b2a52-5c43-4c84-9f39-6d9e3c6a0f02"
+            dev2 = pkg("Dev2", u2, "g() = 10")
+            dev1 = pkg("Dev1", u1, "using Dev2\nf() = 1 + Dev2.g()"; deps = ["Dev2" => u2],
+                       sources = "[sources]\nDev2 = {path = \"$(dev2)\"}\n")
+            fork = mkpath(joinpath(dir, "fork"))
+            write(joinpath(fork, "Project.toml"), "[deps]\nDev1 = \"$u1\"\n\n[sources]\nDev1 = {path = \"$(dev1)\"}\n")
+            jl = Base.julia_cmd()[1]
+            depot = join(DEPOT_PATH, ':')
+            run(`$jl --startup-file=no --project=$fork -e 'import Pkg; Pkg.resolve()'`)
+            # The machine's shared environment, as a prepare left it.
+            shared = mkpath(joinpath(home, RE.Sweep.shared_env(fork)))
+            cp(joinpath(fork, "Project.toml"), joinpath(shared, "Project.toml"))
+            cp(joinpath(fork, "Manifest.toml"), joinpath(shared, "Manifest.toml"))
+            setup = "export PATH=$(dirname(jl)):\$PATH; "
+            withenv("HOME" => home, "JULIA_DEPOT_PATH" => depot) do
+                cd(home) do
+                    load(rel) = readchomp(`$jl --startup-file=no --project=$(joinpath(home, rel)) -e 'using Dev1; print(Dev1.f())'`)
+                    v1 = RE.Sweep.batch_env!("", fork; setup)
+                    # Named as the sweep key names its environment (`env_key`).
+                    @test v1 == RE.Sweep.shared_env(fork) * ".batch/" * first(RE.Sweep.env_source_fingerprint(fork), 12)
+                    @test load(v1) == "11"
+                    # Both the environment and the copy's own `[sources]` point at the copies.
+                    @test occursin(joinpath(home, v1, "devsrc", "Dev1"), read(joinpath(home, v1, "Manifest.toml"), String))
+                    @test occursin(joinpath(home, v1, "devsrc", "Dev2"),
+                                   read(joinpath(home, v1, "devsrc", "Dev1", "Project.toml"), String))
+                    # Unchanged sources: the same snapshot, not built again.
+                    write(joinpath(home, v1, "marker"), "")
+                    @test RE.Sweep.batch_env!("", fork; setup) == v1 && isfile(joinpath(home, v1, "marker"))
+                    # An edit makes a new snapshot; the one a running sweep uses keeps its code.
+                    write(joinpath(dev2, "src", "Dev2.jl"), "module Dev2\ng() = 20\nend\n")
+                    v2 = RE.Sweep.batch_env!("", fork; setup)
+                    @test v2 != v1 && load(v2) == "21" && load(v1) == "11"
+                    rm(shared; recursive = true)
+                    write(joinpath(dev2, "src", "Dev2.jl"), "module Dev2\ng() = 30\nend\n")
+                    @test_throws "prepare the machine" RE.Sweep.batch_env!("", fork; setup)
+                end
+            end
+        end
+    end
+
     @testset "a remote program's colours reach the activity only" begin
         @test RE._strip_ansi("\e[32m  ✓ \e[39mJSON \e[90m[682c06a0]\e[39m") == "  ✓ JSON [682c06a0]"
         @test RE._strip_ansi("no colour here") == "no colour here"

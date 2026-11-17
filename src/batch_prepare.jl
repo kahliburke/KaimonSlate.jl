@@ -50,12 +50,14 @@ function prepare_batch!(machine::AbstractString; project::AbstractString, resour
         # Read again now the depot is settled: the target's shell has to carry it.
         spec = Dict{String,String}(String(k) => string(v) for (k, v) in cluster_get_resolved(machine))
         t = Sweep.with_resources(Sweep._with(Sweep.cluster(spec); parent = ref[1]), resources)
-        # The environment a region's worker for this project uses, built the same way: a sweep runs in it.
+        # The environment a region's worker for this project uses, built the same way. A sweep runs in
+        # its snapshot of the current sources (`batch_env!`), so the test task does too.
         envdir = Ref("~/" * Sweep.shared_env(ref[1]))
         built = step("Install $(basename(ref[1]))") do
             rt = RemoteTarget(m.host; project = envdir[], origin_env = ref[1], depot = machine_depot(m),
                               setup = machine_setup(m))
             provision_remote!(rt, ref[2]; precompile = false)
+            envdir[] = "~/" * Sweep.batch_env!(m.host, ref[1]; setup = machine_setup(m))
             ("ok", "")
         end
         built == "fail" && return

@@ -284,10 +284,103 @@ _env_twin_sh(root::AbstractString, envfp::AbstractString) =
 # Removes old task environment versions, for disk space only: the newest eight are always kept, and so
 # is any version used in the last 14 days (`provision_remote_env!` touches the one it hands out), and
 # never `keep`.
-_env_prune_sh(root::AbstractString, keep::AbstractString) =
-    "cd " * shq_path(root) * "/env 2>/dev/null && ls -1dt -- */ 2>/dev/null | tail -n +9 | " *
+_env_prune_sh(root::AbstractString, keep::AbstractString) = _versions_prune_sh(String(root) * "/env", keep)
+_versions_prune_sh(dir::AbstractString, keep::AbstractString) =
+    "cd " * shq_path(dir) * " 2>/dev/null && ls -1dt -- */ 2>/dev/null | tail -n +9 | " *
     "while IFS= read -r d; do d=\${d%/}; [ \"\$d\" = " * shq(keep) * " ] && continue; " *
     "[ -n \"\$(find \"\$d\" -maxdepth 0 -mtime +14)\" ] && rm -rf -- \"\$d\"; done; true"
+
+# ── A hub-resolved sweep's environment ───────────────────────────────────────────────────────
+# A target the hub resolved runs in the environment a region's worker uses for the same project
+# (`shared_env`): its packages are in the machine's depot and a test task has loaded it there. Its
+# developed packages, though, point at the host's one copy of each checkout, which a region's worker
+# keeps in step with local edits while it runs. A sweep cannot run from that copy: with no region
+# running an edit never reaches it, and with one running an edit lands under units already queued,
+# whose sweep key names the code as it was.
+#
+# So each version of the sources gets a snapshot beside the shared environment: its Project and
+# Manifest, the developed packages copied from their local checkouts, and the paths pointed at the
+# copies. Named like `env_key`, so a sweep's key names the snapshot it runs in. The registered packages
+# are the shared environment's, already installed; only the developed ones compile again, on the node.
+
+# Slate's own packages, which the shared environment loads from the worker's copy of its code rather
+# than from any checkout the notebook develops them from.
+const _WORKER_PKGS = ("SlateExtensionsBase", "SlateWorker")
+
+"""
+    batch_env!(host, parent; setup = "") -> String
+
+The snapshot of `parent`'s shared environment on `host` for the current version of its sources, as a
+path relative to the home directory. Built when this version has none; the shared environment itself
+must exist (a prepare builds it).
+"""
+function batch_env!(host::AbstractString, parent::AbstractString; setup::AbstractString = "")
+    fp = env_source_fingerprint(parent)
+    key = first(fp, 12)
+    base = shared_env(parent)
+    rel = "$(base).batch/$(key)"
+    lk = lock(() -> get!(ReentrantLock, _BATCH_ENVS, (String(host), rel)), _BATCH_ENVS_LOCK)
+    lock(lk) do
+        stamp = rel * "/.slate-fp"
+        ok, had = _ssh_run(host, "cat " * shq_path(stamp) * " 2>/dev/null; touch -c " * shq_path(rel) * " 2>/dev/null; true")
+        (ok && strip(had) == fp) && return rel
+        q, qb = shq_path(rel), shq_path(base)
+        ok, out = _ssh_run(host, "[ -f $qb/Project.toml ] || { echo missing; exit 0; }; rm -rf -- $q && " *
+            "mkdir -p $q/devsrc && cp $qb/Project.toml $q/ && { [ ! -f $qb/Manifest.toml ] || cp $qb/Manifest.toml $q/; } && " *
+            "for f in LocalPreferences.toml JuliaLocalPreferences.toml; do [ ! -f $qb/\$f ] || cp $qb/\$f $q/; done && echo ok")
+        ok && strip(out) == "missing" &&
+            error("$(basename(parent))'s environment is not on $(host) yet: prepare the machine for batch work first")
+        (ok && strip(out) == "ok") || error("could not start a task environment at $(host):$(rel)\n$(first(strip(out), 600))")
+        src = joinpath(parent, "src")
+        isdir(src) && (put_dir(host, src, "$(rel)/src"; delete = true, filter = true, excludes = [".git", "*.cov"]) ||
+                       error("could not copy $(src) to $(host):$(rel)/src"))
+        rewrites = Tuple{String,String}[]
+        for (name, dir) in local_dev_deps(parent)
+            (name in _WORKER_PKGS || !isdir(dir)) && continue
+            rp = "$(rel)/devsrc/$(name)"
+            put_dir(host, dir, rp; delete = true, filter = true,
+                    excludes = [".git", "test", "docs", "Manifest.toml", "*.cov"]) ||
+                error("could not copy $(dir) to $(host):$(rp)")
+            push!(rewrites, (name, rp))
+        end
+        code = devpaths_script(rel, rewrites) * _batch_devsources_script(rel, [r for (_, r) in rewrites]) *
+            "\nimport Pkg\nENV[\"JULIA_PKG_PRECOMPILE_AUTO\"] = \"0\"\n" *
+            "Pkg.activate(joinpath(homedir(), raw\"$(rel)\"))\n" *
+            # A developed package that gained a dependency needs a resolve; the rest only instantiate.
+            "try\n    Pkg.instantiate()\ncatch\n    Pkg.resolve(); Pkg.instantiate()\nend\n"
+        ok, out = run_julia_there(host, code; setup, what = "the task environment")
+        ok || error("could not build the task environment at $(host):$(rel):\n$(first(strip(out), 2000))")
+        put_file(String(host), Vector{UInt8}(codeunits(fp)), stamp) ||
+            error("could not record the task environment at $(host):$(rel)")
+        _ssh_run(host, _versions_prune_sh("$(base).batch", key))
+        return rel
+    end
+end
+const _BATCH_ENVS = Dict{Tuple{String,String},ReentrantLock}()
+const _BATCH_ENVS_LOCK = ReentrantLock()
+
+# Points each copied package's own `[sources]` at the copies, and at the shared environment's paths
+# for what was not copied (Slate's own packages): every path the environment's Manifest records.
+function _batch_devsources_script(rel::AbstractString, copies::Vector{String})
+    isempty(copies) && return ""
+    io = IOBuffer()
+    println(io, "import TOML")
+    println(io, "let mf = joinpath(homedir(), raw\"$(rel)\", \"Manifest.toml\"), at = Dict{String,String}()")
+    println(io, "  for (n, es) in (isfile(mf) ? get(TOML.parsefile(mf), \"deps\", Dict()) : Dict()), e in es")
+    println(io, "    e isa AbstractDict && haskey(e, \"path\") && (at[n] = e[\"path\"])")
+    println(io, "  end")
+    print(io, "  for pf in [")
+    print(io, join(("joinpath(homedir(), raw\"$p\", \"Project.toml\")" for p in copies), ", "))
+    println(io, "]")
+    println(io, "    isfile(pf) || continue")
+    println(io, "    d = TOML.parsefile(pf); s = get(d, \"sources\", nothing)")
+    println(io, "    s isa AbstractDict || continue")
+    println(io, "    for (k, e) in s; e isa AbstractDict && haskey(e, \"path\") && haskey(at, k) && (e[\"path\"] = at[k]); end")
+    println(io, "    open(io -> TOML.print(io, d), pf, \"w\")")
+    println(io, "  end")
+    println(io, "end")
+    return String(take!(io))
+end
 
 # ── Targets ──────────────────────────────────────────────────────────────────────────────────
 # A target says WHERE shards run and HOW the two sides see the store. Everything a notebook needs
@@ -459,11 +552,13 @@ _prefix(t::ClusterTarget) = !isempty(t.setup) ? t.setup :
 _as_line(prefix::AbstractString) = endswith(prefix, "&& ") ? prefix * "true" : rstrip(prefix, [' ', ';'])
 
 function provision!(t::ClusterTarget)
-    # A target the hub resolved runs in the environment a region's worker uses for the same project
-    # (`shared_env`): built and tested by whatever prepared it, never a second copy. A sweep goes
-    # out only once that has happened (`_untested`), so there is nothing to build here.
+    # A target the hub resolved runs in a snapshot of the environment a region's worker uses for the
+    # same project (`batch_env!`), with the developed packages' sources as they are now. The shared
+    # environment was built and tested by whatever prepared it, and a sweep goes out only once that
+    # has happened (`_untested`), so only the sources travel here.
     proj = !isempty(t.project) ? t.project :
-           !isempty(t.setup) ? "\$HOME/" * shared_env(t.parent) :
+           !isempty(t.setup) ? "\$HOME/" * (isempty(t.parent) ? shared_env(t.parent) :
+                                             batch_env!(t.host, t.parent; setup = t.setup)) :
            provision_remote_env!(t.host, t.root_remote, t.parent; setup = _prefix(t), depot = t.depot)
     # The runner is Slate's own code and its location on the cluster is Slate's business, so it is
     # shipped rather than configured. Naming one is still allowed, for a site that stages it itself.
