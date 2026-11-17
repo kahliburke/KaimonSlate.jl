@@ -52,7 +52,7 @@ this is the only extra bookkeeping a sweep needs.
 function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
                       cell::AbstractString = "", notebook::AbstractString = "", name::AbstractString = "",
                       parent::AbstractString = "", resources::AbstractDict = Dict{String,String}(),
-                      labels::AbstractString = "")
+                      labels::AbstractString = "", key_parts::AbstractDict = Dict{String,Any}())
     d = Dict{String,Any}(
         "kind" => KIND_SWEEP,
         "created" => round(Int, time()),
@@ -77,6 +77,8 @@ function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
     # …and the blob of each unit's display-only labels (`@sweep(labels=)`), which the chunk
     # descriptors do not carry, so a sweep reopened from the store has them.
     isempty(labels) || (d["labels"] = String(labels))
+    # …and what its key was made of (`Sweep.key_parts`), so a run under a new key can say what moved.
+    isempty(key_parts) || (d["key_parts"] = key_parts)
     MemoStore.write_manifest(root, sweep, d)
     isempty(cell) || _index_cell_run!(root, String(cell), String(sweep))
     return sweep

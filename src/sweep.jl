@@ -1006,6 +1006,79 @@ function sweep_key(body_src, setup_src, captures, envkey = "", summary_src = "")
                                     "\0", summary_src)), 16)
 end
 
+# What a key was made of, kept with each run: the key itself is one digest, and when a cell re-runs
+# under a new one nothing else could say which of its inputs moved. The environment is broken down
+# into its packages (the Project and Manifest) and each source tree `env_key` digests, by package,
+# since an edit in a developed package is the change least visible from the cell.
+function key_parts(target::SweepTarget, body_src, setup_src, captures, summary_src = "")
+    d = Dict{String,Any}("body" => first(_hex(body_src), 16), "setup" => first(_hex(setup_src), 16),
+                         "summary" => first(_hex(summary_src), 16), "env" => env_key(target),
+                         "captures" => Dict{String,Any}(String(k) => first(_digest_of(v), 16) for (k, v) in captures))
+    parent = target isa ClusterTarget ? target.parent : ""
+    if !isempty(parent)
+        d["packages"] = env_parent_fingerprint(parent)
+        d["sources"] = Dict{String,Any}(name => string(src_tree_digest([joinpath(dir, "src")]); base = 16)
+                                        for (name, dir) in [basename(rstrip(parent, '/')) => parent; env_path_deps(parent)])
+    end
+    return d
+end
+
+"""
+    key_change(before, now) -> Vector{String}
+
+What differs between two runs' `key_parts`, as short phrases: "the body", "`x`", "Pkg's source".
+"""
+function key_change(before::AbstractDict, now::AbstractDict)
+    out = String[]
+    for (k, what) in (("body", "the body"), ("setup", "the setup"), ("summary", "the summary"))
+        get(before, k, "") == get(now, k, "") || push!(out, what)
+    end
+    cb, cn = get(before, "captures", Dict()), get(now, "captures", Dict())
+    for k in sort!(collect(union(keys(cb), keys(cn))))
+        get(cb, k, "") == get(cn, k, "") || push!(out, "`$k`")
+    end
+    get(before, "packages", "") == get(now, "packages", "") || push!(out, "the packages")
+    sb, sn = get(before, "sources", Dict()), get(now, "sources", Dict())
+    for k in sort!(collect(union(keys(sb), keys(sn))))
+        get(sb, k, "") == get(sn, k, "") || push!(out, "$(k)'s source")
+    end
+    (isempty(out) && get(before, "env", "") != get(now, "env", "")) && push!(out, "the environment")
+    return out
+end
+
+"""
+    rekeyed(root, run) -> Union{Nothing,NamedTuple}
+
+For a run whose cell ran before under another key: `(; previous, what)`, the newest such run of the
+same cell and notebook, and what changed since (`key_change`). `nothing` for a cell's first run, or
+when either run predates recording its key's parts.
+"""
+function rekeyed(root::AbstractString, run::AbstractString)
+    m = MemoStore.read_manifest(root, run)
+    m === nothing && return nothing
+    now, cell, doc = get(m, "key_parts", nothing), String(get(m, "cell", "")), get(m, "notebook", "")
+    (now isa AbstractDict && !isempty(cell)) || return nothing
+    best = nothing
+    for r in BatchSweep.cell_runs(root, cell)
+        (r == run || _sweep_of(r) == _sweep_of(run)) && continue
+        o = MemoStore.read_manifest(root, r)
+        (o === nothing || get(o, "notebook", "") != doc || !(get(o, "key_parts", nothing) isa AbstractDict)) && continue
+        (best === nothing || get(o, "created", 0) > get(best[2], "created", 0)) && (best = (r, o))
+    end
+    best === nothing && return nothing
+    return (; previous = best[1], what = key_change(best[2]["key_parts"], now))
+end
+
+# The card's line for a re-keyed run nobody has started: what changed, and the run it replaces, by
+# the id `Sweep.reopen` takes.
+function _rekey_html(root::AbstractString, run::AbstractString)
+    rk = try; rekeyed(root, run); catch; nothing; end
+    rk === nothing && return ""
+    what = isempty(rk.what) ? "" : _esc(join(rk.what, ", ")) * " changed · "
+    return "<div style='margin-top:6px;font-size:11px;opacity:.7'>" * what *
+           "previous run <code style='user-select:all'>" * _esc(rk.previous) * "</code></div>"
+end
+
 shard_key(sweep, param) = string(sweep, "_s", first(_digest_of(param), 12))
 chunk_key(run, i) = string(run, "_c", i)
 
@@ -4321,7 +4394,8 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         # Only while held: once a job is out, testing is over and the card says nothing about it.
         "prepare" => held ? _prepare_key(target) : "",
         "prepare_machine" => (held && target isa ClusterTarget) ? (isempty(target.machine) ? target.host : target.machine) : "",
-        "signed_in" => connected(target_host(target)))
+        "signed_in" => connected(target_host(target)),
+        "rekey" => started ? "" : _rekey_html(root, run))
     # The data line grows as units land, so it rides the poll too. Off the indices, so a sweep
     # writing terabytes still costs manifest reads to watch.
     #
@@ -5230,6 +5304,8 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     println(io, "<div data-sw='testing' style='margin-top:8px;font-size:12px;opacity:.85;cursor:pointer'></div>")
     err = p.state === :exhausted ? exhausted_error(getfield(r, :target), getfield(r, :run)) : ""
     println(io, "<div data-sw='why'>", _why_html(p; err), "</div>")
+    # A run nobody has started, of a cell that ran before under another key: what changed.
+    println(io, "<div data-sw='rekey'>", started ? "" : _rekey_html(store_root(r.target), r.run), "</div>")
     println(io, "<div data-sw='fails'>", _fails_html(getfield(r, :rows)), "</div>")
 
     _actions(io, r)
@@ -5433,7 +5509,7 @@ function _live_script(io, r::ShardedResult)
         // Why it stopped, and which units failed. Rendered by Julia and swapped in whole, so the
         // browser holds no second copy of this markup to drift from the cell's own render. Only on
         // CHANGE, so an open <details> is not collapsed underneath the reader on every poll.
-      ["queue", "why", "fails", "data", "stall"].forEach(function(k){
+      ["queue", "why", "fails", "data", "stall", "rekey"].forEach(function(k){
           var el = root.querySelector('[data-sw="' + k + '"]');
           if (!el || s[k] === undefined) return;
           if (el.dataset.h !== s[k]) { el.dataset.h = s[k]; el.innerHTML = s[k]; }
@@ -5954,6 +6030,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                                   root)[1]
     BatchSweep.write_sweep!(root, run, chunks; cell = String(cell), notebook = _ctx_docid(),
                             name = _ctx_notebook(), labels = lab_blob,
+                            key_parts = key_parts(target, body_src, setup_src, captures, summary_src),
                             parent = target isa ClusterTarget ? target.parent : "",
                             resources = target isa ClusterTarget ?
                                 Dict{String,String}(String(k) => string(v) for (k, v) in pairs(target.resources)) :

@@ -1532,6 +1532,31 @@ end
         end
     end
 
+    @testset "a cell run again under a new key says what changed" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            g = Sweep.paramgrid(x = 1:2)
+            r1 = Sweep.run_sweep(t, g, "p -> p.x * a"; captures = Dict(:a => 1), cell = "fit")
+            @test Sweep.rekeyed(root, r1.run) === nothing                 # the cell's first run
+            BS.start!(root, r1.run)
+            r2 = Sweep.run_sweep(t, g, "p -> p.x * a"; captures = Dict(:a => 2), cell = "fit")
+            rk = Sweep.rekeyed(root, r2.run)
+            @test rk.previous == r1.run && rk.what == ["`a`"]
+            @test occursin(r1.run, Sweep._rekey_html(root, r2.run))
+            # An unstarted run is dropped when the cell moves on, so the comparison is with the last
+            # run that went out.
+            r3 = Sweep.run_sweep(t, g, "p -> p.x * a + 0"; captures = Dict(:a => 2), cell = "fit")
+            @test Sweep.rekeyed(root, r3.run).what == ["the body", "`a`"]
+            # Another cell's runs are not this one's history.
+            o = Sweep.run_sweep(t, g, "p -> p.x"; cell = "other")
+            @test Sweep.rekeyed(root, o.run) === nothing
+        end
+        @test Sweep.key_change(Dict("env" => "e1", "sources" => Dict("A" => "1", "B" => "1")),
+                               Dict("env" => "e2", "sources" => Dict("A" => "1", "B" => "2"))) == ["B's source"]
+        @test Sweep.key_change(Dict("env" => "e1"), Dict("env" => "e2")) == ["the environment"]
+    end
+
     @testset "only genuinely free names are captured" begin
         # Captures enter the sweep key, so a name the body BINDS must never be mistaken for one it
         # reads. A symbol scrape counted comprehension and loop variables as free: a body written
