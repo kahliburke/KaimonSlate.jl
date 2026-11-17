@@ -341,6 +341,7 @@
     // failed, and that is also what progress looks like. Only whether the job is still there tells
     // them apart, so the listing carries that.
     function fileStatus(f) {
+      if (f.current === false) return { txt: 'earlier try', cls: 'none', ord: 0 };
       if (f.failed > 0) return { txt: f.failed + ' failed', cls: 'error', ord: 4 };
       if (f.total > 0 && f.done >= f.total) return { txt: 'ok', cls: 'ok', ord: 1 };
       if (f.running) return { txt: f.total ? f.done + '/' + f.total : 'running', cls: 'run', ord: 2 };
@@ -357,6 +358,7 @@
     const COLS = [
       ['job', 'job', f => jobTag(f.job), 'which submission'],
       ['step', '#', f => f.step, 'array task within its submission'],
+      ['attempt', 'try', f => f.attempt || 1, 'which launch of this task'],
       ['bytes', 'size', f => f.bytes, 'file size'],
       ['modified', 'modified', f => f.modified, 'last written'],
       ['node', 'node', f => f.node || '', 'where it ran'],
@@ -367,15 +369,17 @@
     // are two submissions; `pid` is only knowable for work this machine started, and a scheduler
     // identifies its own by job id instead.
     const anyPid = () => S.files.some(f => f.pid > 0);
+    const anyRetry = () => S.files.some(f => f.attempt > 1);
     const cols = () => COLS.filter(c => c[0] === 'job' ? jobs().length > 1 :
-                                        c[0] === 'pid' ? anyPid() : true);
+                                        c[0] === 'pid' ? anyPid() :
+                                        c[0] === 'attempt' ? anyRetry() : true);
 
     function sortedFiles() {
       const t = (q('.logv-ffilter').value || '').toLowerCase();
       const fs = S.files.filter(f => !t ||
         f.name.toLowerCase().includes(t) || (f.node || '').toLowerCase().includes(t) ||
         (f.chunk || '').toLowerCase().includes(t) || String(f.pid || '').includes(t));
-      const col = COLS.find(c => c[0] === S.sort.key) || COLS[3];
+      const col = COLS.find(c => c[0] === S.sort.key) || COLS.find(c => c[0] === 'modified');
       const get = col[2], dir = S.sort.dir;
       return fs.slice().sort((a, b) => {
         const x = get(a), y = get(b);
@@ -404,6 +408,7 @@
           title="${esc(f.name)}${f.chunk ? '\n' + esc(f.chunk) : ''}">
           ${show[0][0] === 'job' ? `<td class="logv-job">${esc(jobTag(f.job))}</td>` : ''}
           <td class="logv-step">${f.step || '—'}</td>
+          ${anyRetry() ? `<td class="logv-step">${f.attempt || 1}</td>` : ''}
           <td class="logv-num">${bytes(f.bytes)}</td>
           <td class="logv-when">${esc(when(f.modified))}</td>
           <td class="logv-node">${esc(f.node || '—')}</td>

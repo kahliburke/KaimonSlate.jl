@@ -3888,11 +3888,18 @@ log_files(r::ShardedResult) = log_files(getfield(r, :target), getfield(r, :run))
 # position of its chunk in the job's index. That is the only link between a FILE and the work that
 # wrote it, and it is what lets the listing say where a file ran and how it ended rather than
 # offering a column of identical names.
-# SLURM names a file `<job>.<jobid>_<index>.out`, PBS and the local launcher `<job>.<index>.<ext>`.
+# SLURM names a file `<job>.<jobid>_<index>.out`, the local launcher `<job>.<launch>_<index>.log`,
+# PBS `<job>.<index>.out`.
 # The array INDEX is what maps to a chunk, so the job id in front of it is optional here.
 function _log_step(path::AbstractString)
     m = match(r"\.(?:\d+_)?(\d+)\.(?:log|out|err)$", basename(String(path)))
     return m === nothing ? 0 : parse(Int, m.captures[1])
+end
+# The number in front of the index: the scheduler's job id, or the local launcher's launch. Larger is
+# later; `0` for a name with none, which is an older one.
+function _log_launch(path::AbstractString)
+    m = match(r"\.(\d+)_\d+\.(?:log|out|err)$", basename(String(path)))
+    return m === nothing ? 0 : something(tryparse(Int, m.captures[1]), 0)
 end
 
 # What the chunk last reported about itself, from the newest event it wrote. One read, and nothing
@@ -3943,6 +3950,14 @@ function log_files(t::SweepTarget, run::AbstractString)
     # These two are guarded, because the listing is worth having without them.
     pids = Dict(nm => (try; BatchLauncher.job_pids(l, root, nm); catch; Int[]; end) for nm in names)
     out = NamedTuple[]
+    # A retried submission writes a file per launch for the same task: each is an attempt, numbered
+    # by launch. Only the newest belongs to the process the pid file and the scheduler describe.
+    launches = Dict{Tuple{String,Int},Vector{Int}}()
+    for e in files
+        nm = _log_job(e.path, names)
+        isempty(nm) || push!(get!(Vector{Int}, launches, (nm, _log_step(e.path))), _log_launch(e.path))
+    end
+    foreach(sort!, values(launches))
     for e in files
         # `<job>.<step>.<ext>`, which is how a path finds the submission that wrote it now that
         # they are not listed one submission at a time.
@@ -3952,10 +3967,13 @@ function log_files(t::SweepTarget, run::AbstractString)
         step = _log_step(e.path)
         at(v) = (1 <= step <= length(v)) ? v[step] : nothing
         chunk = something(at(chunks), "")
-        f = _chunk_facts(store, chunk)
-        push!(out, (; job = nm, e.path, e.bytes, e.modified, step, chunk,
-                      pid = something(at(get(pids, nm, Int[])), 0),
-                      running = get(live, nm, :unknown) === :running,
+        ls = launches[(nm, step)]
+        attempt = findfirst(==(_log_launch(e.path)), ls)
+        current = attempt == length(ls)
+        f = current ? _chunk_facts(store, chunk) : (; node = "", ran = 0, failed = 0, done = 0, total = 0)
+        push!(out, (; job = nm, e.path, e.bytes, e.modified, step, chunk, attempt, current,
+                      pid = current ? something(at(get(pids, nm, Int[])), 0) : 0,
+                      running = current && get(live, nm, :unknown) === :running,
                       f.node, f.ran, f.failed, f.done, f.total))
     end
     sort!(out; by = e -> (-e.modified, e.path))
@@ -4225,6 +4243,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
                                                "bytes" => Int(f.bytes),
                                                "modified" => Int(f.modified),
                                                "step" => f.step, "chunk" => f.chunk, "pid" => f.pid,
+                                               "attempt" => f.attempt, "current" => f.current,
                                                "running" => f.running,
                                                "node" => f.node, "ran" => f.ran,
                                                "failed" => f.failed, "done" => f.done,

@@ -410,12 +410,15 @@ function submit!(l::ExecLauncher, spec::JobSpec)
     # A hint from THIS machine's memory, which is the right answer only when the work runs here.
     # A remote box is sized by whoever configured it, so nothing is imposed on it.
     heap = _remote(l) ? "" : _local_heap_hint(length(slices))
-    pids = _remote(l) ? _exec_start_there(l, spec, slices, heap) :
-                        _exec_start_here(spec, slices, heap)
+    # Each launch names its files apart, as a scheduler's job id does, so a retry of the same
+    # submission keeps the output of the attempt before it.
+    launch = string(round(Int, time() * 1000))
+    pids = _remote(l) ? _exec_start_there(l, spec, slices, heap, launch) :
+                        _exec_start_here(spec, slices, heap, launch)
     return join(pids, ",")
 end
 
-function _exec_start_here(spec::JobSpec, slices, heap)
+function _exec_start_here(spec::JobSpec, slices, heap, launch)
     mkpath(_jobdir(spec.root)); mkpath(spec.logdir)
     # Running here, the store is on this machine and `task_command` carries the umask into the task
     # process; the directories it writes into are made now, so they get it explicitly.
@@ -424,7 +427,7 @@ function _exec_start_here(spec::JobSpec, slices, heap)
     end
     pids = Int[]
     for (i, slice) in enumerate(slices)
-        logf = joinpath(spec.logdir, "$(spec.name).$(i).log")
+        logf = joinpath(spec.logdir, "$(spec.name).$(launch)_$(i).log")
         cmd = pipeline(Cmd(`sh -c $(task_command(spec, slice; heap = heap))`);
                        stdout = logf, stderr = logf)
         p = run(cmd; wait = false)
@@ -454,14 +457,14 @@ end
 #
 # The pid file is written ON THE FAR SIDE, where the pids mean something — the same place `poll`
 # and `cancel!` read it from. A pid is only meaningful to the kernel that issued it.
-function _exec_start_there(l::ExecLauncher, spec::JobSpec, slices, heap)
+function _exec_start_there(l::ExecLauncher, spec::JobSpec, slices, heap, launch)
     # The log files are created by THIS shell's redirection, not by the task process, so the umask
     # has to be set here as well as inside `task_command`.
     pf = _shq(_jobfile(spec.root, spec.name))
     lines = [isempty(spec.umask) ? ":" : "umask " * spec.umask,
              "mkdir -p $(_shq(_jobdir(spec.root))) $(_shq(spec.logdir))", ": > $pf.tmp"]
     for (i, slice) in enumerate(slices)
-        logf = joinpath(spec.logdir, "$(spec.name).$(i).log")
+        logf = joinpath(spec.logdir, "$(spec.name).$(launch)_$(i).log")
         push!(lines, "nohup sh -c $(_shq(task_command(spec, slice; heap = heap))) " *
                      "> $(_shq(logf)) 2>&1 < /dev/null &")
         push!(lines, "printf '%s %s\\n' \$! $(_shq(join(slice, " "))) >> $pf.tmp")
@@ -476,8 +479,8 @@ end
 """
     job_pids(launcher, root, name) -> Vector{Int}
 
-The process ids a submission started, in array-task order — so `pids[i]` is the process that wrote
-`<name>.<i>.log`. Empty for a launcher whose work runs somewhere this machine cannot signal: a
+The process ids a submission's latest launch started, in array-task order — so `pids[i]` is the
+process that wrote `<name>.<launch>_<i>.log`. Empty for a launcher whose work runs somewhere this machine cannot signal: a
 scheduler's own job id is what identifies those, and `poll` already reports it.
 
 A pid is reported as the historical fact that it is. Whether it is still ALIVE is deliberately not,

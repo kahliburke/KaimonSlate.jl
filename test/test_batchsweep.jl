@@ -2639,6 +2639,30 @@ end
         end
     end
 
+    @testset "every launch of a task keeps its own log" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; p.x; end
+            mkpath(joinpath(root, "logs")); mkpath(BS.jobs_dir(root))
+            chunks = BS.sweep_chunks(root, r.run)
+            name = BS.submission_name(chunks)
+            write(BS.index_path(root, name), join(chunks, "\n") * "\n")
+            a = joinpath(root, "logs", "$(name).100_1.log")
+            b = joinpath(root, "logs", "$(name).200_1.log")
+            write(a, "first try\n"); write(b, "second try\n")
+            byp = Dict(f.path => f for f in Sweep.log_files(t, r.run))
+            @test byp[a].attempt == 1 && !byp[a].current && byp[a].pid == 0 && !byp[a].running
+            @test byp[b].attempt == 2 && byp[b].current
+            @test occursin("first try", Sweep.logs(t, r.run)) && occursin("second try", Sweep.logs(t, r.run))
+            # The local launcher names each launch apart.
+            l = BL.ExecLauncher(; maxproc = 1)
+            spec = BL.JobSpec("slate-x", ["c"]; root, project = "", payload = "", command = "true")
+            BL.submit!(l, spec); sleep(0.01); BL.submit!(l, spec)
+            @test count(f -> startswith(f, "slate-x."), readdir(joinpath(root, "logs"))) == 2
+        end
+    end
+
     @testset "a healthy log does not read as a failing one" begin
         # The runner's own success line is "N ran, 0 skipped, 0 failed of N". Matching the bare word
         # `failed` painted the most common line in a healthy log the colour of the thing you are
