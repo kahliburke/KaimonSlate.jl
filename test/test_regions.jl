@@ -2383,6 +2383,24 @@ end
         end
     end
 
+    @testset "a machine's test task is read back from the file its launcher wrote" begin
+        # Each launcher names its output its own way (`.log` for exec, `.out` with the array id for a
+        # scheduler); the test asks the launcher rather than guessing, so a plain machine passes too.
+        mktempdir() do dir
+            env = mkpath(joinpath(dir, "env"))
+            write(joinpath(env, "Project.toml"), "")
+            jl = Base.julia_cmd()[1]
+            t = RE.Sweep.ClusterTarget(""; kind = :exec, root = dir, prologue = "export PATH=$(dirname(jl)):\$PATH")
+            # An earlier test of the same environment left its output; the new one is what is read.
+            mkpath(joinpath(dir, "logs"))
+            old = joinpath(dir, "logs", "slate-test-$(RE.Sweep.env_key(t)).0.log")
+            write(old, "stale"); run(`touch -t 202501010000 $old`)
+            measured = Dict{String,Any}()
+            st, detail = RE._batch_test!(t, env, measured, _ -> nothing; every = 0.5)
+            @test st in ("ok", "warn") && haskey(measured, "precompile_s") && occursin("precompiled", detail)
+        end
+    end
+
     @testset "a hub-resolved sweep runs its developed packages as they are at submit" begin
         mktempdir() do dir
             home = mkpath(joinpath(dir, "home"))
