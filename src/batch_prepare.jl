@@ -103,7 +103,7 @@ function _batch_test!(t, envdir::AbstractString, measured, note; qos::AbstractSt
         st === :unreachable && (note("the scheduler did not answer; asking again"); continue)
         note(st === :pending ? "queued as job $id" : "running as job $id")
     end
-    f = t.kind === :pbs ? "$logdir/$name.1.out" : "$logdir/$name.$(id)_1.out"
+    f = t.kind === :pbs ? "$logdir/$name.1.out" : t.kind === :exec ? "$logdir/$name.1.log" : "$logdir/$name.$(id)_1.out"
     ok, out = Sweep.run_there(t.host, "cat " * Sweep.shq_path(f))
     ok || return ("fail", "job $id left no output at $f")
     return _test_result!(measured, out, "job $id")
