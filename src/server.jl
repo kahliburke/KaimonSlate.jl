@@ -4115,7 +4115,7 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
     # the notebooks that happen to be open. A sweep's second wave used to wait on a sweep card
     # polling, so closing the tab left the rest of a grid unsubmitted until someone came back.
     # Both of these wait on remote hosts, so they run beside the pass rather than in it.
-    _background_step!("sweep advance", ReportEngine.Sweep.advance_started!)
+    _background_step!("sweep advance", () -> ReportEngine.Sweep.advance_started!(; wait = false))
     _background_step!("region sweep driver", () -> _drive_region_sweeps!(h))   # a region sweep's chunks, on its node
     part("diag log") do                                            # a leak is only visible as a series, so write one
         line = SlateDiag.diag_log_line()

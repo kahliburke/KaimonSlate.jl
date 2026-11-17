@@ -1206,6 +1206,11 @@ end
             @test Sweep.advance_started!(every = 0.0) == 1       # one run still has work
             @test length(BS.read_attempts(root)) == 1            # …the probe wave, and only that
             @test isempty(HUB_LOG)
+            # A cluster whose last advance is still going (a host that stopped answering) is left to it.
+            Sweep._ADVANCING["t1"][] = true
+            @test Sweep.advance_started!(every = 0.0) == 0
+            Sweep._ADVANCING["t1"][] = false
+            @test Sweep.advance_started!(every = 0.0) == 1
         end
         empty!(HUB_CLUSTERS)
     end

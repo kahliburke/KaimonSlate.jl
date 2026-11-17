@@ -1737,10 +1737,11 @@ _store_stamp(root::AbstractString) =
     (mtime(joinpath(root, "events")), mtime(BatchSweep.jobs_dir(String(root))))
 
 """
-    advance_started!(; every = 30.0) -> Int
+    advance_started!(; every = 30.0, wait = true) -> Int
 
 Release the next wave of every started, unsettled sweep this machine knows about, and return how
-many were advanced.
+many were advanced. Each cluster is advanced on a task of its own; with `wait = false` they are left
+running and the count is of the clusters started.
 
 A sweep goes out in waves: one chunk, then the rest once a unit has landed and the body is known to
 work. Something has to release that second wave, and until now the only thing that did was an open
@@ -1758,11 +1759,11 @@ _hub_log(msg::AbstractString) = (isdefined(P, :_rlog) && P._rlog(msg); nothing)
 
 _cluster_from(c) = cluster(Dict{String,String}(String(k) => String(v) for (k, v) in c))
 
-function advance_started!(; every::Real = 30.0)
-    n = 0
+function advance_started!(; every::Real = 30.0, wait::Bool = true)
+    tasks = Task[]
     # Without `_tested` while looking for started runs: almost every tick finds none, and readiness is a
     # check of every environment tested on the machine. The cluster that has some is resolved again
-    # below, with it.
+    # with it, on its own task.
     for c in _hub_clusters(; tested = false)
         name = String(get(c, "name", ""))
         isempty(name) && continue
@@ -1770,48 +1771,71 @@ function advance_started!(; every::Real = 30.0)
         root = store_root(t)
         runs = started_runs(root)
         stamp = _store_stamp(root)
-        filter!(r -> get(_SETTLED, (root, r), nothing) != stamp, runs)   # settled, and nothing since
+        lock(_SETTLED_LOCK) do
+            filter!(r -> get(_SETTLED, (root, r), nothing) != stamp, runs)   # settled, and nothing since
+        end
         isempty(runs) && continue
         time() - get(_ADVANCE_AT, name, 0.0) < every && continue
-        _ADVANCE_AT[name] = time()
         # A cluster nobody has signed in to WAITS, exactly as the card's poll does — submitting is
         # the only thing a sign-in gates, and it goes out on the next tick after one lands.
         _reachable(t) || continue
-        try; sync_in!(t); catch; continue; end
-        full = _hub_clusters(; only = name)
-        isempty(full) || (t = try; _cluster_from(first(full)); catch; t; end)
-        # Fold the MIRROR's log. A pull merges and never deletes, so a store compacted over there
-        # leaves this side holding the originals; folding here is what keeps the mirror from growing
-        # for the life of the store. Local files only, and never required for correctness.
-        try; SlateTask.compact_events!(root); BatchSweep.forget_fold!(root); catch; end
-        stamp = _store_stamp(root)          # after the sync and the fold, which write to the mirror
-        for run in runs
-            # Clear markers with no run behind them; the store was synced in above.
-            if MemoStore.read_manifest(root, run) === nothing
-                BatchSweep.stop!(root, run)
-                _hub_log("supervisor: $(name)/$(run) has no descriptor — dropped its started marker")
-                continue
+        # Each cluster on a task of its own: a host that has gone away holds its own sweeps until its
+        # session times out, and no other cluster's. One still running from an earlier tick is left to it.
+        busy = lock(() -> get!(() -> Threads.Atomic{Bool}(false), _ADVANCING, name), _SETTLED_LOCK)
+        Threads.atomic_cas!(busy, false, true) && continue
+        _ADVANCE_AT[name] = time()
+        push!(tasks, Threads.@spawn try
+            t0 = time()
+            k = _advance_cluster!(name, t, root, runs)
+            time() - t0 > 5.0 && _hub_log("supervisor: advancing sweeps on $(name) took $(round(time() - t0; digits = 1))s")
+            k
+        catch e
+            _hub_log("supervisor: advancing sweeps on $(name) failed: " * first(sprint(showerror, e), 160))
+            0
+        finally
+            busy[] = false
+        end)
+    end
+    return wait ? sum(fetch, tasks; init = 0) : length(tasks)
+end
+const _ADVANCING = Dict{String,Threads.Atomic{Bool}}()
+const _SETTLED_LOCK = ReentrantLock()
+
+function _advance_cluster!(name::AbstractString, t, root::AbstractString, runs)
+    n = 0
+    try; sync_in!(t); catch; return n; end
+    full = _hub_clusters(; only = name)
+    isempty(full) || (t = try; _cluster_from(first(full)); catch; t; end)
+    # Fold the MIRROR's log. A pull merges and never deletes, so a store compacted over there
+    # leaves this side holding the originals; folding here is what keeps the mirror from growing
+    # for the life of the store. Local files only, and never required for correctness.
+    try; SlateTask.compact_events!(root); BatchSweep.forget_fold!(root); catch; end
+    stamp = _store_stamp(root)          # after the sync and the fold, which write to the mirror
+    for run in runs
+        # Clear markers with no run behind them; the store was synced in above.
+        if MemoStore.read_manifest(root, run) === nothing
+            BatchSweep.stop!(root, run)
+            _hub_log("supervisor: $(name)/$(run) has no descriptor — dropped its started marker")
+            continue
+        end
+        # Submitted, but its environment has never run on these nodes: testing it is part of
+        # running it, so the hub starts the test, and the next pass submits once it has passed.
+        tr = _as_run(t, run)
+        if _untested(tr)
+            isdefined(P, :auto_prepare_batch!) && P.auto_prepare_batch!(name, tr.parent, tr.resources)
+            continue
+        end
+        try
+            # The run's launcher, not the registry's: a region's queue names the environment its
+            # task workers start in, and that is the notebook's, which only the run records.
+            p = reconcile_and_sync!(t, run, launcher_for(tr); submit = true, failure_policy = sweep_policy(t))
+            settled = BatchSweep.is_settled(p)
+            lock(_SETTLED_LOCK) do
+                settled ? (_SETTLED[(root, run)] = stamp) : delete!(_SETTLED, (root, run))
             end
-            # Submitted, but its environment has never run on these nodes: testing it is part of
-            # running it, so the hub starts the test, and the next pass submits once it has passed.
-            tr = _as_run(t, run)
-            if _untested(tr)
-                isdefined(P, :auto_prepare_batch!) && P.auto_prepare_batch!(name, tr.parent, tr.resources)
-                continue
-            end
-            try
-                # The run's launcher, not the registry's: a region's queue names the environment its
-                # task workers start in, and that is the notebook's, which only the run records.
-                p = reconcile_and_sync!(t, run, launcher_for(tr); submit = true, failure_policy = sweep_policy(t))
-                if BatchSweep.is_settled(p)
-                    _SETTLED[(root, run)] = stamp
-                else
-                    n += 1
-                    delete!(_SETTLED, (root, run))
-                end
-            catch e
-                _hub_log("supervisor: advancing $(name)/$(run) failed: " * first(sprint(showerror, e), 160))
-            end
+            settled || (n += 1)
+        catch e
+            _hub_log("supervisor: advancing $(name)/$(run) failed: " * first(sprint(showerror, e), 160))
         end
     end
     return n
