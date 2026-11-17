@@ -226,6 +226,14 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   let SWNB = '';
   const mine = r => r.notebook === SWNB;
 
+  // A row's id: its sweep's digest, which is what the card and the cell's logs name. Two runs of one
+  // sweep (a pilot and the full grid) share that, so where both are listed the run's own suffix is
+  // added. A click copies the whole run id, which `Sweep.reopen` takes.
+  const sweepOf = id => { const i = id.lastIndexOf('_r'); return i < 0 ? id : id.slice(0, i); };
+  const runTag = id => { const i = id.lastIndexOf('_r'); return i < 0 ? '' : id.slice(i + 2, i + 6); };
+  const swLabel = (id, sw) => id.slice(2, 12) +
+    (sw.some(o => o.sweep !== id && sweepOf(o.sweep) === sweepOf(id)) ? ' · r' + runTag(id) : '');
+
   function sweepTable(sw, name) {
     const cols = SWCOLS.filter(c => c[3](sw));
     const col = cols.find(c => c[0] === SWSORT.key) || cols.find(c => c[0] === 'started') || cols[0];
@@ -243,7 +251,7 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
     return '<div class="swst-grp">sweeps</div>' +
       `<table class="swst-tbl" data-cluster="${esc(name)}"><tr>${head}<th></th></tr>` +
       rows.map(r =>
-        `<tr><td title="${esc(r.sweep)}">${esc(r.sweep.slice(2, 12))}</td>` +
+        `<tr><td class="swst-id" data-run="${esc(r.sweep)}" title="${esc(r.sweep)} · click to copy">${esc(swLabel(r.sweep, sw))}</td>` +
         // A store belongs to the CLUSTER, so a run in it may be another document's. Marked rather
         // than hidden: it is still occupying the disk this panel is accounting for, and the button
         // beside it would still release it.
@@ -276,6 +284,11 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
       SWSORT = SWSORT.key === k ? { key: k, dir: -SWSORT.dir }
                                 : { key: k, dir: ['sweep', 'cell', 'state'].includes(k) ? 1 : -1 };
       loadStatus(pop, name);
+    });
+    host.querySelectorAll('.swst-id').forEach(td => td.onclick = () => {
+      navigator.clipboard?.writeText(td.dataset.run).then(() => {
+        SWNOTE = { msg: `copied ${td.dataset.run}`, bad: false, at: Date.now() }; loadStatus(pop, name);
+      }).catch(() => {});
     });
     host.querySelectorAll('.swst-free').forEach(b => b.onclick = async () => {
       const sweep = b.dataset.sweep;

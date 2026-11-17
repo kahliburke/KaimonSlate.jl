@@ -1544,6 +1544,7 @@ end
             rk = Sweep.rekeyed(root, r2.run)
             @test rk.previous == r1.run && rk.what == ["`a`"]
             @test occursin(r1.run, Sweep._rekey_html(root, r2.run))
+            @test Sweep._find_run(root, r1.run[3:12]) == r1.run           # as the Sweeps panel shows it
             # An unstarted run is dropped when the cell moves on, so the comparison is with the last
             # run that went out.
             r3 = Sweep.run_sweep(t, g, "p -> p.x * a + 0"; captures = Dict(:a => 2), cell = "fit")

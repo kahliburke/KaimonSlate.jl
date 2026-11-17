@@ -6105,7 +6105,8 @@ function _find_run(root::AbstractString, run::AbstractString)
     r = String(run)
     m = try; MemoStore.read_manifest(root, r); catch; nothing; end
     (m !== nothing && get(m, "kind", "") == BatchSweep.KIND_SWEEP) && return r
-    hits = [n for (n, _) in store_sweeps(root) if startswith(n, r)]
+    # The Sweeps panel shows ids without their `sw`.
+    hits = [n for (n, _) in store_sweeps(root) if startswith(n, r) || startswith(n, "sw" * r)]
     length(hits) == 1 && return hits[1]
     isempty(hits) && error("no sweep `$r` in the store at $root (`Sweep.list` shows what it holds)")
     error("`$r` names $(length(hits)) sweeps: $(join(first(hits, 6), ", "))" *

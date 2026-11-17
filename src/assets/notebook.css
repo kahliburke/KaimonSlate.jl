@@ -1253,6 +1253,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 /* What the last release did. Under the table, where the thing it happened to was — the confirm
    already said what would happen, so this reports the outcome rather than repeating the warning. */
 .swst-tbl td.swst-cell { color:var(--val); white-space:nowrap; }
+.swst-tbl td.swst-id { cursor:copy; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .swst-note { margin-top:8px; font-size:.72rem; color:var(--val); }
 .swst-note.bad { color:var(--red,#e57575); }
 .swcfgpop .swcfg-sub { text-transform:none; letter-spacing:0; font-weight:400; opacity:.75; }
