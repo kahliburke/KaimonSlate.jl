@@ -1215,6 +1215,21 @@ end
         empty!(HUB_CLUSTERS)
     end
 
+    @testset "two submitters at once launch a chunk once" begin
+        # A card's poll and the hub's supervisor both submit for a started run.
+        mktempdir() do root
+            payload = joinpath(@__DIR__, "..", "src", "slatetask.jl")
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2, payload)
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p; (; g = p.g); end
+            BS.start!(root, r.run)
+            @sync for _ = 1:4
+                Threads.@spawn Sweep.reconcile_and_sync!(t, r.run, Sweep.launcher_for(t); submit = true)
+            end
+            @test sum(values(BS.read_attempts(root))) == 1
+        end
+        empty!(HUB_CLUSTERS)
+    end
+
     @testset "releasing a run takes its marker with it" begin
         # A marker outliving its descriptor leaves the supervisor with a run it cannot advance and
         # cannot stop asking about, once per tick for as long as the hub runs.

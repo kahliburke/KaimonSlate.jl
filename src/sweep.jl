@@ -1898,8 +1898,15 @@ end
 _descriptors_sent!(t::SweepTarget, run::AbstractString) =
     lock(_DESC_LOCK) do; push!(_DESC_SENT, (store_root(t), String(run))); end
 
-function reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher;
-                             submit::Bool = false, kw...)
+# A submitting reconcile holds the store's lock from its read to its push. A card's poll and the hub's
+# supervisor both submit for a started run, from different processes, and each decides from what the
+# store holds: two that overlap both find a chunk not yet out and both launch it.
+reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher; submit::Bool = false, kw...) =
+    submit ? _with_store_lock(() -> _reconcile_and_sync!(target, run, launcher; submit, kw...), target) :
+             _reconcile_and_sync!(target, run, launcher; submit, kw...)
+
+function _reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher;
+                              submit::Bool = false, kw...)
     # About to decide what to submit, so the mirror is read fresh rather than shared: a cached copy
     # taken on a reader's behalf a moment ago could miss a chunk that has since landed, and the
     # decision this makes is the one that must not be taken twice.
@@ -1922,9 +1929,9 @@ end
 # A change to `jobs/` is only real once it has been pushed. `sync_in!` REPLACES the mirror's copy
 # from the store, so a poll landing between the change and the push restores what was just removed,
 # and the push then sends it back. Holding the store's sync lock across both keeps them together.
-_with_store_lock(f, ::LocalTarget) = f()
+_with_store_lock(f, t::LocalTarget) = with_store_lock(f, store_root(t))
 _with_store_lock(f, t::ClusterTarget) =
-    isempty(t.host) ? f() : with_store_lock(f, remote_store(t).mirror)
+    with_store_lock(f, isempty(t.host) ? store_root(t) : remote_store(t).mirror)
 
 "Send what the hub has written — descriptors, their blobs, markers — to the store. `dirs` narrows
 it to part of that, for the callers that have just touched one thing."
