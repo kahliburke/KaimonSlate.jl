@@ -1796,7 +1796,7 @@ function advance_started!(; every::Real = 30.0, wait::Bool = true)
             busy[] = false
         end)
     end
-    return wait ? sum(fetch, tasks; init = 0) : length(tasks)
+    return wait ? sum(Base.fetch, tasks; init = 0) : length(tasks)
 end
 const _ADVANCING = Dict{String,Threads.Atomic{Bool}}()
 const _SETTLED_LOCK = ReentrantLock()
