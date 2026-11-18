@@ -3988,7 +3988,7 @@ const LOG_TAIL_CHARS = 200_000
 """
     log_tail(r, path; lines = LOG_TAIL_LINES) -> String
 
-One output file's last lines. `path` must be one `log_files` reported.
+One output file's last lines, without colour codes. `path` must be one `log_files` reported.
 
 That check is the point, not a formality: the path arrives from a browser and ends up inside a
 command on a login node. Anything not in the listing is refused rather than quoted and hoped for.
@@ -4039,20 +4039,25 @@ even when `hits` stops at `limit` — "3 of 412" is the number a reader needs, a
 silently meant "3 of the first 1000" would be a lie about the file.
 
 The offsets are what a viewer seeks to, so a match is reachable without reading what precedes it.
+A literal pattern matches across the logger's colour codes, and each hit's text comes back without
+them.
 """
 log_search(r::ShardedResult, path::AbstractString, pattern::AbstractString; kw...) =
     log_search(getfield(r, :target), getfield(r, :run), path, pattern; kw...)
-log_search(t::SweepTarget, run::AbstractString, path::AbstractString, pattern::AbstractString;
-           ignorecase::Bool = false, regex::Bool = false, limit::Integer = 1000) =
-    BatchLauncher.log_search(launcher_for(t), _known_log(t, run, path), String(pattern);
-                             ignorecase, regex, limit)
+function log_search(t::SweepTarget, run::AbstractString, path::AbstractString,
+                    pattern::AbstractString; ignorecase::Bool = false, regex::Bool = false,
+                    limit::Integer = 1000)
+    r = BatchLauncher.log_search(launcher_for(t), _known_log(t, run, path), String(pattern);
+                                 ignorecase, regex, limit)
+    return (; r.total, hits = [(; h.offset, h.line, text = _uncolour(h.text)) for h in r.hits], r.capped)
+end
 
 function log_tail(t::SweepTarget, run::AbstractString, path::AbstractString;
                   lines::Integer = LOG_TAIL_LINES)
     known = log_paths(t, run)
     String(path) in known ||
         error("no such log for this sweep: $(path)")
-    txt = BatchLauncher.log_tail(launcher_for(t), String(path); lines = Int(lines))
+    txt = _uncolour(BatchLauncher.log_tail(launcher_for(t), String(path); lines = Int(lines)))
     return length(txt) > LOG_TAIL_CHARS ?
            "… truncated to the last $(LOG_TAIL_CHARS) characters …\n" *
            String(last(txt, LOG_TAIL_CHARS)) : String(txt)
@@ -4061,8 +4066,9 @@ end
 """
     logs(r::ShardedResult; lines = 200, job = "") -> String
 
-Every job behind this sweep, tailed and concatenated. `log_files` + `log_tail` are the finer form
-and what the card uses; this is the one-call version for a terminal.
+Every output file behind this sweep, tailed and concatenated, with colour codes removed. A task
+launched more than once has a file per attempt, each headed `try N of M`. `log_files` +
+`log_tail` are the finer form; this is the one-call version for a terminal.
 
 A deliberate fetch, not a property: for a cluster it is a round trip to the login node, so it
 happens when asked and never on the card's poll. `job =` narrows to one submission (`run_jobs(r)`
@@ -4078,18 +4084,43 @@ function logs(t::SweepTarget, run::AbstractString; lines::Integer = 200,
     names = isempty(job) ? run_jobs(t, run) : String[String(job)]
     isempty(names) && return ""
     l = launcher_for(t)
-    root = job_root(t)
+    files = try
+        BatchLauncher.log_files(l, job_root(t), names)
+    catch e
+        return "… could not list this sweep's job output: " * first(sprint(showerror, e), 160)
+    end
+    isempty(files) && return ""
+    # The same files the viewer lists, each with its attempt: a retried task wrote one per launch.
+    tasks = Dict{Tuple{String,Int},Vector{Int}}()
+    for e in files
+        nm = _log_job(e.path, names)
+        isempty(nm) || push!(get!(Vector{Int}, tasks, (nm, _log_step(e.path))), _log_launch(e.path))
+    end
+    foreach(sort!, values(tasks))
+    picked = NamedTuple{(:path, :job, :step, :attempt, :tries),Tuple{String,String,Int,Int,Int}}[]
+    for e in files
+        nm = _log_job(e.path, names)
+        isempty(nm) && continue
+        step = _log_step(e.path)
+        ls = tasks[(nm, step)]
+        push!(picked, (; path = String(e.path), job = nm, step,
+                         attempt = something(findfirst(==(_log_launch(e.path)), ls), 1),
+                         tries = length(ls)))
+    end
+    sort!(picked; by = p -> (p.job, p.step, p.attempt))
+    per = max(1, Int(lines) ÷ max(1, length(picked)))
+    txts = try
+        BatchLauncher.log_tails(l, [p.path for p in picked]; lines = per)
+    catch e
+        return "… could not read this sweep's job output: " * first(sprint(showerror, e), 160)
+    end
     io = IOBuffer()
-    for nm in names
-        txt = try
-            BatchLauncher.logs(l, root, nm; lines = Int(lines))
-        catch e
-            # One unreachable job must not hide the others: a partly-readable answer beats none.
-            "… could not read this job's output: " * first(sprint(showerror, e), 160)
-        end
-        isempty(strip(txt)) && continue
-        println(io, "── ", nm, " ──")
-        println(io, rstrip(txt))
+    for p in picked
+        txt = rstrip(_uncolour(get(txts, p.path, "")))
+        isempty(txt) && continue
+        try_ = p.tries > 1 ? " · try $(p.attempt) of $(p.tries)" : ""
+        println(io, "── ", basename(p.path), try_, " ──")
+        println(io, txt)
     end
     return String(take!(io))
 end

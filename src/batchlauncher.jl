@@ -128,9 +128,6 @@ Cancel anything live under these names. Returns how many names were acted on.
 """
 function cancel! end
 
-"Recent output for a name, best effort. Empty string when there is nothing to show."
-function logs end
-
 """
     log_files(launcher, root, name) -> Vector{NamedTuple}
 
@@ -152,6 +149,15 @@ The last `lines` of ONE output file. `path` must be one `log_files` reported: it
 the far side, so a caller that invents paths is writing a command injection.
 """
 function log_tail end
+
+"""
+    log_tails(launcher, paths; lines) -> Dict{String,String}
+
+`log_tail` of several files in one read, keyed by path. A file that cannot be read maps to "".
+The same rule on `paths` applies: each must be one `log_files` reported.
+"""
+log_tails(l::Launcher, paths::AbstractVector; lines::Int = 200) =
+    Dict{String,String}(String(p) => log_tail(l, String(p); lines) for p in paths)
 
 # One shell word, whatever it contains. A log path comes back from the browser and is about to be
 # interpolated into a command on the far side, so quoting it is not tidiness: inside single quotes
@@ -691,10 +697,24 @@ end
 # fields are what make the hit worth reading; more than this and the list is the file again.
 const _SEARCH_AFTER = 8
 
+# A literal pattern as a regex that also matches with colour codes between its characters. The task
+# logger colours a record's head, so a phrase that crosses a colour change is not contiguous on disk.
+# A regex pattern is the searcher's own and is passed through as written.
+const _SGR_GAP = "(?:\\x1b\\[[0-9;:]*m)*"
+function _sgr_tolerant(pattern::AbstractString)
+    io = IOBuffer()
+    for (i, c) in enumerate(pattern)
+        i > 1 && print(io, _SGR_GAP)
+        c in "\\.+*?()|[]{}^\$#&-~" && print(io, '\\')
+        print(io, c)
+    end
+    return String(take!(io))
+end
+
 function _rg_search(rg, path, pattern, ignorecase, regex, limit)
     flags = String[]
     ignorecase && push!(flags, "-i")
-    regex || push!(flags, "-F")
+    regex || (pattern = _sgr_tolerant(pattern))
     # ripgrep says which of the two it is: 1 is "no matches", 2 is "I could not do that" — an
     # unbalanced regex, an unreadable file. Treating both as no matches turns a pattern the engine
     # rejected into a confident answer of zero, which is the one reply a searcher cannot question.
@@ -814,20 +834,9 @@ log_tail(l::ExecLauncher, path::AbstractString; lines::Int = 500) =
     _remote(l) ? _remote_log_tail((sc) -> _there(l, sc), path, lines) :
     isfile(path) ? tail_file(path, lines) : ""
 
-function logs(l::ExecLauncher, root::AbstractString, name::AbstractString; lines::Int = 200)
-    dir = joinpath(root, "logs")
-    isdir(dir) || return ""
-    fs = filter(f -> startswith(basename(f), String(name) * "."), readdir(dir; join = true))
-    isempty(fs) && return ""
-    buf = IOBuffer()
-    per = max(1, lines ÷ length(fs))
-    for f in fs
-        println(buf, "== ", basename(f), " ==")
-        # `readlines` read the whole file to keep its last few lines — see `tail_file`.
-        println(buf, tail_file(f, per))
-    end
-    return String(take!(buf))
-end
+log_tails(l::ExecLauncher, paths::AbstractVector; lines::Int = 200) =
+    _remote(l) ? _remote_log_tails((sc) -> _there(l, sc), paths, lines) :
+    Dict{String,String}(String(p) => log_tail(l, String(p); lines) for p in paths)
 
 # ── A region's held node ─────────────────────────────────────────────────────────────────────
 # No scheduler is asked for anything: the node is the one a region already holds, and the hub runs
@@ -956,10 +965,8 @@ log_slice(l::RegionLauncher, path::AbstractString; offset::Integer = -(1 << 16),
 log_search(l::RegionLauncher, path::AbstractString, pattern::AbstractString; ignorecase::Bool = false,
            regex::Bool = false, limit::Integer = 1000) =
     _remote_log_search(_there(l), path, pattern, ignorecase, regex, limit)
-function logs(l::RegionLauncher, root::AbstractString, name::AbstractString; lines::Int = 200)
-    ok, txt = l.runner(l.host, "tail -n $(lines) $(_shq(joinpath(l.root, "logs")))/$(name).*.log 2>/dev/null")
-    return ok ? String(txt) : ""
-end
+log_tails(l::RegionLauncher, paths::AbstractVector; lines::Int = 200) =
+    _remote_log_tails(_there(l), paths, lines)
 
 # ── SLURM ────────────────────────────────────────────────────────────────────────────────────
 # One array job per submission: the scheduler sees a single entry with N elements, which is what
@@ -1223,12 +1230,6 @@ function cancel!(l::SlurmLauncher, root::AbstractString, names)
     return count(n -> !(get(after, n, :unknown) in (:pending, :running)), live)
 end
 
-function logs(l::SlurmLauncher, root::AbstractString, name::AbstractString; lines::Int = 200)
-    ok, txt = (_ssh(l,
-        "tail -n $(lines) $(joinpath(root, "logs"))/$(name).*.out 2>/dev/null"))
-    return ok ? txt : ""
-end
-
 # Both schedulers list and tail identically: the files are on a filesystem reached through the same
 # session, and which scheduler wrote them does not change how they are read.
 # Every named submission in ONE round trip. A sweep is reconciled, so it is normally several
@@ -1257,6 +1258,25 @@ _remote_log_files(runner, root, name; ext::AbstractString = "out") =
 _remote_log_tail(runner, path, lines) = begin
     ok, txt = runner("tail -n $(Int(lines)) " * _shq(String(path)) * " 2>/dev/null")
     ok ? txt : ""
+end
+
+# Each file follows a line of its own that starts with an ASCII record separator, which a log does
+# not otherwise contain. `tail`'s `==> f <==` headers would serve, but only from the second file on,
+# and a file whose content looks like one would split wrongly.
+function _remote_log_tails(runner, paths::AbstractVector, lines)
+    out = Dict{String,String}(String(p) => "" for p in paths)
+    for part in Iterators.partition(collect(String, paths), 150)
+        ok, txt = runner("for f in " * join(_shq.(part), " ") * "; do printf '\\036%s\\n' \"\$f\"; " *
+                         "tail -n $(Int(lines)) -- \"\$f\" 2>/dev/null; done")
+        ok || error("could not read job output on the far side: " * first(strip(String(txt)), 200))
+        for rec in eachsplit(String(txt), '\x1e'; keepempty = false)
+            nl = findfirst('\n', rec)
+            nl === nothing && continue
+            p = rec[1:prevind(rec, nl)]
+            haskey(out, p) && (out[p] = rec[nextind(rec, nl):end])
+        end
+    end
+    return out
 end
 
 # The same three primitives, on the far side. Each is ONE command: a login node is reached over a
@@ -1302,15 +1322,15 @@ end
 # may itself contain colons, so only the first two are split off.
 function _remote_log_search(runner, path, pattern, ignorecase, regex, limit)
     q = _shq(String(path)); pq = _shq(String(pattern))
+    rq = regex ? pq : _shq(_sgr_tolerant(pattern))     # grep has no `\x1b`, so it takes the literal
     ic = ignorecase ? " -i" : ""
-    fixed = regex ? "" : " -F"
     # The provisioned ripgrep first, by the path recorded at provision time: a JLL puts its binary in
     # an artifact directory, never on PATH, so looking only at PATH missed the rg we installed and
     # fell through to `grep -E`. POSIX ERE has no `(?:`, no `\x1b`, no `\s`; the pattern was rejected,
     # `2>/dev/null` ate the complaint, and an empty result read as "no matches".
     ok, txt = runner("RG=\"\$(cat \"\$HOME/.cache/kaimonslate/rg-path\" 2>/dev/null)\"; " *
                      "[ -x \"\$RG\" ] || RG=\"\$(command -v rg 2>/dev/null)\"; " *
-                     "if [ -x \"\$RG\" ]; then \"\$RG\"$(ic)$(fixed) --json -A $_SEARCH_AFTER -- $pq $q; else " *
+                     "if [ -x \"\$RG\" ]; then \"\$RG\"$(ic) --json -A $_SEARCH_AFTER -- $rq $q; else " *
                      "grep -b -n$(ic)$(regex ? " -E" : " -F") -- $pq $q; fi 2>/dev/null")
     hits = NamedTuple{(:offset, :line, :text),Tuple{Int,Int,String}}[]
     total = 0
@@ -1341,6 +1361,8 @@ log_files(l::SlurmLauncher, root::AbstractString, names::AbstractVector) =
     _remote_log_files(sc -> _ssh(l, sc), root, names)
 log_tail(l::SlurmLauncher, path::AbstractString; lines::Int = 500) =
     _remote_log_tail(sc -> _ssh(l, sc), path, lines)
+log_tails(l::SlurmLauncher, paths::AbstractVector; lines::Int = 200) =
+    _remote_log_tails(sc -> _ssh(l, sc), paths, lines)
 log_stat(l::SlurmLauncher, path::AbstractString) = _remote_log_stat(sc -> _ssh(l, sc), path)
 log_slice(l::SlurmLauncher, path::AbstractString; offset::Integer = -(1 << 16),
           nbytes::Integer = 1 << 16) =
@@ -1692,15 +1714,11 @@ function cancel!(l::PbsLauncher, root::AbstractString, names)
     return count(==("CANCELLED"), replies)
 end
 
-# Only after the job ENDS: PBS spools output on the execution node and copies it back at exit, where
-# SLURM writes it live. Per-unit progress comes from the status directory either way, so this is for
-# reading what a finished job said — which is when it is asked for.
-function logs(l::PbsLauncher, root::AbstractString, name::AbstractString; lines::Int = 200)
-    ok, txt = (_ssh(l,
-        "tail -n $(lines) $(joinpath(root, "logs"))/$(name).*.out 2>/dev/null"))
-    return ok ? txt : ""
-end
-
+# PBS spools output on the execution node and copies it back at exit, where SLURM writes it live, so
+# these read a PBS job's output only after it ends. Per-unit progress comes from the status
+# directory either way.
+log_tails(l::PbsLauncher, paths::AbstractVector; lines::Int = 200) =
+    _remote_log_tails(sc -> _ssh(l, sc), paths, lines)
 log_files(l::PbsLauncher, root::AbstractString, names::AbstractVector) =
     _remote_log_files(sc -> _ssh(l, sc), root, names)
 log_tail(l::PbsLauncher, path::AbstractString; lines::Int = 500) =

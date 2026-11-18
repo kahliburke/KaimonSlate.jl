@@ -2654,7 +2654,27 @@ end
             byp = Dict(f.path => f for f in Sweep.log_files(t, r.run))
             @test byp[a].attempt == 1 && !byp[a].current && byp[a].pid == 0 && !byp[a].running
             @test byp[b].attempt == 2 && byp[b].current
-            @test occursin("first try", Sweep.logs(t, r.run)) && occursin("second try", Sweep.logs(t, r.run))
+            out = Sweep.logs(t, r.run)
+            @test occursin("first try", out) && occursin("second try", out)
+            @test occursin("try 1 of 2", out) && occursin("try 2 of 2", out)
+            @test findfirst("first try", out) < findfirst("second try", out)
+
+            # The task logger colours a record's head. Plain-text reads drop the codes, and a
+            # literal search matches a phrase that crosses one.
+            write(b, "\e[36m\e[1m┌ \e[22m\e[39m\e[36m\e[1mInfo 16:07:03.538: \e[22m\e[39mchunk began\n")
+            @test occursin("┌ Info 16:07:03.538: chunk began", Sweep.logs(t, r.run))
+            @test !occursin('\e', Sweep.logs(t, r.run))
+            @test rstrip(Sweep.log_tail(t, r.run, b)) == "┌ Info 16:07:03.538: chunk began"
+            s = Sweep.log_search(t, r.run, b, "Info 16:07:03.538: chunk")
+            @test s.total == 1 && s.hits[1].text == "┌ Info 16:07:03.538: chunk began"
+            @test Sweep.log_search(t, r.run, b, "┌ info"; ignorecase = true).total == 1
+            @test Sweep.log_search(t, r.run, b, "a.b(").total == 0     # metacharacters stay literal
+
+            # The far side reads every file in one command, quoting each path.
+            sh = sc -> (true, read(`sh -c $sc`, String))
+            odd = joinpath(root, "logs", "it's here.log"); write(odd, "x\ny\n")
+            got = BL._remote_log_tails(sh, [a, odd, joinpath(root, "nope.log")], 1)
+            @test got[a] == "first try\n" && got[odd] == "y\n" && got[joinpath(root, "nope.log")] == ""
             # The local launcher names each launch apart.
             l = BL.ExecLauncher(; maxproc = 1)
             spec = BL.JobSpec("slate-x", ["c"]; root, project = "", payload = "", command = "true")
