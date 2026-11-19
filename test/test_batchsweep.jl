@@ -1215,6 +1215,25 @@ end
         empty!(HUB_CLUSTERS)
     end
 
+    @testset "a submitter and a reader of a remote mirror take its locks in one order" begin
+        # A pull holds the collector's lock and then the store's; a submitting reconcile holds the
+        # store's and then pulls. In opposite orders the two wait on each other for good.
+        t = Sweep.ClusterTarget("h"; kind = :exec, root = mktempdir(), root_remote = "/s")
+        c = Sweep.collector(t)
+        @test Sweep._with_store_lock(() -> c.pull_lk.locked_by === current_task(), t)
+        try
+            Sweep.set_delegate!() do op, a
+                op in (:connected, :connect) ? true :
+                op === :io ? (sleep(0.005); (true, UInt8[])) : error("unexpected op :$op")
+            end
+            ts = [Threads.@spawn(isodd(i) ? Sweep._with_store_lock(() -> Sweep.collect_pull!(t; force = true), t) :
+                                            Sweep.collect_pull!(t; force = true)) for i in 1:40]
+            @test timedwait(() -> all(istaskdone, ts), 30.0) === :ok
+        finally
+            Sweep.set_delegate!(nothing)
+        end
+    end
+
     @testset "two submitters at once launch a chunk once" begin
         # A card's poll and the hub's supervisor both submit for a started run.
         mktempdir() do root

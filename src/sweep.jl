@@ -1929,9 +1929,15 @@ end
 # A change to `jobs/` is only real once it has been pushed. `sync_in!` REPLACES the mirror's copy
 # from the store, so a poll landing between the change and the push restores what was just removed,
 # and the push then sends it back. Holding the store's sync lock across both keeps them together.
+#
+# A remote mirror has a second lock, the collector's, which a pull holds and then takes the store's
+# inside (`collect_pull!`). Whatever holds both takes them in that order: a submitting reconcile that
+# held the store's lock and then pulled would wait on a reader holding the collector's, and that
+# reader on it, for good.
 _with_store_lock(f, t::LocalTarget) = with_store_lock(f, store_root(t))
 _with_store_lock(f, t::ClusterTarget) =
-    with_store_lock(f, isempty(t.host) ? store_root(t) : remote_store(t).mirror)
+    isempty(t.host) ? with_store_lock(f, store_root(t)) :
+    lock(() -> with_store_lock(f, remote_store(t).mirror), collector(t).pull_lk)
 
 "Send what the hub has written — descriptors, their blobs, markers — to the store. `dirs` narrows
 it to part of that, for the callers that have just touched one thing."
