@@ -1268,6 +1268,44 @@ end
         end
     end
 
+    @testset "a chunk whose job ended as the mirror was pulled is not launched again" begin
+        # The far side is this machine. The job's results land just after the reconcile's first pull,
+        # and the job is gone by the time the reconcile asks: the chunk looks lost until pulled again.
+        store = mktempdir()
+        pulls = Ref(0); landed = Ref(false); chunk = Ref("")
+        sh(script, input) = (out = IOBuffer();
+                             ok = success(pipeline(`bash -c $script`; stdin = input === nothing ? devnull : IOBuffer(input), stdout = out));
+                             (ok, take!(out)))
+        try
+            Sweep.set_delegate!() do op, a
+                op in (:connected, :connect) && return true
+                op === :exec && return ((ok, o) = sh(a.script, nothing); (ok, String(o)))
+                op === :io || error("unexpected op :$op")
+                r = sh(a.script, a.input)
+                if occursin("date +%s", a.script) && (pulls[] += 1) == 1 && !isempty(chunk[])
+                    SlateTask.run_chunk(store, chunk[]); landed[] = true
+                end
+                return r
+            end
+            t = Sweep.ClusterTarget("h"; kind = :exec, root_remote = store, chunk = 2,
+                                    payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; p.x; end
+            root = Sweep.store_root(t)
+            c = only(BS.sweep_chunks(root, r.run))
+            # Tried once already, by a job no longer running.
+            BS.bump_attempts!(root, [c])
+            write(BS.index_path(root, BS.submission_name([c])), c * "\n")
+            BS.start!(root, r.run)
+            chunk[] = c; pulls[] = 0
+            p = Sweep.reconcile_and_sync!(t, r.run, Sweep.launcher_for(t); submit = true)
+            @test landed[] && pulls[] >= 2
+            @test p.shards_done == 2 && isempty(p.to_submit) && BS.read_attempts(root)[c] == 1
+        finally
+            Sweep.set_delegate!(nothing)
+        end
+        empty!(HUB_CLUSTERS)
+    end
+
     @testset "two submitters at once launch a chunk once" begin
         # A card's poll and the hub's supervisor both submit for a started run.
         mktempdir() do root

@@ -1920,6 +1920,14 @@ function _reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher
               "$(target_host(target)):$(job_root(target)) — nothing was submitted")
     end
     root = store_root(target)
+    # A chunk submitted again is one whose job has gone without its results in the mirror. The job
+    # writes them before it exits, so the pull above may just have run first; pulling again now that
+    # the job is seen gone finds them if they are there, and the chunk is not launched twice.
+    if submit && target isa ClusterTarget && !isempty(target.host)
+        pk = (; (k => v for (k, v) in pairs(kw) if k in (:job_state, :job_state_at, :lost, :failure_policy))...)
+        p0 = BatchSweep.plan(root, run; launcher, pk...)
+        any(c -> get(p0.chunk_attempts, c, 0) > 0, p0.to_submit) && sync_in!(target; force = true)
+    end
     before = BatchSweep.read_attempts(root)
     p = BatchSweep.reconcile!(root, run, launcher, specfn_for(target); submit, kw...)
     BatchSweep.read_attempts(root) == before || sync_out!(target; dirs = ("jobs",))
