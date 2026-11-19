@@ -1834,7 +1834,12 @@ function _advance_cluster!(name::AbstractString, t, root::AbstractString, runs)
         try
             # The run's launcher, not the registry's: a region's queue names the environment its
             # task workers start in, and that is the notebook's, which only the run records.
-            p = reconcile_and_sync!(t, run, launcher_for(tr); submit = true, failure_policy = sweep_policy(t), asked...)
+            lr = launcher_for(tr)
+            # Every unit landed in the mirror just pulled: nothing to submit or to ask about, so the
+            # run is not reconciled, which would take the store's lock for it.
+            p = BatchSweep.plan(root, run; launcher = lr)
+            BatchSweep.is_settled(p) ||
+                (p = reconcile_and_sync!(t, run, lr; submit = true, failure_policy = sweep_policy(t), asked...))
             settled = BatchSweep.is_settled(p)
             lock(_SETTLED_LOCK) do
                 settled ? (_SETTLED[(root, run)] = stamp) : delete!(_SETTLED, (root, run))
@@ -1922,10 +1927,9 @@ function _reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher
     # An environment never tested on this machine's nodes is not sent to them as an array: the card
     # offers Prepare, which runs one task first (`_untested`).
     submit && _untested(target) && (submit = false)
-    if submit && !_ensure_descriptors!(target, run)
+    descriptors!() = _ensure_descriptors!(target, run) ||
         error("could not send sweep $(run)'s descriptors to " *
               "$(target_host(target)):$(job_root(target)) — nothing was submitted")
-    end
     root = store_root(target)
     # A chunk submitted again is one whose job has gone without its results in the mirror. The job
     # writes them before it exits, so the pull above may just have run first. One answer from the
@@ -1940,6 +1944,11 @@ function _reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher
         pk = (; (k => v for (k, v) in pairs(kw) if k in (:job_state, :job_state_at, :lost, :failure_policy))...)
         p0 = BatchSweep.plan(root, run; launcher, pk...)
         any(c -> get(p0.chunk_attempts, c, 0) > 0, p0.to_submit) && sync_in!(target; force = true)
+        # The descriptors are what a launched job reads its chunk from, so they go out with the
+        # first chunk that does; a run with nothing to launch costs no push.
+        isempty(p0.to_submit) || descriptors!()
+    elseif submit
+        descriptors!()
     end
     before = BatchSweep.read_attempts(root)
     p = BatchSweep.reconcile!(root, run, launcher, specfn_for(target); submit, kw...)

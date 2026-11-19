@@ -1321,6 +1321,31 @@ end
         empty!(HUB_CLUSTERS)
     end
 
+    @testset "the supervisor passes over a started run whose units have all landed" begin
+        # A store keeps a started marker for every run it ever ran, and a round's landing reopens them
+        # all. Reconciling each took the store's lock once per finished run, every pass.
+        empty!(HUB_CLUSTERS); empty!(HUB_LOG)
+        mktempdir() do root
+            payload = joinpath(@__DIR__, "..", "src", "slatetask.jl")
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2, payload)
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p; (; g = p.g); end
+            BS.start!(root, r.run)
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            push!(HUB_CLUSTERS, Dict{String,Any}("name" => "t1", "kind" => "exec", "host" => "",
+                                                 "root_remote" => root, "project" => tempdir(),
+                                                 "payload" => payload))
+            # Someone else holds the store's lock the whole time; a reconcile would wait on it.
+            held, release = Channel{Nothing}(1), Channel{Nothing}(1)
+            holder = Threads.@spawn Sweep.with_store_lock(() -> (put!(held, nothing); take!(release)), root)
+            take!(held)
+            took = @elapsed(n = Sweep.advance_started!(every = 0.0))
+            put!(release, nothing); wait(holder)
+            @test n == 0 && took < 5
+            @test isempty(BS.read_attempts(root))
+        end
+        empty!(HUB_CLUSTERS); empty!(HUB_LOG)
+    end
+
     @testset "releasing a run takes its marker with it" begin
         # A marker outliving its descriptor leaves the supervisor with a run it cannot advance and
         # cannot stop asking about, once per tick for as long as the hub runs.
