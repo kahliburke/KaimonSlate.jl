@@ -200,10 +200,17 @@ function provision_payload!(host::AbstractString, root_remote::AbstractString)
     dst = "$(root_remote)/src"                 # `put_files` makes it
     src = dirname(String(first(methods(paramgrid)).file))
     files = [joinpath(src, f) for f in SlateTask.PAYLOAD_FILES]
+    # Once per version of the runner and destination in this process: a campaign launches a round
+    # every few seconds, and the runner changes only with Slate.
+    k = (String(host), dst, _hex(join(read.(files, String), '\0')))
+    lock(() -> k in _PAYLOAD_SENT, _PAYLOAD_LOCK) && return "$(dst)/slatetask.jl"
     put_files(host, files, dst) ||
         error("could not ship the task runner to $(host):$(dst)")
+    lock(() -> push!(_PAYLOAD_SENT, k), _PAYLOAD_LOCK)
     return "$(dst)/slatetask.jl"
 end
+const _PAYLOAD_SENT = Set{Tuple{String,String,String}}()
+const _PAYLOAD_LOCK = ReentrantLock()
 
 """
     provision_remote_env!(host, root_remote, parent; setup = "", depot = "", online = nothing) -> envdir
@@ -321,9 +328,16 @@ function batch_env!(host::AbstractString, parent::AbstractString; setup::Abstrac
     rel = "$(base).batch/$(key)"
     lk = lock(() -> get!(ReentrantLock, _BATCH_ENVS, (String(host), rel)), _BATCH_ENVS_LOCK)
     lock(lk) do
+        # A version found built is not asked about again for a while. The check is a round trip per
+        # launch, and its `touch` only has to keep the version clear of a prune counted in days.
+        vk = (String(host), rel, fp)
+        time() - lock(() -> get(_BATCH_ENV_SEEN, vk, 0.0), _BATCH_ENVS_LOCK) < _BATCH_ENV_RECHECK_S && return rel
         stamp = rel * "/.slate-fp"
         ok, had = _ssh_run(host, "cat " * shq_path(stamp) * " 2>/dev/null; touch -c " * shq_path(rel) * " 2>/dev/null; true")
-        (ok && strip(had) == fp) && return rel
+        if ok && strip(had) == fp
+            lock(() -> (_BATCH_ENV_SEEN[vk] = time()), _BATCH_ENVS_LOCK)
+            return rel
+        end
         q, qb = shq_path(rel), shq_path(base)
         ok, out = _ssh_run(host, "[ -f $qb/Project.toml ] || { echo missing; exit 0; }; rm -rf -- $q && " *
             "mkdir -p $q/devsrc && cp $qb/Project.toml $q/ && { [ ! -f $qb/Manifest.toml ] || cp $qb/Manifest.toml $q/; } && " *
@@ -353,11 +367,14 @@ function batch_env!(host::AbstractString, parent::AbstractString; setup::Abstrac
         put_file(String(host), Vector{UInt8}(codeunits(fp)), stamp) ||
             error("could not record the task environment at $(host):$(rel)")
         _ssh_run(host, _versions_prune_sh("$(base).batch", key))
+        lock(() -> (_BATCH_ENV_SEEN[vk] = time()), _BATCH_ENVS_LOCK)
         return rel
     end
 end
 const _BATCH_ENVS = Dict{Tuple{String,String},ReentrantLock}()
 const _BATCH_ENVS_LOCK = ReentrantLock()
+const _BATCH_ENV_SEEN = Dict{Tuple{String,String,String},Float64}()   # (host, rel, fp) → when found built
+const _BATCH_ENV_RECHECK_S = 600.0
 
 # Points each copied package's own `[sources]` at the copies, and at the shared environment's paths
 # for what was not copied (Slate's own packages): every path the environment's Manifest records.
@@ -1994,15 +2011,25 @@ const _DESC_LOCK = ReentrantLock()
 # Idempotent and content-addressed, so the repeat costs a manifest rewrite and no blob movement.
 function _ensure_descriptors!(t::SweepTarget, run::AbstractString)
     isempty(target_host(t)) && return true
-    k = (store_root(t), String(run))
-    lock(_DESC_LOCK) do; k in _DESC_SENT; end && return true
+    _descriptors_were_sent(t, run) && return true
     sync_out!(t) || return false
-    lock(_DESC_LOCK) do; push!(_DESC_SENT, k); end
+    _descriptors_sent!(t, run)
     return true
 end
 
-_descriptors_sent!(t::SweepTarget, run::AbstractString) =
+# Also recorded in the mirror, which every process on this machine shares: a worker sends a run's
+# descriptors before it asks the hub to launch the run, and the hub need not send them again.
+_sent_marker(root::AbstractString, run::AbstractString) = joinpath(root, ".sent", String(run))
+_descriptors_were_sent(t::SweepTarget, run::AbstractString) =
+    lock(() -> (store_root(t), String(run)) in _DESC_SENT, _DESC_LOCK) || isfile(_sent_marker(store_root(t), run))
+function _descriptors_sent!(t::SweepTarget, run::AbstractString)
     lock(_DESC_LOCK) do; push!(_DESC_SENT, (store_root(t), String(run))); end
+    isempty(target_host(t)) || try
+        mkpath(dirname(_sent_marker(store_root(t), run))); touch(_sent_marker(store_root(t), run))
+    catch
+    end
+    return nothing
+end
 
 # A submitting reconcile holds the store's lock from its read to its push. A card's poll and the hub's
 # supervisor both submit for a started run, from different processes, and each decides from what the
@@ -6295,7 +6322,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # has nothing new to send (its descriptors are named by their content), so neither pays the
     # round trip. Replaying a campaign's finished rounds is then a matter of local reads. A landed
     # run is not marked sent: a unit retried later has its descriptors sent before it is submitted.
-    if !all(in(landed), keys) && !lock(() -> (String(root), run) in _DESC_SENT, _DESC_LOCK)
+    if !all(in(landed), keys) && !_descriptors_were_sent(target, run)
         if sync_out!(target)
             _descriptors_sent!(target, run)
         elseif _reachable(target)

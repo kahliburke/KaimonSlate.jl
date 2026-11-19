@@ -1346,6 +1346,28 @@ end
         empty!(HUB_CLUSTERS); empty!(HUB_LOG)
     end
 
+    @testset "a launch does not resend what this machine already sent" begin
+        # Every round of a campaign is a launch, and each one sent the runner, checked the task
+        # environment and sent the run's descriptors over again: a round trip apiece.
+        t = Sweep.ClusterTarget("h"; kind = :exec, root = mktempdir(), root_remote = "/s")
+        Sweep._descriptors_sent!(t, "run1")
+        lock(() -> empty!(Sweep._DESC_SENT), Sweep._DESC_LOCK)        # another process, same mirror
+        @test Sweep._descriptors_were_sent(t, "run1") && !Sweep._descriptors_were_sent(t, "run2")
+        ops = Symbol[]
+        try
+            Sweep.set_delegate!() do op, a
+                push!(ops, op)
+                op in (:connected, :connect) ? true : op === :io ? (true, UInt8[]) : (true, "")
+            end
+            Sweep.provision_payload!("h", "/s/payload-test")
+            n = count(!=(:connected), ops)
+            Sweep.provision_payload!("h", "/s/payload-test")
+            @test n > 0 && count(!=(:connected), ops) == n
+        finally
+            Sweep.set_delegate!(nothing)
+        end
+    end
+
     @testset "callers waiting on a cluster share its next pass" begin
         # Two notebooks waiting on rounds, and the supervisor, used to pull and ask the scheduler
         # each for themselves, taking the store's lock in turn.
