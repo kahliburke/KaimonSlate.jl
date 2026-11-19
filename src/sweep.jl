@@ -5591,8 +5591,9 @@ function _live_script(io, r::ShardedResult; hosted::Bool = false)
       function paint(s){
         last = s;
         // Feed the notebook-level pill. The card is inside one cell's output; the pill is what
-        // answers "what is this notebook doing" when that cell is scrolled away or collapsed.
-        if (window.slateSweeps) {
+        // answers "what is this notebook doing" when that cell is scrolled away or collapsed. A hosted
+        // card's work is its host's to report, as part of what the host is doing.
+        if (window.slateSweeps && !hosted) {
           var cell = root.closest('[data-cid]');
           // The CHANNEL rides along so the log viewer can read any sweep in the notebook, not
           // only the card it was opened from.
