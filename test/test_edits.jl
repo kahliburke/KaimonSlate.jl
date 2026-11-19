@@ -284,5 +284,13 @@ failing(cases) = [string(name, " → ", join(m, "; ")) for (name, (cells, steps)
         @test plan("y = compute(1)\nz = y + 1") == (Int[], Symbol[])
         # a global function a `let` defines has its methods taken back on re-run
         @test RE._defined_function_paths("let k = 1\n global lk(x) = k\nend") == Any[:lk]
+        # A replayed method belongs to the cell's file, as a run's does: a sweep finds its helpers,
+        # and a re-run takes back its methods, by that name.
+        m = Module()
+        p = RE._replay_plan("function rf(; a)\n  a + 1\nend"; filename = "cell:defs")
+        for i in p.idx
+            Core.eval(m, Expr(:toplevel, p.stmts[i]...))
+        end
+        @test [String(x.file) for x in methods(Base.invokelatest(getfield, m, :rf))] == ["cell:defs"]
     end
 end

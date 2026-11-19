@@ -808,8 +808,8 @@ end
 # Evaluate the type definitions among a cell's replayed statements (structs, abstract and primitive
 # types, `@kwdef` structs). Failures are left to the restore, which then misses and runs the cell.
 function _replay_types!(m::Module, source::AbstractString, cid::AbstractString)
-    plan = _replay_plan(source)
     fname = Symbol(isempty(cid) ? "none" : "cell:" * cid)
+    plan = _replay_plan(source; filename = String(fname))
     for i in plan.idx
         ln, s = plan.stmts[i]
         d = _unwrap_definition(s)
@@ -838,7 +838,7 @@ function _replay_scaffold!(m::Module, source::AbstractString; cid::AbstractStrin
     # the names they bind (see `_eval_one`), so they run again here, in source order. Each carries a line
     # node naming this cell's `cell:<id>` file, the tag that later removes the methods it defines.
     isempty(cid) || _redefine_cell!(m, cid, source)
-    plan = _replay_plan(source)
+    plan = _replay_plan(source; filename = fname)
     for i in plan.idx
         ln, s = plan.stmts[i]
         try; Base.invokelatest(Core.eval, m, Expr(:toplevel, LineNumberNode(ln.line, Symbol(fname)), s))

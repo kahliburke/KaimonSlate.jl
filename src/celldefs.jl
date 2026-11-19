@@ -68,11 +68,12 @@ end
 
 # A cell's top-level statements, each with the line node before it, `begin` blocks flattened: a
 # `begin` opens no scope, so a definition inside one is a top-level definition.
-function _flat_statements(src::AbstractString)
+# `filename` is what the line nodes name, and so the file of every method the statements define.
+function _flat_statements(src::AbstractString; filename::AbstractString = "none")
     out = Tuple{LineNumberNode,Any}[]
-    top = try; Meta.parseall(String(src)); catch; return out; end
+    top = try; Meta.parseall(String(src); filename = String(filename)); catch; return out; end
     (top isa Expr && top.head === :toplevel) || return out
-    ln = Ref(LineNumberNode(1, :none))
+    ln = Ref(LineNumberNode(1, Symbol(filename)))
     walk(args) = for a in args
         if a isa LineNumberNode
             ln[] = a
@@ -203,7 +204,7 @@ function _let_function_assignment(s)
 end
 
 """
-    _replay_plan(src) -> (; stmts, idx, names)
+    _replay_plan(src; filename = "none") -> (; stmts, idx, names)
 
 Which of a cell's statements re-establish its definitions on a cache restore, and the globals they
 bind, so a memo entry stores everything else. `stmts` are the flattened top-level statements with
@@ -214,10 +215,11 @@ their line nodes; `idx` indexes the ones to replay, in source order:
   replayed whole, since the function may close over the block's locals;
 - `name = let … end` whose value is a function, under the same condition.
 
-The hub and the worker both call this, so the entry's contents and the restore agree.
+The hub and the worker both call this, so the entry's contents and the restore agree. A restore
+parses under the cell's `cell:<id>` name, as its run does, so the methods it defines are the cell's.
 """
-function _replay_plan(src::AbstractString)
-    stmts = _flat_statements(src)
+function _replay_plan(src::AbstractString; filename::AbstractString = "none")
+    stmts = _flat_statements(src; filename)
     idx = Int[]; names = Set{Symbol}()
     for (i, (_, s)) in enumerate(stmts)
         if _is_definition_stmt(s)
