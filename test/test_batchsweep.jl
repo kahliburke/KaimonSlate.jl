@@ -3225,6 +3225,14 @@ end
             html = sprint(show, MIME"text/html"(), Sweep.refresh!(r))
             @test occursin("data-sw='chart'", html)
             @test occursin("\"data\":[1,2,3,4]", html)
+
+            # Shown inside another card it is a section of that card: no frame or chart, only the
+            # controls a host does not own, and a poll that reads the run without advancing it.
+            hosted = sprint(show, MIME"text/html"(), r; context = :sweep_hosted => true)
+            @test startswith(hosted, "<div data-sweep='$(r.run)' data-sw-hosted='1' style='font-family:inherit;color:var(--text,#d4d8e8);'>")
+            @test !occursin("data-sw='chart'", hosted) && occursin("data-sw-allow='logs'", hosted)
+            @test occursin("data-sw-do='reset'", html) && !occursin("data-sw-do='reset'", hosted)
+            @test occursin("advance: false", hosted) && occursin("var hosted = true", hosted)
         end
     end
 

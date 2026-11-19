@@ -5273,7 +5273,14 @@ function _fails_html(rows)
     return String(take!(io))
 end
 
+# A card shown inside another's (`IOContext(io, :sweep_hosted => true)`) is a section of its host: no
+# frame, no chart, and only the controls a host does not own (`_HOSTED_ACTIONS`). The host drives the
+# run, so the card's poll reads it without advancing it and does not report it settled.
+const _HOSTED_ACTIONS = ("logs",)
+_hosted(io::IO) = get(io, :sweep_hosted, false) === true
+
 function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
+    hosted = _hosted(io)
     p, t = r.plan, r.telemetry
     frac = BatchSweep.fraction(p)
     started = BatchSweep.is_started(store_root(r.target), r.run)
@@ -5284,13 +5291,13 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     # `data-sw` hooks mark every part the live script patches; without them it would have to
     # rebuild the card, and the parts that come from Julia (failures, the blocked reason) cannot be
     # rebuilt in the browser.
-    print(io, "<div data-sweep='", r.run, "' ",
+    print(io, "<div data-sweep='", r.run, "' ", hosted ? "data-sw-hosted='1' " : "",
               # `inherit`, not a font stack: inside the notebook this picks up the page's own UI
               # font, and in a static export it picks up whatever that page uses. Naming a family
               # here would make the card the one element that ignores its surroundings.
               "style='font-family:inherit;color:var(--text,#d4d8e8);",
-              "border:1px solid var(--border,#2a2e40);border-radius:8px;padding:12px 14px;",
-              "background:var(--bg2,#141828)'>")
+              hosted ? "" : "border:1px solid var(--border,#2a2e40);border-radius:8px;padding:12px 14px;" *
+                            "background:var(--bg2,#141828)", "'>")
 
     # Header: what state it is in, and how far.
     print(io, "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'>",
@@ -5341,7 +5348,7 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     # at render time AND patched by the poll, so it is populated before the first round trip and
     # keeps filling after it. The host is emitted only when there is something to draw, so a sweep
     # with no plottable shape does not leave a hole in the card.
-    if r.plot !== false
+    if r.plot !== false && !hosted
         opt, perr, fields, f = _plot_option(r.plot, getfield(r, :rows))
         # Which of the record's numeric fields the automatic chart shows, when it has several.
         print(io, "<select data-sw='chartfield' title='the field the chart shows' style='",
@@ -5395,8 +5402,8 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     println(io, "<div data-sw='rekey'>", started ? "" : _rekey_html(store_root(r.target), r.run), "</div>")
     println(io, "<div data-sw='fails'>", _fails_html(getfield(r, :rows)), "</div>")
 
-    _actions(io, r)
-    _live_script(io, r)
+    _actions(io, r; hosted)
+    _live_script(io, r; hosted)
     println(io, "</div>")
     return nothing
 end
@@ -5453,12 +5460,15 @@ const _BTN_STYLE = "font:inherit;font-size:11px;padding:3px 9px;border-radius:5p
                    "border:1px solid var(--border,#2a2e40);background:transparent;" *
                    "color:var(--text,#d4d8e8)"
 
-function _actions(io, r::ShardedResult)
+function _actions(io, r::ShardedResult; hosted::Bool = false)
     # The container is emitted even when empty: the live script repopulates it, and a card that
-    # rendered with nothing to offer must still be able to grow a Retry when a unit fails.
-    print(io, "<div data-sw='acts' style='display:flex;gap:6px;margin-top:10px'>")
+    # rendered with nothing to offer must still be able to grow a Retry when a unit fails. A hosted
+    # card names the actions it may show, so a poll cannot bring the others back.
+    print(io, "<div data-sw='acts'", hosted ? " data-sw-allow='" * join(_HOSTED_ACTIONS, ",") * "'" : "",
+              " style='display:flex;gap:6px;margin-top:10px'>")
     for (act, label) in action_list(r.plan, BatchSweep.is_started(store_root(r.target), r.run);
                                     jobs = !isempty(run_jobs(r)))
+        hosted && !(act in _HOSTED_ACTIONS) && continue
         print(io, "<button data-sw-do='", act, "' style='", _BTN_STYLE, "'>", _esc(label), "</button>")
     end
     println(io, "</div>")
@@ -5468,7 +5478,7 @@ end
 # a settled sweep renders static and starts no timer, so a notebook full of finished sweeps costs
 # nothing. The interval backs off as a run gets long, because a sweep of hours does not need
 # second-by-second updates and the poll is a round trip to the scheduler.
-function _live_script(io, r::ShardedResult)
+function _live_script(io, r::ShardedResult; hosted::Bool = false)
     ch = status_channel(r.run)
     doch = action_channel(r.run)
     # The buttons are wired whatever the state; only the POLL is conditional. A finished sweep still
@@ -5486,6 +5496,7 @@ function _live_script(io, r::ShardedResult)
       root.dataset.swLive = "1";
       var started = Date.now(), timer = null, chart = null, settled = false;
       var watching = $(poll ? "true" : "false");   // was there anything left to watch at render?
+      var hosted = $(hosted ? "true" : "false");   // a section of another card, which drives the run
       // The last state the card knows about, seeded from the render so the buttons can speak
       // accurately before the first poll lands.
       var last = { done: $(r.plan.shards_done), total: $(r.plan.shards_total),
@@ -5683,7 +5694,7 @@ function _live_script(io, r::ShardedResult)
           // Only for a settle we actually WATCHED: a card that rendered already-finished has
           // nothing to announce, and announcing anyway would restale the notebook's downstream
           // cells on every page load.
-          if (watching && !root.dataset.swSettledSent) {
+          if (watching && !hosted && !root.dataset.swSettledSent) {
             root.dataset.swSettledSent = "1";
             if (window.slateCall) window.slateCall("$(doch)", { action: "settled" }).catch(function(){});
           }
@@ -5720,7 +5731,7 @@ function _live_script(io, r::ShardedResult)
         if (!document.body.contains(root)) { clearInterval(timer); return; }
         if (!window.slateCall || polling) return;
         polling = true;
-        window.slateCall("$(ch)", { field: field }).then(paint).catch(function(e){
+        window.slateCall("$(ch)", hosted ? { field: field, advance: false } : { field: field }).then(paint).catch(function(e){
           if (/no slate_on handler/.test(String(e))) clearInterval(timer);   // the cell is gone
         }).then(function(){ polling = false; });
       }
@@ -5819,6 +5830,10 @@ function _live_script(io, r::ShardedResult)
       function syncActions(list, now){
         var host = root.querySelector('[data-sw="acts"]');
         if (!host || !list) return;
+        if (host.dataset.swAllow) {
+          var allow = host.dataset.swAllow.split(",");
+          list = list.filter(function(a){ return allow.indexOf(a[0]) >= 0; });
+        }
         if (acting && !now) { held = list; return; }
         var want = list.map(function(a){ return a[0] + "|" + a[1]; }).join(",");
         if (host.dataset.sig === want) return;
