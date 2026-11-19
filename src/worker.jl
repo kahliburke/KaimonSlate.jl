@@ -824,6 +824,10 @@ function _replay_scaffold!(m::Module, source::AbstractString; cid::AbstractStrin
     fname = isempty(cid) ? "none" : "cell:" * cid
     top = try; Meta.parseall(String(source); filename = fname); catch; return true; end   # unparseable → nothing to replay
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
+    # The statements under the cell's name, as a run records them: a sweep ships a helper this cell
+    # defines by that text (`_helper_defs`), and a restored cell has otherwise left none.
+    (!isempty(cid) && _ns_defined(m, :__slate_cell_stmts)) &&
+        (_ns_read(m, :__slate_cell_stmts)[fname] = stmt_texts(source, top))
     for s in stmts                                   # top-level using/import — bring names into scope
         s isa LineNumberNode && continue
         (s isa Expr && s.head in (:using, :import)) || continue
