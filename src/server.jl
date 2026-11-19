@@ -4624,6 +4624,44 @@ function _ensure_resource_on!(nb::LiveNotebook, cell::Cell, dst_k, dst_side::Abs
     return nothing
 end
 
+# (nb id, `_worker_key` of the kernel, writer cell id) whose definitions are being evaluated there now,
+# so definitions that read each other's names stop instead of recursing.
+const _REGION_DEFINING = Set{Tuple{String,UInt,String}}()
+
+# Evaluate the definitions `writer` makes (`_definitions_replay_source`) on `dst_k`, once per writer
+# source and kernel namespace. The writer's own cross-side reads, such as a global a function body
+# uses, are staged first. Recorded in `_REGION_SYNCED`, so forgetting or tearing down the kernel
+# forgets these too. Throws when the definitions fail there, so the reading cell shows why.
+function _ensure_definitions_on!(nb::LiveNotebook, writer::Cell, dst_k, dst_side::AbstractString)
+    key = string(isempty(dst_side) ? "main" : dst_side, ":#defs:", writer.id, ":g", _kgen(dst_k))
+    token = string(writer.src_hash)
+    lock(_REGION_LOCK) do; get(get(_REGION_SYNCED, nb.id, Dict{String,String}()), key, ""); end == token &&
+        return nothing
+    guard = (nb.id, _worker_key(dst_k), writer.id)
+    lock(_REGION_LOCK) do
+        guard in _REGION_DEFINING ? true : (push!(_REGION_DEFINING, guard); false)
+    end && return nothing
+    try
+        ReportEngine.prepare!(dst_k, nb.report)
+        _prime_namespace!(nb, dst_k, dst_side)
+        # Best effort, as for a prime: inference counts names a body only binds locally as reads.
+        try; _region_presync!(nb, writer, dst_k; dst_side); catch e
+            ReportEngine._rlog("region: staging the reads of $(writer.id)'s definitions on " *
+                               "$(_side_label(nb, dst_side)) failed: " * first(sprint(showerror, e), 160))
+        end
+        src = ReportEngine._definitions_replay_source(writer.source)
+        err = _replay_on(dst_k, nb, src, "cell:" * writer.id * "#defs")
+        _note_setup!(nb, dst_side, writer.id, err)
+        err === nothing || error("the definitions in cell $(writer.id) failed on " *
+                                 _side_label(nb, dst_side) * ": " * first(err, 300))
+        lock(_REGION_LOCK) do; get!(Dict{String,String}, _REGION_SYNCED, nb.id)[key] = token; end
+        ReportEngine._rlog("region: defined cell $(writer.id)'s definitions on $(_side_label(nb, dst_side))")
+    finally
+        lock(_REGION_LOCK) do; delete!(_REGION_DEFINING, guard); end
+    end
+    return nothing
+end
+
 # Which transport the region runner asks `transfer_binding!` to use for a cross-boundary value.
 # Default `:auto` — try a direct worker→worker pull (one leg) and fall back to the hub relay when
 # not viable (see WORKER_CHANNEL_SPIKE.md). `KAIMONSLATE_REGION_XFER=relay` is the kill switch (force
@@ -4740,6 +4778,12 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
             end
             _source_current!(src_side, src_k)
             _ensure_resource_on!(nb, writer, dst_k, dst_side)
+            continue
+        end
+        # A function, type or method the writer defines lives in the notebook's namespace module, which
+        # the far side cannot decode a value from. Its definitions are evaluated there instead.
+        if r in ReportEngine._definition_names(writer.source)
+            _ensure_definitions_on!(nb, writer, dst_k, dst_side)
             continue
         end
         token = _transfer_token(nb, cell, writer, r, src_side, digests)

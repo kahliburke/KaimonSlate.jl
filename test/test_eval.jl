@@ -469,6 +469,28 @@ end
         @test occursin("scale_it", ReportEngine._scaffold_replay_source("using A\nscale_it(x) = x * SCALE"))
     end
 
+    @testset "a cell's definitions are evaluated on another worker, its compute is not" begin
+        src = """
+        using A: run!
+        struct Fit; a::Float64; end
+        begin
+            A.driver(m::Fit, c) = m.a
+        end
+        y = expensive(data)
+        scale(x) = x * y
+        """
+        defs = ReportEngine._definitions_replay_source(src)
+        m = Module()
+        Core.eval(m, :(module A; driver(x, c) = 0; run!() = 1; end))
+        Core.eval(m, Meta.parseall(replace(defs, "using A: run!" => "using .A: run!")))
+        @test all(s -> Base.invokelatest(isdefined, m, s), (:Fit, :scale, :run!))
+        # a method added to another module's function
+        @test Base.invokelatest(Core.eval, m, :(A.driver(Fit(2.0), nothing))) == 2.0
+        @test !occursin("expensive", defs)
+        @test :Fit in ReportEngine._definition_names(src) && !(:y in ReportEngine._definition_names(src))
+        @test ReportEngine._definitions_replay_source("y = f(x)") == ""
+    end
+
     @testset "@asset file deps: static extraction + memo invalidation" begin
         # `@asset "path"` is a source literal, so the analyzer records it as a file input (cell.inputs)
         # WITHOUT running the cell; the memo key folds the file's content hash, so editing the asset

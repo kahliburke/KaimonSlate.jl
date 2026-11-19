@@ -1143,6 +1143,17 @@ function _scaffold_replay_source(src::AbstractString)
     return join(out, "\n")
 end
 
+# The statements that define what a cell defines (`_replay_plan`), as source for another namespace,
+# after the cell's `using`/`import` statements so the names its signatures use resolve there. `""`
+# when the cell defines nothing.
+function _definitions_replay_source(src::AbstractString)
+    plan = _replay_plan(src)
+    isempty(plan.idx) && return ""
+    out = String[string(s) for (_, s) in plan.stmts if s isa Expr && s.head in (:using, :import)]
+    append!(out, (string(plan.stmts[i][2]) for i in plan.idx))
+    return join(out, "\n")
+end
+
 # A total-ish cache key: this cell's source + the sources of its transitive upstream cells + the
 # values of any @bind variables in the read-closure. The worker folds in the Revise'd `src/` digest
 # and the resolved Manifest, completing the key so a src/dep/package change invalidates the entry.
