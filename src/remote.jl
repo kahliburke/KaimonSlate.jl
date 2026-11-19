@@ -607,8 +607,20 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
     end
     ok, out = _run_on(String(host), script; timeout = _JULIA_SCRIPT_TIMEOUT, online = tap)
     out = _strip_ansi(out)                 # callers parse it and show it in a step's detail
-    ok || _rlog("FAILED: $what\n    out: $(first(strip(out), 1200))")
+    ok || _rlog("FAILED: $what\n    out: $(_failure_of(out, 1200))")
     return (ok, out)
+end
+
+"""
+    _failure_of(out, n) -> String
+
+What a failed run's output says went wrong, at most `n` characters: from its first `ERROR` line, where
+Julia and Pkg report it after everything they printed on the way, or else the output's end.
+"""
+function _failure_of(out::AbstractString, n::Integer)
+    s = strip(out)
+    i = findfirst(r"^ERROR"m, s)
+    i === nothing ? (length(s) <= n ? String(s) : "…" * last(s, n)) : first(s[first(i):end], n)
 end
 
 # Every remote `julia` call goes through this PATH prefix. juliaup installs its launcher shim at
@@ -1563,7 +1575,7 @@ function _provision_remote!(t::RemoteTarget, parent_project::AbstractString; pre
         ok, out = _ssh_julia!(host, _env_repair_script(rel; precompile, held_file = _env_held_path(t), stamp = had),
                               "instantiate on $host"; stream = true, online = _bringup_note, setup = t.setup)
         scripted = ok
-        ok || (_rlog("provision [3/3] instantiating on $host failed, building: " * first(strip(out), 140)); built = true)
+        ok || (_rlog("provision [3/3] instantiating on $host failed, building: " * _failure_of(out, 400)); built = true)
     end
     if !built
         repair || (_rlog("provision [3/3] environment unchanged on $host" *
@@ -2211,11 +2223,11 @@ function _replicate_env!(t::RemoteTarget; precompile::Bool = true, stamp::Abstra
                           "instantiate on $host"; stream = true, online = _bringup_note, setup = t.setup)
     ok, out = inst(merged !== nothing)
     if !ok && merged !== nothing
-        _rlog("env: instantiating the combined environment on $host failed, resolving: " * first(strip(out), 300))
+        _rlog("env: instantiating the combined environment on $host failed, resolving: " * _failure_of(out, 600))
         put_own!()
         ok, out = inst(false)
     end
-    ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
+    ok || error("env: instantiate failed on $host — $(_failure_of(out, 900))")
     return nothing
 end
 
@@ -2296,7 +2308,7 @@ function _infra_ref!(t::RemoteTarget, julia::AbstractString)
                 end
                 _run_on(_host_for_files(host), _versions_prune_sh("$_REMOTE_WORKER/infra", key))
             else
-                _rlog("provision [3/3] resolving Slate's packages on $host failed: " * first(strip(out), 300))
+                _rlog("provision [3/3] resolving Slate's packages on $host failed: " * _failure_of(out, 600))
             end
         end
         got === nothing || lock(() -> (_INFRA_REF[ck] = got), _INFRA_REF_LOCK)

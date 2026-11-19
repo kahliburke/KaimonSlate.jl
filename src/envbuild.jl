@@ -51,6 +51,40 @@ function dev_deps(manifest::AbstractString, envdir::AbstractString)
     return out
 end
 
+"""
+    local_registry_deps(manifest) -> Vector{Pair{String,String}}
+
+The packages `manifest` takes from a registry only this machine can reach (its url a local path or a
+`file://` one), each with the source this machine installed. Another machine cannot clone that
+registry, so these travel as a developed package does.
+"""
+function local_registry_deps(manifest::AbstractString)
+    out = Pair{String,String}[]
+    isfile(manifest) || return out
+    d = try; TOML.parsefile(manifest); catch; return out; end
+    regs = get(d, "registries", Dict{String,Any}())
+    here = Set(k for (k, r) in regs if r isa AbstractDict && _local_url(string(get(r, "url", ""))))
+    isempty(here) && return out
+    for (name, es) in get(d, "deps", Dict{String,Any}()), e in es
+        (e isa AbstractDict && !haskey(e, "path") && haskey(e, "git-tree-sha1") && haskey(e, "uuid")) || continue
+        rs = get(e, "registries", String[]); rs = rs isa AbstractString ? [rs] : rs
+        (!isempty(rs) && all(in(here), rs)) || continue
+        dir = _installed_source(name, e["uuid"], e["git-tree-sha1"])
+        dir === nothing || push!(out, name => dir)
+    end
+    return out
+end
+_local_url(u::AbstractString) = startswith(u, "file://") || startswith(u, "/")
+# where this machine installed a registered package's version: its slug under a depot's `packages`
+function _installed_source(name::AbstractString, uuid::AbstractString, tree::AbstractString)
+    slug = Base.version_slug(Base.UUID(uuid), Base.SHA1(tree))
+    for dp in DEPOT_PATH
+        p = joinpath(dp, "packages", name, slug)
+        isdir(p) && return p
+    end
+    return nothing
+end
+
 # Remote Julia code that rewrites each dev dep's path — in the Manifest (if present) AND in Project.toml's
 # `[sources]` — to its shipped `devsrc` location. Julia ≥1.11's resolver reads the `[sources]` path, so a
 # dev dep dangles unless BOTH are redirected. Returns "" when there's nothing to rewrite. Shared so the
@@ -64,11 +98,18 @@ function devpaths_script(projrel::AbstractString, rewrites::Vector{Tuple{String,
     println(io, "if isfile(mf)")
     println(io, "  data = TOML.parsefile(mf)")
     println(io, "  deps = get(data, \"deps\", Dict{String,Any}())")
+    # A package sent from a registry only the origin reaches becomes a path entry like the rest: its tree
+    # hash and registry go, and so does a registry no entry names any more.
     for (name, rp) in rewrites
         println(io, "  if haskey(deps, raw\"$name\")")
-        println(io, "    for e in deps[raw\"$name\"]; e isa AbstractDict && (e[\"path\"] = joinpath(homedir(), raw\"$rp\")); end")
+        println(io, "    for e in deps[raw\"$name\"]; e isa AbstractDict && (e[\"path\"] = joinpath(homedir(), raw\"$rp\"); delete!(e, \"git-tree-sha1\"); delete!(e, \"registries\")); end")
         println(io, "  end")
     end
+    println(io, "  if haskey(data, \"registries\")")
+    println(io, "    named = Set{String}()")
+    println(io, "    for es in values(deps), e in es; r = e isa AbstractDict ? get(e, \"registries\", nothing) : nothing; r isa AbstractString ? push!(named, r) : r isa AbstractVector && union!(named, r); end")
+    println(io, "    filter!(kv -> kv.first in named, data[\"registries\"])")
+    println(io, "  end")
     println(io, "  open(mf, \"w\") do _io; TOML.print(_io, data); end")
     println(io, "end")
     println(io, "pf = joinpath(proj, \"Project.toml\")")
@@ -135,8 +176,9 @@ end
 
 Every package the environment in `env` develops from a local directory, as `name => directory`:
 the `[sources]` paths of its project, followed through the packages they name (`env_path_deps`),
-and the path entries of the manifest that resolves it. Before a first resolve writes a manifest the
-`[sources]` are all there is. The project itself is left out.
+and the path entries of the manifest that resolves it, with the packages it takes from a registry only
+this machine reaches (`local_registry_deps`). Before a first resolve writes a manifest the `[sources]`
+are all there is. The project itself is left out.
 
 Cached per environment until its project file, the manifest that resolves it or a developed package's
 own project file changes.
@@ -149,6 +191,9 @@ function local_dev_deps(env::AbstractString)
     devs = Dict{String,String}(env_path_deps(env))
     mf = parent_manifest(env)
     for (name, dir) in dev_deps(mf, isempty(mf) ? env : dirname(abspath(mf)))
+        haskey(devs, name) || (devs[name] = dir)
+    end
+    for (name, dir) in local_registry_deps(mf)
         haskey(devs, name) || (devs[name] = dir)
     end
     self = strip_trailing_sep(normpath(abspath(env)))

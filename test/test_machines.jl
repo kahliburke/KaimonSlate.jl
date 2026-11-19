@@ -243,6 +243,60 @@ const RE = KaimonSlate.ReportEngine
             end
         end
 
+        @testset "a package from a registry only this machine reaches travels as a developed one" begin
+            uuid = "00000000-0000-0000-0000-00000000000a"; tree = "4d09a6cf483cc8aa823f0999ee04051d38147069"
+            manifest = """
+                [[deps.Local]]
+                git-tree-sha1 = "$tree"
+                registries = "Mine"
+                uuid = "$uuid"
+                version = "0.2.0"
+
+                [[deps.Shared]]
+                git-tree-sha1 = "d470f5891d50dc1145ce0dfbe535eaa5e9118b3e"
+                registries = "General"
+                uuid = "00000000-0000-0000-0000-00000000000b"
+                version = "1.0.0"
+
+                [registries.General]
+                url = "https://github.com/JuliaRegistries/General.git"
+                uuid = "23338594-aafe-5451-b93e-139f81909106"
+
+                [registries.Mine]
+                url = "file:///Users/someone/registries/Mine.git"
+                uuid = "00000000-0000-0000-0000-00000000000c"
+                """
+            depot = mktempdir()
+            src = joinpath(depot, "packages", "Local", Base.version_slug(Base.UUID(uuid), Base.SHA1(tree))); mkpath(src)
+            mktempdir() do env
+                write(joinpath(env, "Manifest.toml"), manifest)
+                pushfirst!(DEPOT_PATH, depot)
+                try
+                    @test RE.Sweep.local_registry_deps(joinpath(env, "Manifest.toml")) == ["Local" => src]
+                finally
+                    popfirst!(DEPOT_PATH)
+                end
+            end
+            # where it lands: a path entry like a developed package's, the registry it came from gone
+            home = mktempdir(); proj = mkpath(joinpath(home, "env"))
+            write(joinpath(proj, "Manifest.toml"), manifest); write(joinpath(proj, "Project.toml"), "[deps]\nLocal = \"$uuid\"\n")
+            withenv("HOME" => home) do
+                Base.include_string(Module(), RE.Sweep.devpaths_script("env", [("Local", "devsrc/Local")]))
+            end
+            m = RE.Sweep.TOML.parsefile(joinpath(proj, "Manifest.toml")); e = only(m["deps"]["Local"])
+            @test e["path"] == joinpath(home, "devsrc/Local") && !haskey(e, "git-tree-sha1") && !haskey(e, "registries")
+            @test collect(keys(m["registries"])) == ["General"] && haskey(only(m["deps"]["Shared"]), "git-tree-sha1")
+        end
+
+        @testset "a failed run is reported by its error, not its start" begin
+            out = "   Resolving package versions...\n" * repeat("  [1234abcd] + Pkg v1\n", 100) *
+                  "ERROR: LoadError: Unsatisfiable requirements detected\nStacktrace:\n [1] resolve"
+            @test startswith(RE._failure_of(out, 60), "ERROR: LoadError: Unsatisfiable")
+            @test length(RE._failure_of(out, 60)) == 60
+            @test RE._failure_of(repeat("a", 50) * " the end", 7) == "…the end"
+            @test RE._failure_of("short", 100) == "short"
+        end
+
         @testset "batch tasks start in their machine's shell" begin
             S = RE.Sweep
             RE.cluster_set!(Dict("name" => "pmb", "host" => "hpc1", "kind" => "slurm",
