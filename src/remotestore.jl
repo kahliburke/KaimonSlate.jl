@@ -1384,9 +1384,10 @@ function _push_parts(s::RemoteStore, dirs)
         keep = Set(pres)
         # Under `jobs/`, send only what this hub owns. The launcher's index and batch script live on
         # the far side; the mirror holds them only because a pull brought them over, and re-sending
-        # that copy would overwrite a newer one with a stale one.
+        # that copy would overwrite a newer one with a stale one. The directory itself is kept, or
+        # the walk would not go into it.
         (pres, _archive(s.mirror, p -> (t = first(split(String(p), '/'; keepempty = false));
-                                        t in keep && (t != "jobs" || hub_owned(p)))))
+                                        t in keep && (t != "jobs" || p == "jobs" || hub_owned(p)))))
     end
     isempty(present) && return nothing
     # Delete only the hub's own files, by name. `rm -rf jobs/` took the launcher's files with it,

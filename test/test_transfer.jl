@@ -453,6 +453,19 @@ end
         end
     end
 
+    @testset "a push sends only the hub's own files" begin
+        mktempdir() do mirror
+            mkpath(joinpath(mirror, "jobs"))
+            write(joinpath(mirror, "jobs", "attempts.toml"), "c1 = 1\n")
+            write(joinpath(mirror, "jobs", "sw1_r2.started"), "1")
+            write(joinpath(mirror, "jobs", "slate-ab.index"), "chunk1")
+            q = SW.push_query(SW.RemoteStore("h", "/s", mirror, ""); dirs = ("jobs",))
+            out = mktempdir()
+            @test SW._unarchive(SW._gunzip_if(q.input), out)
+            @test sort(readdir(joinpath(out, "jobs"))) == ["attempts.toml", "sw1_r2.started"]
+        end
+    end
+
     @testset "a push deletes only the hub's own files" begin
         g = SW._hub_owned_globs("'/s/jobs'")
         @test "'/s/jobs'/*.started" in g
