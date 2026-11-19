@@ -255,6 +255,20 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
         end
     end
 
+    @testset "jls: a value holding a notebook's closure decodes in another process" begin
+        nb = Core.eval(Main, :(module SlateClosureNB end))
+        v = Core.eval(nb, :(let k = 10; (f = x -> x + k, g = r -> r.cost, n = 3); end))
+        mktempdir() do dir
+            p = joinpath(dir, "v.jls")
+            open(io -> _codec_encode(io, "jls", v), p, "w")
+            # The other process has the notebook's module, as a worker does, and never saw the closures.
+            code = "module SlateClosureNB end; using Serialization; v = open(deserialize, ARGS[1]); " *
+                   "print(v.f(2), ' ', v.g((; cost = 7)), ' ', v.n)"
+            out = read(`$(Base.julia_cmd()) --startup-file=no -e $code $p`, String)
+            @test out == "12 7 3"
+        end
+    end
+
     @testset "raw: an element type whose name is longer than the header" begin
         # The header used to be a fixed 64 bytes, so a value was unwritable once its element type
         # NAMED itself in more than what was left — which a NamedTuple of a few fields does easily,
