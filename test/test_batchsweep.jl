@@ -1346,6 +1346,27 @@ end
         empty!(HUB_CLUSTERS); empty!(HUB_LOG)
     end
 
+    @testset "callers waiting on a cluster share its next pass" begin
+        # Two notebooks waiting on rounds, and the supervisor, used to pull and ask the scheduler
+        # each for themselves, taking the store's lock in turn.
+        n = Threads.Atomic{Int}(0)
+        go = Channel{Nothing}(Inf)
+        pass() = (Threads.atomic_add!(n, 1); take!(go))
+        a = Threads.@spawn Sweep._with_pass(pass, "shared")
+        timedwait(() -> n[] == 1, 10.0)
+        @test !Sweep._with_pass(pass, "shared"; block = false)      # the timer leaves it to the pass
+        since = time()
+        bc = [Threads.@spawn(Sweep._with_pass(pass, "shared"; since)) for _ in 1:2]
+        sleep(0.2)
+        @test n[] == 1                                             # they wait for the running pass…
+        put!(go, nothing); wait(a)
+        timedwait(() -> n[] == 2, 10.0)
+        put!(go, nothing)
+        @test all(fetch, bc) && n[] == 2                           # …then share the one after it
+        @test Sweep._with_pass(pass, "shared"; since = 0.0) && n[] == 2   # an older request is served
+        @test !Sweep.advance_now!(mktempdir())                     # no cluster keeps this store
+    end
+
     @testset "releasing a run takes its marker with it" begin
         # A marker outliving its descriptor leaves the supervisor with a run it cannot advance and
         # cannot stop asking about, once per tick for as long as the hub runs.

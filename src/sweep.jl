@@ -1781,25 +1781,109 @@ function advance_started!(; every::Real = 30.0, wait::Bool = true)
         _reachable(t) || continue
         # Each cluster on a task of its own: a host that has gone away holds its own sweeps until its
         # session times out, and no other cluster's. One still running from an earlier tick is left to it.
-        busy = lock(() -> get!(() -> Threads.Atomic{Bool}(false), _ADVANCING, name), _SETTLED_LOCK)
-        Threads.atomic_cas!(busy, false, true) && continue
+        _busy(name)[] && continue
         _ADVANCE_AT[name] = time()
         push!(tasks, Threads.@spawn try
-            t0 = time()
-            k = _advance_cluster!(name, t, root, runs)
-            time() - t0 > 5.0 && _hub_log("supervisor: advancing sweeps on $(name) took $(round(time() - t0; digits = 1))s")
-            k
+            k = Ref(0)
+            _with_pass(name; block = false) do
+                t0 = time()
+                k[] = _advance_cluster!(name, t, root, runs)
+                time() - t0 > 5.0 && _hub_log("supervisor: advancing sweeps on $(name) took $(round(time() - t0; digits = 1))s")
+            end
+            k[]
         catch e
             _hub_log("supervisor: advancing sweeps on $(name) failed: " * first(sprint(showerror, e), 160))
             0
-        finally
-            busy[] = false
         end)
     end
     return wait ? sum(Base.fetch, tasks; init = 0) : length(tasks)
 end
 const _ADVANCING = Dict{String,Threads.Atomic{Bool}}()
 const _SETTLED_LOCK = ReentrantLock()
+
+# ── One pass at a time per cluster ──
+# A cluster's started runs are advanced by this process alone, whoever asks: the supervisor on its
+# timer, or a notebook worker waiting on a round (`advance_now!`). A request is served by the first
+# pass that starts after it was made, so callers arriving together share one pull and one question to
+# the scheduler, instead of each taking the store's lock in turn to make their own.
+mutable struct _ClusterPass
+    cond::Threads.Condition
+    last_start::Float64          # when the last finished pass started
+end
+const _PASSES = Dict{String,_ClusterPass}()
+
+_busy(name) = lock(() -> get!(() -> Threads.Atomic{Bool}(false), _ADVANCING, String(name)), _SETTLED_LOCK)
+_cluster_pass(name) = lock(() -> get!(() -> _ClusterPass(Threads.Condition(), 0.0), _PASSES, String(name)), _SETTLED_LOCK)
+
+# Run `f` as `name`'s pass, or wait for a pass that started at or after `since` to finish. With
+# `block = false`, a pass already running is left to it and this returns false.
+function _with_pass(f, name::AbstractString; since::Real = time(), block::Bool = true)
+    busy, p = _busy(name), _cluster_pass(name)
+    lock(p.cond)
+    try
+        while true
+            p.last_start >= since && return true
+            if !Threads.atomic_cas!(busy, false, true)
+                t0 = time()
+                unlock(p.cond)
+                try
+                    f()
+                finally
+                    lock(p.cond)
+                    busy[] = false
+                    p.last_start = t0
+                    notify(p.cond)
+                end
+                return true
+            end
+            block || return false
+            wait(p.cond)
+        end
+    finally
+        unlock(p.cond)
+    end
+end
+
+"""
+    advance_now!(root; since = time()) -> Bool
+
+Advance the started runs of the cluster whose store is `root`, in a pass that starts no earlier than
+`since`, and return once it has finished. False when no cluster here keeps that store or its host is
+not signed in, which leaves the caller to advance the run itself.
+"""
+function advance_now!(root::AbstractString; since::Real = time())
+    for c in _hub_clusters(; tested = false)
+        name = String(get(c, "name", ""))
+        isempty(name) && continue
+        t = try; _cluster_from(c); catch; continue; end
+        store_root(t) == root || continue
+        _reachable(t) || return false
+        _with_pass(name; since) do
+            runs = started_runs(root)
+            stamp = _store_stamp(root)
+            lock(_SETTLED_LOCK) do
+                filter!(r -> get(_SETTLED, (root, r), nothing) != stamp, runs)
+            end
+            isempty(runs) || _advance_cluster!(name, t, root, runs)
+        end
+        return true
+    end
+    return false
+end
+
+# A worker on the hub's machine shares the hub's mirror of a cluster's store, so it asks the hub to
+# advance the store rather than pulling and asking the scheduler for itself. False where there is no
+# hub to ask, or the hub keeps no cluster with this store; the caller then advances the run here.
+function _hub_advance!(t::SweepTarget)
+    (has_delegate() && t isa ClusterTarget && !isempty(t.host)) || return false
+    r = try
+        _DELEGATE[](:advance, (; root = store_root(t), since = time(), machine = gethostname()))
+    catch e
+        @debug "slate: the hub could not advance a store" exception = e
+        nothing
+    end
+    return r === true
+end
 
 function _advance_cluster!(name::AbstractString, t, root::AbstractString, runs)
     n = 0
@@ -6213,8 +6297,10 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # nobody asked for again. Starting says the work was wanted; it does not say this call should
     # start it. The card's poll advances a started sweep, which is where watching belongs.
     submit && BatchSweep.start!(root, run)
-    reconcile_and_sync!(target, run, launcher; cap, submit = going, pulled = going,
-                        failure_policy = sweep_policy(target))
+    # A run to submit with no cap of its own is the hub's to advance, as every started run is.
+    (going && cap == 0 && _hub_advance!(target)) ||
+        reconcile_and_sync!(target, run, launcher; cap, submit = going, pulled = going,
+                            failure_policy = sweep_policy(target))
     return _attach(target, run, key, params, keys; launcher, plot, register, refresh,
                    cell = String(cell))
 end

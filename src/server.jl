@@ -198,6 +198,8 @@ function _run_sshop(op::Symbol, a)
     op === :connect    && return S.connect!(a.host; interactive = a.interactive === true)
     op === :disconnect && return S.disconnect!(a.host)
     op === :exec       && return S.run_there(a.host, a.script; timeout = a.timeout)
+    # Only a worker on this machine shares the mirror the pass brings up to date.
+    op === :advance    && return a.machine == gethostname() && S.advance_now!(a.root; since = a.since)
     op === :io         && return S.run_io(a.host, a.script, a.input)
     op === :fetch      && return ReportEngine.fetch_viewed(a.host, a.script, a.dest, a.part;
                                                          input = a.input, name = a.name, total = a.total)
