@@ -1803,7 +1803,13 @@ const _SETTLED_LOCK = ReentrantLock()
 
 function _advance_cluster!(name::AbstractString, t, root::AbstractString, runs)
     n = 0
-    try; sync_in!(t); catch; return n; end
+    # One pull and one question to the scheduler for the whole pass, which every run below decides
+    # from. Each run asking for itself held the store's lock for a pull and a poll per run, and a
+    # store with many settled runs kept it held for most of every pass.
+    try; sync_in!(t; force = true); catch; return n; end
+    remote = t isa ClusterTarget && !isempty(t.host)
+    js = remote ? (try; collect_jobs(t; force = true); catch; nothing; end) : nothing
+    asked = js === nothing ? (;) : (; pulled = true, job_state = js, job_state_at = collected_at(t), lost = collected_lost(t))
     full = _hub_clusters(; only = name)
     isempty(full) || (t = try; _cluster_from(first(full)); catch; t; end)
     # Fold the MIRROR's log. A pull merges and never deletes, so a store compacted over there
@@ -1828,7 +1834,7 @@ function _advance_cluster!(name::AbstractString, t, root::AbstractString, runs)
         try
             # The run's launcher, not the registry's: a region's queue names the environment its
             # task workers start in, and that is the notebook's, which only the run records.
-            p = reconcile_and_sync!(t, run, launcher_for(tr); submit = true, failure_policy = sweep_policy(t))
+            p = reconcile_and_sync!(t, run, launcher_for(tr); submit = true, failure_policy = sweep_policy(t), asked...)
             settled = BatchSweep.is_settled(p)
             lock(_SETTLED_LOCK) do
                 settled ? (_SETTLED[(root, run)] = stamp) : delete!(_SETTLED, (root, run))
@@ -1906,11 +1912,12 @@ reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher; submit::
              _reconcile_and_sync!(target, run, launcher; submit, kw...)
 
 function _reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher;
-                              submit::Bool = false, kw...)
+                              submit::Bool = false, pulled::Bool = false, kw...)
     # About to decide what to submit, so the mirror is read fresh rather than shared: a cached copy
     # taken on a reader's behalf a moment ago could miss a chunk that has since landed, and the
-    # decision this makes is the one that must not be taken twice.
-    submit && sync_in!(target; force = true)
+    # decision this makes is the one that must not be taken twice. `pulled` says the caller has just
+    # pulled for this decision (the supervisor, once for every run it advances).
+    submit && !pulled && sync_in!(target; force = true)
     target = _as_run(target, run)
     # An environment never tested on this machine's nodes is not sent to them as an array: the card
     # offers Prepare, which runs one task first (`_untested`).
@@ -1921,9 +1928,15 @@ function _reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher
     end
     root = store_root(target)
     # A chunk submitted again is one whose job has gone without its results in the mirror. The job
-    # writes them before it exits, so the pull above may just have run first; pulling again now that
-    # the job is seen gone finds them if they are there, and the chunk is not launched twice.
+    # writes them before it exits, so the pull above may just have run first. One answer from the
+    # scheduler decides: a chunk it shows gone is pulled for again, which finds its results if the
+    # job wrote them, and the submission is decided on that same answer, so a job that ends between
+    # two questions cannot be launched twice.
     if submit && target isa ClusterTarget && !isempty(target.host)
+        if !haskey(kw, :job_state)
+            js = collect_jobs(target; force = true)
+            kw = (; kw..., job_state = js, job_state_at = collected_at(target), lost = collected_lost(target))
+        end
         pk = (; (k => v for (k, v) in pairs(kw) if k in (:job_state, :job_state_at, :lost, :failure_policy))...)
         p0 = BatchSweep.plan(root, run; launcher, pk...)
         any(c -> get(p0.chunk_attempts, c, 0) > 0, p0.to_submit) && sync_in!(target; force = true)
