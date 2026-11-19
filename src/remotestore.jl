@@ -1185,6 +1185,8 @@ const _LOCK_STALE_S = 900.0
 # survivable (a pull merges, an archive tolerates a file that vanishes), whereas a hung sync stalls
 # the notebook that asked for it.
 const _LOCK_WAIT_S = 60.0
+# A wait for the lock longer than this is logged, with who held it; a hold twice as long, by the holder.
+const _LOCK_SLOW_S = 5.0
 
 _lock_alive(pid::Int, host::AbstractString) =
     host != gethostname() ? true :                       # another machine: cannot tell, assume alive
@@ -1214,15 +1216,21 @@ process on this machine. Falls through to running `f` anyway if the lock cannot 
 `_LOCK_WAIT_S`, having said so: a sync that never runs is a worse failure than one that overlaps.
 """
 function with_store_lock(f, mirror::AbstractString)
+    t_ask = time()
     lock(_sync_lock(mirror)) do
         m = String(mirror)
+        time() - t_ask > _LOCK_SLOW_S &&
+            @info "slate: waited $(round(time() - t_ask; digits = 1)) s for a mirror's lock in this process" mirror = m
         depth = get(_LOCK_DEPTH, m, 0)
         _LOCK_DEPTH[m] = depth + 1
         held = false
+        t_held = 0.0
         try
             if depth == 0
                 d = _lock_dir(m)
-                deadline = time() + _LOCK_WAIT_S
+                t0 = time()
+                deadline = t0 + _LOCK_WAIT_S
+                owner = ""
                 while true
                     try
                         mkdir(d)
@@ -1230,6 +1238,7 @@ function with_store_lock(f, mirror::AbstractString)
                         held = true
                         break
                     catch
+                        isempty(owner) && (owner = try; read(joinpath(d, "owner"), String); catch; ""; end)
                         isdir(d) && _lock_stale(d) && (try; rm(d; recursive = true, force = true); catch; end; continue)
                         if time() > deadline
                             @warn "slate: sync lock busy, proceeding without it" mirror = m
@@ -1238,9 +1247,14 @@ function with_store_lock(f, mirror::AbstractString)
                         sleep(0.05)
                     end
                 end
+                t_held = time()
+                t_held - t0 > _LOCK_SLOW_S &&
+                    @info "slate: waited $(round(t_held - t0; digits = 1)) s for a mirror's lock" mirror = m owner = strip(owner)
             end
             return f()
         finally
+            held && time() - t_held > 2 * _LOCK_SLOW_S &&
+                @info "slate: held a mirror's lock $(round(time() - t_held; digits = 1)) s" mirror = m pid = getpid()
             held && (try; rm(_lock_dir(m); recursive = true, force = true); catch; end)
             _LOCK_DEPTH[m] = depth
             depth == 0 && delete!(_LOCK_DEPTH, m)

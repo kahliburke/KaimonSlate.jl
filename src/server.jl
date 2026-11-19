@@ -214,11 +214,13 @@ function _relay_sshop(nb::LiveNotebook, p)
     # Off the poller task: a connect waits for someone to answer a dialog, and everything else waits
     # for a cluster. Blocking here would stall every other notebook's worker events behind it.
     Threads.@spawn begin
+        t0 = time()
         res = try
             _run_sshop(Symbol(p.op), p.args)
         catch e
             (; error = first(sprint(showerror, e), 300))
         end
+        t1 = time()
         try
             ReportEngine._tool(nb.kernel, "__slate_sshop_reply",
                 Dict{String,Any}("id" => id,
@@ -226,6 +228,11 @@ function _relay_sshop(nb::LiveNotebook, p)
         catch e
             ReportEngine._rlog("cluster: could not return a result to the worker ($(first(sprint(showerror, e), 120)))")
         end
+        t2 = time()
+        # A worker's cluster operation that was slow says which half was: the cluster, or the reply.
+        (t1 - t0 > 5 || t2 - t1 > 2) && String(p.op) != "connect" &&
+            ReportEngine._rlog("cluster: $(p.op) for $(nb.id) ran $(round(t1 - t0; digits = 1)) s, " *
+                               "its reply took $(round(t2 - t1; digits = 1)) s")
     end
     return nothing
 end

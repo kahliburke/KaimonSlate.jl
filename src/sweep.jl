@@ -1958,7 +1958,11 @@ end
 _with_store_lock(f, t::LocalTarget) = with_store_lock(f, store_root(t))
 _with_store_lock(f, t::ClusterTarget) =
     isempty(t.host) ? with_store_lock(f, store_root(t)) :
-    lock(() -> with_store_lock(f, remote_store(t).mirror), collector(t).pull_lk)
+    (t0 = time(); lock(collector(t).pull_lk) do
+        time() - t0 > _LOCK_SLOW_S &&
+            @info "slate: waited $(round(time() - t0; digits = 1)) s for $(t.host)'s pull" pid = getpid()
+        with_store_lock(f, remote_store(t).mirror)
+    end)
 
 "Send what the hub has written — descriptors, their blobs, markers — to the store. `dirs` narrows
 it to part of that, for the callers that have just touched one thing."

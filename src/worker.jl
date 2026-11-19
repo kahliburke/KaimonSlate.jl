@@ -2009,6 +2009,9 @@ const _CONTROL_TOOLS = Set([
     "__slate_running", "__slate_cancel", "__slate_cancel_cells", "__slate_ports",
     "__slate_client_key", "__slate_server_key", "__slate_authorize_client", "__slate_revoke_client",
     "__slate_probe_peer",
+    # The hub's answer to a cluster operation a task here is parked on. Queued behind the default
+    # lane, it waits on the very calls that are waiting for it.
+    "__slate_sshop_reply",
 ])
 
 # Gate requests that render or answer the page → the UI threads. Each may run notebook code, but
@@ -2917,6 +2920,15 @@ const _CONN_CACHE = Dict{String,Tuple{Float64,Bool}}()
 const _CONN_LOCK = ReentrantLock()
 const _CONN_TTL = 2.0
 
+# A cluster operation slower than this is logged, with what it ran.
+const _SLOW_SSHOP_S = 5.0
+function _op_what(args)
+    hasproperty(args, :script) || return ""
+    ls = [strip(l) for l in split(String(args.script), '\n')]
+    i = findfirst(l -> !isempty(l) && !startswith(l, "#") && !startswith(l, "set "), ls)
+    return i === nothing ? "" : first(ls[i], 120)
+end
+
 function _install_sshop_delegate!()
     # A long read reports on the running cell, and ends at the cell's Stop.
     Sweep.READ_HOOKS[] = (;
@@ -2939,7 +2951,11 @@ function _install_sshop_delegate!()
             @warn "slate: could not reach the hub to run a cluster operation" op exception = e
             return nothing
         end
+        t0 = time()
         r = Sweep.await_op(id; timeout = _sshop_timeout(op))
+        dt = time() - t0
+        dt > _SLOW_SSHOP_S && op !== :connect &&
+            @info "slate: a cluster operation took $(round(dt; digits = 1)) s" op host = get(args, :host, "") what = _op_what(args)
         # The hub reports a failure as a value rather than by throwing across the gate, so raise it
         # here — a cell asking for a cluster should fail with the reason, not with `nothing`.
         (r isa NamedTuple && haskey(r, :error)) && error(String(r.error))
