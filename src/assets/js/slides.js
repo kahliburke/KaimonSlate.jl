@@ -1483,12 +1483,23 @@
       for (const c of dv.children) c.classList.toggle('derive-cur', c === cur);
     }
     // The same fitting and lighting as the deck, so the preview is what the audience sees.
+    _lightTerms(slide.querySelector('.slide-body'));
+    _fitPreview(slide);
+    return total;
+  }
+  // Fit a drawn preview to its canvas, the way the deck fits a slide. Call it again when the images of
+  // the slide have loaded: the copy of an image has no size when it is drawn, so the first fit sees a
+  // slide that is shorter than it will be.
+  function _fitPreview(slide) {
     const body = slide.querySelector('.slide-body');
-    _lightTerms(body);
+    body.style.setProperty('--shrink', 1);
     _fitFigures(body, body.scrollHeight - body.clientHeight);
     _fitMath(body);
     _shrinkText(body);
-    return total;
+  }
+  // Fit every slide drawn into `root` again.
+  function _refitPreviews(root) {
+    root.querySelectorAll('.deck-preview').forEach(_fitPreview);
   }
   // ── Rendering the deck to a video ───────────────────────────────────────────
   // The renderer (server_deckshot.jl `deck_render`) steps the deck with `slideNext` and, after each
@@ -1588,7 +1599,7 @@
       const n = document.createElement('span'); n.className = 'deck-sheet-n'; n.textContent = String(i + 1);
       host.appendChild(n);
     });
-    whenLoaded(grid, done);
+    whenLoaded(grid, () => { _refitPreviews(grid); done(); });
   }
   // The deck one page per slide at the slide's own size (`--u: 1px`), for the hub's PDF of the deck
   // as presented (server_deckshot.jl `deck_pdf`). Each slide is at its last step, or with `&steps=all`
@@ -1623,9 +1634,10 @@
       p.host.appendChild(row);
     };
     const draw = () => pages.forEach(p => { _previewInto(p.host, p.i, p.step); if (p.total) dots(p); });
-    // The first drawing fits each slide before its images and the deck's fonts have loaded; the
-    // second fits it again with them in place. The notebook is hidden only after that: a hidden
-    // chart shrinks to nothing, and its snapshot with it.
+    // The first drawing fits each slide before its images and the deck's fonts have loaded. The
+    // second copies the cells again with them in place, and fits again once the new copies have
+    // loaded: a copied image has no size before that (`_fitPreview`). The notebook is hidden only
+    // after the last fit: a hidden chart shrinks to nothing, and its snapshot with it.
     draw();
     whenLoaded(root, () => document.fonts.ready.then(() => {
       draw();
@@ -1634,7 +1646,11 @@
       const sl = root.querySelector('.deck-slide');
       const under = sl ? getComputedStyle(sl).backgroundColor : '';
       if (under) document.documentElement.style.setProperty('--deck-print-under', under);
-      whenLoaded(root, () => { document.documentElement.classList.add('deck-print-mode'); done(); });
+      whenLoaded(root, () => {
+        _refitPreviews(root);
+        document.documentElement.classList.add('deck-print-mode');
+        done();
+      });
     }));
   }
   function _renderPreviews() {
@@ -1722,7 +1738,11 @@
     const q = new URLSearchParams(location.search);
     if (q.get('shot') === '1') document.documentElement.classList.add('deck-shot');
     if (q.get('render') === '1') document.documentElement.classList.add('deck-render');
-    const settled = () => !document.querySelector('#nb .cell.state-running, #nb .cell.state-queued');
+    // A cell with images fills its markdown or output only after the images decode (`_swapOutput`,
+    // view.js): until then its host is empty. A swap is pending while `__slateSwapSeq` is ahead of
+    // `__slateHoldSeq`. A capture taken before then copies the empty host.
+    const settled = () => !document.querySelector('#nb .cell.state-running, #nb .cell.state-queued')
+      && ![...document.querySelectorAll('#nb .md, #nb .output')].some(o => o.__slateSwapSeq !== o.__slateHoldSeq);
     const whenLoaded = (root, done, n = 0) => {
       const loaded = [...root.querySelectorAll('img, video')].every(m => m.tagName === 'IMG' ?
         (!m.getAttribute('src') || m.complete) : (m.readyState >= 2 && !m.seeking) || !m.getAttribute('src'));
