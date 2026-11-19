@@ -1891,8 +1891,9 @@ end
 # A worker on the hub's machine shares the hub's mirror of a cluster's store, so it asks the hub to
 # advance the store rather than pulling and asking the scheduler for itself. False where there is no
 # hub to ask, or the hub keeps no cluster with this store; the caller then advances the run here.
+_hub_advances(t::SweepTarget) = has_delegate() && t isa ClusterTarget && !isempty(t.host)
 function _hub_advance!(t::SweepTarget)
-    (has_delegate() && t isa ClusterTarget && !isempty(t.host)) || return false
+    _hub_advances(t) || return false
     r = try
         _DELEGATE[](:advance, (; root = store_root(t), since = time(), machine = gethostname()))
     catch e
@@ -6266,7 +6267,10 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # every manifest read below local; for a local target it is a no-op. A run about to be submitted
     # reads the store fresh here, once, for this and for the submission below.
     going = submit && _reachable(target)
-    sync_in!(target; force = going)
+    # A run the hub will launch is pulled for and sent by the hub's pass, into the mirror this
+    # process shares with it; pulling and sending here first would put both in front of that pass.
+    handoff = going && cap == 0 && _hub_advances(target)
+    handoff || sync_in!(target; force = going)
     root = store_root(target)
     mkpath(root)
     key = sweep_key(body_src, setup_src, captures, env_key(target), summary_src)
@@ -6322,7 +6326,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # has nothing new to send (its descriptors are named by their content), so neither pays the
     # round trip. Replaying a campaign's finished rounds is then a matter of local reads. A landed
     # run is not marked sent: a unit retried later has its descriptors sent before it is submitted.
-    if !all(in(landed), keys) && !_descriptors_were_sent(target, run)
+    if !handoff && !all(in(landed), keys) && !_descriptors_were_sent(target, run)
         if sync_out!(target)
             _descriptors_sent!(target, run)
         elseif _reachable(target)
@@ -6343,8 +6347,8 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # start it. The card's poll advances a started sweep, which is where watching belongs.
     submit && BatchSweep.start!(root, run)
     # A run to submit with no cap of its own is the hub's to advance, as every started run is.
-    (going && cap == 0 && _hub_advance!(target)) ||
-        reconcile_and_sync!(target, run, launcher; cap, submit = going, pulled = going,
+    (handoff && _hub_advance!(target)) ||
+        reconcile_and_sync!(target, run, launcher; cap, submit = going, pulled = going && !handoff,
                             failure_policy = sweep_policy(target))
     return _attach(target, run, key, params, keys; launcher, plot, register, refresh,
                    cell = String(cell))

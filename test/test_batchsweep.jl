@@ -1368,6 +1368,39 @@ end
         end
     end
 
+    @testset "a worker hands a launch to the hub without pulling or sending first" begin
+        # The hub's pass pulls the store and sends the run's descriptors from the mirror both share.
+        store = mktempdir()
+        ops = Symbol[]; hub = Ref(true)
+        sh(script, input) = (out = IOBuffer();
+                             ok = success(pipeline(`bash -c $script`; stdin = input === nothing ? devnull : IOBuffer(input), stdout = out));
+                             (ok, take!(out)))
+        try
+            Sweep.set_delegate!() do op, a
+                op in (:connected, :connect) && return true
+                push!(ops, op)
+                op === :advance && return hub[]
+                op === :exec && return ((ok, o) = sh(a.script, nothing); (ok, String(o)))
+                op === :io && return sh(a.script, a.input)
+                error("unexpected op :$op")
+            end
+            t = Sweep.ClusterTarget("h"; kind = :exec, root_remote = store, chunk = 2,
+                                    payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            Sweep.@sweep(Sweep.paramgrid(x = 0:1), t; submit = false) do p; p.x; end   # what the host is, once
+            empty!(ops)
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = true) do p; p.x; end
+            @test ops == [:advance]
+            @test BS.is_started(Sweep.store_root(t), r.run)
+            # No hub keeps this cluster: the worker pulls, sends and launches for itself.
+            empty!(ops); hub[] = false
+            r = Sweep.@sweep(Sweep.paramgrid(x = 3:4), t; submit = true) do p; p.x; end
+            @test first(ops) === :advance && :io in ops
+            @test Sweep._descriptors_were_sent(t, r.run)
+        finally
+            Sweep.set_delegate!(nothing)
+        end
+    end
+
     @testset "callers waiting on a cluster share its next pass" begin
         # Two notebooks waiting on rounds, and the supervisor, used to pull and ask the scheduler
         # each for themselves, taking the store's lock in turn.
