@@ -1278,10 +1278,14 @@ function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     # directory, takes everything.
     full = any(d -> (p = joinpath(s.mirror, String(d)); !isdir(p) || isempty(readdir(p))), dirs)
     since = full ? nothing : _pulled_at(s)
-    tarpart = since === nothing ? "tar cf - " * names * "; " :
-              "L=\$(mktemp) && { find " * names * " -type f -newermt @" * string(since - PULL_OVERLAP_S) *
-              " > \"\$L\" 2>/dev/null || find " * names * " -type f > \"\$L\"; }; " *
-              "if [ -s \"\$L\" ]; then tar cf - -T \"\$L\"; fi; rm -f \"\$L\"; "
+    # Listed against a file stamped with that time: GNU `touch -d @N`, else BSD `date -r N`. A far side
+    # where neither works lists everything. `COPYFILE_DISABLE` keeps a macOS tar from adding `._` files.
+    t = string(since === nothing ? 0 : since - PULL_OVERLAP_S)
+    tarpart = since === nothing ? "COPYFILE_DISABLE=1 tar cf - " * names * "; " :
+              "L=\$(mktemp) && R=\$(mktemp) && " *
+              "{ { touch -d @" * t * " \"\$R\" 2>/dev/null || touch -t \"\$(date -r " * t * " +%Y%m%d%H%M.%S)\" \"\$R\"; } && " *
+              "find " * names * " -type f -newer \"\$R\" > \"\$L\" 2>/dev/null || find " * names * " -type f > \"\$L\"; }; " *
+              "if [ -s \"\$L\" ]; then COPYFILE_DISABLE=1 tar cf - -T \"\$L\"; fi; rm -f \"\$L\" \"\$R\"; "
     # Compressed over there when this side can inflate it, and when the far side has `gzip`.
     _zlib() === nothing ||
         (tarpart = "{ " * tarpart * "} | if command -v gzip >/dev/null 2>&1; then gzip -c; else cat; fi; ")
