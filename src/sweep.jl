@@ -1887,19 +1887,26 @@ end
 
 function _advance_cluster!(name::AbstractString, t, root::AbstractString, runs)
     n = 0
+    # Where a slow pass spent its time, step by step, for the log.
+    t0 = time(); steps = Pair{String,Float64}[]
+    step!(what) = (push!(steps, what => time() - t0); t0 = time())
     # One pull and one question to the scheduler for the whole pass, which every run below decides
     # from. Each run asking for itself held the store's lock for a pull and a poll per run, and a
     # store with many settled runs kept it held for most of every pass.
     try; sync_in!(t; force = true); catch; return n; end
+    step!("pull")
     remote = t isa ClusterTarget && !isempty(t.host)
     js = remote ? (try; collect_jobs(t; force = true); catch; nothing; end) : nothing
     asked = js === nothing ? (;) : (; pulled = true, job_state = js, job_state_at = collected_at(t), lost = collected_lost(t))
+    step!("jobs")
     full = _hub_clusters(; only = name)
     isempty(full) || (t = try; _cluster_from(first(full)); catch; t; end)
+    step!("resolve")
     # Fold the MIRROR's log. A pull merges and never deletes, so a store compacted over there
     # leaves this side holding the originals; folding here is what keeps the mirror from growing
     # for the life of the store. Local files only, and never required for correctness.
     try; SlateTask.compact_events!(root); BatchSweep.forget_fold!(root); catch; end
+    step!("fold")
     stamp = _store_stamp(root)          # after the sync and the fold, which write to the mirror
     for run in runs
         # Clear markers with no run behind them; the store was synced in above.
@@ -1932,7 +1939,11 @@ function _advance_cluster!(name::AbstractString, t, root::AbstractString, runs)
         catch e
             _hub_log("supervisor: advancing $(name)/$(run) failed: " * first(sprint(showerror, e), 160))
         end
+        step!(run)
     end
+    total = sum(last, steps; init = 0.0)
+    total > 5.0 && _hub_log("supervisor: a pass on $(name) took $(round(total; digits = 1)) s (" *
+        join(("$(k) $(round(v; digits = 1)) s" for (k, v) in steps if v >= 0.3), ", ") * ")")
     return n
 end
 
@@ -2030,13 +2041,20 @@ function _reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher
         any(c -> get(p0.chunk_attempts, c, 0) > 0, p0.to_submit) && sync_in!(target; force = true)
         # The descriptors are what a launched job reads its chunk from, so they go out with the
         # first chunk that does; a run with nothing to launch costs no push.
+        td = time()
         isempty(p0.to_submit) || descriptors!()
+        time() - td > 1.0 && _hub_log("supervisor: $(run): sending descriptors $(round(time() - td; digits = 1)) s")
     elseif submit
         descriptors!()
     end
     before = BatchSweep.read_attempts(root)
+    t0 = time()
     p = BatchSweep.reconcile!(root, run, launcher, specfn_for(target); submit, kw...)
+    t1 = time()
     BatchSweep.read_attempts(root) == before || sync_out!(target; dirs = ("jobs",))
+    t2 = time()
+    t2 - t0 > 2.0 && _hub_log("supervisor: $(run): reconcile $(round(t1 - t0; digits = 1)) s, " *
+                              "pushing jobs $(round(t2 - t1; digits = 1)) s")
     return p
 end
 
