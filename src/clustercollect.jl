@@ -133,6 +133,62 @@ function collect_jobs(t::ClusterTarget; force::Bool = false)
 end
 
 """
+    collect_pull_and_jobs!(t) -> Bool
+
+`collect_jobs` and `collect_pull!`, both forced, in one round trip, and whether the pull succeeded.
+The scheduler is asked first, so a job it no longer holds wrote its results before this pull read
+the store. A submission the pull brought that this side did not ask about is answered as
+`:unreachable` (taken for live) until it is asked about.
+"""
+function collect_pull_and_jobs!(t::ClusterTarget)
+    isempty(t.host) && return true
+    c = collector(t)
+    root, s = store_root(t), remote_store(t)
+    return lock(c.pull_lk) do
+        with_store_lock(s.mirror) do
+            names = collect(keys(BatchSweep.known_submissions(root)))
+            q = isempty(names) ? (":", (ok, out) -> (; states = Dict{String,Symbol}(), lost = Dict{String,Set{String}}())) :
+                BatchLauncher.poll_query(launcher_for(t), root, names)
+            if q === nothing
+                ok = collect_pull!(t; force = true)
+                collect_jobs(t; force = true)
+                return ok
+            end
+            script, pulled! = pull_query(s)
+            asked = time()
+            ok, out = run_io(String(t.host), BatchLauncher.framed([q[1], script]), nothing)
+            (pok, pout), (mok, mout) = BatchLauncher.unframe(out, 2)
+            pulled = try
+                pulled!(ok && mok, mout)
+            catch e
+                c.err = _short_err(e); false
+            end
+            pulled && (c.pulled = time())
+            d = try
+                q[2](ok && pok, String(pout))
+            catch e
+                c.err = _short_err(e); nothing
+            end
+            d === nothing || lock(c.poll_lk) do
+                fresh, lost = d.states, d.lost
+                gaps = [n for (n, st) in fresh if st === :unreachable]
+                for n in gaps
+                    haskey(c.jobs, n) && (fresh[n] = c.jobs[n])
+                    haskey(c.lost, n) && (lost[n] = c.lost[n])
+                end
+                for n in keys(BatchSweep.known_submissions(root))
+                    haskey(fresh, n) || (fresh[n] = :unreachable)
+                end
+                c.jobs, c.lost, c.polled = fresh, lost, asked
+                c.err = isempty(gaps) ? (pulled ? "" : c.err) :
+                        "the scheduler did not answer for $(length(gaps)) submission(s)"
+            end
+            return pulled
+        end
+    end
+end
+
+"""
     collect_size(t) -> (; bytes, blobs)
 
 How much the store weighs. On its own slow clock: this walks every blob on the far side, and it is

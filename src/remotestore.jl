@@ -323,6 +323,7 @@ function run_io(host::AbstractString, script::AbstractString, input::Union{Vecto
         catch; false; end
         return (ok, take!(out))
     end
+    has_delegate() || note_sched_calls!(host, script)
     has_delegate() && return _via(() -> (false, UInt8[]), :io,
                                   (; host = String(host), script = String(script), input = input))
     connect!(host) || return (false, UInt8[])
@@ -1280,6 +1281,18 @@ end
 function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
     connected(s.host) || return false
+    script, read = pull_query(s; dirs)
+    return with_store_lock(() -> read(run_io(String(s.host), script, nothing)...), s.mirror)
+end
+
+"""
+    pull_query(s; dirs) -> (script, read)
+
+`pull_meta!` as a script for the store's host and the function `(ok, output) -> Bool` that brings
+what it printed into the mirror. The caller holds the mirror's lock across both. The script prints
+nothing on stderr, so it can be a part of a `framed` one.
+"""
+function pull_query(s::RemoteStore; dirs = META_DIRS)
     names = _dirlist(dirs)
     # INCREMENTAL. A sweep's `manifests/` holds one file per UNIT, so a poll that tars the whole
     # tree moves tens of megabytes to learn that a handful of results landed — which is what put the
@@ -1303,9 +1316,8 @@ function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     # Compressed over there when this side can inflate it, and when the far side has `gzip`.
     _zlib() === nothing ||
         (tarpart = "{ " * tarpart * "} | if command -v gzip >/dev/null 2>&1; then gzip -c; else cat; fi; ")
-    script = "cd " * shq_path(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; date +%s; " * tarpart
-    with_store_lock(s.mirror) do
-        ok, out = run_io(String(s.host), script, nothing)
+    script = "{ cd " * shq_path(s.root) * " || exit 0; mkdir -p " * names * "; date +%s; " * tarpart * "} 2>/dev/null"
+    return (script, function (ok, out)
         ok || return false
         # The store's time on the first line, the archive after it.
         nl = findfirst(==(UInt8('\n')), out)
@@ -1325,7 +1337,7 @@ function pull_meta!(s::RemoteStore; dirs = META_DIRS)
         _unarchive(data, s.mirror; skip = fresh ? (_ -> false) : hub_owned) || return false
         at === nothing || _pulled!(s, at)
         return true
-    end
+    end)
 end
 
 """
@@ -1337,6 +1349,33 @@ store. What may be DELETED there is `sync_flags`' decision, not this function's.
 function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     isempty(s.host) && return true
     connected(s.host) || return false
+    q = _push_parts(s, dirs)
+    q === nothing && return true
+    ok = _send_archive(String(s.host), q.prefix, q.data, _gzip_bytes(q.data))
+    # Say what the far side said. Callers get a Bool, and a push that fails silently here surfaces
+    # much later as a job that cannot find its own descriptors.
+    ok || @warn "slate: could not push to $(s.host):$(s.root)" dirs = q.present
+    return ok
+end
+
+"""
+    push_query(s; dirs) -> Union{Nothing,NamedTuple}
+
+`push_meta!` as `(; script, input)`, the script to run on the store's host with `input` on its stdin,
+for a caller sending it with other work. `nothing` when there is nothing to send. The archive is
+gzipped when this side can make it, and a far side without `gzip` fails the script.
+"""
+function push_query(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
+    q = _push_parts(s, dirs)
+    q === nothing && return nothing
+    gz = _gzip_bytes(q.data)
+    gz === nothing && return (; script = q.prefix * "tar xf -", input = q.data)
+    return (; script = q.prefix * "t=\$(mktemp) && gzip -dc > \"\$t\" && tar xf \"\$t\"; r=\$?; rm -f \"\$t\"; exit \$r",
+              input = gz)
+end
+
+# The archive of what to send and the shell that unpacks it, which ends ready for the unpack command.
+function _push_parts(s::RemoteStore, dirs)
     # Under the same lock as `pull_meta!`: this READS the mirror to build the archive, and a pull
     # rewriting those directories underneath it would ship a half-replaced tree.
     present, data = with_store_lock(s.mirror) do
@@ -1349,21 +1388,17 @@ function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
         (pres, _archive(s.mirror, p -> (t = first(split(String(p), '/'; keepempty = false));
                                         t in keep && (t != "jobs" || hub_owned(p)))))
     end
-    isempty(present) && return true
+    isempty(present) && return nothing
     # Delete only the hub's own files, by name. `rm -rf jobs/` took the launcher's files with it,
     # which then had to survive by round-tripping through the mirror.
     wipe = String[g for d in present if sync_flags(d, :out)
                     for g in _hub_owned_globs(shq_path(joinpath(s.root, d)))]
     # `tar x` creates with the ambient umask, so it is set for this shell rather than fixed up after.
-    script = (isempty(s.umask) ? "" : "umask " * s.umask * "; ") *
+    prefix = (isempty(s.umask) ? "" : "umask " * s.umask * "; ") *
              "mkdir -p " * shq_path(s.root) *
              (isempty(wipe) ? "" : "; rm -f " * join(wipe, " ")) *
              "; cd " * shq_path(s.root) * " && "
-    ok = _send_archive(String(s.host), script, data, _gzip_bytes(data))
-    # Say what the far side said. Callers get a Bool, and a push that fails silently here surfaces
-    # much later as a job that cannot find its own descriptors.
-    ok || @warn "slate: could not push to $(s.host):$(s.root)" dirs = present
-    return ok
+    return (; prefix, data, present)
 end
 
 """

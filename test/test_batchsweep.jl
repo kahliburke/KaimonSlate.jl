@@ -1281,11 +1281,11 @@ end
                 op in (:connected, :connect) && return true
                 op === :exec && return ((ok, o) = sh(a.script, nothing); (ok, String(o)))
                 op === :io || error("unexpected op :$op")
-                r = sh(a.script, a.input)
+                res = sh(a.script, a.input)
                 if occursin("date +%s", a.script) && (pulls[] += 1) == 1 && !isempty(chunk[])
                     SlateTask.run_chunk(store, chunk[]); landed[] = true
                 end
-                return r
+                return res
             end
             t = Sweep.ClusterTarget("h"; kind = :exec, root_remote = store, chunk = 2,
                                     payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
@@ -1297,7 +1297,9 @@ end
             write(BS.index_path(root, BS.submission_name([c])), c * "\n")
             BS.start!(root, r.run)
             chunk[] = c; pulls[] = 0
-            p = Sweep.reconcile_and_sync!(t, r.run, Sweep.launcher_for(t); submit = true)
+            # Pulled by the caller, so the scheduler is asked after the pull.
+            Sweep.sync_in!(t; force = true)
+            p = Sweep.reconcile_and_sync!(t, r.run, Sweep.launcher_for(t); submit = true, pulled = true)
             @test landed[] && pulls[] >= 2
             @test p.shards_done == 2 && isempty(p.to_submit) && BS.read_attempts(root)[c] == 1
         finally
@@ -1396,6 +1398,71 @@ end
             r = Sweep.@sweep(Sweep.paramgrid(x = 3:4), t; submit = true) do p; p.x; end
             @test first(ops) === :advance && :io in ops
             @test Sweep._descriptors_were_sent(t, r.run)
+        finally
+            Sweep.set_delegate!(nothing)
+        end
+    end
+
+    @testset "several scripts in one round trip come back apart" begin
+        sh(script) = (out = IOBuffer(); ok = success(pipeline(`sh -c $script`; stdout = out)); (ok, take!(out)))
+        bin = "printf '\\000\\001\\nSLATE_PART 0 9\\n'"           # binary, and a line like a header
+        ok, out = sh("echo a login banner; " * BL.framed(["echo one", bin, "echo err >&2; exit 3", "echo four"]))
+        @test ok
+        parts = BL.unframe(out, 4)
+        @test parts[1] == (true, Vector{UInt8}("one\n"))
+        @test parts[2] == (true, UInt8[0x00, 0x01, UInt8('\n'), codeunits("SLATE_PART 0 9\n")...])
+        @test parts[3] == (false, Vector{UInt8}("err\n")) && parts[4] == (true, Vector{UInt8}("four\n"))
+        # With `stop`, nothing runs after a part that failed.
+        ok, out = sh(BL.framed(["exit 1", "touch never"]; stop = true))
+        @test ok && BL.unframe(out, 2) == [(false, UInt8[]), (false, UInt8[])]
+        @test BL.unframe(UInt8[], 1) == [(false, UInt8[])]
+    end
+
+    @testset "a pass asks the scheduler and pulls in one round trip, and launches in one more" begin
+        store = mktempdir()
+        scripts = Tuple{Symbol,String}[]
+        sh(script, input) = (out = IOBuffer();
+                             ok = success(pipeline(`bash -c $script`; stdin = input === nothing ? devnull : IOBuffer(input), stdout = out));
+                             (ok, take!(out)))
+        try
+            Sweep.set_delegate!() do op, a
+                op in (:connected, :connect) && return true
+                sc = String(a.script)
+                push!(scripts, (op, sc))
+                sc = replace(sc, "nohup sh -c" => "nohup true")     # starts nothing
+                op === :exec && return ((ok, o) = sh(sc, nothing); (ok, String(o)))
+                op === :io && return sh(sc, a.input)
+                error("unexpected op :$op")
+            end
+            t = Sweep.ClusterTarget("h"; kind = :exec, root_remote = store, chunk = 2,
+                                    payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; p.x; end
+            root = Sweep.store_root(t)
+            c = only(BS.sweep_chunks(root, r.run))
+            BS.start!(root, r.run)
+            empty!(scripts)
+            Sweep.reconcile_and_sync!(t, r.run, Sweep.launcher_for(t); submit = true)
+            has(sc, w...) = all(x -> occursin(x, sc), w)
+            # The scheduler and the pull, in one script.
+            ask = [sc for (op, sc) in scripts if op === :io && has(sc, "tar cf")]
+            @test length(ask) == 1 && has(ask[1], "SLATE_PART")
+            # The counts and the launch, in one script.
+            go = [sc for (op, sc) in scripts if op === :io && has(sc, "tar x", "nohup")]
+            @test length(go) == 1
+            @test count(((op, sc),) -> occursin("nohup", sc) || occursin("tar x", sc), scripts) == 1
+            @test BS.read_attempts(root)[c] == 1 && BS.read_attempts(store)[c] == 1
+            # A launch that fails on the far side puts the counts back on both sides.
+            BS.write_attempts!(root, Dict{String,Int}()); Sweep.sync_out!(t; dirs = ("jobs",))
+            rm(joinpath(root, "jobs", BS.submission_name([c]) * ".index"); force = true)
+            Sweep.set_delegate!() do op, a
+                op in (:connected, :connect) && return true
+                sc = replace(String(a.script), "nohup sh -c" => "nohup true", "cut -d' '" => "false && cut -d' '")
+                op === :exec && return ((ok, o) = sh(sc, nothing); (ok, String(o)))
+                op === :io && return sh(sc, a.input)
+                error("unexpected op :$op")
+            end
+            @test_throws ErrorException Sweep.reconcile_and_sync!(t, r.run, Sweep.launcher_for(t); submit = true)
+            @test get(BS.read_attempts(root), c, 0) == 0 && get(BS.read_attempts(store), c, 0) == 0
         finally
             Sweep.set_delegate!(nothing)
         end

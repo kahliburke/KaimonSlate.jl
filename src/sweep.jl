@@ -1911,12 +1911,15 @@ function _advance_cluster!(name::AbstractString, t, root::AbstractString, runs)
     # One pull and one question to the scheduler for the whole pass, which every run below decides
     # from. Each run asking for itself held the store's lock for a pull and a poll per run, and a
     # store with many settled runs kept it held for most of every pass.
-    try; sync_in!(t; force = true); catch; return n; end
-    step!("pull")
     remote = t isa ClusterTarget && !isempty(t.host)
-    js = remote ? (try; collect_jobs(t; force = true); catch; nothing; end) : nothing
-    asked = js === nothing ? (;) : (; pulled = true, job_state = js, job_state_at = collected_at(t), lost = collected_lost(t))
-    step!("jobs")
+    try
+        remote ? collect_pull_and_jobs!(t) : sync_in!(t; force = true)
+    catch
+        return n
+    end
+    asked = remote ? (; pulled = true, polled_first = true, job_state = collect_jobs(t),
+                        job_state_at = collected_at(t), lost = collected_lost(t)) : (;)
+    step!("pull and jobs")
     full = _hub_clusters(; only = name)
     isempty(full) || (t = try; _cluster_from(first(full)); catch; t; end)
     step!("resolve")
@@ -2040,50 +2043,87 @@ reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher; submit::
              _reconcile_and_sync!(target, run, launcher; submit, kw...)
 
 function _reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher;
-                              submit::Bool = false, pulled::Bool = false, kw...)
+                              submit::Bool = false, pulled::Bool = false, polled_first::Bool = false, kw...)
+    remote = target isa ClusterTarget && !isempty(target.host)
     # About to decide what to submit, so the mirror is read fresh rather than shared: a cached copy
     # taken on a reader's behalf a moment ago could miss a chunk that has since landed, and the
     # decision this makes is the one that must not be taken twice. `pulled` says the caller has just
-    # pulled for this decision (the supervisor, once for every run it advances).
+    # pulled for this decision (the supervisor, once for every run it advances), and `polled_first`
+    # that it asked the scheduler before it pulled.
+    if submit && remote && !pulled && !haskey(kw, :job_state)
+        collect_pull_and_jobs!(target)
+        kw = (; kw..., job_state = collect_jobs(target), job_state_at = collected_at(target),
+                lost = collected_lost(target))
+        pulled = polled_first = true
+    end
     submit && !pulled && sync_in!(target; force = true)
     target = _as_run(target, run)
     # An environment never tested on this machine's nodes is not sent to them as an array: the card
     # offers Prepare, which runs one task first (`_untested`).
     submit && _untested(target) && (submit = false)
-    descriptors!() = _ensure_descriptors!(target, run) ||
-        error("could not send sweep $(run)'s descriptors to " *
-              "$(target_host(target)):$(job_root(target)) — nothing was submitted")
     root = store_root(target)
     # A chunk submitted again is one whose job has gone without its results in the mirror. The job
-    # writes them before it exits, so the pull above may just have run first. One answer from the
-    # scheduler decides: a chunk it shows gone is pulled for again, which finds its results if the
-    # job wrote them, and the submission is decided on that same answer, so a job that ends between
-    # two questions cannot be launched twice.
-    if submit && target isa ClusterTarget && !isempty(target.host)
+    # writes them before it exits, so a scheduler asked before the pull answers for what the pull
+    # holds. Asked after it, the job may have written them since: a chunk it shows gone is pulled for
+    # again, and the submission is decided on that same answer, so a job that ends between two
+    # questions cannot be launched twice.
+    if submit && remote
         if !haskey(kw, :job_state)
             js = collect_jobs(target; force = true)
             kw = (; kw..., job_state = js, job_state_at = collected_at(target), lost = collected_lost(target))
         end
-        pk = (; (k => v for (k, v) in pairs(kw) if k in (:job_state, :job_state_at, :lost, :failure_policy))...)
-        p0 = BatchSweep.plan(root, run; launcher, pk...)
-        any(c -> get(p0.chunk_attempts, c, 0) > 0, p0.to_submit) && sync_in!(target; force = true)
-        # The descriptors are what a launched job reads its chunk from, so they go out with the
-        # first chunk that does; a run with nothing to launch costs no push.
-        td = time()
-        isempty(p0.to_submit) || descriptors!()
-        time() - td > 1.0 && _hub_log("supervisor: $(run): sending descriptors $(round(time() - td; digits = 1)) s")
-    elseif submit
-        descriptors!()
+        if !polled_first
+            pk = (; (k => v for (k, v) in pairs(kw) if k in (:job_state, :job_state_at, :lost, :failure_policy))...)
+            p0 = BatchSweep.plan(root, run; launcher, pk...)
+            any(c -> get(p0.chunk_attempts, c, 0) > 0, p0.to_submit) && sync_in!(target; force = true)
+        end
     end
     before = BatchSweep.read_attempts(root)
+    # A launch on a cluster takes what it needs from the store with it: the run's descriptors if they
+    # have not gone yet, and the new attempt counts.
+    sent = Ref(false)
+    launch = remote ? ((l, spec) -> _launch_with_store!(target, run, l, spec, sent)) : BatchLauncher.submit!
     t0 = time()
-    p = BatchSweep.reconcile!(root, run, launcher, specfn_for(target); submit, kw...)
+    p = try
+        BatchSweep.reconcile!(root, run, launcher, specfn_for(target); submit, launch, kw...)
+    catch
+        # The launch failed after its counts went out, and `reconcile!` has put them back.
+        sent[] && sync_out!(target; dirs = ("jobs",))
+        rethrow()
+    end
     t1 = time()
-    BatchSweep.read_attempts(root) == before || sync_out!(target; dirs = ("jobs",))
+    (sent[] || BatchSweep.read_attempts(root) == before) || sync_out!(target; dirs = ("jobs",))
     t2 = time()
     t2 - t0 > 2.0 && _hub_log("supervisor: $(run): reconcile $(round(t1 - t0; digits = 1)) s, " *
                               "pushing jobs $(round(t2 - t1; digits = 1)) s")
     return p
+end
+
+# Send what the launch needs from the mirror and start it, in one round trip where the launcher can
+# say its launch as a script. Otherwise, or when that send fails, each goes on its own. `sent` is set
+# once the store holds this launch's attempt counts.
+function _launch_with_store!(t::ClusterTarget, run::AbstractString, l, spec, sent::Ref{Bool})
+    full = !_descriptors_were_sent(t, run)
+    q = BatchLauncher.launch_query(l, spec)
+    pq = q === nothing ? nothing :
+         push_query(remote_store(t); dirs = full ? (META_DIRS..., "blobs") : ("jobs",))
+    if pq !== nothing
+        ok, out = run_io(String(t.host), BatchLauncher.framed([pq.script, q[1]]; stop = true), pq.input)
+        (pushed, _), (launched, lout) = BatchLauncher.unframe(out, 2)
+        if pushed
+            full && _descriptors_sent!(t, run)
+            sent[] = true
+            return q[2](launched, String(lout))
+        end
+        # Cut off before the push reported: whether the launch ran is not known, so it is not tried
+        # again here. The caller puts the counts back and a later pass decides.
+        ok || error("lost $(t.host) while launching $(spec.name)")
+    end
+    _ensure_descriptors!(t, run) ||
+        error("could not send sweep $(run)'s descriptors to $(target_host(t)):$(job_root(t)) — nothing was submitted")
+    id = BatchLauncher.submit!(l, spec)
+    sent[] = sync_out!(t; dirs = ("jobs",))
+    return id
 end
 
 # A change to `jobs/` is only real once it has been pushed. `sync_in!` REPLACES the mirror's copy

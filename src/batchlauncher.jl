@@ -122,6 +122,77 @@ poll_detail(l::Launcher, root::AbstractString, names) =
     (; states = poll(l, root, names), lost = Dict{String,Set{String}}())
 
 """
+    poll_query(launcher, root, names) -> Union{Nothing,Tuple{String,Function}}
+
+`poll_detail` as a shell script for the launcher's host and the function `(ok, output) -> (; states,
+lost)` that reads what it printed, so a caller can run the poll in a round trip it is making anyway.
+`nothing` for a launcher that asks no remote host.
+"""
+poll_query(::Launcher, ::AbstractString, names) = nothing
+
+"""
+    launch_query(launcher, spec) -> Union{Nothing,Tuple{String,Function}}
+
+`submit!` as a shell script for the launcher's host and the function `(ok, output) -> id` that reads
+what it printed, throwing when the submission failed. `nothing` for a launcher that starts nothing
+on a remote host.
+"""
+launch_query(::Launcher, ::JobSpec) = nothing
+
+_ask(run, (script, read)) = ((ok, out) = run(script); read(ok, String(out)))
+
+# ── Several scripts in one round trip ────────────────────────────────────────────────────────
+# Each part runs in its own subshell and its output comes back length-prefixed behind a header with
+# its exit status, so the parts' outputs (an archive among them) are read apart.
+const _FRAME = "SLATE_PART"
+
+"""
+    framed(parts; stop = false) -> String
+
+One script running each of `parts` in turn. With `stop`, a part that fails ends the script and the
+parts after it do not run. A part's stderr is part of its output, so a part whose output must stay
+clean sends its own elsewhere.
+"""
+function framed(parts; stop::Bool = false)
+    io = IOBuffer()
+    for p in parts
+        print(io, "T=\$(mktemp) || exit 1\n(\n", p, "\n) > \"\$T\" 2>&1; s=\$?\n",
+              "printf '", _FRAME, " %d %d\\n' \$s \$(wc -c < \"\$T\")\ncat \"\$T\"; rm -f \"\$T\"\n")
+        stop && print(io, "[ \$s -eq 0 ] || exit 0\n")
+    end
+    print(io, "exit 0\n")
+    return String(take!(io))
+end
+
+"""
+    unframe(out, n) -> Vector{Tuple{Bool,Vector{UInt8}}}
+
+The `n` parts of a `framed` script's output, each as `(succeeded, output)`. A part that did not
+run, or whose output was cut short, reads as failed with no output.
+"""
+function unframe(out::Union{AbstractVector{UInt8},AbstractString}, n::Integer)
+    b = out isa AbstractString ? Vector{UInt8}(codeunits(out)) : out
+    res = Tuple{Bool,Vector{UInt8}}[]
+    # Whatever a login shell printed comes before the first header.
+    r = findfirst(codeunits(_FRAME * " "), b)
+    i = r === nothing ? length(b) + 1 : first(r)
+    while length(res) < n
+        nl = findnext(==(UInt8('\n')), b, i)
+        nl === nothing && break
+        h = split(String(b[i:nl-1]))
+        (length(h) == 3 && h[1] == _FRAME) || break
+        s, len = tryparse(Int, h[2]), tryparse(Int, h[3])
+        (s === nothing || len === nothing || nl + len > length(b)) && break
+        push!(res, (s == 0, b[nl+1:nl+len]))
+        i = nl + len + 1
+    end
+    while length(res) < n
+        push!(res, (false, UInt8[]))
+    end
+    return res
+end
+
+"""
     cancel!(launcher, names) -> Int
 
 Cancel anything live under these names. Returns how many names were acted on.
@@ -412,16 +483,15 @@ end
 
 function submit!(l::ExecLauncher, spec::JobSpec)
     isempty(spec.chunks) && return ""
+    _remote(l) && return _ask(sc -> _there(l, sc), launch_query(l, spec))
     slices = _deal(spec.chunks, l.maxproc)
     # A hint from THIS machine's memory, which is the right answer only when the work runs here.
     # A remote box is sized by whoever configured it, so nothing is imposed on it.
-    heap = _remote(l) ? "" : _local_heap_hint(length(slices))
+    heap = _local_heap_hint(length(slices))
     # Each launch names its files apart, as a scheduler's job id does, so a retry of the same
     # submission keeps the output of the attempt before it.
     launch = string(round(Int, time() * 1000))
-    pids = _remote(l) ? _exec_start_there(l, spec, slices, heap, launch) :
-                        _exec_start_here(spec, slices, heap, launch)
-    return join(pids, ",")
+    return join(_exec_start_here(spec, slices, heap, launch), ",")
 end
 
 function _exec_start_here(spec::JobSpec, slices, heap, launch)
@@ -463,7 +533,13 @@ end
 #
 # The pid file is written ON THE FAR SIDE, where the pids mean something — the same place `poll`
 # and `cancel!` read it from. A pid is only meaningful to the kernel that issued it.
-function _exec_start_there(l::ExecLauncher, spec::JobSpec, slices, heap, launch)
+function launch_query(l::ExecLauncher, spec::JobSpec)
+    _remote(l) || return nothing
+    isempty(spec.chunks) && return (":", (ok, out) -> "")
+    slices = _deal(spec.chunks, l.maxproc)
+    # Each launch names its files apart, as a scheduler's job id does, so a retry of the same
+    # submission keeps the output of the attempt before it.
+    launch = string(round(Int, time() * 1000))
     # The log files are created by THIS shell's redirection, not by the task process, so the umask
     # has to be set here as well as inside `task_command`.
     pf = _shq(_jobfile(spec.root, spec.name))
@@ -471,15 +547,15 @@ function _exec_start_there(l::ExecLauncher, spec::JobSpec, slices, heap, launch)
              "mkdir -p $(_shq(_jobdir(spec.root))) $(_shq(spec.logdir))", ": > $pf.tmp"]
     for (i, slice) in enumerate(slices)
         logf = joinpath(spec.logdir, "$(spec.name).$(launch)_$(i).log")
-        push!(lines, "nohup sh -c $(_shq(task_command(spec, slice; heap = heap))) " *
+        push!(lines, "nohup sh -c $(_shq(task_command(spec, slice; heap = ""))) " *
                      "> $(_shq(logf)) 2>&1 < /dev/null &")
         push!(lines, "printf '%s %s\\n' \$! $(_shq(join(slice, " "))) >> $pf.tmp")
     end
     push!(lines, "mv $pf.tmp $pf")
     push!(lines, "cut -d' ' -f1 $pf")
-    ok, out = _there(l, join(lines, "\n"))
-    ok || error("could not start work on $(l.host): " * first(strip(String(out)), 300))
-    return [something(tryparse(Int, s), 0) for s in split(String(out); keepempty = false)]
+    read(ok, out) = (ok || error("could not start work on $(l.host): " * first(strip(out), 300));
+                     join((something(tryparse(Int, s), 0) for s in split(out; keepempty = false)), ","))
+    return (join(lines, "\n"), read)
 end
 
 """
@@ -513,7 +589,11 @@ _unreachable(names) = Dict{String,Symbol}(String(n) => :unreachable for n in nam
 poll(l::ExecLauncher, root::AbstractString, names) = poll_detail(l, root, names).states
 
 function poll_detail(l::ExecLauncher, root::AbstractString, names)
-    procs = _remote(l) ? _exec_probe_there(l, root, names) : _exec_probe_here(l, root, names)
+    _remote(l) && return _ask(sc -> _there(l, sc), poll_query(l, root, names))
+    return _exec_states(names, _exec_probe_here(l, root, names))
+end
+
+function _exec_states(names, procs)
     states = Dict{String,Symbol}(String(n) => :unknown for n in names)
     lost = Dict{String,Set{String}}()
     for (name, ps) in procs
@@ -542,9 +622,9 @@ end
 # submissions and the answer has to cost one call, not one call each. `kill -0` is the far side's
 # `_alive`: it signals nothing and only asks whether the pid is still there. One line back per
 # process: name, 1 or 0, then its chunks.
-function _exec_probe_there(l::ExecLauncher, root, names)
-    isempty(names) && return Dict{String,Any}()
-    lines = String[]
+function poll_query(l::ExecLauncher, root::AbstractString, names)
+    _remote(l) || return nothing
+    lines = String[":"]
     for name in names
         f = _procfile(l, root, name)
         push!(lines, "if [ -f $(_shq(f)) ]; then while read p rest; do [ -n \"\$p\" ] || continue; " *
@@ -552,10 +632,13 @@ function _exec_probe_there(l::ExecLauncher, root, names)
                      "printf '%s\\t%s\\t%s\\n' $(_shq(String(name))) \$a \"\$rest\"; " *
                      "done < $(_shq(f)); fi")
     end
-    ok, txt = _there(l, join(lines, "\n"))
+    return (join(lines, "\n"), (ok, txt) -> _exec_states(names, _exec_probe_read(names, ok, txt)))
+end
+
+function _exec_probe_read(names, ok::Bool, txt::AbstractString)
     ok || return Dict{String,Any}(String(n) => :unreachable for n in names)
     out = Dict{String,Any}()
-    for line in eachsplit(String(txt), '\n'; keepempty = false)
+    for line in eachsplit(txt, '\n'; keepempty = false)
         parts = split(line, '\t'); length(parts) == 3 || continue
         ps = get!(() -> _Proc[], out, String(strip(parts[1])))
         push!(ps, (; alive = strip(parts[2]) == "1", chunks = String.(split(parts[3]))))
@@ -1103,8 +1186,8 @@ _index_file(spec::JobSpec) = joinpath(spec.root, "jobs", spec.name * ".index")
 # Write a sweep's index and its batch script (`<index>.<ext>`) on the far side, then run `submit`,
 # which prints the job id last. Heredocs keep it to one ssh round trip and avoid quoting the script
 # through two shells. `what` names the submit command in the error.
-function _stage_and_submit(l, spec::JobSpec, script::AbstractString, ext::AbstractString,
-                           submit::AbstractString, what::AbstractString)
+function _stage_query(l, spec::JobSpec, script::AbstractString, ext::AbstractString,
+                      submit::AbstractString, what::AbstractString)
     indexfile = _index_file(spec)
     payload = """
     set -e
@@ -1116,16 +1199,19 @@ function _stage_and_submit(l, spec::JobSpec, script::AbstractString, ext::Abstra
     $(script)SLATE_SCRIPT_EOF
     $(submit)
     """
-    ok, out = _ssh(l, payload)
-    ok || error("$what failed on $(l.host): $(strip(out))")
-    return String(strip(split(strip(out), '\n')[end]))
+    read(ok, out) = (ok || error("$what failed on $(l.host): $(strip(out))");
+                     String(strip(split(strip(out), '\n')[end])))
+    return (payload, read)
 end
 
-function submit!(l::SlurmLauncher, spec::JobSpec)
-    isempty(spec.chunks) && return ""
+function launch_query(l::SlurmLauncher, spec::JobSpec)
+    isempty(spec.chunks) && return (":", (ok, out) -> "")
     f = _index_file(spec)
-    return _stage_and_submit(l, spec, _sbatch_script(l, spec, f), "sbatch", "sbatch --parsable $(f).sbatch", "sbatch")
+    return _stage_query(l, spec, _sbatch_script(l, spec, f), "sbatch", "sbatch --parsable $(f).sbatch", "sbatch")
 end
+
+submit!(l::SlurmLauncher, spec::JobSpec) =
+    isempty(spec.chunks) ? "" : _ask(sc -> _ssh(l, sc), launch_query(l, spec))
 
 # How many job names go into one scheduler query. Long enough that an ordinary sweep is one call,
 # short enough that a failure loses a slice of the answer rather than all of it.
@@ -1155,21 +1241,32 @@ function _array_count(id::AbstractString)
     return max(n, 1)
 end
 
-function poll(l::SlurmLauncher, root::AbstractString, names)
+poll(l::SlurmLauncher, root::AbstractString, names) = poll_detail(l, root, names).states
+poll_detail(l::SlurmLauncher, root::AbstractString, names) =
+    isempty(names) ? (; states = Dict{String,Symbol}(), lost = Dict{String,Set{String}}()) :
+    _ask(sc -> _ssh(l, sc), poll_query(l, root, names))
+
+# squeue lists only live jobs, so anything absent stays :unknown and the store decides whether that
+# means finished or lost.
+#
+# BATCHED, and a failed batch costs only its own names. One call naming every job put the whole
+# sweep's liveness on a single command: a slow or refused `squeue` dropped every chunk to :unknown at
+# once, and the next poll brought them all back, so the grid flashed in blocks. The batches are parts
+# of one script, so the poll is still one round trip.
+function poll_query(l::SlurmLauncher, root::AbstractString, names)
     ns = String.(collect(names))
-    isempty(ns) && return Dict{String,Symbol}()
+    batches = collect(Iterators.partition(ns, _POLL_NAMES))
+    script = framed(["squeue -h -u \"\$USER\" -o '%j|%T|%i|%r|%S|%N|%M|%L' --name=$(join(part, ','))"
+                     for part in batches])
+    return (script, (ok, txt) -> _squeue_read(ns, batches, unframe(txt, length(batches)), ok))
+end
+
+function _squeue_read(ns, batches, frames, answered::Bool)
     out = Dict{String,Symbol}(n => :unknown for n in ns)
     seen = Dict{String,Dict{String,Any}}()
-    # squeue lists only live jobs, so anything absent stays :unknown and the store decides whether
-    # that means finished or lost.
-    #
-    # BATCHED, and a failed batch costs only its own names. One call naming every job put the whole
-    # sweep's liveness on a single command: a slow or refused `squeue` dropped every chunk to
-    # :unknown at once, and the next poll brought them all back, so the grid flashed in blocks.
-    for part in Iterators.partition(ns, _POLL_NAMES)
-        ok, txt = (_ssh(l, "squeue -h -u \"\$USER\" -o '%j|%T|%i|%r|%S|%N|%M|%L' --name=$(join(part, ','))"))
-        ok || (foreach(n -> out[n] = :unreachable, part); continue)
-        for line in split(txt, '\n'; keepempty = false)
+    for (part, (ok, bytes)) in zip(batches, frames)
+        (answered && ok) || (foreach(n -> out[n] = :unreachable, part); continue)
+        for line in split(String(bytes), '\n'; keepempty = false)
             # `|`-separated as asked for; a bare `name STATE` from an older or stand-in squeue still reads.
             parts = occursin('|', line) ? split(strip(line), '|') : split(strip(line))
             length(parts) >= 2 || continue
@@ -1207,7 +1304,7 @@ function poll(l::SlurmLauncher, root::AbstractString, names)
             haskey(seen, n) ? (_JOB_DETAILS[n] = seen[n]) : delete!(_JOB_DETAILS, n)
         end
     end
-    return out
+    return (; states = out, lost = Dict{String,Set{String}}())
 end
 
 # ONE scancel per name. `--name` takes a single job name: `scancel --name=a,b` matches nothing and
@@ -1629,8 +1726,11 @@ function _pbs_script(l::PbsLauncher, spec::JobSpec, indexfile::AbstractString)
     return join(lines, "\n") * "\n"
 end
 
-function submit!(l::PbsLauncher, spec::JobSpec)
-    isempty(spec.chunks) && return ""
+submit!(l::PbsLauncher, spec::JobSpec) =
+    isempty(spec.chunks) ? "" : _ask(sc -> _ssh(l, sc), launch_query(l, spec))
+
+function launch_query(l::PbsLauncher, spec::JobSpec)
+    isempty(spec.chunks) && return (":", (ok, out) -> "")
     f = _index_file(spec)
     # The `qselect` guard is what `--dependency=singleton` does on SLURM: the hub can restart, or two
     # notebooks can reconcile the same sweep, and the name is content-derived either way. Without it
@@ -1641,8 +1741,8 @@ function submit!(l::PbsLauncher, spec::JobSpec)
       exit 0
     fi
     qsub $(f).pbs"""
-    id = _stage_and_submit(l, spec, _pbs_script(l, spec, f), "pbs", submit, "qsub")
-    return id == "SLATE_ALREADY" ? "" : id
+    script, read = _stage_query(l, spec, _pbs_script(l, spec, f), "pbs", submit, "qsub")
+    return (script, (ok, out) -> (id = read(ok, out); id == "SLATE_ALREADY" ? "" : id))
 end
 
 # One `qstat -f` for the user's jobs, parsed by name. PBS has no `--name` filter, and asking per name
@@ -1676,11 +1776,16 @@ _pbs_state(s::AbstractString) =
     s in ("R", "B", "E") ? :running :
     s in ("Q", "H", "W", "T", "S", "M") ? :pending : :unknown
 
-function poll(l::PbsLauncher, root::AbstractString, names)
-    ns = String.(collect(names))
-    isempty(ns) && return Dict{String,Symbol}()
+poll(l::PbsLauncher, root::AbstractString, names) = poll_detail(l, root, names).states
+poll_detail(l::PbsLauncher, root::AbstractString, names) =
+    isempty(names) ? (; states = Dict{String,Symbol}(), lost = Dict{String,Set{String}}()) :
+    _ask(sc -> _ssh(l, sc), poll_query(l, root, names))
+
+poll_query(l::PbsLauncher, root::AbstractString, names) =
+    (_PBS_POLL, (ok, txt) -> (; states = _qstat_read(String.(collect(names)), ok, txt), lost = Dict{String,Set{String}}()))
+
+function _qstat_read(ns, ok::Bool, txt::AbstractString)
     out = Dict{String,Symbol}(n => :unknown for n in ns)
-    ok, txt = (_ssh(l, _PBS_POLL))
     ok || return _unreachable(ns)
     for line in split(txt, '\n'; keepempty = false)
         parts = split(strip(line))
