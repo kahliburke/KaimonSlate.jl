@@ -6121,8 +6121,10 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # cannot be sliced; the dataset says how many, rather than quietly omitting them.
     lazy = lazy || attr_lazy(attrs)
     # What has landed since last time. For a remote cluster this is the one round trip that makes
-    # every manifest read below local; for a local target it is a no-op.
-    sync_in!(target)
+    # every manifest read below local; for a local target it is a no-op. A run about to be submitted
+    # reads the store fresh here, once, for this and for the submission below.
+    going = submit && _reachable(target)
+    sync_in!(target; force = going)
     root = store_root(target)
     mkpath(root)
     key = sweep_key(body_src, setup_src, captures, env_key(target), summary_src)
@@ -6198,7 +6200,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # nobody asked for again. Starting says the work was wanted; it does not say this call should
     # start it. The card's poll advances a started sweep, which is where watching belongs.
     submit && BatchSweep.start!(root, run)
-    reconcile_and_sync!(target, run, launcher; cap, submit = submit && _reachable(target),
+    reconcile_and_sync!(target, run, launcher; cap, submit = going, pulled = going,
                         failure_policy = sweep_policy(target))
     return _attach(target, run, key, params, keys; launcher, plot, register, refresh,
                    cell = String(cell))
