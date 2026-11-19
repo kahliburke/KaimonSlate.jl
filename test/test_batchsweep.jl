@@ -1234,6 +1234,40 @@ end
         end
     end
 
+    @testset "a remote mirror takes what changed since the last pull it finished" begin
+        store = mktempdir(); mirror = mktempdir()
+        for d in Sweep.META_DIRS; mkpath(joinpath(store, d)); end
+        s = Sweep.RemoteStore("h", store, mirror, "")
+        fail = Ref(false)
+        try
+            # The far side is this machine: the pull's own script, run here.
+            Sweep.set_delegate!() do op, a
+                op in (:connected, :connect) && return true
+                op === :io || error("unexpected op :$op")
+                fail[] && return (false, UInt8[])
+                return (true, read(`bash -c $(a.script)`))
+            end
+            for (d, f) in (("events", "e1"), ("manifests", "m1"), ("jobs", "j1"))
+                write(joinpath(store, d, f), "a")
+            end
+            @test Sweep.pull_meta!(s)                        # nothing here yet: everything
+            @test isfile(joinpath(mirror, "events", "e1")) && Sweep._pulled_at(s) !== nothing
+            # What changed since is sent; what is older than the last pull, less its overlap, is not.
+            old = joinpath(store, "events", "e0"); write(old, "x"); run(`touch -t 202601010000 $old`)
+            write(joinpath(store, "events", "e2"), "b")
+            @test Sweep.pull_meta!(s)
+            @test isfile(joinpath(mirror, "events", "e2")) && !isfile(joinpath(mirror, "events", "e0"))
+            # A pull that fails records nothing, so what it would have brought comes with the next.
+            at = Sweep._pulled_at(s)
+            fail[] = true; write(joinpath(store, "events", "e3"), "c")
+            @test !Sweep.pull_meta!(s) && Sweep._pulled_at(s) == at
+            fail[] = false
+            @test Sweep.pull_meta!(s) && isfile(joinpath(mirror, "events", "e3"))
+        finally
+            Sweep.set_delegate!(nothing)
+        end
+    end
+
     @testset "two submitters at once launch a chunk once" begin
         # A card's poll and the hub's supervisor both submit for a started run.
         mktempdir() do root
@@ -3233,6 +3267,7 @@ end
             @test !occursin("data-sw='chart'", hosted) && occursin("data-sw-allow='logs'", hosted)
             @test occursin("data-sw-do='reset'", html) && !occursin("data-sw-do='reset'", hosted)
             @test occursin("advance: false", hosted) && occursin("var hosted = true", hosted)
+            @test occursin("window.slateSweeps && !hosted", hosted)
         end
     end
 

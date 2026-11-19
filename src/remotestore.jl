@@ -1248,6 +1248,20 @@ function with_store_lock(f, mirror::AbstractString)
     end
 end
 
+# Where an incremental pull starts: the store's clock when the last finished pull began, less this.
+# What was written while a pull ran, or on a node whose clock trails the store's, is sent again
+# rather than missed; extracting a file twice changes nothing.
+const PULL_OVERLAP_S = 30
+
+# The mirror's own record of that point, written only once a pull's files are in the mirror.
+_pulled_file(s) = joinpath(s.mirror, ".pulled")
+_pulled_at(s) = (p = _pulled_file(s); isfile(p) ? tryparse(Int, strip(read(p, String))) : nothing)
+function _pulled!(s, at::Integer)
+    p = _pulled_file(s); tmp = p * ".tmp"
+    write(tmp, string(at)); mv(tmp, p; force = true)
+    return nothing
+end
+
 "Bring the local mirror up to date with the store's metadata. One round trip."
 function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
@@ -1257,29 +1271,28 @@ function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     # tree moves tens of megabytes to learn that a handful of results landed — which is what put the
     # card's poll past its deadline on a sweep of a few thousand units.
     #
-    # The watermark is the STORE's own clock, never this machine's: a stamp file over there, and
-    # `find -newer` against it. The new stamp is laid down BEFORE the walk and promoted after, so a
-    # file written during the transfer is newer than the stamp it will be compared to next time and
-    # cannot fall through the gap. No stamp yet means take everything, which is also the recovery
-    # path for a mirror that has lost its copy.
-    # The HUB decides whether it needs everything. The stamp lives on the store, so a mirror that
-    # has been wiped while the stamp survived would otherwise ask for "what changed" and be told
-    # nothing, leaving it empty for good.
+    # The watermark is the STORE's own clock, never this machine's, and it is the MIRROR's to keep:
+    # the store prints its time before it lists, and the mirror records it once the files are in. A
+    # pull that fails records nothing, and pulls into one mirror at once each record only a time their
+    # own listing covered, so neither can skip a file. A mirror with no record, or with an empty
+    # directory, takes everything.
     full = any(d -> (p = joinpath(s.mirror, String(d)); !isdir(p) || isempty(readdir(p))), dirs)
-    tarpart = full ? "tar cf - " * names * "; " :
-              "if [ -f .pullstamp ]; then " *
-                  "find " * names * " -type f -newer .pullstamp > .pulllist 2>/dev/null || true; " *
-                  "if [ -s .pulllist ]; then tar cf - -T .pulllist; fi; rm -f .pulllist; " *
-              "else tar cf - " * names * "; fi; "
+    since = full ? nothing : _pulled_at(s)
+    tarpart = since === nothing ? "tar cf - " * names * "; " :
+              "L=\$(mktemp) && { find " * names * " -type f -newermt @" * string(since - PULL_OVERLAP_S) *
+              " > \"\$L\" 2>/dev/null || find " * names * " -type f > \"\$L\"; }; " *
+              "if [ -s \"\$L\" ]; then tar cf - -T \"\$L\"; fi; rm -f \"\$L\"; "
     # Compressed over there when this side can inflate it, and when the far side has `gzip`.
     _zlib() === nothing ||
         (tarpart = "{ " * tarpart * "} | if command -v gzip >/dev/null 2>&1; then gzip -c; else cat; fi; ")
-    script = "cd " * shq_path(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; " *
-             "touch .pullstamp.new; " * tarpart * "mv .pullstamp.new .pullstamp"
+    script = "cd " * shq_path(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; date +%s; " * tarpart
     with_store_lock(s.mirror) do
-        ok, data = run_io(String(s.host), script, nothing)
+        ok, out = run_io(String(s.host), script, nothing)
         ok || return false
-        data = _gunzip_if(data)
+        # The store's time on the first line, the archive after it.
+        nl = findfirst(==(UInt8('\n')), out)
+        at = nl === nothing ? nothing : tryparse(Int, String(out[1:nl-1]))
+        data = _gunzip_if(at === nothing ? out : out[nl+1:end])
         # Merged, never replaced. `_unarchive` copies over the top, so what the store has wins
         # per file and what only exists here survives to be pushed.
         #
@@ -1291,7 +1304,9 @@ function pull_meta!(s::RemoteStore; dirs = META_DIRS)
         for d in dirs
             mkpath(joinpath(s.mirror, String(d)))
         end
-        return _unarchive(data, s.mirror; skip = fresh ? (_ -> false) : hub_owned)
+        _unarchive(data, s.mirror; skip = fresh ? (_ -> false) : hub_owned) || return false
+        at === nothing || _pulled!(s, at)
+        return true
     end
 end
 
