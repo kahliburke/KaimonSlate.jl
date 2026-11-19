@@ -1262,12 +1262,13 @@ end
 
 # Each file follows a line of its own that starts with an ASCII record separator, which a log does
 # not otherwise contain. `tail`'s `==> f <==` headers would serve, but only from the second file on,
-# and a file whose content looks like one would split wrongly.
+# and a file whose content looks like one would split wrongly. A missing file reads as empty; the
+# `|| :` keeps its `tail` from becoming the loop's exit status.
 function _remote_log_tails(runner, paths::AbstractVector, lines)
     out = Dict{String,String}(String(p) => "" for p in paths)
     for part in Iterators.partition(collect(String, paths), 150)
         ok, txt = runner("for f in " * join(_shq.(part), " ") * "; do printf '\\036%s\\n' \"\$f\"; " *
-                         "tail -n $(Int(lines)) -- \"\$f\" 2>/dev/null; done")
+                         "tail -n $(Int(lines)) -- \"\$f\" 2>/dev/null || :; done")
         ok || error("could not read job output on the far side: " * first(strip(String(txt)), 200))
         for rec in eachsplit(String(txt), '\x1e'; keepempty = false)
             nl = findfirst('\n', rec)
