@@ -27,7 +27,7 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Tar = "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e"
 
 [compat]
-DedicatedThreads = "0.1"
+DedicatedThreads = "0.1, 0.2"
 ExpressionExplorer = "1.1.4"
 KaimonGate = "1.4"
 SlateExtensionsBase = "0.11.2"
