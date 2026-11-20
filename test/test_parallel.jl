@@ -72,6 +72,7 @@ cell(src) = RE.Cell("c", RE.CODE, src)
               "#%% md id=prose\n## a heading\n" *
               "#%% job id=vol\nvolume = @sweep(paramgrid(z = zs)) do p\n    p.z\nend\n" *
               "#%% code id=plot\nframes = collect(volume)\n" *
+              "#%% md id=report\nThe sweep covered {{ length(frames) }} frames.\n" *
               "#%% tool id=call\n@tool deploy()\n"
         r = RE.parse_report(src)
         foreach(RE.infer_bindings!, r.cells)
@@ -79,12 +80,15 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         for c in r.cells; c.state = RE.STALE; end
 
         ids = [c.id for c in NS._batch_cells(r.cells)]
-        @test ids == ["grid", "vol", "plot"]        # markdown renders serially, a tool never auto-runs
+        @test ids == ["grid", "prose", "vol", "plot", "report"]   # a tool never auto-runs
 
         # …and with the sweep present, the reader is ordered behind it.
         bl = NS.par_blockers(NS._batch_specs(NS._batch_cells(r.cells)))
         @test "vol" in bl["plot"]
         @test !NS.co_runnable(["vol", "plot"], bl)
+        # Prose renders as soon as what it interpolates is done: static prose waits on nothing.
+        @test isempty(bl["prose"])
+        @test "plot" in bl["report"] && !("vol" in bl["report"])
 
         # The regression itself: drop the sweep (the old CODE-only filter) and the ordering vanishes.
         codeonly = [c for c in r.cells if c.kind == RE.CODE && c.state == RE.STALE]

@@ -5629,11 +5629,11 @@ end
 # a plot downstream of a sweep raised `UndefVarError` on every cold open, then worked when re-run by
 # hand, because by then its producer had run in the serial pass.
 #
-# MARKDOWN is excluded because the serial path renders it (static prose first, interpolating prose
-# after its deps); TOOL because it never runs automatically, so deferring its readers would strand
+# Markdown is in the batch so each prose cell renders as soon as the cells it interpolates from are
+# done. TOOL is excluded because it never runs automatically, so deferring its readers would strand
 # them rather than order them.
-_batch_cells(cells) = [c for c in cells if c.state == STALE && c.run === nothing && evaluates(c.kind) &&
-                       runs_automatically(c.kind)]
+_batch_cells(cells) = [c for c in cells if c.state == STALE && c.run === nothing && runs_automatically(c.kind) &&
+                       (evaluates(c.kind) || is_prose(c.kind))]
 
 # Build the parallel-batch scheduler specs for the cells about to run (document order). Plotting cells share
 # Makie's non-thread-safe globals (theme / current-figure / display stack), invisible to dataflow
@@ -5646,6 +5646,10 @@ function _batch_specs(code)
     # the provenance half catches aliased/re-exported plot verbs the regex can't (crash-on-miss).
     gnames = ReportEngine._graphics_export_names()
     for c in code
+        if is_prose(c.kind)   # writes nothing and draws nothing: ordered by what it reads alone
+            push!(specs, ParCell(c.id, copy(c.deps), copy(c.reads), Set{Symbol}(), false))
+            continue
+        end
         w = copy(c.writes)
         ReportEngine._is_graphics_cell(c, gnames) && push!(w, _GRAPHICS_SENTINEL)
         push!(specs, ParCell(c.id, copy(c.deps), copy(c.reads), w, (:opaque in c.flags) || _cell_defines(c)))
@@ -5653,7 +5657,7 @@ function _batch_specs(code)
     return specs
 end
 
-# Run every stale CODE cell as a PARALLEL dataflow batch. Independent cells evaluate CONCURRENTLY —
+# Run every stale cell that runs automatically as a PARALLEL dataflow batch. Independent cells evaluate CONCURRENTLY —
 # each on its own task making its own gate `__slate_eval` call (the request channel muxes them by
 # correlation id; each runs on its own worker task with task-local DemuxCapture) — while par_blockers
 # serialises any dependent/conflicting pair. Each cell goes through the SAME `_eval_one!` as the serial
