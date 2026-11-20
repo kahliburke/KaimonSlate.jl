@@ -1373,7 +1373,7 @@ end
     @testset "a worker hands a launch to the hub without pulling or sending first" begin
         # The hub's pass pulls the store and sends the run's descriptors from the mirror both share.
         store = mktempdir()
-        ops = Symbol[]; hub = Ref(true)
+        ops = Symbol[]; hub = Ref(true); asked = Float64[]
         sh(script, input) = (out = IOBuffer();
                              ok = success(pipeline(`bash -c $script`; stdin = input === nothing ? devnull : IOBuffer(input), stdout = out));
                              (ok, take!(out)))
@@ -1381,7 +1381,7 @@ end
             Sweep.set_delegate!() do op, a
                 op in (:connected, :connect) && return true
                 push!(ops, op)
-                op === :advance && return hub[]
+                op === :advance && (push!(asked, a.since); return hub[])
                 op === :exec && return ((ok, o) = sh(a.script, nothing); (ok, String(o)))
                 op === :io && return sh(a.script, a.input)
                 error("unexpected op :$op")
@@ -1389,9 +1389,11 @@ end
             t = Sweep.ClusterTarget("h"; kind = :exec, root_remote = store, chunk = 2,
                                     payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
             Sweep.@sweep(Sweep.paramgrid(x = 0:1), t; submit = false) do p; p.x; end   # what the host is, once
-            empty!(ops)
+            empty!(ops); t0 = time()
             r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = true) do p; p.x; end
             @test ops == [:advance]
+            @test only(asked) >= t0                 # a send needs a pass that starts after it
+            @test Sweep._hub_advance!(t; since = 5.0) && last(asked) == 5.0   # a read takes an earlier one
             @test BS.is_started(Sweep.store_root(t), r.run)
             # No hub keeps this cluster: the worker pulls, sends and launches for itself.
             empty!(ops); hub[] = false

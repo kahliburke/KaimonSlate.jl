@@ -1891,11 +1891,14 @@ end
 # A worker on the hub's machine shares the hub's mirror of a cluster's store, so it asks the hub to
 # advance the store rather than pulling and asking the scheduler for itself. False where there is no
 # hub to ask, or the hub keeps no cluster with this store; the caller then advances the run here.
+# The hub's pass has to start at or after `since`: now, for a caller that has just written to the
+# store, and the end of its previous read for one that only reads, so a pass already under way since
+# then serves it.
 _hub_advances(t::SweepTarget) = has_delegate() && t isa ClusterTarget && !isempty(t.host)
-function _hub_advance!(t::SweepTarget)
+function _hub_advance!(t::SweepTarget; since::Real = time())
     _hub_advances(t) || return false
     r = try
-        _DELEGATE[](:advance, (; root = store_root(t), since = time(), machine = gethostname()))
+        _DELEGATE[](:advance, (; root = store_root(t), since = Float64(since), machine = gethostname()))
     catch e
         @debug "slate: the hub could not advance a store" exception = e
         nothing
