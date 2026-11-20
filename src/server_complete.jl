@@ -4772,6 +4772,7 @@ function stop_hub(h::Hub)
         try; shutdown!(nb.kernel; wait = false); catch; end
         _teardown_region!(nb; wait = false)
     end
+    try; ReportEngine.term_pending_exits!(); catch; end   # the reaper stops with the supervisor below
     _stop_run_supervisor!()          # its closure holds THIS hub — see `_ensure_run_supervisor!`
     h.server === nothing || close(h.server)
     return nothing

@@ -3610,10 +3610,14 @@ _xfer_executor_task() = try; _xfer_executor!(); catch e
     @warn "slate worker: transfer executor died" exception = e
 end
 
+# Process exit closes every libuv handle, so a task asleep in `sleep` wakes with an EOFError from its
+# closed timer. That is the loop ending with the process, not a failure.
+_closed_at_exit(e) = e isa EOFError
+
 _ssh_fwd_reaper() = try
     while true; sleep(30); _ssh_fwd_reap_idle!(); end
 catch e
-    @warn "slate worker: ssh-forward reaper died" exception = e
+    _closed_at_exit(e) || @warn "slate worker: ssh-forward reaper died" exception = e
 end
 
 # Prewarm the eval path: the package image holds most of what the first run through
@@ -3664,7 +3668,7 @@ _prepare_env_task() = try; with_env_work(_prepare_env!); catch e
 end
 
 _telemetry_task(stats_path::String) = try; _telemetry_loop!(stats_path); catch e
-    @warn "slate worker: telemetry sampler died" exception = e
+    _closed_at_exit(e) || @warn "slate worker: telemetry sampler died" exception = e
 end
 
 # The worker log's logger: timestamps every record (the default logger emits none), on the stream

@@ -77,6 +77,7 @@ module Frontmatter; include("test_frontmatter.jl"); end
 module Export;    include("test_export.jl");    end
 module DocBundle; include("test_docbundle.jl"); end
 module Bootfail;  include("test_bootfail.jl");  end
+module Reaper;    include("test_reaper.jl");    end
 module Publishing; include("test_publishing.jl"); end
 module App;       include("test_app.jl");       end
 module AppMode;   include("test_appmode.jl");   end
