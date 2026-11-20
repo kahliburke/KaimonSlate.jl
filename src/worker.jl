@@ -3620,6 +3620,19 @@ catch e
     _closed_at_exit(e) || @warn "slate worker: ssh-forward reaper died" exception = e
 end
 
+# The gate's shutdown hook: the hub asked this worker to exit. Julia's atexit hooks run and output is
+# flushed, then the process ends without the C runtime's exit teardown. Threads still inside native
+# code segfault when that teardown frees what they are running.
+function _exit_on_shutdown()
+    try; Base._atexit(Cint(0)); catch; end
+    try; flush(stdout); flush(stderr); catch; end
+    @static if Sys.iswindows()
+        ccall((:ExitProcess, "kernel32"), stdcall, Cvoid, (UInt32,), UInt32(0))
+    else
+        ccall(:_exit, Cvoid, (Cint,), Cint(0))
+    end
+end
+
 # Prewarm the eval path: the package image holds most of what the first run through
 # `_eval_one`/`run_capture` compiles; this pays for what it does not, which otherwise lands under the
 # user's first cell. Deferred until the hub has attached. A real eval arriving mid-prewarm serializes
@@ -3761,7 +3774,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     _blog("start(): entering KaimonGate.serve")
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
-                     allow_restart = false, spawned_by = "slate",
+                     allow_restart = false, spawned_by = "slate", on_shutdown = _exit_on_shutdown,
                      curve = curve, allowed_clients = allowed_clients, _owner_wake_kw()...)
     _blog("start(): gate SERVING — port reachable (hub can dial now)")
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
