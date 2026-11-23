@@ -12,6 +12,16 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-11-23
+
+### Fixed
+
+- A notebook saved with CRLF line endings, as a Windows checkout under `core.autocrlf` writes it,
+  reads the same as with LF. Markdown cells showed their `@md"""` wrapper, and cells showed as
+  edited in the browser.
+- A standalone app's environment updates to the latest Kaimon on each start. Kaimon is bounded to
+  2.x there, and the launcher starts Julia without the user's startup file.
+
 ## [2.3.0] - 2026-11-23
 
 ### Added
