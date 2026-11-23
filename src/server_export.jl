@@ -3941,15 +3941,7 @@ $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
                 @info "Using a local \$name checkout" path = src
                 Pkg.develop(path = expanduser(String(src)))
             elseif registered
-                spec = Pkg.PackageSpec(name = name, uuid = uuid)
-                Pkg.add(spec)                                           # registered → latest release
-                # …but ENVDIR persists across runs, and `add` on a package the env already holds at an
-                # OLDER release is "already satisfied" — the same no-op documented above for `rev`. So a
-                # visitor who ran an earlier bundle keeps that first resolve forever, dependencies and
-                # all, long after the package has dropped or changed them. `update` advances it.
-                try; Pkg.update(spec); catch e
-                    @warn "Could not update \$name to the latest release — continuing with the installed version" exception = e
-                end
+                Pkg.add(Pkg.PackageSpec(name = name, uuid = uuid))     # registered → latest release
             else
                 Pkg.add(url = url, rev = "main")                        # unregistered → track the branch tip
             end
@@ -3962,8 +3954,19 @@ $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
         # Kaimon FIRST: it provides the compute gate the notebook's env reconstructs through (and the
         # agent). KaimonSlate second — both want HTTP 2, so they co-resolve into one env.
         _add_pkg("Kaimon", "d3856c55-31fd-4246-b7e8-380411123c01", "$KAIMON", "SLATE_KAIMON_PATH")
+        Pkg.compat("Kaimon", "2")    # any 2.x; the resolver never settles on a 1.x to satisfy something else
         _add_pkg("KaimonSlate", "f7b954f5-0334-4562-ac21-b005218ce1da", "$SLATE", "SLATE_KAIMONSLATE_PATH";
                  default_path = raw"$SLATEDEV")
+        # ENVDIR persists across runs, and `add` on a package the env already holds is "already
+        # satisfied", so the first resolve would stick. Update the whole env: a per-package update
+        # keeps every other entry at its locked version, which holds the package back as soon as its
+        # newer releases need a newer dependency. Nothing else lives in this env, so there is nothing
+        # to preserve.
+        Base.CoreLogging.with_logger(_QuietGit(Base.CoreLogging.current_logger())) do
+            try; Pkg.update(); catch e
+                @warn "Could not update to the latest releases — continuing with the installed versions" exception = e
+            end
+        end
     end
 
     # Prefer the bundle shipped NEXT TO this script (extracted site tarball, or downloaded alongside
@@ -4243,7 +4246,7 @@ function _run_ps1()
         Write-Host "Install it from https://julialang.org/downloads/  (or run:  winget install julia )"
         Hold; exit 1
     }
-    julia (Join-Path \$PSScriptRoot "$(_SITE_RUNJL)") @args   # forward --host/--port through
+    julia --startup-file=no (Join-Path \$PSScriptRoot "$(_SITE_RUNJL)") @args   # forward --host/--port through
     Hold
     """
 end
@@ -4341,7 +4344,8 @@ function _run_sh(title::AbstractString = "")
       printf '  %swhich can take several minutes. Later starts are fast.%s\\n\\n' "\$D" "\$R"
     fi
 
-    exec julia "$(_SITE_RUNJL)" "\$@"
+    # No startup file: packages it loads (Revise, say) come from the default env, ahead of the app's.
+    exec julia --startup-file=no "$(_SITE_RUNJL)" "\$@"
     """
 end
 

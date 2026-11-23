@@ -426,6 +426,14 @@ end
     end
 end
 
+@testset "a run resolves its env to the latest, apart from the user's startup" begin
+    rj = NS._run_script("https://x/y/nb.standalone.jl"; app = true)
+    @test occursin("Pkg.update()", rj) && !occursin("Pkg.update(spec)", rj)   # whole env, not per package
+    @test occursin("Pkg.compat(\"Kaimon\", \"2\")", rj)
+    @test occursin("julia --startup-file=no", NS._run_sh("Demo"))
+    @test occursin("julia --startup-file=no", NS._run_ps1())
+end
+
 @testset "a run isolates its gates from the machine's Kaimon" begin
     # A worker's gate announces itself by writing session metadata into `<cache>/kaimon/sock`, and a
     # Kaimon on the same machine watches that directory and connects to every local gate in it. Two
