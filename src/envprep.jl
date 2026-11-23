@@ -42,6 +42,16 @@ end
 
 _same_dir(a, b) = try; samefile(a, b); catch; normpath(abspath(a)) == normpath(abspath(b)); end
 
+"""
+    is_fork(envdir, parent) -> Bool
+
+Whether `envdir` is a forked notebook env of `parent`: both set and not the same directory. An env
+that IS its parent (an app installed from a bundle runs in the project it shipped) is never seeded,
+stamped, or refreshed from it.
+"""
+is_fork(envdir::AbstractString, parent::AbstractString) =
+    !isempty(envdir) && !isempty(parent) && !_same_dir(envdir, parent)
+
 "The ancestor project file whose `[workspace] projects` lists `projectfile`'s dir, or `\"\"`."
 function workspace_parent(projectfile::AbstractString)
     isfile(projectfile) || return ""
@@ -354,6 +364,10 @@ the parent as the resolution baseline (path deps absolutised). PURE files — th
 isn't a package).
 """
 function seed_env_project!(envdir::AbstractString, parent::AbstractString)
+    # The seed is a nameless fork project. Written over the parent itself it would erase the
+    # package's own `name`/`uuid`, and with them `using Parent`.
+    (isempty(parent) || is_fork(envdir, parent)) ||
+        error("refusing to seed a notebook env into its own parent project: $parent")
     mkpath(envdir)
     ppf = project_file_in(parent)
     if isempty(ppf)
@@ -650,10 +664,11 @@ end
     env_stale(envdir, parent) -> Bool
 
 A forked env is STALE if the parent has changed since it was seeded (or it was never stamped) — the
-trigger to rebuild it before booting a worker. Always `false` for a parentless (detached) notebook.
+trigger to rebuild it before booting a worker. Always `false` when `envdir` is not a fork
+([`is_fork`](@ref)): a parentless (detached) notebook, or an env that is the parent project itself.
 """
 function env_stale(envdir::AbstractString, parent::AbstractString)
-    isempty(parent) && return false
+    is_fork(envdir, parent) || return false
     sf = _env_stamp_file(envdir)
     isfile(sf) || return true
     return strip(read(sf, String)) != env_parent_fingerprint(parent)

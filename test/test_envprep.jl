@@ -457,6 +457,22 @@ end
         @test ReportEngine.env_stale(env, "") == false     # a detached notebook has nothing to follow
     end
 
+    # An app installed from a bundle runs in the very project it shipped, so its env dir IS the parent.
+    # Treating that as a fork re-seeded the parent's Project.toml as a nameless env, and the notebook's
+    # `using Parent` stopped resolving.
+    @testset "an env that is its own parent is never treated as a fork" begin
+        par = mktempdir()
+        pf = joinpath(par, "Project.toml")
+        body = "name = \"Parent\"\nuuid = \"11111111-1111-1111-1111-111111111111\"\n\n[deps]\n"
+        write(pf, body)
+        @test !ReportEngine.is_fork(par, par)
+        @test !ReportEngine.is_fork(par, joinpath(par, "."))
+        @test ReportEngine.is_fork(mktempdir(), par)
+        @test ReportEngine.env_stale(par, par) == false
+        @test_throws ErrorException ReportEngine.seed_env_project!(par, par)
+        @test read(pf, String) == body
+    end
+
     @testset "a package add chooses among the versions already installed" begin
         installed = Set{VersionNumber}()
         for root in DEPOT_PATH, d in (isdir(joinpath(root, "packages", "JSON")) ? readdir(joinpath(root, "packages", "JSON"); join = true) : String[])
