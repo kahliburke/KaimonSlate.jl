@@ -641,6 +641,9 @@ implicit content after a header is taken as that explicit cell's verbatim body.)
 """
 function parse_report(text::AbstractString; id::AbstractString = "r", title::AbstractString = "")
     report = Report(id, title)
+    # A CRLF file (a Windows checkout under `core.autocrlf`) reads as LF. A kept `\r` ends every line,
+    # so the `@md` skin no longer unwraps and each cell's source differs from the editor's copy.
+    text = replace(text, "\r\n" => "\n")
     # Lift out Slate's footer blocks (`# ╔═╡ Slate.<kind>` … `# ╚═╡`) before cell parsing, so their
     # comment lines aren't taken for a markdown cell. Slate writes them last, but each block is removed
     # wherever it sits and every other line is kept: an edit that appends a cell after them, by hand or

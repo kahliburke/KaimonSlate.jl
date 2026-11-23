@@ -46,6 +46,13 @@ mean(data)
         @test r.cells[1].source == "x = 1"
     end
 
+    @testset "parse: CRLF reads as LF" begin
+        lf = "#%% md id=intro\n@md\"\"\"\n# Hello\n\nsome text\n\"\"\"\n\n#%% code id=a\nx = 1\ny = 2\n"
+        r = parse_report(replace(lf, "\n" => "\r\n"))
+        @test [c.source for c in r.cells] == ["# Hello\n\nsome text", "x = 1\ny = 2"]
+        @test serialize_report(r) == serialize_report(parse_report(lf))
+    end
+
     @testset "hybrid: pure-Literate input (# = md, bare = code)" begin
         literate = """
         # # Title
