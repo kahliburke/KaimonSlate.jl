@@ -12,6 +12,67 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-23
+
+### Added
+
+- **`Form` control.** `@bind costs Form(years = Slider(1:10), price = Slider(5_000:5_000:200_000))`
+  groups several controls that are applied at once. Moving a field edits a draft in the page, and
+  Apply sends every field, so the cells reading the form run once. It binds a NamedTuple of the
+  fields' values, each as its own control would bind it. `set_bind(:costs, (; years = 3))` applies
+  values from a cell, with a field left out taking its default. The controls palette and the design
+  graph's tooltip list a form's fields.
+- A sweep's card says what changed since its cell's last run. Each run records the parts of its
+  key, with the environment broken down by package source, so a cell that runs under a new key
+  names what moved and the run it replaces.
+- The Sweeps panel tells runs of one sweep apart, and a click copies a run's id. `Sweep.reopen`
+  takes the id as the panel shows it.
+- A sweep's card can be a section of another card that hosts it: with `:sweep_hosted` on the
+  display context it drops its frame and chart, offers only Logs, and leaves driving the run to
+  the host. A hosted card is left out of the Sweeps panel.
+- A machine whose juliaup runs another Julia version gets the hub's version added by a prepare,
+  and every Julia Slate starts there asks for it with `JULIAUP_CHANNEL`. The user's default
+  channel is left alone.
+
+### Changed
+
+- A hub-resolved sweep runs in a snapshot of its developed sources. Each version of the sources
+  gets its own environment beside the shared one, and a sweep already running keeps the code its
+  key names.
+- A cluster's runs advance in one pass at a time, which the hub serves for every notebook and
+  worker on its machine. The pass asks the scheduler and pulls results in one round trip, launches
+  with the store's changes in another, and skips finished runs. Each cluster advances on a task of
+  its own, so a host that stops answering holds only its own sweeps. Slow cluster operations are
+  logged with where they spend their time.
+- `Sweep.logs` reads a job's output through the same listing the log viewer uses, headed by its
+  try when a task was launched more than once. A plain-SSH machine keeps each launch's log.
+- A bind cell's controls line up in shared columns, and a label reads as text. Only a slider, a
+  labelled toggle and a pick keep a readout beside them.
+- Markdown cells render in the parallel batch, each as soon as the cells it interpolates from
+  finish.
+- A notebook's checkout inside its project is recorded in the footer relative to the project, so
+  it resolves wherever the project is cloned.
+
+### Fixed
+
+- An app installed from a bundle keeps its project's `Project.toml`. The app runs in the project
+  it shipped, which Slate no longer re-seeds as if it were a notebook's forked environment, so the
+  notebook's `using` of its own package resolves.
+- A region worker defines the functions and types of the cells it reads, and a value holding a
+  notebook closure crosses to another worker with its code.
+- A restored cell's methods are defined under the cell's file and its statements recorded, so a
+  sweep ships the helpers a restored cell defines.
+- A package from a registry only this machine reaches is sent to another machine as source. A
+  failed Pkg run is reported from its error line.
+- A remote mirror's pull cannot skip a file across concurrent pulls or a failed transfer, and a
+  chunk whose job is seen gone is pulled for again before it is launched a second time. Lock order
+  between the collector and the store is consistent.
+- A worker asked to shut down exits cleanly, after its atexit hooks and output flush, instead of
+  crashing while threads are still in native code.
+- A bind value reaches the worker as plain Base types, so a structured value set from the page or
+  the `set_bind` tool arrives in a worker without the JSON package.
+- The worker accepts DedicatedThreads 0.2.
+
 ## [2.2.0] - 2026-11-16
 
 ### Added
