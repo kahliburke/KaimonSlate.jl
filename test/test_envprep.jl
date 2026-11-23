@@ -201,6 +201,19 @@ end
         @test Meta.parse("begin" * replace(code, r"^; " => "\n") * "\nend") isa Expr
     end
 
+    @testset "a checkout inside the project is recorded relative to it, and read back under wherever the project is" begin
+        proj = mktempdir(); lib = mkpath(joinpath(proj, "lib", "Sub")); other = mktempdir()
+        @test ReportEngine.footer_origin(lib, proj) == joinpath("lib", "Sub")
+        @test ReportEngine.footer_origin(proj * "-other", proj) == ReportEngine.footer_origin(proj * "-other")   # beside it, not in it
+        @test ReportEngine.footer_origin(joinpath(homedir(), "x", "Y")) == "~/x/Y"
+        @test ReportEngine.origin_dir(joinpath("lib", "Sub"), proj) == normpath(lib)
+        @test ReportEngine.origin_dir("~/x/Y", proj) == joinpath(homedir(), "x", "Y")
+        delta = [Dict{String,Any}("name" => "Sub", "source" => "path", "origin" => joinpath("lib", "Sub"))]
+        @test ReportEngine.readd_specs(delta; base = proj).devs == [(; name = "Sub", path = normpath(lib))]
+        @test ReportEngine.readd_specs(delta; base = other).skipped == ["Sub"]
+        @test occursin(repr(normpath(lib)), ReportEngine.env_add_code(delta; base = proj))
+    end
+
     @testset "a named parent is reported, and the fork is not itself a package" begin
         r = seed_from("")
         @test r.pname == "Parent"

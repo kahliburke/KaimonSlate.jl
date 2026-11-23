@@ -2169,8 +2169,8 @@ end
 
 "Re-create the notebook's own packages after a re-seed, each the way it was added (`readd_specs`,
 envprep.jl). Returns the names of local checkouts that are missing on this machine."
-function _readd!(delta; pinned::Bool = false, preserve = Pkg.PRESERVE_TIERED)
-    s = readd_specs(delta; pinned)
+function _readd!(delta; pinned::Bool = false, preserve = Pkg.PRESERVE_TIERED, base::AbstractString = "")
+    s = readd_specs(delta; pinned, base)
     isempty(s.devs) || Pkg.develop([Pkg.PackageSpec(; d...) for d in s.devs]; preserve)
     isempty(s.adds) || Pkg.add([Pkg.PackageSpec(; a...) for a in s.adds]; preserve)
     return s.skipped
@@ -2184,7 +2184,7 @@ function __slate_reconstruct(envdir, parent, pkgs)
     try
         skipped = with_env_work() do
             _seed_notebook_env!(String(envdir), String(parent))
-            _readd!(pkgs; pinned = true)
+            _readd!(pkgs; pinned = true, base = String(parent))
         end
         return Dict{String,Any}("ok" => true, "skipped" => skipped)
     catch e

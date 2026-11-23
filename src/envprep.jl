@@ -441,19 +441,45 @@ function sync_fork_preferences!(envdir::AbstractString, parent::AbstractString)
 end
 
 """
-    readd_specs(delta; pinned = false) -> (; devs, adds, skipped)
+    footer_origin(dir, base = "") -> String
+
+How the footer records checkout `dir`: relative to the notebook's project `base` when it is inside it,
+so the footer holds wherever the project is cloned; else `~/…` under the home directory, for anyone
+who keeps it at the same place; else as it is. `origin_dir` reads it back.
+"""
+function footer_origin(dir::AbstractString, base::AbstractString = "")
+    root = isempty(base) ? "" : joinpath(abspath(base), "")
+    !isempty(root) && startswith(joinpath(dir, ""), root) && return relpath(dir, root)
+    home = homedir()
+    startswith(dir, home * "/") ? "~" * dir[ncodeunits(home)+1:end] : String(dir)
+end
+
+"""
+    origin_dir(origin, base = "") -> String
+
+A footer's checkout path as a directory on this machine: `~/…` under the home directory, a relative
+path under the notebook's project `base` (a checkout inside the project is recorded relative to it,
+so the footer holds wherever the project is cloned), an absolute path as it is.
+"""
+function origin_dir(origin::AbstractString, base::AbstractString = "")
+    p = expanduser(origin)
+    isabspath(p) || isempty(base) ? abspath(p) : normpath(joinpath(abspath(base), p))
+end
+
+"""
+    readd_specs(delta; pinned = false, base = "") -> (; devs, adds, skipped)
 
 `Pkg.PackageSpec` keyword sets that re-create a notebook's OWN packages (its `Slate.env` records)
 after a re-seed, each the way it was added: a local checkout (`source = "path"`) is developed from
 its path, a git package (`"git"`) is added from its `url#rev`, and any other package is added by
 name and uuid. A checkout whose path does not exist on this machine goes to `skipped`, so the rest
-still install.
+still install. A relative checkout path is under `base`, the notebook's project (see `origin_dir`).
 
 Seeding rebuilds a fork from its PARENT, which knows nothing about what the notebook added, so every
 rebuild path re-adds these afterwards. A registry package is left to resolve unless `pinned`: its
 recorded version would fight the parent's fresh resolution, which is the thing that just changed.
 """
-function readd_specs(delta; pinned::Bool = false)
+function readd_specs(delta; pinned::Bool = false, base::AbstractString = "")
     devs = NamedTuple[]; adds = NamedTuple[]; skipped = String[]
     for e in (delta isa AbstractVector ? delta : ())
         e isa AbstractDict || continue
@@ -462,7 +488,7 @@ function readd_specs(delta; pinned::Bool = false)
         isempty(nm) && continue
         src = f("source"); origin = f("origin")
         if src == "path" && !isempty(origin)
-            dir = abspath(expanduser(origin))
+            dir = origin_dir(origin, base)
             isdir(dir) ? push!(devs, (; name = nm, path = dir)) : push!(skipped, nm)
         elseif src == "git" && !isempty(origin)
             url, rev = (split(origin, '#'; limit = 2)..., "")
@@ -478,15 +504,15 @@ function readd_specs(delta; pinned::Bool = false)
 end
 
 """
-    env_add_code(delta, devs = Dict()) -> String
+    env_add_code(delta, devs = Dict(); base = "") -> String
 
 Pkg code that re-adds the notebook's own packages (`readd_specs`) after a re-seed, for a rebuild
 that runs in a subprocess. `devs` (name => path, from [`fork_devs`](@ref)) are the checkouts the
 fork had developed. They are read from the fork itself, so for those packages they win over the
 footer's record. Checkouts are developed first, so a package that depends on one resolves against it.
 """
-function env_add_code(delta, devs::AbstractDict = Dict{String,String}())
-    s = readd_specs(delta)
+function env_add_code(delta, devs::AbstractDict = Dict{String,String}(); base::AbstractString = "")
+    s = readd_specs(delta; base)
     spec(t) = "Pkg.PackageSpec(" * join(("$k=$(repr(v))" for (k, v) in pairs(t)), ", ") * ")"
     paths = sort!(collect(String, values(devs)))
     for d in s.devs

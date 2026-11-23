@@ -401,7 +401,7 @@ function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; 
                                 delta = Dict{String,Any}[])
     # Read before the re-seed overwrites the fork's files.
     devs = ReportEngine.fork_devs(envdir, parent)
-    skipped = filter(n -> !haskey(devs, n), ReportEngine.readd_specs(delta).skipped)
+    skipped = filter(n -> !haskey(devs, n), ReportEngine.readd_specs(delta; base = parent).skipped)
     if !isempty(skipped)
         msg = "local checkouts not found on this machine, so not added: " * join(skipped, ", ")
         @warn "KaimonSlate: $msg" envdir
@@ -413,7 +413,7 @@ function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; 
               "Pkg.develop(Pkg.PackageSpec(path=raw\"$(parent)\"); preserve=Pkg.PRESERVE_ALL); "
         ok = _instantiate_env!(envdir; online = online,
                                code = "using Pkg; $(dev)Pkg.instantiate()" *
-                                      ReportEngine.env_add_code(delta, devs))
+                                      ReportEngine.env_add_code(delta, devs; base = parent))
         ok && ReportEngine.stamp_env!(envdir, parent)
         return ok
     end
