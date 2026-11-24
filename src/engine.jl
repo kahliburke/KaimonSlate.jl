@@ -93,7 +93,8 @@ export standalone!
 One computation of one cell, from the runner picking the cell up to its result being merged.
 
 `phase` is `:preparing` until the cell is handed to a worker (a region's bring-up, the namespace
-prime and the input transfer all happen first) and `:dispatched` after. A result is accepted only
+prime and the input transfer all happen first) and `:dispatched` after. A pure `using` cell's run
+is then `:mirroring` while the import is replayed on the notebook's other sides. A result is accepted only
 from the run that is still the cell's (`cell.run === run`), so a restart, a replaced worker or a
 superseded edit drops the late answer instead of overwriting newer state.
 
@@ -104,7 +105,7 @@ mutable struct Run
     id::String
     src_hash::UInt64          # the source this run computes
     side::String              # "" = the main kernel, else the region; set when the cell is routed
-    phase::Symbol             # :preparing | :dispatched
+    phase::Symbol             # :preparing | :dispatched | :mirroring
     rerun::Bool
     stop_at::Float64
     started::Float64

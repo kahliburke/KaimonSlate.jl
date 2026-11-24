@@ -1189,6 +1189,26 @@ end
                 end
             end
 
+            @testset "a using cell mirroring to a region coming up is not an orphan" begin
+                # Its own kernel finished it and runs nothing; the mirror waits on the region's bring-up.
+                rep = RE.parse_report("#%% code id=u\nusing LinearAlgebra\n#%% code id=c region=gpu\n1\n")
+                nb = NS.LiveNotebook("mirror", joinpath(mktempdir(), "mirror.jl"), rep, RE.GateKernel(mktempdir()), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                u = rep.cells[1]
+                run = RE.begin_run!(u)
+                run.phase = :mirroring; run.dispatched = time() - 60
+                try
+                    for _ in 1:3
+                        NS._LAST_RUNNING[nb.id] = (Set{String}(), Set(["local"]), Set(["local", "gpu"]))
+                        NS._reconcile_nb_runs!(nb)
+                    end
+                    @test u.run === run && run.misses == 0
+                finally
+                    delete!(NS._LAST_RUNNING, nb.id)
+                end
+            end
+
             @testset "closing does not wait on a worker still starting" begin
                 # A close finds the kernel's lock held (a spawn in progress) and returns at once; the
                 # ending happens once the lock is free. A restart still waits, so it starts fresh.

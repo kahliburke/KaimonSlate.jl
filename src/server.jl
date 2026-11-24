@@ -5390,6 +5390,12 @@ function _eval_one_run!(nb::LiveNotebook, cid::AbstractString, run::ReportEngine
     out.memo == "absent" && return _hold_locked!(nb, cid, run)   # restore-only, and nothing was stored
     out = _with_setup_note(out, nb, side)
     if _region_active(nb) && ReportEngine._is_pure_using(cell.source) && out.exception === nothing
+        # Its own worker is done with it, and a mirror can wait on a region's bring-up for minutes:
+        # still `:dispatched`, the orphan reconciler would find no worker running it and settle it STALE.
+        lock(nb.lock) do
+            c = _run_cell(nb, cid, run)
+            c === nothing || (run.phase = :mirroring)
+        end
         sides = Set{String}([""])
         for c in nb.report.cells
             s = _cell_region(c); isempty(s) || push!(sides, s)
