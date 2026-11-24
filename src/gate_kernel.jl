@@ -2297,13 +2297,13 @@ function memo_pin!(k::GateKernel, report::Report, key::AbstractString, pin::Bool
     return nothing
 end
 
-# Add/remove a package in the notebook's own env. Adding the FIRST package while in base
+# Add, update or remove a package in the notebook's own env. Adding the FIRST package while in base
 # mode forks the notebook off its parent (seed + activate a single extended env) before the
 # add, so the parent's `Project.toml` is never touched and there's one consistent resolution.
 function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::AbstractString;
                target::AbstractString = "notebook")
     prepare!(k, report)
-    # "project" target: add to the SHARED parent project (no fork), then re-resolve the notebook env.
+    # "project" target: change the SHARED parent project (no fork), then re-resolve the notebook env.
     if String(target) == "project"
         isempty(k.parent) && return Dict{String,Any}("ok" => false, "message" => "this notebook has no parent project")
         r = try

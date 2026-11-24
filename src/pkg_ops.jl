@@ -102,6 +102,28 @@ function _pkg_apply_now(o, tokens)
 end
 
 """
+    _pkg_parent_now(op, tokens, parent) -> Dict("ok", "message")
+
+`_pkg_apply_now` against the notebook's parent project at `parent`, then back in the notebook's env,
+which is re-resolved so it picks up the change (the fork dev-refs the parent, so a resolve pulls it
+through). The active project is restored even on error.
+"""
+function _pkg_parent_now(o, tokens, parent)
+    cur = try; dirname(Pkg.project().path); catch; ""; end
+    r = try
+        Pkg.activate(parent)
+        _pkg_apply_now(o, tokens)
+    catch e
+        Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    finally
+        isempty(cur) || (try; Pkg.activate(cur); catch; end)
+    end
+    # Best-effort: the operation itself already succeeded.
+    get(r, "ok", false) && !isempty(cur) && (try; Pkg.resolve(); catch; end)
+    return r
+end
+
+"""
     _same_registry(reg, url) -> Bool
 
 Does an installed registry point at `url`? Compared on `repo`, which is the only field carrying it:

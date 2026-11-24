@@ -2271,8 +2271,8 @@ end
 remote region, not the hub's). See `_registry_add` (pkg_ops.jl)."
 __slate_registry_add(url) = _registry_add(url)
 
-"Add/remove package(s) in the notebook's PARENT PROJECT (shared) rather than its own env, then
-re-resolve the active notebook env so the change is visible. `parent` is the parent project dir.
+"Add, update or remove package(s) in the notebook's PARENT PROJECT (shared) rather than its own env,
+then re-resolve the active notebook env so the change is visible. `parent` is the parent project dir.
 Restores the active project even on error. Returns `{ok, message}`."
 function __slate_pkg_parent(op, name, parent)
     isempty(String(parent)) && return Dict{String,Any}("ok" => false, "message" => "no parent project")
@@ -2282,33 +2282,6 @@ function __slate_pkg_parent(op, name, parent)
     r = with_env_work(() -> _pkg_parent_now(String(op), tokens, String(parent)))
     _after_env_change!()
     return r
-end
-function _pkg_parent_now(o, tokens, parent)
-    cur = try; dirname(Pkg.project().path); catch; ""; end
-    try
-        Pkg.activate(parent)
-        if o == "add"
-            s = _pkg_add_specs(tokens)
-            isempty(s.adds) || Pkg.add(s.adds)
-            isempty(s.devs) || Pkg.develop(s.devs)
-            msg = "added $(join(s.labels, ", ")) to the project"
-        elseif o == "rm"
-            Pkg.rm(String.(tokens)); msg = "removed $(join(tokens, ", ")) from the project"
-        else
-            isempty(cur) || Pkg.activate(cur)
-            return Dict{String,Any}("ok" => false, "message" => "unknown op '$o'")
-        end
-        # Back to the notebook env and re-resolve so it picks up the parent's change (the fork dev-refs
-        # the parent, so a resolve pulls the new dep through). Best-effort — the add already succeeded.
-        if !isempty(cur)
-            Pkg.activate(cur)
-            try; Pkg.resolve(); catch; end
-        end
-        return Dict{String,Any}("ok" => true, "message" => msg)
-    catch e
-        isempty(cur) || (try; Pkg.activate(cur); catch; end)
-        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
-    end
 end
 
 # ── Hot-reload of the parent project's /src (Revise) ──────────────────────────

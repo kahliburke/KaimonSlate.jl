@@ -256,6 +256,26 @@ mean(data)
         @test ReportEngine._pkg_apply("add", " , ")["ok"] == false            # nothing named
     end
 
+    @testset "the parent project takes the same ops as the notebook env" begin
+        RE = ReportEngine
+        before = Base.active_project()
+        parent = mktempdir(); write(joinpath(parent, "Project.toml"), "")
+        # Offline: `update` would otherwise refresh registries. Naming a non-dependency fails in Pkg,
+        # which shows the op was dispatched rather than refused.
+        was = RE.Pkg.OFFLINE_MODE[]
+        RE.Pkg.offline(true)
+        r = try
+            redirect_stderr(devnull) do
+                RE._pkg_parent_now("update", ["NotADependency"], parent)
+            end
+        finally
+            RE.Pkg.offline(was)
+        end
+        @test r["ok"] == false && !occursin("unknown op", r["message"])
+        @test RE._pkg_parent_now("frobnicate", ["Foo"], parent)["message"] == "unknown op 'frobnicate'"
+        @test Base.active_project() == before
+    end
+
     @testset "a load that waits for environment work waits until it ends" begin
         RE = ReportEngine
         @test RE.env_work_idle(; timeout = 0)
