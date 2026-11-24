@@ -100,7 +100,8 @@ end
     RE.stamp_env!(fork, parent)
     good = read(joinpath(parent, "Project.toml"), String)
     write(joinpath(parent, "Project.toml"), good * "[compat]\nGLMakie = \"0.13\"\n")
-    @test NS._refresh_fork_env!(fork, parent, Dict{String,Any}[])
+    # A failed rebuild reports nothing new, so no region worker's copy of the fork is sent again.
+    @test !NS._refresh_fork_env!(fork, parent, Dict{String,Any}[])
     @test occursin("not updated from its project", RE.env_problem(fork))
     write(joinpath(parent, "Project.toml"), good)
     @test !NS._refresh_fork_env!(fork, parent, Dict{String,Any}[])
@@ -112,10 +113,23 @@ end
              "ERROR: `Foo` is a direct dependency, but does not appear in the manifest.",
              "Run `Pkg.resolve()`.",
              "Stacktrace:",
-             "[1] pkgerror(msg::String)"]
-    @test NS._build_error(lines) == "`Foo` is a direct dependency, but does not appear in the manifest. Run `Pkg.resolve()`."
-    @test NS._build_error(["just a line"]) == "just a line"
-    @test NS._build_error(String[]) == "the rebuild failed"
+             " [1] pkgerror(msg::String)"]
+    @test RE.pkg_error(lines) == "`Foo` is a direct dependency, but does not appear in the manifest. Run `Pkg.resolve()`."
+    @test RE.pkg_error(["just a line"]) == "just a line"
+    @test RE.pkg_error(String[]) == "the build failed"
+end
+
+@testset "a sweep's task environment builds from a project with no package" begin
+    # The seed lists SlateExtensionsBase, which the project's manifest does not have; with no package
+    # to develop, the build resolves it in.
+    parent = project_dir("[deps]\nStatistics = \"10745b16-79ce-11e8-11f9-7d13ad32a3b2\"\n")
+    env = RE.Sweep.task_env!(mktempdir(), parent, :parent)
+    @test occursin("SlateExtensionsBase", read(joinpath(env, "Manifest.toml"), String))
+
+    # A project that can't be built says why.
+    bad = project_dir("[deps]\nNoSuchPkg = \"44444444-4444-4444-4444-444444444444\"\n")
+    e = try; RE.Sweep.task_env!(mktempdir(), bad, :parent); ""; catch err; sprint(showerror, err); end
+    @test occursin("could not prepare the task environment", e) && occursin("NoSuchPkg", e)
 end
 
 # A worker whose environment can't be read answers with no packages and an error. Read as "this notebook

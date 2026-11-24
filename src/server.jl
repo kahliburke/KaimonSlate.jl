@@ -432,7 +432,7 @@ function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; 
         ok = _instantiate_env!(envdir; online = out,
                                code = "using Pkg; $(dev)Pkg.instantiate()" *
                                       ReportEngine.env_add_code(delta, devs; base = parent))
-        ok ? ReportEngine.stamp_env!(envdir, parent) : (err = _build_error(tail))
+        ok ? ReportEngine.stamp_env!(envdir, parent) : (err = ReportEngine.pkg_error(tail))
         return ok
     end
     ok = build()
@@ -456,19 +456,6 @@ function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; 
     return ok
 end
 
-# The error a failed Pkg subprocess ended with, from the last lines of its output: the `ERROR:` line and
-# what follows it up to the stacktrace.
-function _build_error(lines)
-    i = findlast(l -> startswith(l, "ERROR:"), lines)
-    i === nothing && return isempty(lines) ? "the rebuild failed" : String(last(lines))
-    msg = String[strip(chopprefix(lines[i], "ERROR:"))]
-    for l in @view lines[i+1:end]
-        (startswith(l, "Stacktrace") || startswith(l, "[")) && break
-        push!(msg, l)
-    end
-    return join(msg, " ")
-end
-
 # ── A forked env follows its parent project ─────────────────────────────────────────────────────
 # A notebook that added packages of its own runs in a fork of its project's env. When the project
 # changes (a dependency added to the package under development, a re-resolve), the fork is behind it,
@@ -488,9 +475,9 @@ function _refresh_fork_env!(envdir::AbstractString, parent::AbstractString, delt
         end
         ReportEngine._rlog("fork: $(basename(envdir)) is behind its project $(basename(parent)) — re-resolving it")
         # `delta`: the re-seed comes from the PARENT, which knows nothing about what this notebook
-        # added, so its own packages have to be put back.
-        _rebuild_notebook_env!(envdir, parent; online = online, delta = delta)
-        return true
+        # added, so its own packages have to be put back. A failed rebuild leaves the fork as it was,
+        # so there is nothing new for a region worker's copy of it.
+        return _rebuild_notebook_env!(envdir, parent; online = online, delta = delta)
     end
 end
 

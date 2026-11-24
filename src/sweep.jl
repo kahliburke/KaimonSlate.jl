@@ -157,17 +157,20 @@ function task_env!(root::AbstractString, parent::AbstractString, env)
     pname = seed_env_project!(envdir, parent)
     add = isempty(extras) ? "" :
           "Pkg.add([" * join(("\"$e\"" for e in extras), ", ") * "]);"
-    dev = isempty(pname) ? "" : "Pkg.develop(Pkg.PackageSpec(path=raw\"$(parent)\"));"
+    # The develop resolves the env. Without a parent package the resolve is explicit: the seed lists
+    # packages the copied manifest does not have (SlateExtensionsBase).
+    dev = isempty(pname) ? "Pkg.resolve();" : "Pkg.develop(Pkg.PackageSpec(path=raw\"$(parent)\"));"
     # A subprocess: `Pkg.instantiate`/`precompile` inside a live worker is not safe.
     code = "using Pkg; Pkg.activate(raw\"$(envdir)\"); $dev $add Pkg.instantiate(); Pkg.precompile()"
+    out = IOBuffer()
     ok = try
-        run(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $code`;
-                     stdout = devnull, stderr = devnull))
+        run(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $code`; stdout = out, stderr = out))
         true
     catch
         false
     end
-    ok || error("could not prepare the task environment at $envdir from parent $parent")
+    ok || error("could not prepare the task environment at $envdir from parent $parent: " *
+                pkg_error(split(String(take!(out)), '\n')))
     write(_env_stamp_file(envdir), fp)
     return envdir
 end

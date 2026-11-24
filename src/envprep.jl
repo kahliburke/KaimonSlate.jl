@@ -421,6 +421,24 @@ function check_project_file(projectfile::AbstractString)
 end
 
 """
+    pkg_error(lines) -> String
+
+The error a Pkg subprocess ended with, from the last lines of its output: the `ERROR:` line and what
+follows it up to the stacktrace.
+"""
+function pkg_error(lines)
+    lines = [String(strip(l)) for l in lines]
+    i = findlast(l -> startswith(l, "ERROR:"), lines)
+    i === nothing && return isempty(lines) ? "the build failed" : last(lines)
+    msg = String[strip(chopprefix(lines[i], "ERROR:"))]
+    for l in @view lines[i+1:end]
+        (startswith(l, "Stacktrace") || startswith(l, "[")) && break
+        isempty(l) || push!(msg, l)
+    end
+    return join(msg, " ")
+end
+
+"""
     seed_env_project!(envdir, parent) -> parent_pkg_name
 
 Write a forked env's `Project.toml` (the parent's `[deps]`+`[compat]`+`[sources]`, with dev paths
