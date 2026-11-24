@@ -435,6 +435,11 @@ const _Cite = @NamedTuple{key::String, sup::String}
 # An `emit(cites, form)` renders one citation group: the `_Cite`s of a `[@a; @b, p. 7]` bracket
 # (`form` "n") or the single key of a bare `@key` (`form` "p", the prose form).
 #
+# A cited key the bibliography does not have, as the PDF prints it: the key, marked, rather than a cite
+# Typst would refuse (it fails the whole document on one). No `@`, which the Markdown reader would take
+# for a citation again.
+_cite_missing(c) = string("(", c.key, isempty(strip(c.sup)) ? "" : ", " * strip(c.sup), "?)")
+
 # Default `emit` for the export path: a sentinel per key, which the preamble's `#show` rule turns into
 # a Typst cite. Typst groups adjacent cites itself.
 _cite_sentinel(cites, form) = join(_cite_token(c.key, c.sup, form) for c in cites)
@@ -447,7 +452,9 @@ _fig_text(num, anchor) = string("Figure ", num)
 # Rewrite one `[...]` citation group (its inner text, which contains an `@`); `emit(cites, form)`
 # renders the group (a Typst sentinel for export, an HTML link for the live view). A `fig:` label
 # resolved in `figrefs` becomes a figure cross-reference via `figemit` instead, splitting the group.
-function _rewrite_bracket_cite(inner, emit; figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
+# With `unknown(cite)`, a key not in `citekeys` is that text instead of a citation, splitting it too.
+function _rewrite_bracket_cite(inner, emit; figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text,
+                               citekeys = Set{String}(), unknown = nothing)
     io = IOBuffer()
     run = _Cite[]
     flush() = isempty(run) || (print(io, emit(copy(run), "n")); empty!(run))
@@ -461,6 +468,9 @@ function _rewrite_bracket_cite(inner, emit; figrefs = Dict{String,Tuple{Int,Stri
             flush()
             num, anchor = figrefs[key]
             print(io, figemit(num, anchor))
+        elseif unknown !== nothing && !(key in citekeys)
+            flush()
+            print(io, unknown((key = key, sup = m.captures[2] === nothing ? "" : String(m.captures[2]))))
         else
             push!(run, (key = key, sup = m.captures[2] === nothing ? "" : String(m.captures[2])))
         end
@@ -470,10 +480,11 @@ function _rewrite_bracket_cite(inner, emit; figrefs = Dict{String,Tuple{Int,Stri
 end
 # Rewrite the citation syntax in one stretch of TEXT (no code spans). Bracketed groups first, then
 # bare `@key` (prose) — the latter only for defined keys, so emails/handles are left literal.
-function _rewrite_text_citations(text, citekeys, emit; figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
+function _rewrite_text_citations(text, citekeys, emit; figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text,
+                                 unknown = nothing)
     t = replace(text, r"\[([^\]\n]*@[^\]\n]*)\]" => m -> begin
         # `chop` strips the brackets safely; byte slicing breaks on a non-ASCII locator (`[@k, p. 3–4]`).
-        r = _rewrite_bracket_cite(chop(m; head = 1, tail = 1), emit; figrefs = figrefs, figemit = figemit)
+        r = _rewrite_bracket_cite(chop(m; head = 1, tail = 1), emit; figrefs, figemit, citekeys, unknown)
         r === nothing ? m : r
     end)
     (isempty(citekeys) && isempty(figrefs)) && return t
@@ -492,9 +503,10 @@ function _rewrite_text_citations(text, citekeys, emit; figrefs = Dict{String,Tup
 end
 # Rewrite citations across a markdown source, skipping fenced code blocks AND inline `code` spans
 # (so a literal `[@key]` shown in backticks is left untouched). `emit` selects sentinel vs HTML link;
-# `figrefs`/`figemit` handle `[@fig:label]` figure cross-references.
+# `figrefs`/`figemit` handle `[@fig:label]` figure cross-references. With `unknown(cite)`, a bracketed
+# key the bibliography (`citekeys`) does not have is that text instead (see `_cite_missing`).
 function _rewrite_citations(md::AbstractString, citekeys = Set{String}(); emit = _cite_sentinel,
-                            figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
+                            figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text, unknown = nothing)
     out = IOBuffer(); infence = false
     for (li, ln) in enumerate(split(md, '\n'))
         li == 1 || print(out, '\n')
@@ -503,7 +515,7 @@ function _rewrite_citations(md::AbstractString, citekeys = Set{String}(); emit =
         # Protect inline `code` spans, rewrite the text between them, then restore the spans.
         spans = SubString{String}[]
         masked = replace(ln, r"`[^`]*`" => s -> (push!(spans, s); "\x00$(length(spans))\x00"))
-        done = _rewrite_text_citations(masked, citekeys, emit; figrefs = figrefs, figemit = figemit)
+        done = _rewrite_text_citations(masked, citekeys, emit; figrefs, figemit, unknown)
         for (i, s) in enumerate(spans); done = replace(done, "\x00$(i)\x00" => s); end
         print(out, done)
     end
@@ -675,7 +687,7 @@ function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{S
     s = _admonitions_to_quotes(s)
     s = _strip_deck_markup(s)
     s = _plain_math_macros(s)
-    return _rewrite_citations(s, citekeys; figrefs = figrefs)
+    return _rewrite_citations(s, citekeys; figrefs = figrefs, unknown = _cite_missing)
 end
 
 # The presentation macros (`\term`, `\step`, … — see SLATE_TEX_MACROS in core.js) mark up an equation
@@ -1598,18 +1610,20 @@ them), and otherwise author and year (`(Sun et al., 2026)`). `numbers` is the fi
 (`citation_numbers`).
 
 `names` (the authors as cited, `Sun et al.`) and `tags` (what follows them: the year, or the number)
-are the two halves the prose form puts apart, `Sun et al. (2026)` (see `_cite_text`).
+are the two halves the prose form puts apart, `Sun et al. (2026)` (see `_cite_text`). A work with no
+author is named by its title, as the styles do: `(Water levels, 2026)`.
 """
 function _cite_labels(style::AbstractString, entries, numbers)
-    names = Dict{String,String}(e.key => _cite_name(e.author; surname = e.surname) for e in entries)
+    named(e, name) = isempty(name) ? _cite_title(e.title) : String(name)
+    names = Dict{String,String}(e.key => named(e, _cite_name(e.author; surname = e.surname)) for e in entries)
     if _is_numeric_style(style)
         tags = Dict{String,String}(e.key => string(get(numbers, e.key, "?")) for e in entries)
         return (; labels = tags, names, tags, open = "[", close = "]", authordate = false)
     elseif _is_bracket_style(style)
         # This style names only the first author, never "et al.".
-        names = Dict{String,String}(e.key => e.surname for e in entries)
+        names = Dict{String,String}(e.key => named(e, e.surname) for e in entries)
         years = Dict{String,String}(e.key => strip(e.year) for e in entries)
-        base = Dict(e.key => strip(string(e.surname, " ", e.year)) for e in entries)
+        base = Dict(e.key => strip(string(names[e.key], " ", e.year)) for e in entries)
         tags = Dict{String,String}()
         for lab in unique(values(base))
             es = sort([e for e in entries if base[e.key] == lab];
@@ -1674,6 +1688,12 @@ function _cite_name(author::AbstractString; surname::AbstractString = _surname(a
     a = strip(String(author))
     (isempty(a) || isempty(surname)) && return String(surname)
     return length(split(a, r"\s+and\s+")) > 1 ? surname * " et al." : String(surname)
+end
+
+# A work's title as a citation names a work with no author: whole when short, else its first words.
+function _cite_title(title::AbstractString)
+    words = split(strip(replace(String(title), r"[{}]" => "")))
+    return length(words) <= 5 ? join(words, " ") : join(words[1:4], " ") * " …"
 end
 
 # A compact author-date label for the live view, e.g. "Knuth, 1984" / "Cormen et al., 2009".
@@ -1817,7 +1837,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             absarg = "none"
             if !isempty(strip(fm.abstract))
                 write(joinpath(dir, "abstract.md"),
-                      _stage_typst_md_media(_rewrite_citations(fm.abstract, citekeys), dir, "abstract", _proj_root(nb); sizes = mediasz))
+                      _stage_typst_md_media(_rewrite_citations(fm.abstract, citekeys; unknown = _cite_missing), dir, "abstract", _proj_root(nb); sizes = mediasz))
                 absarg = "cmarker.render(read(\"abstract.md\"), math: mathfn, scope: (image: mdimage))"
             end
             print(io, "#metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ", arg(fm.byline), ", ", absarg, ")\n\n")

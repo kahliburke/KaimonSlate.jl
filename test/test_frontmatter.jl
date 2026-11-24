@@ -657,6 +657,8 @@ x = 1
         @test rw("[@knuth1984]") == "§c§n§knuth1984§§"                       # plain
         @test rw("[@knuth1984, p. 7]") == "§c§n§knuth1984§p. 7§"            # page locator → supplement
         @test rw("[@knuth1984; @lamport1994]") == "§c§n§knuth1984§§§c§n§lamport1994§§"  # multiple
+        # The PDF prints a key the bibliography lacks as text, which Typst would refuse as a cite.
+        @test NS._rewrite_citations("[@knuth1984; @nope, p. 2]", keys; unknown = NS._cite_missing) == "§c§n§knuth1984§§(nope, p. 2?)"
         @test rw("@knuth1984 rocks") == "§c§p§knuth1984§§ rocks"            # bare key → prose form
         @test rw("see @knuth1984.") == "see §c§p§knuth1984§§."              # trailing punctuation kept literal
         @test rw("email me@host.com") == "email me@host.com"               # unknown @ left literal
@@ -693,6 +695,14 @@ x = 1
         @test grp("[@n24; @g22; @n25]") == "(Ning et al., 2024; Gysbers, 2022; Ning et al., 2025)"
         @test grp("[@n24, p. 3; @n25]") == "(Ning et al., 2024, p. 3; Ning et al., 2025)"
         @test grp("@g22 found") == "Gysbers (2022) found"
+        # A work with no author (a note, a record) is named by its title, a long one by its first words.
+        notes = [(key = "wl", title = "Water levels", author = "", year = "2026", surname = ""),
+                 (key = "hm", title = "Heron migration at the north marsh this autumn", author = "", year = "2026", surname = "")]
+        nf = NS._cite_labels("apa", notes, Dict{String,Int}())
+        @test NS._rewrite_citations("[@wl; @hm]", Set(["wl", "hm"]); emit = (c, f) -> NS._cite_text(nf, c, f)) ==
+              "(Water levels, 2026; Heron migration at the …, 2026)"
+        @test NS._rewrite_citations("@wl", Set(["wl"]); emit = (c, f) -> NS._cite_text(nf, c, f)) == "Water levels (2026)"
+        @test NS._cite_labels("author-year-brackets", notes, Dict("wl" => 1)).labels["wl"] == "Water levels 2026"
         # without a bibliography a citation shows as written
         @test NS._rewrite_citations("[@a; @b, p. 2] and @a", Set(["a"]); emit = NS._cite_literal) == "[@a; @b, p. 2] and @a"
         @test NS._is_numeric_style("ieee") && !NS._is_numeric_style("apa")
