@@ -2835,7 +2835,22 @@ end
             # A listener that throws must not break disconnecting — that would strand the session.
             ST.on_drop!((_, _) -> error("boom"))
             @test ST._announce_drop("login") === nothing
+            # Retrying a host that refused is no drop: that session never signed in, so carried nothing.
+            empty!(saw)
+            ST.on_drop!((h, died) -> push!(saw, "$h:$died"))
+            key = "slate-test-unresolvable.invalid"
+            failed(signed_in) = (s = ST.Session(ST.resolve(key), Cint(-1), C_NULL, Channel{Any}(1), nothing,
+                                                 ST.Prompter(key), false, "refused", ST.Fwd[]);
+                                 s.signed_in = signed_in; s)
+            ask = (_, _, _) -> nothing
+            for signed_in in (false, true)
+                lock(() -> (ST._SESSIONS[key] = failed(signed_in)), ST._REG_LOCK)
+                ST.session(key; ask)
+                timedwait(() -> !isempty(saw), signed_in ? 5.0 : 0.5)
+            end
+            @test saw == ["$key:true"]
         finally
+            try; ST.disconnect!("slate-test-unresolvable.invalid"); catch; end
             ST._ON_DROP[] = prev
         end
 

@@ -290,11 +290,14 @@ mutable struct Session
     # when that shell is another one (zsh, whose unmatched glob is an error) and bash is installed,
     # each command is handed to bash. Set once signed in (`_note_login_shell!`).
     in_bash::Bool
+    # Authentication completed at some point. A session that never got this far carried nothing, so
+    # replacing it is not a drop anyone needs to hear about.
+    signed_in::Bool
 end
 Session(ep, fd, ptr, req, owner, prompter, alive, err, fwds; bulk::Bool = false) =
     Session(ep, fd, ptr, req, owner, prompter, alive, err, fwds, ReentrantLock(), ReentrantLock(), Cint(0), "",
             Base.Semaphore(_max_channels()), Threads.Atomic{Int}(0), Channel{Any}(32),
-            Base.Event(true), Base.Event(true), Threads.Atomic{Int}(0), nothing, bulk, Ptr{Cvoid}[], false)
+            Base.Event(true), Base.Event(true), Threads.Atomic{Int}(0), nothing, bulk, Ptr{Cvoid}[], false, false)
 
 # `cmd` as the server should be sent it: as it is under a bash login shell, else as bash's argument.
 _as_sent(s::Session, cmd::AbstractString) =
@@ -1401,6 +1404,7 @@ function _open!(s::Session, ask)
     end
     _authed(s) || error("$(s.ep.alias): authentication did not complete")
     s.alive = true
+    s.signed_in = true
     Base.acquire(() -> _note_login_shell!(s), s.slots)
     s.bulk || errormonitor(Threads.@spawn _announce_connect(s.ep.alias))
     # Which login node the session landed on (an address can be shared by several) and the pid of its sshd there:
@@ -1616,7 +1620,7 @@ function session(host::AbstractString; ask)
         # interactive sign-in (which is the only caller that currently clears a session).
         if s !== nothing
             (s.alive || (isempty(s.err) && s.owner !== nothing && !istaskdone(s.owner))) && return s
-            delete!(_SESSIONS, key); replaced[] = true
+            delete!(_SESSIONS, key); replaced[] = s.signed_in
             s.owner !== nothing && !istaskdone(s.owner) && (dead[] = s)   # still looping on its own error - tell it to stop
         end
         ep = resolve(key)
