@@ -31,6 +31,7 @@ module Dataset; include("test_dataset.jl"); end
 module TablesInc; include("test_tables_include.jl"); end
 module Jobcell;   include("test_jobcell.jl");   end
 module FormatT;   include("test_format.jl");    end
+module LiterateT; include("test_literate.jl");  end
 module Effectstore; include("test_effectstore.jl"); end
 module Blobchannel; include("test_blobchannel.jl"); end
 module RemotePool; include("test_remote_pool.jl"); end

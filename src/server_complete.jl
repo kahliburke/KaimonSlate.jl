@@ -614,6 +614,25 @@ function _is_notebook_file(path::AbstractString)
     end
 end
 
+# Write `content` as a new notebook beside `src`, `<stem>-notebook.jl` (then `-2`, `-3`, …), or in the
+# uploads dir when that directory isn't writable. Returns the path written.
+function _write_beside(src::AbstractString, content::AbstractString)
+    stem = splitext(basename(src))[1]; isempty(stem) && (stem = "notebook")
+    dest(base) = begin
+        o = joinpath(base, "$(stem)-notebook.jl"); i = 1
+        while ispath(o); i += 1; o = joinpath(base, "$(stem)-notebook-$(i).jl"); end
+        o
+    end
+    out = dest(dirname(abspath(src)))
+    try
+        write(out, content)
+    catch
+        dir = joinpath(homedir(), "KaimonSlate", "uploads"); mkpath(dir)
+        out = dest(dir); write(out, content)
+    end
+    return abspath(out)
+end
+
 # The notebook's project root (its parent project dir — the `@asset` base). "" ⇒ in-process / no project.
 _proj_root(nb::LiveNotebook) = String(get(nb.report.meta, "assetbase", ""))
 
@@ -1373,29 +1392,22 @@ function _make_router(h::Hub)
         write(out, src)
         _json(Dict("path" => abspath(out)))
     end)
-    # Create a NEW notebook from a plain Julia script (no Slate structure), leaving the original
-    # untouched: copy it beside the source as `<stem>-notebook.jl` (falling back to the uploads dir if
-    # that directory isn't writable). The copy opens as an ordinary notebook — `parse_report` turns a
-    # plain script into cells, and the first save rewrites it in canonical `#%%` form. Body: {path}.
+    # Create a NEW Slate notebook from a plain Julia script, leaving the original untouched. The
+    # script is read with the plain-script rules (an attached comment stays with its code) and written
+    # in Slate's format: a copy without `#%%` headers would open as a Literate file. Body: {path}.
     HTTP.register!(router, "POST", "/api/notebook-from-script", req -> begin
         p = expanduser(strip(String(get(_body(req), "path", ""))))
         isfile(p) || return HTTP.Response(404, "no such file: $p")
-        content = read(p, String)
-        stem = splitext(basename(p))[1]; isempty(stem) && (stem = "notebook")
-        _dest(base) = begin
-            o = joinpath(base, "$(stem)-notebook.jl"); i = 1
-            while ispath(o); i += 1; o = joinpath(base, "$(stem)-notebook-$(i).jl"); end
-            o
-        end
-        out = _dest(dirname(abspath(p)))
-        try
-            write(out, content)
-        catch
-            dir = joinpath(homedir(), "KaimonSlate", "uploads"); mkpath(dir)
-            out = _dest(dir); write(out, content)
-        end
-        _json(Dict("path" => abspath(out)))
+        _json(Dict("path" => _write_beside(p, serialize_report(parse_report(read(p, String))))))
     end)
+    # Convert an open Literate notebook to a Slate notebook beside it, with everything the session holds
+    # that the Literate file couldn't (tags, controls, other cell kinds). The Literate file is left as it
+    # is, since a docs build may read it.
+    HTTP.register!(router, "POST", "/api/{id}/literate-convert", req -> _withnb(h, req, nb -> begin
+        is_literate(nb.report) || return HTTP.Response(400, "not a Literate notebook")
+        s = lock(nb.lock) do; serialize_report(nb.report); end
+        _json(Dict("path" => _write_beside(nb.path, s)))
+    end))
     HTTP.register!(router, "POST", "/api/close", req -> begin
         file = abspath(expanduser(strip(String(get(_body(req), "path", "")))))
         id = lock(h.lock) do

@@ -668,7 +668,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     switch((info&&info.kind)||''){
       case 'bundle':      openImport(p); break;
       case 'notebook':    openPath(p); break;
-      case 'plain':       offerNewNotebook(p); break;
+      case 'literate':    offerNewNotebook(p, true); break;
+      case 'plain':       offerNewNotebook(p, false); break;
       case 'html-bundle': extractAndImport(p); break;
       case 'html-static': alertDark('“'+baseName(p)+'” is a static Slate export — it carries no embedded runnable bundle.\n\nRe-export it with the “Runnable” option checked to get a launchable notebook.'); break;
       default: alertDark('“'+baseName(p)+'” isn’t a Slate notebook or bundle.\n\nOpen a .jl notebook, a self-contained .jl bundle, or a runnable .html export.');
@@ -682,10 +683,15 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();})
       .then(function(info){_dispatchOpen(p,info);})
       .catch(function(){openPath(p);});}
-  // Plain Julia script → offer to create a NEW notebook from it (a copy; the original is untouched).
-  function offerNewNotebook(p){
-    confirmDark('“'+baseName(p)+'” is a plain Julia file, not a Slate notebook.\n\nCreate a new notebook from it? Your original file is left untouched.','Create notebook').then(function(ok){
-      if(!ok)return;
+  // A `.jl` with no Slate structure: open it in place as Literate source (saved back as Literate), or
+  // create a NEW notebook from a copy. A file with Literate markers leads with the first.
+  function offerNewNotebook(p, literate){
+    var lit={label:'Open as Literate',value:'lit'}, copy={label:'Create notebook',value:'copy'};
+    (literate?lit:copy).cls='primary';
+    modal('“'+baseName(p)+'” has no Slate cells.',
+          [{label:'Cancel',value:''}].concat(literate?[copy,lit]:[lit,copy])).then(function(v){
+      if(v==='lit'){openPath(p);return;}
+      if(v!=='copy')return;
       showLoading('Creating a notebook from “'+baseName(p)+'”…');
       fetch('/api/notebook-from-script',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
         .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})

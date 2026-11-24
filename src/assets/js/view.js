@@ -658,8 +658,11 @@ window.openKindPicker = function (id, ev) {
   }
   if (pop.classList.contains('show') && pop.dataset.cell === id) return closeKindPicker();
   pop.dataset.cell = id;
+  // A Literate file holds code and markdown only.
+  const kinds = (window.__slateState || {}).literate
+    ? window.CELL_KINDS.filter(x => x.k === 'code' || x.k === 'md') : window.CELL_KINDS;
   pop.innerHTML = '<div class="kindpop-head">Cell type</div>' +
-    window.CELL_KINDS.map(x => window.kindRow(x, x.k === c.kind, x.k)).join('');
+    kinds.map(x => window.kindRow(x, x.k === c.kind, x.k)).join('');
   pop.querySelectorAll('[data-kind]').forEach(b => {
     b.onclick = () => {
       closeKindPicker();
@@ -2061,7 +2064,34 @@ function updateChrome(state) {
   const rb = document.getElementById('redobtn');
   if (rb) { rb.textContent = '↷ Redo' + (state.redoLabel ? ' ' + state.redoLabel : ''); rb.disabled = !state.redoLabel; }
   _sharedDocNotice(state);
+  _literatePill(state);
 }
+// A Literate.jl file opened in place: marked in the top bar, amber when a change couldn't be written
+// (the file can't hold it), and the way to convert it to a Slate notebook.
+let _litState = null;
+function _literatePill(state) {
+  const el = document.getElementById('litpill');
+  if (!el) return;
+  _litState = state.literate ? state : null;
+  el.style.display = state.literate ? '' : 'none';
+  el.classList.toggle('unsaved', !!state.literateUnsaved);
+  el.textContent = state.literateUnsaved ? 'Literate · not saved' : 'Literate';
+}
+async function literateMenu() {
+  const st = _litState;
+  if (!st) return;
+  const msg = st.literateUnsaved ? `Not saved: ${st.literateUnsaved}` : 'Literate.jl source, saved in place.';
+  const choice = await dlg(msg, [
+    { label: 'Close', value: '' },
+    { label: 'Convert to Slate notebook', value: 'convert', cls: 'primary' },
+  ]);
+  if (choice !== 'convert') return;
+  const r = await api('POST', '/api/literate-convert', {});
+  if (!r || !r.path) { await alertDark('Could not convert the notebook.'); return; }
+  const d = await slateOpenPath(r.path);
+  if (d && d.url) location.href = d.url;
+}
+window.literateMenu = literateMenu;
 // A notebook copied on this machine keeps the original's `docid`, so the two share one document:
 // the same history, chat transcript and preview. That's the intended meaning of a docid (publish
 // matches on it too), but it should never be a surprise — say so once, and offer the split.

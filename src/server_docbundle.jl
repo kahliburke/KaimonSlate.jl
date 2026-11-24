@@ -578,7 +578,7 @@ function render_doc_bundle_inprocess(path::AbstractString, dir::AbstractString; 
     isfile(path) || throw(ArgumentError("no notebook at $path"))
     base = splitext(basename(path))[1]
     rid = replace(base, r"[^A-Za-z0-9]" => "_")
-    r = parse_report(read(path, String); id = rid, title = base)
+    r = read_notebook_source(read(path, String); id = rid, title = base)
     build_dependencies!(r)
     kernel = _select_kernel(path, r)
     nb = LiveNotebook(rid, path, r, kernel, 0, String[], String[], ReentrantLock(), SseClient[],

@@ -669,7 +669,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     base = splitext(basename(path))[1]
     rid = replace(base, r"[^A-Za-z0-9]" => "_")
     nbid = isempty(id) ? rid : String(id)
-    r = parse_report(src; id = rid, title = base)
+    r = read_notebook_source(src; id = rid, title = base)
     # A file in an older format whose update changes something opens only once the update is agreed
     # to: then the original is kept beside it and the file is written in the current format.
     ch = ReportEngine.format_changes(r)
@@ -688,7 +688,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     isempty(strip(String(runon))) || (r.meta["runon"] = String(strip(String(runon))))
     _reestablish_effects!(r)   # durable declared-effects (EVERYWHERE marks, observed writes) before the graph and any run
     build_dependencies!(r)
-    _note_server_write!(rid, hash(serialize_report(r)))   # the as-opened state is OURS — a watcher
+    _note_server_write!(rid, hash(_sync_text(r, src)))    # the as-opened state is OURS — a watcher
                                                           # tick reading it must not "revert" to it
     # Any self-contained `.jl`: open INSTANTLY and reconstruct + run the env in the BACKGROUND
     # (hydrate), so a heavy bundle never blocks the open. If it embeds a frozen render that's

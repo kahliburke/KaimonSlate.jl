@@ -791,7 +791,7 @@ function render_report_file(path::AbstractString;
                             reset::Bool = false)
     src = read(path, String)
     id = replace(splitext(basename(path))[1], r"[^A-Za-z0-9]" => "_")
-    report = parse_report(src; id = id, title = title)
+    report = read_notebook_source(src; id = id, title = title)
     eval_report!(report; reset = reset)
     write(out, render_html(report))
     return out

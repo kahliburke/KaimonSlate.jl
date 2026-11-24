@@ -48,6 +48,7 @@ export KindInfo, kind_info, kind_name, kind_from_name, kind_table, is_prose, int
        runs_automatically, in_dependency_graph, refines_analysis, memoizes, exports_figures, exports_source,
        profilable, debuggable, takes_run_tags, editable, renders, cell_attrs
 export parse_report, serialize_report, serialize_cells, source_text, cell_definitions
+export parse_literate, render_literate, read_notebook_source, is_literate_source, is_literate, LiterateUnsupported
 export standalone!
 
 # ── Model ────────────────────────────────────────────────────────────────────
@@ -1213,6 +1214,8 @@ end
 
 "Alias kept for callers that think in terms of a cell's raw text."
 source_text(cell::Cell) = cell.source
+
+include(joinpath(@__DIR__, "literate.jl"))  # Literate.jl dialect: read and write a `.jl` as Literate source
 
 include(joinpath(@__DIR__, "echarts.jl"))   # EChart (used by capture.jl)
 include(joinpath(@__DIR__, "echarts_dsl.jl")) # echart(:line,…)/series DSL (shared with the worker)

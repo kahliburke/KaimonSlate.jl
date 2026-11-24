@@ -204,9 +204,17 @@ function _is_slate_export_html(path::AbstractString)
     return false
 end
 
+# A line only a Literate.jl source would have: an output filter (`#src`, `#md`, `#nb`, `#jl`, `#!…`),
+# a `#-`/`#+` chunk break, a `## ` code comment, or a `# # Title` heading. Any `.jl` without Slate
+# structure opens as Literate; this only decides which choice the open dialog leads with.
+const _LITERATE_MARKER = r"^\h*#!?(src|md|nb|jl)\b|#!?(src|md|nb|jl)$|^\h*#[-+]\h*$|^\h*## |^# # "m
+_has_literate_markers(path::AbstractString) =
+    try; occursin(_LITERATE_MARKER, read(path, String)); catch; false; end
+
 # Classify a path the open box points at, so the front end can route it:
 #   "bundle"      self-contained `.jl` (Slate.bundle footer)   → import helper
 #   "notebook"    a Slate `.jl` notebook (has #%% cells)        → open live / inactive
+#   "literate"    no Slate structure, with Literate.jl markers  → offer to open it in place
 #   "plain"       a plain Julia script, no Slate structure      → offer a new notebook (a copy)
 #   "html-bundle" a RUNNABLE HTML export (bundle embedded)      → extract → import helper
 #   "html-static" a static HTML export (no embedded bundle)     → clear error (re-export runnable)
@@ -217,7 +225,8 @@ function _source_kind(path::AbstractString)
     ext = lowercase(splitext(path)[2])
     if ext == ".jl"
         _has_bundle_footer(path) && return "bundle"
-        return _is_notebook_file(path) ? "notebook" : "plain"
+        _is_notebook_file(path) && return "notebook"
+        return _has_literate_markers(path) ? "literate" : "plain"
     elseif ext == ".html" || ext == ".htm"
         _html_bundle_source(path) === nothing || return "html-bundle"
         return _is_slate_export_html(path) ? "html-static" : "foreign"

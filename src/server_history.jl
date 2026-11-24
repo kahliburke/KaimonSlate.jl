@@ -153,6 +153,24 @@ function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::
     # Only when the notebook says to carry them; otherwise this clears any stale copy so turning the
     # option off actually removes them from the file rather than freezing the last set written.
     try; stage_findings!(nb); catch; end
+    # A Literate file is written back as Literate source, changed cells only, and carries no footers.
+    # A notebook the file can't hold (a web cell, say) is not written: the reason is kept for the page,
+    # which offers the conversion to a Slate notebook, and history still records every change.
+    if is_literate(nb.report)
+        try
+            s, doc = render_literate(nb.report)
+            _note_server_write!(nb.report.id, hash(s))
+            _write_notebook(nb.path, s)
+            nb.report.meta["literate"] = doc
+            delete!(nb.report.meta, "literate_unsaved")
+        catch e
+            e isa LiterateUnsupported || rethrow()
+            nb.report.meta["literate_unsaved"] = e.msg
+        end
+        nb.version += 1
+        _history!(nb; source = source, label = label)
+        return nb
+    end
     s = serialize_report(nb.report)
     # What `sync_from_file!` will re-derive from disk when it sees this write: it re-parses and
     # re-serializes, so it recovers THIS text and not the carried footers appended below. The ring is
@@ -425,6 +443,11 @@ function _read_settled(path::AbstractString)
     return txt
 end
 
+# The text the file watcher compares and records for a notebook read from `disk`. A Slate notebook
+# compares canonically (re-serialized), since its footers and spacing are rewritten on every save. A
+# Literate file is written back as it was, so it compares as the bytes on disk.
+_sync_text(r::Report, disk::AbstractString) = is_literate(r) ? String(disk) : serialize_report(r)
+
 # Pull in external edits (VS Code, the agent, …). Re-reads the file; if it differs
 # (canonically) from our state, reconciles → runs stale → bumps version. Returns
 # true if changed. The server's own writes match canonically, so they don't loop.
@@ -432,6 +455,7 @@ function sync_from_file!(nb::LiveNotebook)
     isfile(nb.path) || return false
     disk = _read_settled(nb.path)
     disk === nothing && return false     # a writer is part way through; the next tick reads it whole
+    is_literate(nb.report) && return _sync_literate!(nb, disk)
     norm = try
         serialize_report(parse_report(disk; id = nb.report.id))
     catch
@@ -445,6 +469,26 @@ function sync_from_file!(nb::LiveNotebook)
     _eval!(nb)
     nb.version += 1
     # External write (agent mid-turn → "agent", else a human in another editor).
+    _history!(nb; source = nb.agent_busy ? "agent" : "external")
+    return true
+end
+
+# An external edit to a Literate file. Cells whose content is unchanged keep their session ids, so
+# their outputs, control values and memo entries carry over; the rest arrive as new cells.
+function _sync_literate!(nb::LiveNotebook, disk::AbstractString)
+    _is_server_write(nb.report.id, hash(disk)) && return false
+    current = try; first(render_literate(nb.report)); catch; nothing; end
+    disk == current && return false
+    newr = try
+        parse_literate(disk; id = nb.report.id)
+    catch
+        return false
+    end
+    ReportEngine.adopt_literate_ids!(newr, nb.report)
+    update_source!(nb.report, serialize_report(newr))
+    nb.report.meta["literate"] = newr.meta["literate"]
+    _eval!(nb)
+    nb.version += 1
     _history!(nb; source = nb.agent_busy ? "agent" : "external")
     return true
 end
@@ -1819,6 +1863,13 @@ function state_json(nb::LiveNotebook)
     meta["health"] = _health_json(nb)                                       # watchdog status + alerts (stall/runaway) → health panel
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
+    # A Literate file: the page marks it and offers the conversion; `literateUnsaved` says why the
+    # last change wasn't written.
+    if is_literate(nb.report)
+        meta["literate"] = true
+        u = get(nb.report.meta, "literate_unsaved", "")
+        isempty(u) || (meta["literateUnsaved"] = u)
+    end
     # Other live copies of this same document (see `shared_with`). Normally empty — notably for a
     # notebook you were sent and are opening for the first time, which has no local store to share.
     #
