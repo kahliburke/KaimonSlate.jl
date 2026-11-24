@@ -673,14 +673,28 @@ x = 1
         r = RE.parse_report("#%% md id=a\nSee [@fig:flow], [@nope] and [@a].\n\n#%% md id=refs bibliography\n@book{a,title={A}}\n")
         @test NS.citation_numbers(r, Set(["a"])) == Dict("a" => 1)
         # live HTML-link emit tracks the bibstyle: numeric → [3, p. 7], author-date → (Knuth, 1984)
-        numctx = (anchor = "refs", tips = Dict("k" => "Knuth · TeX"), labels = Dict("k" => "3"),
-                  numeric = true, numbers = Dict("k" => 3), open = "[", close = "]")
-        num = NS._rewrite_citations("[@k, p. 7]", Set(["k"]); emit = NS._cite_link_emit(numctx))
-        @test occursin("<a class=\"cite\" href=\"#cell-refs\"", num) && occursin(">[3, p. 7]</a>", num)
-        adctx = (anchor = "refs", tips = Dict("k" => "x"), labels = Dict("k" => "Knuth, 1984"),
-                 numeric = false, numbers = Dict{String,Int}(), open = "(", close = ")")
-        ad = NS._rewrite_citations("[@k]", Set(["k"]); emit = NS._cite_link_emit(adctx))
-        @test occursin(">(Knuth, 1984)</a>", ad)
+        knuth = [(key = "k", title = "TeX", author = "Donald E. Knuth", year = "1984", surname = "Knuth")]
+        livectx(style) = (anchor = "refs", tips = Dict("k" => "Knuth · TeX"), numbers = Dict("k" => 3),
+                          numeric = NS._is_numeric_style(style), fmt = NS._cite_labels(style, knuth, Dict("k" => 3)))
+        num = NS._rewrite_citations("[@k, p. 7]", Set(["k"]); emit = NS._cite_link_emit(livectx("ieee")))
+        @test occursin("<a class=\"cite\" href=\"#cell-refs\"", num) && occursin("[<a", num) && occursin(">3, p. 7</a>]", num)
+        ad = NS._rewrite_citations("[@k]", Set(["k"]); emit = NS._cite_link_emit(livectx("apa")))
+        @test occursin("(<a", ad) && occursin(">Knuth, 1984</a>)", ad)
+        # the prose form names the author in the sentence, the whole of it one link
+        @test occursin(">Knuth (1984)</a> wrote", NS._rewrite_citations("@k wrote", Set(["k"]); emit = NS._cite_link_emit(livectx("apa"))))
+        @test occursin(">Knuth [3]</a>", NS._rewrite_citations("@k", Set(["k"]); emit = NS._cite_link_emit(livectx("ieee"))))
+        # a group is one citation; an author's works in a row are named once (author-date)
+        works = [(key = "n24", title = "A", author = "Ning, Ding and Koh, Yun", year = "2024", surname = "Ning"),
+                 (key = "n25", title = "B", author = "Ning, Ding and Bryan, Karin", year = "2025", surname = "Ning"),
+                 (key = "g22", title = "C", author = "Gysbers, Dan", year = "2022", surname = "Gysbers")]
+        apa = NS._cite_labels("apa", works, Dict{String,Int}())
+        grp(s) = NS._rewrite_citations(s, Set(["n24", "n25", "g22"]); emit = (c, f) -> NS._cite_text(apa, c, f))
+        @test grp("[@n24; @n25]") == "(Ning et al., 2024, 2025)"
+        @test grp("[@n24; @g22; @n25]") == "(Ning et al., 2024; Gysbers, 2022; Ning et al., 2025)"
+        @test grp("[@n24, p. 3; @n25]") == "(Ning et al., 2024, p. 3; Ning et al., 2025)"
+        @test grp("@g22 found") == "Gysbers (2022) found"
+        # without a bibliography a citation shows as written
+        @test NS._rewrite_citations("[@a; @b, p. 2] and @a", Set(["a"]); emit = NS._cite_literal) == "[@a; @b, p. 2] and @a"
         @test NS._is_numeric_style("ieee") && !NS._is_numeric_style("apa")
         @test NS._author_year_label("Donald E. Knuth", "1984") == "Knuth, 1984"
         @test NS._author_year_label("Cormen and Leiserson", "2009") == "Cormen et al., 2009"
@@ -710,7 +724,9 @@ x = 1
         # The live view groups them the same way.
         ctx = NS._bib_link_ctx(nb)
         live = NS._rewrite_citations("[@sunA; @w7x]", Set(e.key for e in bi); emit = NS._cite_link_emit(ctx))
-        @test occursin(">[Sun 2026b]</a>", live) && occursin(">[W7-X Team 2024]</a>", live)
+        @test startswith(live, "[<a") && endswith(live, "</a>]")                 # one bracket for the group
+        @test occursin(">Sun 2026b</a>; <a", live) && occursin(">W7-X Team 2024</a>", live)
+        @test occursin(">Sun [2026a]</a>", NS._rewrite_citations("@sunB", Set(e.key for e in bi); emit = NS._cite_link_emit(ctx)))
         card = first(c for c in NS.state_json(nb)["cells"] if get(c, "roleBib", false))["output"]
         @test occursin("<span class=\"bibcard-num\">[Sun 2026a]</span>", card)   # the card shows the in-text label
         refs = NS._html_references(NS._md_cite_ctx(nb))

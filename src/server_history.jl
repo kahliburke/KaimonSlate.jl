@@ -1025,24 +1025,24 @@ end
 # A live `[@fig:label]` cross-reference → an HTML link that scrolls to the figure and shows "Figure N".
 _fig_link_emit(num, anchor) =
     string("<a class=\"figref\" href=\"#cell-", replace(String(anchor), "\"" => ""), "\">Figure ", num, "</a>")
-# Fallback bracket-cite emit for the live view when the notebook has NO bibliography: reconstruct the
-# original `[@key]` literally so a stray citation isn't turned into a Typst sentinel (§c§…) on screen.
-_cite_literal(key, sup, _form) = isempty(strip(sup)) ? string("[@", key, "]") : string("[@", key, ", ", strip(sup), "]")
+# Fallback cite emit for the live view when the notebook has NO bibliography: the citation as it was
+# written, so a stray one isn't turned into a Typst sentinel (§c§…) on screen.
+function _cite_literal(cites, form)
+    one(c) = isempty(strip(c.sup)) ? string("@", c.key) : string("@", c.key, ", ", strip(c.sup))
+    return form == "p" ? join(one.(cites), " ") : string("[", join(one.(cites), "; "), "]")
+end
 
+# A live citation group in the notebook's bibstyle (`_cite_text`), each key's part a link to the
+# bibliography cell with the entry as its tooltip.
 function _cite_link_emit(ctx)
     esc = _esc   # shared HTML-escape (server_hub) — same &<>" mapping
-    return (key, sup, _form) -> begin
-        core = get(ctx.labels, String(key), String(key))
-        inner = isempty(strip(sup)) ? core : string(core, ", ", strip(sup))
-        text = string(ctx.open, inner, ctx.close)
-        href = isempty(ctx.anchor) ? "" : " href=\"#cell-$(esc(ctx.anchor))\""
-        string("<a class=\"cite\"", href, " title=\"", esc(get(ctx.tips, String(key), String(key))),
-               "\">", esc(text), "</a>")
-    end
+    href = isempty(ctx.anchor) ? "" : " href=\"#cell-$(esc(ctx.anchor))\""
+    link(key, text) = string("<a class=\"cite\"", href, " title=\"", esc(get(ctx.tips, key, key)), "\">", esc(text), "</a>")
+    return (cites, form) -> _cite_text(ctx.fmt, cites, form; wrap = link)
 end
 # Live-citation context from the notebook's :bibliography cells — the anchor cell, per-key tooltips,
-# per-key in-text label (a number for numeric styles, an author-year string otherwise), the
-# numeric flag, and (numeric only) the card numbers. `nothing` when the notebook has no bibliography.
+# the style's labels (`fmt`, see `_cite_labels`), and the first-citation numbers. `nothing` when the
+# notebook has no bibliography.
 function _bib_link_ctx(nb)
     bi = bibliography_index(nb.report, dirname(abspath(nb.path)); nb)
     isempty(bi) && return nothing
@@ -1050,10 +1050,8 @@ function _bib_link_ctx(nb)
     anchor = idx === nothing ? "" : nb.report.cells[idx].id
     tips = Dict{String,String}(e.key => strip(join(filter(!isempty, [e.author, e.title]), " · ")) for e in bi)
     style = get(nb.report.meta, "bibstyle", "ieee")
-    numeric = _is_numeric_style(style)
     numbers = citation_numbers(nb.report, Set(e.key for e in bi))
-    (; labels, open, close) = _cite_labels(style, bi, numbers)
-    return (anchor = anchor, tips = tips, labels = labels, numeric = numeric, numbers = numbers, open = open, close = close)
+    return (; anchor, tips, numbers, numeric = _is_numeric_style(style), fmt = _cite_labels(style, bi, numbers))
 end
 
 # A SESSION-BOUND (live) output — one whose HTML is a view onto state that lives in the WORKER, e.g. a
@@ -1203,9 +1201,10 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         d["bibCount"] = length(es)
         labs, by = Dict{String,String}(), e -> 0
         if bibctx !== nothing
-            labs = Dict{String,String}(k => string(bibctx.open, v, bibctx.close) for (k, v) in bibctx.labels
+            fmt = bibctx.fmt
+            labs = Dict{String,String}(k => string(fmt.open, v, fmt.close) for (k, v) in fmt.labels
                                        if haskey(bibctx.numbers, k))
-            by = bibctx.numeric ? (e -> get(bibctx.numbers, e.key, typemax(Int))) : (e -> lowercase(get(bibctx.labels, e.key, e.key)))
+            by = bibctx.numeric ? (e -> get(bibctx.numbers, e.key, typemax(Int))) : (e -> lowercase(get(fmt.labels, e.key, e.key)))
         end
         d["output"] = _bib_card_html(srcs, es, nbid, cited, labs; by)  # card instead of raw BibTeX
     end

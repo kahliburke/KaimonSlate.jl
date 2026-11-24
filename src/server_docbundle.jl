@@ -185,7 +185,7 @@ _doc_cite_href(t) = !isempty(t.docpage) ? _DOC_LINK * t.docpage : t.url
 function _doc_cite_order(ctx)
     cc = ctx.citectx
     order = Dict{String,Int}()
-    rec = (key, _sup, _form) -> (haskey(order, String(key)) || (order[String(key)] = length(order) + 1); "")
+    rec = (cites, _form) -> (for c in cites; haskey(order, c.key) || (order[c.key] = length(order) + 1); end; "")
     for c in ctx.nb.report.cells
         (is_prose(c.kind) && !(:bibliography in c.flags)) || continue
         _rewrite_citations(_doc_spliced(c)[1], cc.citekeys; emit = rec)
@@ -195,28 +195,18 @@ end
 
 _doc_cite_labels(ctx) = _cite_labels(get(ctx.nb.report.meta, "bibstyle", "ieee"), ctx.citectx.bi, _doc_cite_order(ctx))
 
-# Citations in `s` as linked labels, where every key of a group has somewhere to link to; the rest are
-# left for `_doc_markdown` to notice. Groups keep the style's labels and brackets: `(A, 2025; B, 2024)`,
-# `[3; 5]` or `[Sun 2026; Elder 2025]`.
+# Citations in `s` as linked labels (`_cite_text`), where every key of a group has somewhere to link
+# to; the rest are left as written, for `_doc_markdown` to notice. Groups keep the style's labels and
+# brackets: `(A, 2025; B, 2024)`, `[3; 5]` or `[Sun 2026; Elder 2025]`.
 function _doc_citations(ctx, s::AbstractString)
     cc = ctx.citectx
     cc === nothing && return s
     targets = _bib_targets(ctx.nb.report, dirname(abspath(ctx.nb.path)))
-    (; labels, open, close) = _doc_cite_labels(ctx)
+    fmt = _doc_cite_labels(ctx)
     linked(k) = haskey(targets, k) && !isempty(_doc_cite_href(targets[k]))
-    # Each citation is first written as a marker, so a bracketed group's members can be gathered.
-    emit = (key, sup, form) -> string(form == "p" ? "\x02" : "\x01", key, "\x03", strip(sup), form == "p" ? "\x02" : "\x01")
-    t = _rewrite_citations(String(s), cc.citekeys; emit)
-    cite_link(key, sup) = string("[", get(labels, key, key), "](", _doc_cite_href(targets[key]), ")", isempty(sup) ? "" : ", " * sup)
-    t = replace(t, r"(\x01[^\x01]*\x01)+" => function (run)
-        parts = [split(m.captures[1], '\x03') for m in eachmatch(r"\x01([^\x01]*)\x01", run)]
-        all(p -> linked(p[1]), parts) || return "[" * join(("@" * p[1] * (isempty(p[2]) ? "" : ", " * p[2]) for p in parts), "; ") * "]"
-        return open * join((cite_link(p[1], p[2]) for p in parts), "; ") * close
-    end)
-    return replace(t, r"\x02([^\x02]*)\x02" => function (m)
-        key, _ = split(m[2:end-1], '\x03')
-        linked(key) ? cite_link(key, "") : "@" * key
-    end)
+    link(key, text) = string("[", text, "](", _doc_cite_href(targets[key]), ")")
+    emit = (cites, form) -> all(c -> linked(c.key), cites) ? _cite_text(fmt, cites, form; wrap = link) : _cite_literal(cites, form)
+    return _rewrite_citations(String(s), cc.citekeys; emit)
 end
 
 # The bibliography as a docs page shows it: the entries the notebook cites, spliced prose included,

@@ -146,7 +146,7 @@ end
         g = cells["group"]
         @test g["native"] === true
         @test occursin("([Lovelace, 2024](slate-docpage:kb/ada24.md); [Bard et al., 2023](https://example.org/looms))", g["markdown"])
-        @test occursin("as [Lovelace, 2024](slate-docpage:kb/ada24.md) put it", g["markdown"])
+        @test occursin("as [Lovelace (2024)](slate-docpage:kb/ada24.md) put it", g["markdown"])   # prose form names the author
         @test cells["spliced"]["native"] === true && occursin("See ([Lovelace, 2024](slate-docpage:kb/ada24.md)).", cells["spliced"]["markdown"])
         @test cells["unlinked"]["native"] === false                     # nowhere to link: Slate renders it
         refs = cells["refs"]["markdown"]

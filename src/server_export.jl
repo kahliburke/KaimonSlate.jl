@@ -5807,9 +5807,9 @@ function _md_table(spec)
     return String(take!(io))
 end
 
-# Markdown citation context: `citekeys`, a plain-text `emit` that renders each `[@key]` in the
-# notebook's bibstyle (numeric `[2]` / author-date `(Knuth, 1984)`, honouring a `, p. 7` locator), and
-# the data for a References section. `nothing` when the notebook has no bibliography.
+# Markdown citation context: `citekeys`, a plain-text `emit` that renders each citation group in the
+# notebook's bibstyle (`_cite_text`: numeric `[2]` / author-date `(Knuth, 1984)`, honouring a `, p. 7`
+# locator), and the data for a References section. `nothing` when the notebook has no bibliography.
 function _md_cite_ctx(nb::LiveNotebook)
     bi = bibliography_index(nb.report, dirname(abspath(nb.path)))
     isempty(bi) && return nothing
@@ -5817,18 +5817,14 @@ function _md_cite_ctx(nb::LiveNotebook)
     numeric = _is_numeric_style(style)
     citekeys = Set(e.key for e in bi)
     numbers = citation_numbers(nb.report, citekeys)         # first-citation order (numeric labels + ordering)
-    (; open, close) = labels = _cite_labels(style, bi, numbers)
-    label = labels.labels
-    intext = (key, sup) -> begin
-        lab = get(label, String(key), String(key))
-        inner = isempty(strip(sup)) ? lab : string(lab, ", ", strip(sup))
-        string(open, inner, close)
-    end
-    emit = (key, sup, _form) -> intext(key, sup)                       # plain text (markdown / meta desc)
+    fmt = _cite_labels(style, bi, numbers)
+    (; open, close) = fmt
+    label = fmt.labels
+    emit = (cites, form) -> _cite_text(fmt, cites, form)                # plain text (markdown / meta desc)
     # HTML in-text citation that LINKS to its References entry (`#ref-<key>`) — used by the HTML export
     # so a rendered `[N]` / `(Author, Year)` jumps to the bibliography, matching the live view.
-    emit_html = (key, sup, _form) ->
-        string("<a class=\"cite\" href=\"#ref-", _cite_anchor(String(key)), "\">", _esc(intext(key, sup)), "</a>")
+    link(key, text) = string("<a class=\"cite\" href=\"#ref-", _cite_anchor(key), "\">", _esc(text), "</a>")
+    emit_html = (cites, form) -> _cite_text(fmt, cites, form; wrap = link)
     bracketed = _is_bracket_style(style)
     return (; citekeys, emit, emit_html, bi, numeric, bracketed, numbers, label, open, close, cited = cited_citation_keys(nb.report))
 end
