@@ -90,7 +90,7 @@ function _pkg_apply_now(o, tokens)
             return Dict{String,Any}("ok" => true, "message" => "updated $(join(tokens, ", "))")
         elseif o == "add"
             s = _pkg_add_specs(tokens)
-            add_installed_first!(s.adds)    # envprep.jl: reuse versions this depot already holds
+            isempty(s.adds) || Pkg.add(s.adds)
             isempty(s.devs) || Pkg.develop(s.devs)
             return Dict{String,Any}("ok" => true, "message" => "added $(join(s.labels, ", "))")
         else

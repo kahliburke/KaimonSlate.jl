@@ -2289,7 +2289,7 @@ function _pkg_parent_now(o, tokens, parent)
         Pkg.activate(parent)
         if o == "add"
             s = _pkg_add_specs(tokens)
-            add_installed_first!(s.adds)
+            isempty(s.adds) || Pkg.add(s.adds)
             isempty(s.devs) || Pkg.develop(s.devs)
             msg = "added $(join(s.labels, ", ")) to the project"
         elseif o == "rm"

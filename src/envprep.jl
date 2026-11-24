@@ -262,29 +262,6 @@ function _inherit_workspace!(seed::AbstractDict, projectfile::AbstractString)
     return seed
 end
 
-"""
-    add_installed_first!(specs)
-
-`Pkg.add(specs)` into the active project, choosing among the versions this depot already holds when
-those satisfy it. They are, as a rule, already compiled, so a notebook that adds a package goes on
-sharing compiled code with the notebooks beside it instead of pulling in the newest release of every
-dependency it touches. A normal resolve follows when nothing installed will do.
-"""
-function add_installed_first!(specs)
-    isempty(specs) && return nothing
-    was = Pkg.OFFLINE_MODE[]
-    try
-        Pkg.offline(true)
-        Pkg.add(deepcopy(specs))
-        return nothing
-    catch
-    finally
-        Pkg.offline(was)
-    end
-    Pkg.add(specs)
-    return nothing
-end
-
 const _SEB_UUID = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
 
 """
