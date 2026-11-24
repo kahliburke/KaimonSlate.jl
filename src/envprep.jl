@@ -382,9 +382,8 @@ name: `"GLMakie = 13f3f980-… (CairoMakie's UUID)"`. Pkg accepts such a pair wi
 writes it into the project and manifest, after which the package that UUID really belongs to can no
 longer be added. A UUID no registry here knows is not reported.
 """
-function name_uuid_mismatches(entries)
+function name_uuid_mismatches(entries; regs = nothing)
     out = String[]
-    regs = nothing
     for (name, uuid) in entries
         regs === nothing && (regs = _registries())
         reg = registered_name(uuid, regs)
@@ -584,6 +583,7 @@ recorded version would fight the parent's fresh resolution, which is the thing t
 """
 function readd_specs(delta; pinned::Bool = false, base::AbstractString = "")
     devs = NamedTuple[]; adds = NamedTuple[]; skipped = String[]; mismatched = String[]
+    regs = nothing   # read once, on the first record that needs them
     for e in (delta isa AbstractVector ? delta : ())
         e isa AbstractDict || continue
         f(k) = string(get(e, k, get(e, Symbol(k), "")))
@@ -598,7 +598,8 @@ function readd_specs(delta; pinned::Bool = false, base::AbstractString = "")
             push!(adds, isempty(rev) ? (; url = String(url)) : (; url = String(url), rev = String(rev)))
         else
             uu = f("uuid"); v = f("version")
-            bad = isempty(uu) ? String[] : name_uuid_mismatches((nm => uu,))
+            isempty(uu) || regs !== nothing || (regs = _registries())
+            bad = isempty(uu) ? String[] : name_uuid_mismatches((nm => uu,); regs)
             isempty(bad) || (append!(mismatched, bad); continue)
             s = isempty(uu) ? (; name = nm) : (; name = nm, uuid = uu)
             pinned && !isempty(v) && (s = merge(s, (; version = v)))
