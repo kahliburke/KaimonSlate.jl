@@ -397,33 +397,76 @@ end
 # with ONE reset-and-retry from the authoritative parent. The local mirror of the remote provisioner's
 # self-healing `build_env!`, and the counterpart to the worker's in-process `_seed_notebook_env!` for
 # when the worker can't run yet (a stale env would crash it at boot). Streams into the boot banner.
+#
+# All or nothing: when the rebuild fails, the fork's files are put back as they were, so the notebook
+# keeps its own packages and goes on running in the env it had, behind its project, and the next open or
+# project change tries again. What failed, or what was left out, goes to the notebook's env notice
+# (`set_env_problem!`). Returns whether the rebuild succeeded.
 function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; online = nothing,
                                 delta = Dict{String,Any}[])
+    say(msg) = (@warn "KaimonSlate: $msg" envdir; online === nothing || (try; online(msg); catch; end))
     # Read before the re-seed overwrites the fork's files.
     devs = ReportEngine.fork_devs(envdir, parent)
-    skipped = filter(n -> !haskey(devs, n), ReportEngine.readd_specs(delta; base = parent).skipped)
-    if !isempty(skipped)
-        msg = "local checkouts not found on this machine, so not added: " * join(skipped, ", ")
-        @warn "KaimonSlate: $msg" envdir
-        online === nothing || (try; online(msg); catch; end)
-    end
+    left = ReportEngine.readd_specs(delta; base = parent)
+    notes = ReportEngine.left_out_notes(filter(n -> !haskey(devs, n), left.skipped), left.mismatched)
+    foreach(say, notes)
+    files = ("Project.toml", "Manifest.toml")
+    saved = Dict(f => read(joinpath(envdir, f)) for f in files if isfile(joinpath(envdir, f)))
+    tail = String[]   # the build's last lines, for the error it ends with
+    out = line -> (push!(tail, line); length(tail) > 40 && popfirst!(tail);
+                   online === nothing || (try; online(line); catch; end))
+    err = ""; refused = false
     build = function ()
-        pname = ReportEngine.seed_env_project!(envdir, parent)
-        dev = isempty(pname) ? "" :
+        empty!(tail)
+        pname = try
+            ReportEngine.seed_env_project!(envdir, parent)
+        catch e
+            err = sprint(showerror, e); refused = true
+            return false
+        end
+        # The develop resolves the fork. Without a parent package to develop, the resolve is explicit: the
+        # seed lists packages the copied manifest does not have (SlateExtensionsBase), and the copy can
+        # carry entries the project no longer lists, which block adding the package their UUID names.
+        dev = isempty(pname) ? "Pkg.resolve(); " :
               "Pkg.develop(Pkg.PackageSpec(path=raw\"$(parent)\"); preserve=Pkg.PRESERVE_ALL); "
-        ok = _instantiate_env!(envdir; online = online,
+        ok = _instantiate_env!(envdir; online = out,
                                code = "using Pkg; $(dev)Pkg.instantiate()" *
                                       ReportEngine.env_add_code(delta, devs; base = parent))
-        ok && ReportEngine.stamp_env!(envdir, parent)
+        ok ? ReportEngine.stamp_env!(envdir, parent) : (err = _build_error(tail))
         return ok
     end
-    if !build()
+    ok = build()
+    if !ok && !refused
         # Reset the env + rebuild ONCE from the authoritative parent (a half-written / stale env dir
         # self-heals instead of wedging every future open — same policy as the remote provisioner).
-        for f in ("Project.toml", "Manifest.toml"); try; rm(joinpath(envdir, f); force = true); catch; end; end
-        build()
+        for f in files; try; rm(joinpath(envdir, f); force = true); catch; end; end
+        ok = build()
     end
-    return envdir
+    if !ok
+        for f in files
+            p = joinpath(envdir, f)
+            try
+                haskey(saved, f) ? write(p, saved[f]) : rm(p; force = true)
+            catch
+            end
+        end
+        say("not updated from its project: " * err)
+    end
+    ReportEngine.set_env_problem!(envdir; left_out = notes, failure = ok ? "" : "not updated from its project: " * err)
+    return ok
+end
+
+# The error a failed Pkg subprocess ended with, from the last lines of its output: the `ERROR:` line and
+# what follows it up to the stacktrace.
+function _build_error(lines)
+    i = findlast(l -> startswith(l, "ERROR:"), lines)
+    i === nothing && return isempty(lines) ? "the rebuild failed" : String(last(lines))
+    msg = String[strip(chopprefix(lines[i], "ERROR:"))]
+    for l in @view lines[i+1:end]
+        (startswith(l, "Stacktrace") || startswith(l, "[")) && break
+        push!(msg, l)
+    end
+    return join(msg, " ")
 end
 
 # ── A forked env follows its parent project ─────────────────────────────────────────────────────
@@ -438,7 +481,11 @@ const _FORK_LOCK = ReentrantLock()
 function _refresh_fork_env!(envdir::AbstractString, parent::AbstractString, delta; online = nothing)
     (isempty(parent) || isempty(envdir) || !isfile(joinpath(envdir, "Project.toml"))) && return false
     lock(_FORK_LOCK) do
-        ReportEngine.env_stale(envdir, parent) || return false
+        if !ReportEngine.env_stale(envdir, parent)
+            # Current again without a rebuild (the project was put back): an earlier failure is over.
+            ReportEngine.clear_env_problem!(envdir, :failure)
+            return false
+        end
         ReportEngine._rlog("fork: $(basename(envdir)) is behind its project $(basename(parent)) — re-resolving it")
         # `delta`: the re-seed comes from the PARENT, which knows nothing about what this notebook
         # added, so its own packages have to be put back.
@@ -468,7 +515,13 @@ function _watch_fork!(nb::LiveNotebook)
     prev = get(_FORK_SEEN, nb.id, nothing)
     _FORK_SEEN[nb.id] = sig
     (prev === nothing || prev == sig) && return nothing
-    _refresh_nb_fork!(nb) || return nothing
+    before = ReportEngine.env_problem(k.envdir)
+    rebuilt = _refresh_nb_fork!(nb)
+    if rebuilt || ReportEngine.env_problem(k.envdir) != before   # the page shows the env notice
+        v = lock(nb.lock) do; nb.version += 1; end
+        try; _broadcast(nb, string(v)); catch; end
+    end
+    rebuilt || return nothing
     for rk in _nb_kernels(nb)
         (rk isa ReportEngine.GateKernel && rk.conn !== nothing && rk.target isa ReportEngine.RemoteTarget) || continue
         Threads.@spawn try
@@ -578,6 +631,7 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             # Project.toml is written by the reconstruction itself, so a worker that never ran
             # leaves the env "absent" and reconstruction retries on the next open.
             mkpath(envdir)
+            ReportEngine.mark_notebook_env!(envdir, path)
             return GateKernel(envdir; parent = parent, envdir = envdir, nbdir = nbdir, pending = delta, threads = th, extra_flags = ef, dedicated_threads = dt, label = lbl, online = online)
         elseif parent == ""
             # Detached: the notebook env IS the whole world (everything is a "notebook add").

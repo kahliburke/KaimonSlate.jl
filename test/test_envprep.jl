@@ -107,6 +107,8 @@ end
         @test !isempty(c)
         # Even over a parent that allows an older release: the worker cannot run with it.
         r = seed_from("""
+        SlateExtensionsBase = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
+
         [compat]
         SlateExtensionsBase = "0.10, 0.11"
         """)
@@ -183,22 +185,68 @@ end
                  Dict{String,Any}("name" => "Gone", "version" => "0.1.0", "uuid" => "f4c9f34b-fa6a-4506-9309-e8c0bac809fa",
                                   "source" => "path", "origin" => joinpath(dev, "missing")),
                  Dict{String,Any}("name" => "Git", "source" => "git", "origin" => "https://example.com/Git.jl#v1.2"),
-                 Dict{String,Any}("name" => "Reg", "version" => "2.1.0", "uuid" => "2edaba10-b0f1-5616-af89-8c11ac63239a")]
+                 Dict{String,Any}("name" => "Nemo", "version" => "2.1.0", "uuid" => "2edaba10-b0f1-5616-af89-8c11ac63239a")]
         s = ReportEngine.readd_specs(delta)
         @test s.devs == [(; name = "Dev", path = abspath(dev))]
         @test s.skipped == ["Gone"]
         @test (; url = "https://example.com/Git.jl", rev = "v1.2") in s.adds
-        @test (; name = "Reg", uuid = "2edaba10-b0f1-5616-af89-8c11ac63239a") in s.adds
-        @test (; name = "Reg", uuid = "2edaba10-b0f1-5616-af89-8c11ac63239a", version = "2.1.0") in
+        @test (; name = "Nemo", uuid = "2edaba10-b0f1-5616-af89-8c11ac63239a") in s.adds
+        @test (; name = "Nemo", uuid = "2edaba10-b0f1-5616-af89-8c11ac63239a", version = "2.1.0") in
               ReportEngine.readd_specs(delta; pinned = true).adds
         # Symbol keys (a delta that crossed the gate) read the same.
-        @test ReportEngine.readd_specs([Dict(:name => "Reg")]).adds == [(; name = "Reg")]
+        @test ReportEngine.readd_specs([Dict(:name => "Nemo")]).adds == [(; name = "Nemo")]
         code = ReportEngine.env_add_code(delta)
         # Checkouts first, so a package that depends on one resolves against it.
         @test occursin("; Pkg.develop([Pkg.PackageSpec(path=$(repr(abspath(dev))))]); Pkg.add([", code)
         @test occursin("Pkg.PackageSpec(url=\"https://example.com/Git.jl\", rev=\"v1.2\")", code)
         @test !occursin("Gone", code)
         @test Meta.parse("begin" * replace(code, r"^; " => "\n") * "\nend") isa Expr
+    end
+
+    # A footer or project line whose name was changed by hand while its UUID was kept (a find-and-replace
+    # of one package name for another) is accepted by Pkg as is: the package is installed under the wrong
+    # name, and the package that UUID belongs to can no longer be added.
+    @testset "a name paired with another package's UUID is caught" begin
+        cairo = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+        @test ReportEngine.registered_name(cairo) == "CairoMakie"
+        @test ReportEngine.name_uuid_mismatches(["GLMakie" => cairo, "CairoMakie" => cairo,
+                                                 "Mine" => "33333333-3333-3333-3333-333333333333"]) ==
+              ["GLMakie = $cairo (CairoMakie's UUID)"]
+
+        delta = [Dict{String,Any}("name" => "GLMakie", "version" => "0.15.0", "uuid" => cairo),
+                 Dict{String,Any}("name" => "CairoMakie", "version" => "0.15.0", "uuid" => cairo)]
+        s = ReportEngine.readd_specs(delta; pinned = true)
+        @test s.adds == [(; name = "CairoMakie", uuid = cairo, version = "0.15.0")]
+        @test s.mismatched == ["GLMakie = $cairo (CairoMakie's UUID)"]
+        @test !occursin("GLMakie", ReportEngine.env_add_code(delta))
+    end
+
+    @testset "a project that can't be forked is refused, naming its own file" begin
+        project(body) = (d = mktempdir(); write(joinpath(d, "Project.toml"), """
+            name = "P"
+            uuid = "11111111-1111-1111-1111-111111111111"
+            $body
+            """); d)
+        err(dir) = try; ReportEngine.check_project_file(joinpath(dir, "Project.toml")); ""; catch e; sprint(showerror, e); end
+
+        good = project("[deps]\nStatistics = \"10745b16-79ce-11e8-11f9-7d13ad32a3b2\"\n")
+        @test err(good) == ""
+
+        # A [compat] entry left behind when its [deps] line was removed.
+        dangling = project("[deps]\nStatistics = \"10745b16-79ce-11e8-11f9-7d13ad32a3b2\"\n[compat]\nGLMakie = \"0.13\"\n")
+        e = err(dangling)
+        @test occursin("Compat `GLMakie` not listed", e) && occursin(joinpath(dangling, "Project.toml"), e)
+
+        renamed = project("[extras]\nGLMakie = \"13f3f980-e62b-5c42-98c6-ff1f3baf88f0\"\n")
+        e = err(renamed)
+        @test occursin(joinpath(renamed, "Project.toml"), e) && occursin("(CairoMakie's UUID)", e)
+
+        # Seeding refuses before it writes anything, so a fork that already exists keeps its files.
+        env = mktempdir()
+        write(joinpath(env, "Project.toml"), "[deps]\n"); write(joinpath(env, "Manifest.toml"), "# kept\n")
+        @test_throws Exception ReportEngine.seed_env_project!(env, dangling)
+        @test (read(joinpath(env, "Project.toml"), String), read(joinpath(env, "Manifest.toml"), String)) ==
+              ("[deps]\n", "# kept\n")
     end
 
     @testset "a checkout inside the project is recorded relative to it, and read back under wherever the project is" begin

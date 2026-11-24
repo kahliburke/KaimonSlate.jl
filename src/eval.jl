@@ -828,7 +828,7 @@ function env_info(k::InProcessKernel, ::Report)
         deps = filter(d -> !(string(get(d, "name", "")) in base), _project_deps())
         own = (path = dirname(Pkg.project().path), name = "", deps = deps)
     end
-    return (notebook = own, parent = _project_group(k.projectdir))
+    return (notebook = own, parent = _project_group(k.projectdir), error = "")
 end
 
 # `(path, name, deps)` for a project directory, read straight off its Project.toml. Deliberately

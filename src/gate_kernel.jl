@@ -2224,17 +2224,22 @@ function env_info(k::GateKernel, report::Report)
     prepare!(k, report)
     wire = try
         _tool(k, "__slate_env_info", Dict{String,Any}())
-    catch
-        return (notebook = (path = "", deps = Dict{String,Any}[]), parent = nothing)
+    catch e
+        return (notebook = (path = "", deps = Dict{String,Any}[]), parent = nothing,
+                error = sprint(showerror, e))
     end
     _grp(g) = g === nothing ? nothing :
         (path = String(get(g, :path, get(g, "path", ""))),
          name = String(get(g, :name, get(g, "name", ""))),
          deps = Dict{String,Any}[Dict{String,Any}(String(kk) => v for (kk, v) in d)
                                  for d in get(g, :deps, get(g, "deps", Any[]))])
-    nb = _grp(get(wire, :notebook, get(wire, "notebook", nothing)))
+    w_nb = get(wire, :notebook, get(wire, "notebook", nothing))
+    nb = _grp(w_nb)
     par = _grp(get(wire, :parent, get(wire, "parent", nothing)))
-    return (notebook = nb === nothing ? (path = "", name = "", deps = Dict{String,Any}[]) : nb, parent = par)
+    err = w_nb === nothing ? "the worker did not describe its environment" :
+          string(get(w_nb, :error, get(w_nb, "error", "")))
+    return (notebook = nb === nothing ? (path = "", name = "", deps = Dict{String,Any}[]) : nb, parent = par,
+            error = err)
 end
 
 # The worker's SlateExtensionsBase extension manifest — what its loaded packages registered for the
@@ -2385,26 +2390,74 @@ function _reconstruct_env!(k::GateKernel)
                           _pkg_op_timeout(), "could not rebuild the notebook's packages")
     r === nothing && return   # a failed rebuild keeps `pending`, so the next use retries
     stamp_env!(k.envdir, k.parent)
+    isempty(k.nbdir) || mark_notebook_env!(k.envdir, joinpath(k.nbdir, k.label))
     empty!(k.pending)
     return
 end
 
-# Run an env rebuild on the worker and report what went wrong (hub log + boot banner): a failure,
-# or local checkouts it had to skip because their path is missing here. `nothing` on failure.
+# What the last rebuild of each notebook env could not do, keyed by env dir, in two parts that end
+# differently. `failure`: the rebuild failed, so the env is behind its project; it ends when the env is
+# found current again (rebuilt, or the project put back). `left_out`: footer packages it did not add;
+# they end when a package operation rewrites the footer from the env. Kept by env dir because the
+# rebuilds run where only the env is known (before a worker exists, or from the project watcher).
+const _ENV_PROBLEMS = Dict{String,@NamedTuple{failure::String, left_out::Vector{String}}}()
+const _ENV_PROBLEMS_LOCK = ReentrantLock()
+
+"Record what a rebuild of `envdir` could not do, replacing what the last one recorded."
+function set_env_problem!(envdir::AbstractString; failure::AbstractString = "", left_out = String[])
+    lock(_ENV_PROBLEMS_LOCK) do
+        e = (failure = String(failure), left_out = String[String(s) for s in left_out])
+        isempty(e.failure) && isempty(e.left_out) ? delete!(_ENV_PROBLEMS, String(envdir)) :
+                                                    (_ENV_PROBLEMS[String(envdir)] = e)
+    end
+    return nothing
+end
+
+"Drop one part (`:failure` or `:left_out`) of what is recorded for `envdir`. Returns whether there was any."
+function clear_env_problem!(envdir::AbstractString, part::Symbol)
+    lock(_ENV_PROBLEMS_LOCK) do
+        e = get(_ENV_PROBLEMS, String(envdir), nothing)
+        e === nothing && return false
+        had = part === :failure ? !isempty(e.failure) : !isempty(e.left_out)
+        had || return false
+        failure, left_out = part === :failure ? ("", e.left_out) : (e.failure, String[])
+        isempty(failure) && isempty(left_out) ? delete!(_ENV_PROBLEMS, String(envdir)) :
+                                                (_ENV_PROBLEMS[String(envdir)] = (; failure, left_out))
+        return true
+    end
+end
+
+"What the last rebuild of `envdir` could not do, one line each, or `\"\"`."
+function env_problem(envdir::AbstractString)
+    e = lock(() -> get(_ENV_PROBLEMS, String(envdir), nothing), _ENV_PROBLEMS_LOCK)
+    e === nothing && return ""
+    return join(vcat(e.left_out, isempty(e.failure) ? String[] : [e.failure]), "\n")
+end
+
+"The notebook packages a rebuild left out, in words: missing checkouts and records whose name and UUID disagree."
+function left_out_notes(skipped, mismatched)
+    notes = String[]
+    isempty(skipped) || push!(notes, "local checkouts not found on this machine, so not added: " * join(skipped, ", "))
+    isempty(mismatched) || push!(notes, "Slate.env packages not added: " * join(mismatched, "; "))
+    return notes
+end
+
+# Run an env rebuild on the worker and report what went wrong (hub log + boot banner + the notebook's
+# env notice): a failure, or packages it left out. `nothing` on failure.
 function _env_rebuild_tool(k::GateKernel, tool::AbstractString, args, timeout, what::AbstractString)
     note(msg) = (@warn "KaimonSlate: $msg" notebook = k.label; k.online === nothing || (try; k.online(msg); catch; end))
+    fail(msg) = (note(msg); set_env_problem!(k.envdir; failure = msg); nothing)
     r = try
         _tool(k, tool, args; timeout = timeout)
     catch e
         e isa InterruptException && rethrow()
-        note("$what: " * sprint(showerror, e)); return nothing
+        return fail("$what: " * sprint(showerror, e))
     end
     field(key, d) = r isa AbstractDict ? get(r, Symbol(key), get(r, key, d)) : d
-    if field("ok", false) !== true
-        note("$what: " * string(field("message", "no response from worker"))); return nothing
-    end
-    skipped = field("skipped", String[])
-    isempty(skipped) || note("local checkouts not found on this machine, so not added: " * join(skipped, ", "))
+    field("ok", false) === true || return fail("$what: " * string(field("message", "no response from worker")))
+    notes = left_out_notes(field("skipped", String[]), field("mismatched", String[]))
+    foreach(note, notes)
+    set_env_problem!(k.envdir; left_out = notes)
     return r
 end
 

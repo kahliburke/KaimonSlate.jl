@@ -196,13 +196,17 @@ _pkg_manageable(k::InProcessKernel) = !isempty(k.envdir) || !isempty(k.projectdi
 # `{name, version, uuid}` — the set difference active − parent − parent-package. Shared by
 # the package viewer's "notebook" group and the `.jl` reproducibility footer.
 function _notebook_adds(nb::LiveNotebook)
+    # `ok = false` distinguishes a FAILED env probe from a genuinely detached notebook (both
+    # `detached = true`) — so a failure can't be read as "no packages" and wipe the footer. The probe
+    # fails by throwing, or by answering with an `error`: an environment whose manifest is out of step
+    # with its project reads as no packages at all.
+    failed = (adds = Dict{String,Any}[], parent = Dict{String,Any}[], parentpath = "", detached = true, ok = false)
     info = try
         ReportEngine.env_info(nb.kernel, nb.report)
     catch
-        # `ok = false` distinguishes a FAILED env probe from a genuinely detached notebook (both
-        # `detached = true`) — so a transient failure can't be read as "no packages" and wipe the footer.
-        return (adds = Dict{String,Any}[], parent = Dict{String,Any}[], parentpath = "", detached = true, ok = false)
+        return failed
     end
+    isempty(string(get(info, :error, ""))) || return failed
     pdeps = info.parent === nothing ? Dict{String,Any}[] : info.parent.deps
     pnames = Set(string(get(d, "name", "")) for d in pdeps)
     info.parent === nothing || push!(pnames, info.parent.name)
@@ -235,6 +239,10 @@ function _refresh_env_meta!(nb::LiveNotebook)
     info = _notebook_adds(nb)
     info.ok || return nb   # env probe failed transiently — leave the footer as-is rather than wiping it
     env = Dict{String,Any}[_env_record(d; base = info.parentpath) for d in info.adds]
+    # The footer is about to be written from the env, so footer packages a rebuild left out are gone from it.
+    let k = nb.kernel
+        k isa ReportEngine.GateKernel && !isempty(k.envdir) && ReportEngine.clear_env_problem!(k.envdir, :left_out)
+    end
     @report_op nb report begin
         cur = get(report.meta, "env", Dict{String,Any}[])
         changed = if isempty(env)
@@ -1883,6 +1891,14 @@ function state_json(nb::LiveNotebook)
     # Whether the notebook has citation keys: `[@` then asks the hub for them (`/api/{id}/bibkeys`).
     bibctx === nothing || (meta["hasBib"] = true)
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
+    # What the last rebuild of the notebook's env could not do (`set_env_problem!`): the worker runs, but
+    # in an env behind its project or without some of the notebook's packages.
+    let k = nb.kernel
+        if k isa ReportEngine.GateKernel && !isempty(k.envdir)
+            p = ReportEngine.env_problem(k.envdir)
+            isempty(p) || (meta["envProblem"] = p)
+        end
+    end
     # Package-declared front-end scripts (SlateExtensionsBase manifest → `_refresh_extensions!`). The
     # browser injects each `<script>` once (deduped by id) so a package's widget renderer / editor
     # extension registers with no boot cell (see `_frontend_scripts`, view.js `injectFrontendScripts`).

@@ -2036,6 +2036,11 @@ function updateChrome(state) {
     hb.className = 'hydbanner err'; hb.style.display = 'flex';
     hb.textContent = '⚠ ' + state.hydrateError;   // worker bring-up / env reconstruction failed (message is self-contained)
     document.body.classList.remove('hyd-preview'); window.clearPrepare && window.clearPrepare();
+  } else if (state.envProblem) {
+    // The worker runs, but the last rebuild of its env failed or left notebook packages out.
+    hb.className = 'hydbanner err'; hb.style.display = 'flex';
+    hb.textContent = '⚠ ' + state.envProblem.replace(/\n/g, ' · ');
+    document.body.classList.remove('hyd-preview'); window.clearPrepare && window.clearPrepare();
   } else {
     hb.style.display = 'none'; document.body.classList.remove('hyd-preview'); window.clearPrepare && window.clearPrepare();
   }

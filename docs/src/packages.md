@@ -35,6 +35,19 @@ rest still install. A change to the project's `Project.toml` or `Manifest.toml` 
 is open (a dependency added to the package under development, say) re-resolves the fork too, and
 brings the environment of any region worker it has up to date.
 
+A re-sync that fails leaves the fork as it was: the notebook keeps its packages and goes on running in
+the environment it had, behind its project, with a banner giving Pkg's error. The next open, or the
+next change to the project, tries again. Before a fork is seeded, the project's `Project.toml` is
+checked, so a problem there (a `[compat]` entry for a package it no longer lists, say) is reported
+against that file rather than the fork's copy of it.
+
+A package listed under another package's UUID, as a find-and-replace of one package name for another
+leaves it, is caught in both places Slate reads it from. In the project's `[deps]`, `[weakdeps]` or
+`[extras]` it stops the fork being seeded; in the `Slate.env` footer that one package is not added,
+and the banner names it. Pkg itself accepts such a pair, installs it under the wrong name, and then
+refuses to add the package the UUID belongs to ("Package `GLMakie=13f3f980-…` with the same UUID
+already exists"). Only UUIDs a registry on the machine knows are checked.
+
 ## The panel
 
 The panel shows the environment with **provenance**, in two groups:

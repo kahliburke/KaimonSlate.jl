@@ -2110,15 +2110,18 @@ end
 
 "Environment provenance for the package viewer: the notebook's own direct deps (the active
 project — where `Pkg.add` lands) and, separately, the parent project's deps (inherited via
-LOAD_PATH stacking). Shape: `{notebook:{path,deps}, parent:{path,deps}|nothing, payload_sha, job, env_rebuilt}`.
-`job` is the scheduler job this process booted in, and empty outside one (`BOOT_JOB`). `env_rebuilt`
-says the host built this worker's environment again after it booted."
+LOAD_PATH stacking). Shape: `{notebook:{path,deps[,error]}, parent:{path,deps}|nothing, payload_sha, job,
+env_rebuilt}`. `notebook.error` says the notebook's packages could not be read, so an empty `deps` is
+not mistaken for a notebook with none of its own. `job` is the scheduler job this process booted in,
+and empty outside one (`BOOT_JOB`). `env_rebuilt` says the host built this worker's environment
+again after it booted."
 function __slate_env_info()
     nb = Dict{String,Any}("path" => "", "deps" => Dict{String,Any}[])
     try
         nb["path"] = dirname(Pkg.project().path)
-        nb["deps"] = __slate_project_deps()
-    catch
+        nb["deps"] = _project_deps(; strict = true)
+    catch e
+        nb["error"] = sprint(showerror, e)
     end
     parent = nothing
     p = PARENT_PROJECT[]
@@ -2149,6 +2152,11 @@ function _seed_notebook_env!(envdir::AbstractString, parent::AbstractString)
         catch
             try; Pkg.develop(Pkg.PackageSpec(path = parent)); catch; end
         end
+    else
+        # No parent package to develop, so nothing has resolved the fork: the seed lists packages the
+        # copied manifest does not have (SlateExtensionsBase), and the copy can carry entries the
+        # project no longer lists, which block adding the package their UUID names.
+        Pkg.resolve()
     end
     return pname
 end
@@ -2168,25 +2176,27 @@ function __slate_fork(envdir, parent)
 end
 
 "Re-create the notebook's own packages after a re-seed, each the way it was added (`readd_specs`,
-envprep.jl). Returns the names of local checkouts that are missing on this machine."
+envprep.jl). Returns what was left out: local checkouts missing on this machine (`skipped`) and
+records whose name and UUID disagree (`mismatched`)."
 function _readd!(delta; pinned::Bool = false, preserve = Pkg.PRESERVE_TIERED, base::AbstractString = "")
     s = readd_specs(delta; pinned, base)
     isempty(s.devs) || Pkg.develop([Pkg.PackageSpec(; d...) for d in s.devs]; preserve)
     isempty(s.adds) || Pkg.add([Pkg.PackageSpec(; a...) for a in s.adds]; preserve)
-    return s.skipped
+    return (; s.skipped, s.mismatched)
 end
 
 "Reconstruct a notebook env from its `.jl` footer: seed from the parent, then add the
 notebook's own packages at the recorded versions. Called on open when the env dir is
 absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is the footer's
-`{name, version, uuid[, source, origin]}` records. Returns `{ok, skipped}` or `{ok=false, message}`."
+`{name, version, uuid[, source, origin]}` records. Returns `{ok, skipped, mismatched}` or
+`{ok=false, message}`."
 function __slate_reconstruct(envdir, parent, pkgs)
     try
-        skipped = with_env_work() do
+        left = with_env_work() do
             _seed_notebook_env!(String(envdir), String(parent))
             _readd!(pkgs; pinned = true, base = String(parent))
         end
-        return Dict{String,Any}("ok" => true, "skipped" => skipped)
+        return Dict{String,Any}("ok" => true, "skipped" => left.skipped, "mismatched" => left.mismatched)
     catch e
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     finally

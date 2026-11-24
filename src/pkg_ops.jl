@@ -120,8 +120,10 @@ end
 "The active project's direct dependencies as `{name, version, uuid, source, origin}` (for eager docs
 auto-index + the package viewer). `source` = \"registry\" | \"path\" (a dev'd local checkout) | \"git\"
 (added from a URL); `origin` carries the path or `url#rev` for the non-registry ones — so the UI can flag
-that a dep points at something machine-specific rather than a pinned registry release."
-function _project_deps()
+that a dep points at something machine-specific rather than a pinned registry release.
+`strict = true` throws when the environment can't be read (a manifest out of step with its project)
+instead of answering with an empty list."
+function _project_deps(; strict::Bool = false)
     out = Dict{String,Any}[]
     try
         proj = Pkg.project()
@@ -148,6 +150,7 @@ function _project_deps()
                                         "source" => source, "origin" => origin))
         end
     catch
+        strict && rethrow()
     end
     return out
 end

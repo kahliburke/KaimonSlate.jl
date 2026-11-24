@@ -47,6 +47,7 @@ module Eval;      include("test_eval.jl");      end
 module Deps;      include("test_deps.jl");      end
 module Edits;     include("test_edits.jl");     end
 module Envprep;   include("test_envprep.jl");   end
+module ForkRebuild; include("test_fork_rebuild.jl"); end
 module Gateauth;  include("test_gateauth.jl"); end
 module PeerOwnerT; include("test_peer_owner.jl"); end
 module Tools;     include("test_tools.jl");     end
@@ -102,7 +103,7 @@ module Confine;   include("test_confine.jl");   end
 const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memostore, Slatetask,
                    Batchsweep, Transfer, SyncDictT, Dataset, TablesInc, Jobcell, FormatT, Effectstore,
                    Blobchannel, RemotePool, Regions, Machines, SlateDiagT, Parallel, Animation, Echarts, SlateLook,
-                   Engine, Eval, Deps, Edits, Envprep, Gateauth, PeerOwnerT, SshTransportT, Tools, Registry, Toolcell, Web,
+                   Engine, Eval, Deps, Edits, Envprep, ForkRebuild, Gateauth, PeerOwnerT, SshTransportT, Tools, Registry, Toolcell, Web,
                    Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, RunRecord, History, SlateApi,
                    Agentops, Repro, Slides, Recording, Debugger, Profiler, Specialist, Findings, ToolDocs, AppRender,
                    Frontmatter, Export, DocBundle, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, FramePoolT, EmitChannelT, WsOrder, BindObs, RecordDisplay, MatrixDisplay, Confine)
