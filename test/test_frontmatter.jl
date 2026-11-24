@@ -130,7 +130,7 @@ x = 1
         cnb = _mknb("#%% md id=body\nSee [@knuth1984, p. 7].\n\n" *
                     "#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}, year={1984}}\n")
         h = NS.export_html(cnb)
-        @test occursin("[1, p. 7]", h)                       # citation rendered (ieee default), not raw
+        @test occursin(">1, p. 7</a>]", h)                   # citation rendered (ieee default), not raw
         @test !occursin("[@knuth1984", h)                    # no raw citation marker
         @test occursin("exp-refs", h) && occursin("References", h) && occursin("TeX", h)
         # The inline citation LINKS to its References entry, and that entry carries the matching anchor.
