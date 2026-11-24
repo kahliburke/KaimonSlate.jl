@@ -2844,9 +2844,12 @@ function _make_router(h::Hub)
                 "Not signed in", sprint(showerror, e)
             end
         end
-        _html("<!doctype html><meta charset=\"utf-8\"><title>$(_esc(title))</title>" *
-              "<body style=\"font-family:system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem;line-height:1.5\">" *
-              "<h1 style=\"font-size:1.3rem\">$(_esc(title))</h1><p>$(_esc(text))</p></body>")
+        # Slate's dark palette, as its pages are; light only where the system asks for it.
+        _html("<!doctype html><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"dark light\"><title>$(_esc(title))</title>" *
+              "<style>body{font-family:system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem;line-height:1.5;" *
+              "background:#0d1120;color:#d4d8e8}h1{font-size:1.3rem;color:#fff}" *
+              "@media (prefers-color-scheme: light){body{background:#fff;color:#1f2330}h1{color:#000}}</style>" *
+              "<body><h1>$(_esc(title))</h1><p>$(_esc(text))</p></body>")
     end)
     HTTP.register!(router, "POST", "/api/{id}/bib/refresh", req -> _withnb(h, req, nb -> begin
         url = String(get(_body(req), "url", ""))
