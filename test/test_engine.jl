@@ -480,6 +480,19 @@ end
         # Legacy files written with the plain skin still read, whatever they contain.
         @test parse_report("#%% md id=m\n@md\"\"\"\nlegacy\n\"\"\"\n").cells[1].source == "legacy"
     end
+
+    # Prose that shows a notebook's own syntax, a `#%%` line in a code block, stays one cell.
+    @testset "a header line inside the skin is prose" begin
+        md = "A bibliography cell:\n\n```\n#%% md id=kb bibliography\nhttps://kb.example.org\n```\n\nThen cite it."
+        rq = ReportEngine.Report("r", "")
+        push!(rq.cells, ReportEngine.Cell("m", MARKDOWN, md))
+        push!(rq.cells, ReportEngine.Cell("c", CODE, "x = 1"))
+        s = serialize_report(rq)
+        back = parse_report(s)
+        @test [c.id for c in back.cells] == ["m", "c"]
+        @test back.cells[1].source == md
+        @test serialize_report(back) == s
+    end
 end
 
 @testset "standalone! injects the runnable contract" begin

@@ -734,9 +734,22 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         tags = Symbol[]
     end
 
+    # Inside a prose cell's `@md"""…"""` skin every line is body, so prose that shows a `#%%` line (a
+    # notebook's own syntax, in a code block) is not taken for a header. The skin never holds `"""`
+    # (`_cell_source`), so its first `"""` line closes it.
+    inskin = false
     for line in view(lines, firsthdr:length(lines))
+        if inskin
+            push!(body, line)
+            line == "\"\"\"" && (inskin = false)
+            continue
+        end
         m = match(_HEADER, line)
-        if m !== nothing                  # explicit header → start a new explicit cell
+        if m === nothing && is_prose(kind) && had_header && all(l -> isempty(strip(l)), body) &&
+           occursin(r"^@md(?: raw)?\"\"\"$", line)
+            push!(body, line)
+            inskin = true
+        elseif m !== nothing              # explicit header → start a new explicit cell
             flush!()
             kind, cid, ctrls, tags = _parse_header(m.captures[1]; format, changes)
             rawhdr = String(strip(m.captures[1]))
