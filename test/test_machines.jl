@@ -163,6 +163,16 @@ const RE = KaimonSlate.ReportEngine
             RE.host_facts_merge!("hpc1", Dict{String,Any}("julia_channel" => "1.13.4"))
             @test occursin("export JULIAUP_CHANNEL='1.13.4'", RE.machine_setup(m))
             @test !occursin("JULIAUP_CHANNEL", RE.machine_setup(RE.Machine("pm", "hpc1", :slurm, "", "/opt/julia/bin/julia", "", "")))
+            # The version a host reports, recorded at a prepare and compared at every start, is that
+            # same channel's, on the host and on a node reached through it.
+            lock(() -> (RE._VIA["hpc1-nid1"] = (host = "hpc1", job = "1", kind = :slurm)), RE._VIA_LOCK)
+            try
+                @test startswith(RE._host_state_script("env"; host = "hpc1"), "export JULIAUP_CHANNEL='1.13.4'\n")
+                @test startswith(RE._julia_channel_sh("hpc1-nid1"), "export JULIAUP_CHANNEL='1.13.4'")
+                @test RE._julia_channel_sh("elsewhere") == "" && !occursin("JULIAUP", RE._host_state_script("env"))
+            finally
+                lock(() -> delete!(RE._VIA, "hpc1-nid1"), RE._VIA_LOCK)
+            end
             RE.host_facts_set!("hpc1", Dict{String,Any}())
             @test RE.machine_setup(RE.Machine("", "box", :exec, "", "", "", "")) ==
                   "export PATH=\"\$HOME/.juliaup/bin:\$PATH\"; "

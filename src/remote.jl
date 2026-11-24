@@ -1343,10 +1343,12 @@ end
 # Everything a start needs to know about the host, read in ONE command. On a scheduler node each
 # command is a job step, and a step costs seconds to create, so asking piecemeal cost more than most
 # of what it asked about. `projrel` is the worker env ($HOME-relative); "" leaves the env lines out.
+# `host` is where it runs, for the Julia version it reports (`_julia_channel_sh`).
 function _host_state_script(projrel::AbstractString = ""; stamp::AbstractString = "$projrel/$_ENV_STAMP",
-                            held::AbstractString = "")
+                            held::AbstractString = "", host::AbstractString = "")
     q(p) = (startswith(p, "/") || startswith(p, "~/")) ? Sweep.shq_path(p) : "\"\$HOME/\"" * Sweep.shq(p)
     io = IOBuffer()
+    isempty(host) || print(io, _julia_channel_sh(host))
     print(io, _STAMP_SCRIPT)
     # Touched as it is read, so the version in use is never the one an old-version prune removes.
     println(io, "echo \"runtime=\$(test -f ", q(_runtime_dir() * "/" * _RUNTIME_READY), " && touch -c ",
@@ -1373,7 +1375,7 @@ end
 # `nothing` when the host did not answer.
 function _host_state(host::AbstractString, projrel::AbstractString = ""; stamp::AbstractString = "$projrel/$_ENV_STAMP",
                      held::AbstractString = "")
-    ok, out = _run_on(String(host), _host_state_script(projrel; stamp, held))
+    ok, out = _run_on(String(host), _host_state_script(projrel; stamp, held, host))
     ok || return nothing
     return _parse_probe(out)
 end
@@ -6597,7 +6599,7 @@ end
 # job step that costs seconds to create. `nothing` when the host did not answer.
 function _start_survey(host::AbstractString, projrel::AbstractString; stamp::AbstractString = "$projrel/$_ENV_STAMP")
     ok, txt = try
-        _run_on(String(host), _host_state_script(projrel; stamp) * "echo '" * _SURVEY_SPLIT * "'\n" *
+        _run_on(String(host), _host_state_script(projrel; stamp, host) * "echo '" * _SURVEY_SPLIT * "'\n" *
                               _busy_ports_sh() * "\n" * _workers_probe_sh())
     catch
         (false, "")
