@@ -85,11 +85,12 @@ function updateStaleBadge(state) {
 }
 
 
-// The references card's buttons on a bibliography address (`_bib_source_html`): save the site's API
-// token, or fetch the bibliography again. The hub redraws the card when the fetch finishes.
+// The references card's buttons on a bibliography address (`_bib_source_html`): sign in to its site,
+// save the site's API token, or fetch the bibliography again. The hub redraws the card when the fetch
+// finishes.
 async function _bibPost(el, path, body) {
   const url = el.closest('[data-url]').dataset.url;
-  await fetch(`/api/${encodeURIComponent(NB_ID)}/bib/${path}`, {
+  return fetch(`/api/${encodeURIComponent(NB_ID)}/bib/${path}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, ...body }) });
 }
 async function bibToken(el) {
@@ -97,6 +98,18 @@ async function bibToken(el) {
   const token = await promptDark(`API token for ${host}`, '', { placeholder: 'zemi_…', ok: 'Save' });
   if (token) await _bibPost(el, 'token', { token });
 }
+// The site's approval page opens in a tab of its own; approving there sends that tab back to the hub,
+// which fetches the bibliography and redraws the card here. The tab is opened at once, within the
+// click, since one opened after waiting for the hub is taken for a popup.
+async function bibSignin(el) {
+  const tab = window.open('about:blank', '_blank');
+  const r = await _bibPost(el, 'signin', {});
+  const got = await r.json().catch(() => ({}));
+  if (got.to) { if (tab) tab.location = got.to; else window.location = got.to; return; }
+  if (tab) tab.close();
+  (window.alertDark || window.alert)(got.error || `Signing in failed (HTTP ${r.status})`);
+}
 function bibRefresh(el) { _bibPost(el, 'refresh', {}); }
 window.bibToken = bibToken;
+window.bibSignin = bibSignin;
 window.bibRefresh = bibRefresh;

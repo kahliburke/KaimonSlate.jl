@@ -857,6 +857,79 @@ x = 1
         rm(cfg; recursive = true, force = true); rm(cache; recursive = true, force = true)
     end
 
+    @testset "signing in to a bibliography's site" begin
+        # A site that offers signing in, as a Zemi site does: discovery, registration, a code for the
+        # verifier it was asked with, and tokens renewed by their refresh token until that is refused.
+        lib = "@article{arXiv:2401.00001, author={Lovelace, Ada}, title={Engines}, year={2024}}\n"
+        meta = Dict("issuer" => "https://kb.example.org", "authorization_endpoint" => "https://kb.example.org/oauth/authorize",
+                    "token_endpoint" => "https://kb.example.org/oauth/token", "registration_endpoint" => "https://kb.example.org/oauth/register",
+                    "scopes_supported" => ["library", "read"])
+        valid = Set(["acc1", "acc2"])
+        challenge = Ref("")
+        renewable = Ref(true)
+        registered = Ref(0)
+        get_(url, headers) = endswith(url, "/.well-known/oauth-authorization-server") ? NS.HTTP.Response(200, NS.JSON.json(meta)) :
+            replace(get(Dict(headers), "Authorization", ""), "Bearer " => "") in valid ? NS.HTTP.Response(200, lib) :
+            NS.HTTP.Response(401, "{\"error\": \"Sign in.\"}")
+        function post_(url, headers, body)
+            if endswith(url, "/oauth/register")
+                registered[] += 1
+                return NS.HTTP.Response(201, NS.JSON.json(Dict("client_id" => "c1")))
+            end
+            f = NS.HTTP.queryparams(body)
+            f["client_id"] == "c1" || return NS.HTTP.Response(400, "{}")
+            if f["grant_type"] == "authorization_code"
+                (f["code"] == "code1" && NS._b64url(NS.SHA.sha256(f["code_verifier"])) == challenge[]) || return NS.HTTP.Response(400, "{}")
+                return NS.HTTP.Response(200, NS.JSON.json(Dict("access_token" => "acc1", "refresh_token" => "ref1", "expires_in" => 3600)))
+            end
+            (f["refresh_token"] == "ref1" && renewable[]) || return NS.HTTP.Response(400, "{\"error\": \"invalid_grant\"}")
+            return NS.HTTP.Response(200, NS.JSON.json(Dict("access_token" => "acc2", "refresh_token" => "ref2", "expires_in" => 3600)))
+        end
+        cfg, cache = mktempdir(), mktempdir()
+        oldget, oldpost = NS._BIB_GET[], NS._BIB_POST[]
+        withenv("KAIMONSLATE_CONFIG_HOME" => cfg, "KAIMONSLATE_CACHE_HOME" => cache) do
+            NS._BIB_GET[], NS._BIB_POST[] = get_, post_
+            try
+                url = NS.bib_endpoint("https://kb.example.org")
+                lock(NS._BIB_REMOTE_LOCK) do; delete!(NS._BIB_REMOTES, url); end
+                r = NS._bib_load_cached(url)
+                NS._bib_refresh!(r)
+                @test r.status == :signin && r.oauth && r.message == "Not signed in"
+                # The card offers signing in, not a token to paste.
+                src = "#%% md id=refs bibliography\nhttps://kb.example.org\n"
+                lock(NS._BIB_REMOTE_LOCK) do; NS._BIB_REMOTES[url] = r; r.checked = time(); end
+                rep = RE.parse_report(src)
+                html = sprint(io -> NS._bib_source_html(io, NS.bib_sources(rep.cells[1], "/tmp")[1], "nb"))
+                @test occursin("bibSignin(this)", html) && !occursin("Add token", html)
+
+                # Signing in: the approval page's address, for the hub's callback, asking to read.
+                callback = "http://127.0.0.1:8765/bib/signin/callback"
+                to = NS.bib_signin_start(url, callback)
+                q = NS.HTTP.queryparams(NS.HTTP.URI(to))
+                @test startswith(to, "https://kb.example.org/oauth/authorize?") && q["client_id"] == "c1" &&
+                      q["redirect_uri"] == callback && q["scope"] == "read" && q["code_challenge_method"] == "S256"
+                challenge[] = q["code_challenge"]
+                @test NS.bib_signin_finish(q["state"], "code1") == url
+                @test_throws ErrorException NS.bib_signin_finish(q["state"], "code1")      # a sign-in is finished once
+                NS._bib_refresh!(r)
+                @test r.status == :ok && [e.key for e in r.entries] == ["arXiv:2401.00001"]
+                NS.bib_signin_start(url, callback)
+                @test registered[] == 1                                   # registered once for this callback
+
+                # An hour on, the token is renewed; a renewal refused (revoked) asks to sign in again.
+                saved = NS._bib_oauth_saved(url); saved["expires"] = 0.0; NS._bib_oauth_save!(url, saved)
+                @test NS.bib_access_token(url) == "acc2"
+                renewable[] = false
+                delete!(valid, "acc2")
+                NS._bib_refresh!(r)
+                @test r.status == :signin && NS._bib_oauth_saved(url) === nothing
+            finally
+                NS._BIB_GET[], NS._BIB_POST[] = oldget, oldpost
+            end
+        end
+        rm(cfg; recursive = true, force = true); rm(cache; recursive = true, force = true)
+    end
+
     @testset "standalone export inlines an external bib" begin
         d = mktempdir()
         write(joinpath(d, "lib.bib"), "@book{lamport1994, title={LaTeX}}\n")

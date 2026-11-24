@@ -2820,6 +2820,34 @@ function _make_router(h::Hub)
         bib_token_set!(url, String(get(b, "token", "")))
         _json(Dict("ok" => true))
     end))
+    # Signing in to a site that offers it (see bib_remote.jl): the address of its approval page, for the
+    # page to open; the site sends the browser back to the hub's callback below, at the address the
+    # browser reaches the hub by.
+    HTTP.register!(router, "POST", "/api/{id}/bib/signin", req -> _withnb(h, req, nb -> begin
+        url = String(get(_body(req), "url", ""))
+        _bib_declared(nb, url) || return HTTP.Response(404, "not a bibliography address of this notebook")
+        callback = "http://" * HTTP.header(req, "Host", "127.0.0.1") * "/bib/signin/callback"
+        to = try bib_signin_start(url, callback) catch e
+            return HTTP.Response(400, ["Content-Type" => "application/json"], JSON.json(Dict("error" => sprint(showerror, e))))
+        end
+        _json(Dict("to" => to))
+    end))
+    HTTP.register!(router, "GET", "/bib/signin/callback", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        title, text = if haskey(q, "error")
+            "Not signed in", get(q, "error", "") == "access_denied" ? "You denied it." : "The site refused it: $(q["error"])."
+        else
+            try
+                url = bib_signin_finish(get(q, "state", ""), get(q, "code", ""))
+                "Signed in", "The notebook cites $(_bib_origin(url)) now. You can close this tab."
+            catch e
+                "Not signed in", sprint(showerror, e)
+            end
+        end
+        _html("<!doctype html><meta charset=\"utf-8\"><title>$(_esc(title))</title>" *
+              "<body style=\"font-family:system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem;line-height:1.5\">" *
+              "<h1 style=\"font-size:1.3rem\">$(_esc(title))</h1><p>$(_esc(text))</p></body>")
+    end)
     HTTP.register!(router, "POST", "/api/{id}/bib/refresh", req -> _withnb(h, req, nb -> begin
         url = String(get(_body(req), "url", ""))
         _bib_declared(nb, url) || return HTTP.Response(404, "not a bibliography address of this notebook")

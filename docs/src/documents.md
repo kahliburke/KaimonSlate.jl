@@ -69,15 +69,21 @@ knowledge base: every paper, upload and record you may read there, keyed as Zemi
 https://kb.example.org
 ```
 
-The hub fetches it from the site's `api/bib` with your API token, keeps a copy, and checks for a newer
-one when the notebook opens and every few minutes after; the notebook works from the copy, offline
-too. A line ending in `.bib` is fetched as given, so any BibTeX file on the web works the same way.
+The hub fetches it from the site's `api/bib`, keeps a copy, and checks for a newer one when the
+notebook opens and every few minutes after; the notebook works from the copy, offline too. A line
+ending in `.bib` is fetched as given, so any BibTeX file on the web works the same way.
 
-A Zemi site needs sign-in. Create a token on the site under **Account → API tokens**, with the
-**read** permission (see [Zemi's documentation](https://kahliburke.github.io/Zemi.jl/)); the
-references card then shows **Add token** beside the site, which saves it on the hub
-(`secrets.json` in the config home) for that host. The token is never written into the notebook. A
-Zemi run for one person on this machine takes its local key in the same place.
+A Zemi site needs sign-in, a group's or your own. The references card shows **Sign in** beside the
+site: it opens the site's approval page in a new tab (signing in there first, on a group's site), and
+once you allow it the hub can read the site's bibliography and nothing more. That works the same for
+a knowledge base run for one person, on this machine or in development (`http://localhost:5173`).
+You revoke it on the site: under **Your account → Tokens** on a group's site, under
+**Configuration → Connections** on your own. The hub keeps what it was given with its secrets
+(`secrets.json` in the config home), renews it as it expires, and asks you to sign in again once the
+site stops renewing it; nothing is written into the notebook.
+
+A site that does not offer signing in (another BibTeX server behind a token) gets **Add token**
+instead, which saves a pasted token on the hub for that host.
 
 A library can hold thousands of entries. `[@` asks the hub for the keys matching what you type, and
 the card lists only the cited entries once there are more than a few. A PDF, HTML or Markdown export,

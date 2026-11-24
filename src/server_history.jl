@@ -969,7 +969,11 @@ function _bib_source_html(io::IO, s, nbid::AbstractString)
         site = something(match(r"^https?://[^/?#]+"i, s.name), (match = s.name,)).match
         print(io, "<div class=\"bibcard-file bibcard-remote\" data-url=\"", esc(r.url), "\"><a href=\"", esc(site),
               "\" target=\"_blank\" rel=\"noopener\"><code>", esc(replace(site, r"^https?://"i => "")), "</code></a>")
-        if r.status in (:signin, :denied)
+        if r.status == :signin && r.oauth
+            # A site that offers signing in (see bib_remote.jl) is signed in to; no token to paste.
+            print(io, "<span class=\"bibcard-warn\">", esc(r.message), "</span>",
+                  "<button class=\"bibcard-btn\" onclick=\"bibSignin(this)\">Sign in</button>")
+        elseif r.status in (:signin, :denied)
             print(io, "<span class=\"bibcard-warn\">", esc(r.message), "</span>",
                   "<button class=\"bibcard-btn\" onclick=\"bibToken(this)\">", r.status == :signin ? "Add token" : "Replace token", "</button>")
         elseif r.status == :error
