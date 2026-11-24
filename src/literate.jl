@@ -11,8 +11,9 @@
 # - a `#=` … `=#` block (each delimiter alone on its line) is markdown
 #
 # Every chunk becomes a cell. Literate's output filters (`#src`, `#md`, `#nb`, `#jl` and their `#!`
-# negations) are kept verbatim: they are comments to Julia, so a filtered line is inert in Slate, and
-# a trailing `#src` line runs, since Slate edits the source.
+# negations) are kept. A filtered markdown line joins its markdown cell, marked with the filter (see
+# `_lit_md_text`). A filtered code line stays in its code cell as written: a leading filter makes it a
+# comment, so it is inert, and a line with a trailing `#src` runs, since Slate edits the source.
 #
 # Saving writes the file back like a patch. Each cell remembers the exact lines it came from, and a
 # cell whose source is unchanged is written as those lines; the text between two cells that are still
@@ -53,6 +54,41 @@ _lit_is_break(l::AbstractString) = occursin(r"^\h*#[-+]", l)
 _lit_md_content(l::AbstractString) = (m = match(_LIT_MD, l); m.captures[2] === nothing ? "" : String(m.captures[2]))
 # `## x` → `# x`, `##` → `#`: Literate's code-comment escape.
 _lit_unescape(l::AbstractString) = replace(replace(String(l), r"^(\h*)#(# .*)$" => s"\1\2"), r"^(\h*#)#$" => s"\1")
+# An output filter on a markdown line: in front, `#md # text` (also `#nb`, `#jl`, `#src`, `#!md`, …),
+# or after it, `# text #md`. Such a line is markdown for the outputs it is kept in, so it joins the
+# markdown cell. Its filter is carried in the cell source as an HTML comment ending the line, which
+# renders as nothing: `text <!-- #md -->`. At the start of a line the comment would open an HTML
+# block and the rest of the line would not render as markdown.
+const _LIT_FILTER_LEAD = r"^(\h*)#(!?(?:md|nb|jl|src)) (.*)$"
+const _LIT_FILTER_TAIL = r"^(.*) #(!?(?:md|nb|jl|src))$"
+const _LIT_FILTER_MARK = r"^(.*?) ?<!-- #(!?(?:md|nb|jl|src)) -->$"
+
+# `(filter, line without it)` for a markdown line with a leading filter, else `nothing`.
+function _lit_filtered_md(l::AbstractString)
+    m = match(_LIT_FILTER_LEAD, l)
+    m === nothing && return nothing
+    rest = m.captures[1] * m.captures[3]
+    return _lit_is_md(rest) ? (String(m.captures[2]), rest) : nothing
+end
+_lit_mark(text::AbstractString, f::AbstractString) = isempty(text) ? "<!-- #$f -->" : "$text <!-- #$f -->"
+
+# The markdown a line contributes to its cell's source.
+function _lit_md_text(l::AbstractString)
+    f = _lit_filtered_md(l)
+    f === nothing || return _lit_mark(_lit_md_content(f[2]), f[1])
+    c = _lit_md_content(l)
+    m = match(_LIT_FILTER_TAIL, c)
+    return m === nothing ? c : _lit_mark(m.captures[1], m.captures[2])
+end
+
+# One line of a markdown cell's source, written as Literate.
+function _lit_md_line(l::AbstractString)
+    m = match(_LIT_FILTER_MARK, l)
+    m === nothing && return isempty(l) ? "#" : "# " * l
+    text = m.captures[1]
+    return isempty(text) ? "#$(m.captures[2]) #" : "#$(m.captures[2]) # $text"
+end
+
 # The inverse, for a code line that would otherwise read as markdown.
 _lit_escape(l::AbstractString) = (_lit_is_md(l) ? replace(String(l), r"^(\h*)#" => s"\1##") : String(l))
 
@@ -103,8 +139,9 @@ function _lit_chunks(lines::Vector{String})
                 continue
             end
         end
-        cls[i] = isempty(l) ? :blank : _lit_is_break(l) ? :break : _lit_is_md(l) ?
-                 (isempty(_lit_md_content(l)) ? :mdblank : :md) : :code
+        cls[i] = isempty(l) ? :blank : _lit_is_break(l) ? :break :
+                 _lit_filtered_md(l) !== nothing ? :md :
+                 _lit_is_md(l) ? (isempty(_lit_md_content(l)) ? :mdblank : :md) : :code
         i += 1
     end
     ismd(c) = c in (:md, :mdblank, :mdblock)
@@ -143,7 +180,7 @@ function _lit_source(kind::CellKind, raw::AbstractVector{<:AbstractString})
             elseif inblock && occursin(r"^=+#$", s)
                 inblock = false
             else
-                push!(out, inblock ? String(s) : _lit_md_content(s))
+                push!(out, inblock ? String(s) : _lit_md_text(s))
             end
         end
         return join(out, "\n")
@@ -231,7 +268,7 @@ end
 
 function _lit_render(c::Cell)
     lines = split(_lit_norm(c.source), '\n')
-    c.kind === MARKDOWN && return [isempty(l) ? "#" : "# " * l for l in lines]
+    c.kind === MARKDOWN && return [_lit_md_line(l) for l in lines]
     return [_lit_escape(l) for l in lines]
 end
 
@@ -280,7 +317,7 @@ function render_literate(report::Report)
         c = j <= length(cells) ? cells[j] : nothing
         if c === nothing || c.kind !== kind || _lit_norm(c.source) != _lit_norm(src)
             what = c === nothing ? "an extra cell" : "cell $(c.id)"
-            throw(LiterateUnsupported("$(what) doesn't read back the same from Literate source. A code line that starts with `#-` or `#+` can't be written in a Literate file."))
+            throw(LiterateUnsupported("$(what) doesn't read back the same from Literate source. A code line that starts with `#-` or `#+`, or with a filter and a markdown line (`#md # …`), can't be written in a Literate file."))
         end
         nread = j
         c.id

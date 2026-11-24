@@ -45,13 +45,26 @@ kinds_sources(r) = [(c.kind, c.source) for c in r.cells]
         (RE.CODE, "# a code comment\nβ = cov(x, y) / var(x)"),
         (RE.CODE, "β"),
         (RE.MARKDOWN, "A second paragraph,\nset off by a blank line."),
-        (RE.CODE, "#md # [![badge](https://example.com/badge.svg)](https://example.com)"),
+        (RE.MARKDOWN, "[![badge](https://example.com/badge.svg)](https://example.com) <!-- #md -->"),
         (RE.MARKDOWN, "Block prose, read verbatim:\n# not a heading prefix"),
     ]
     # A blank line ends a markdown chunk, as in Literate.
     @test length(RE.parse_literate("# one\n\n# two\n").cells) == 2
     # Indented markdown is still markdown; `##` alone is an empty code comment.
     @test kinds_sources(RE.parse_literate("    # note\nf()\n##\n")) == [(RE.MARKDOWN, "note"), (RE.CODE, "f()\n#")]
+end
+
+@testset "literate: a filtered markdown line stays in its markdown cell" begin
+    text = "# # Title\n#\n#md # [![](badge.svg)](@__NBVIEWER_ROOT_URL__/x.ipynb)\n#nb #\n# Body. #src\n#md x = 1\n"
+    r = RE.parse_literate(text)
+    @test kinds_sources(r) == [
+        (RE.MARKDOWN, "# Title\n\n[![](badge.svg)](@__NBVIEWER_ROOT_URL__/x.ipynb) <!-- #md -->\n<!-- #nb -->\nBody. <!-- #src -->"),
+        (RE.CODE, "#md x = 1"),
+    ]
+    @test first(RE.render_literate(r)) == text
+    # An edited cell writes each filter in front of its line.
+    r.cells[1].source = "Intro\n[badge] <!-- #md -->\nEnd <!-- #!nb -->"
+    @test startswith(first(RE.render_literate(r)), "# Intro\n#md # [badge]\n#!nb # End\n")
 end
 
 @testset "literate: detection" begin
@@ -128,4 +141,28 @@ end
     @test Set(keys(new.meta["literate"].spans)) == Set(c.id for c in new.cells)
     # The adopted layout writes the external text back unchanged.
     @test first(RE.render_literate(new)) == edited
+end
+
+@testset "literate: a live notebook saves in place and keeps its path identity" begin
+    NS = KaimonSlate.NotebookServer
+    p = joinpath(mktempdir(), "lit.jl"); write(p, LIT)
+    nb = NS.LiveNotebook("lit", p, RE.read_notebook_source(LIT), RE.InProcessKernel(), 1, String[], String[],
+        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    nb.report.cells[3].source = "The slope, estimated:"
+    NS._persist!(nb; source = "agent")
+    @test read(p, String) == replace(LIT, "# The slope is:" => "# The slope, estimated:")
+    sleep(NS._SETTLE_S + 0.05)
+    @test !NS.sync_from_file!(nb)                                  # its own write is not an edit
+    # A cell the file can't hold: nothing is written, and the notebook says why.
+    before = read(p, String)
+    push!(nb.report.cells, RE.Cell("w", RE.WEB, "<b>hi</b>"))
+    NS._persist!(nb)
+    @test read(p, String) == before
+    @test occursin("web cell", get(nb.report.meta, "literate_unsaved", ""))
+    pop!(nb.report.cells)
+    NS._persist!(nb)
+    @test !haskey(nb.report.meta, "literate_unsaved")
+    # No id is minted for a file that can't carry one.
+    @test NS._ensure_docid!(nb) == NS.doc_key(nb)
+    @test !haskey(nb.report.meta, "docid")
 end

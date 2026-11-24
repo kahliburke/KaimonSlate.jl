@@ -88,6 +88,8 @@ end
 # has none yet, and return it. Called on OPEN (silent upgrade) and at publish, so every notebook that's
 # been touched carries an id that publish/sync key off — independent of path/slug/title.
 function _ensure_docid!(nb::LiveNotebook)
+    # A Literate file has nowhere to carry an id: its identity is its path, the key its stores sit under.
+    is_literate(nb.report) && return doc_key(nb)
     id = strip(String(get(nb.report.meta, "docid", "")))
     if isempty(id)
         id = _uuid4_str()
