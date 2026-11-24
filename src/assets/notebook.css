@@ -3690,6 +3690,10 @@ body:not(.zen) #nb .cell.slide-start::before { content: 'slide'; position: absol
 .sweeppill.bad { color:var(--red); border-color:color-mix(in srgb, var(--red) 55%, var(--border));
   background:color-mix(in srgb, var(--red) 12%, var(--bg3)); }
 .sweeppill.bad .swpdot { background:var(--red); }
+.litonly { opacity:.5; }
+.litout { font-size:.68rem; font-weight:600; padding:0 6px; border-radius:8px; vertical-align:middle;
+  border:1px solid var(--border); background:var(--bg3); color:var(--dim); white-space:nowrap; }
+.litph { cursor:help; }
 .litpill { flex:0 0 auto; cursor:pointer; font-size:.74rem; font-weight:600; padding:3px 10px;
   border-radius:11px; white-space:nowrap; border:1px solid var(--border); background:var(--bg3); color:var(--dim); }
 .litpill:hover { border-color:var(--accent); color:var(--accent); }

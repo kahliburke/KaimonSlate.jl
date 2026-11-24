@@ -530,8 +530,42 @@ function _md_html(src::AbstractString, interps = CellOutput[]; prose = identity)
     html = replace(html, "<p>. . .</p>" => "<div class=\"pause\"></div>")
     html = _column_widths(html)
     html = _media_from_img(html)
+    html = _literate_marks(html)
     # Last, so an image produced by a `{{ }}` interpolation can be sized like a literal one.
     return _apply_md_attrs(html)
+end
+
+# Two things only a Literate.jl source puts in markdown (see literate.jl):
+#
+# - A line carrying an output filter (`text <!-- #md -->`) is tagged with the outputs Literate puts it
+#   in. A line Literate's notebook output leaves out is dimmed, since Slate reads the file as that
+#   notebook.
+# - A link whose target is a Literate placeholder (`@__NBVIEWER_ROOT_URL__/…`) gets a real URL only in
+#   a Literate build, so it renders as its text, with the target in the tooltip.
+const _LIT_OUTPUTS = Dict("md" => "docs", "jl" => "script", "src" => "source", "nb" => "notebook",
+                          "!md" => "notebook · script", "!nb" => "docs · script", "!jl" => "docs · notebook")
+_lit_in_notebook(f::AbstractString) = f in ("nb", "!md", "!jl")
+const _LIT_MARKED_LINE =
+    r"((?:^|\n)(?:<(?:p|li|ul|ol|blockquote|td|h[1-6])(?:\s[^>]*)?>\n?)*)([^\n]*?) ?<!-- #(!?(?:md|nb|jl|src)) -->"
+function _literate_marks(html::AbstractString)
+    html = String(html)
+    if occursin("<!-- #", html)
+        # The line's rendered text runs from the start of its line, past the tags that open its blocks,
+        # to the marker. A marker alone on its line renders as nothing.
+        html = replace(html, _LIT_MARKED_LINE => function (s)
+            m = match(_LIT_MARKED_LINE, s)
+            lead, text, f = m[1], m[2], m[3]
+            isempty(strip(text)) && return lead
+            chip = "<span class=\"litout\">" * _LIT_OUTPUTS[f] * "</span>"
+            _lit_in_notebook(f) ? string(lead, text, " ", chip) :
+                string(lead, "<span class=\"litonly\">", text, "</span> ", chip)
+        end)
+    end
+    if occursin("@__", html)
+        html = replace(html, r"<a href=\"([^\"]*@__[A-Z_]+__[^\"]*)\"[^>]*>(.*?)</a>"s =>
+                       s"<span class=\"litph\" title=\"\1\">\2</span>")
+    end
+    return html
 end
 
 # `::: {.column width="40%"}` arrives as a bare `width` attribute, which a `<div>` ignores; make it the

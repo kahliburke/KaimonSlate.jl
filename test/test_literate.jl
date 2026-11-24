@@ -166,3 +166,17 @@ end
     @test NS._ensure_docid!(nb) == NS.doc_key(nb)
     @test !haskey(nb.report.meta, "docid")
 end
+
+@testset "literate: filtered lines and placeholder links render marked" begin
+    md(src) = KaimonSlate.markdown_html(src)
+    h = md("[![](b.svg)](@__NBVIEWER_ROOT_URL__/x.ipynb) <!-- #md -->\n\nBody.")
+    @test occursin("<p><span class=\"litonly\"><span class=\"litph\" title=\"@__NBVIEWER_ROOT_URL__/x.ipynb\"><img", h)
+    @test occursin("<span class=\"litout\">docs</span></p>", h)
+    @test !occursin("<a href", h) && !occursin("<!--", h)
+    # A line the notebook output keeps is tagged but not dimmed.
+    h = md("one\nnotebook line <!-- #nb -->\nthree")
+    @test occursin("notebook line <span class=\"litout\">notebook</span>", h) && !occursin("litonly", h)
+    @test occursin("<li><span class=\"litonly\">item</span> <span class=\"litout\">docs · script</span></li>", md("- item <!-- #!nb -->"))
+    @test !occursin("litout", md("text\n<!-- #md -->\n"))            # a filtered blank line shows nothing
+    @test occursin("<a href=\"https://example.com\">", md("[x](https://example.com)"))
+end
