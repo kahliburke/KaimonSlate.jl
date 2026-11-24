@@ -113,7 +113,7 @@ function addMenu(e, cellId, before = false) {
   m.innerHTML = '';
   const where = before ? 'above' : 'below';
   [['code', '＋ code ' + where], ['md', '＋ markdown ' + where], ['web', '＋ web widget ' + where],
-   ['tool', '⌁ tool call ' + where]].forEach(([k, label]) => {
+   ['tool', '⌁ tool call ' + where]].filter(([k]) => window.kindAllowed(k)).forEach(([k, label]) => {
     const b = document.createElement('button'); b.textContent = label;
     b.onclick = () => { hideAddMenu(); addCell(cellId, k, before); }; m.appendChild(b);
   });

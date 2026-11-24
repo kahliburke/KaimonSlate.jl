@@ -238,9 +238,9 @@ R({ id: 'cell.toMarkdown', label: 'Convert selected to markdown', group: 'Cells'
 R({ id: 'cell.toCode', label: 'Convert selected to code', group: 'Cells', ctx: ['command'],
     keys: ['y'], available: _has('toggleType'), run: _toKind('code') });
 R({ id: 'cell.toWeb', label: 'Convert selected to web (HTML/CSS/JS)', group: 'Cells', ctx: ['command'],
-    keys: ['w'], available: _has('toggleType'), run: _toKind('web') });
+    keys: ['w'], available: () => _has('toggleType')() && window.kindAllowed('web'), run: _toKind('web') });
 R({ id: 'cell.toTool', label: 'Convert selected to tool call', group: 'Cells', ctx: ['command'],
-    available: _has('toggleType'), run: _toKind('tool') });
+    available: () => _has('toggleType')() && window.kindAllowed('tool'), run: _toKind('tool') });
 R({ id: 'cell.deps', label: 'Show the dependency chain of the selected cell', group: 'Cells',
     ctx: ['command'], available: _has('toggleDeps'), run: _onSel(t => _fn('toggleDeps', t.id)) });
 R({ id: 'cell.collapse', label: 'Fold / unfold the selected cell', group: 'Cells', ctx: ['command'],

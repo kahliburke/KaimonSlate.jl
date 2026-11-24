@@ -205,11 +205,18 @@ function _is_slate_export_html(path::AbstractString)
 end
 
 # A line only a Literate.jl source would have: an output filter (`#src`, `#md`, `#nb`, `#jl`, `#!…`),
-# a `#-`/`#+` chunk break, a `## ` code comment, or a `# # Title` heading. Any `.jl` without Slate
-# structure opens as Literate; this only decides which choice the open dialog leads with.
-const _LITERATE_MARKER = r"^\h*#!?(src|md|nb|jl)\b|#!?(src|md|nb|jl)$|^\h*#[-+]\h*$|^\h*## |^# # "m
-_has_literate_markers(path::AbstractString) =
-    try; occursin(_LITERATE_MARKER, read(path, String)); catch; false; end
+# a `#-`/`#+` chunk break, or a `# # Title` heading. Any `.jl` without Slate structure opens as
+# Literate; this decides which choice the open dialog leads with, and which files the Files tree
+# offers as notebooks. Read from the same bounded head as `_is_notebook_file`.
+const _LITERATE_MARKER = r"^\h*#!?(src|md|nb|jl)\b|#!?(src|md|nb|jl)$|^\h*#[-+]\h*$|^# # "m
+function _has_literate_markers(path::AbstractString)
+    try
+        head = open(io -> String(read(io, _NB_SNIFF_HEAD)), path)
+        return occursin(_LITERATE_MARKER, head)
+    catch
+        return false
+    end
+end
 
 # Classify a path the open box points at, so the front end can route it:
 #   "bundle"      self-contained `.jl` (Slate.bundle footer)   → import helper

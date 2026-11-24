@@ -139,7 +139,8 @@ function _filesRow(r) {
     el.dataset.kind = n.kind || 'text';
     const ico = document.createElement('span'); ico.className = 'ftico';
     ico.textContent = n.notebook ? '📓' : _kindIcon(n.kind);
-    if (n.notebook) ico.title = 'a Slate notebook — double-click to open it';
+    if (n.notebook) ico.title = n.literate ? 'Literate.jl source — double-click to open it as a notebook'
+                                           : 'a Slate notebook — double-click to open it';
     el.appendChild(ico);
     el.appendChild(document.createTextNode(' ' + n.name));
     if (n.path === (_filesTree.self || '\0')) {

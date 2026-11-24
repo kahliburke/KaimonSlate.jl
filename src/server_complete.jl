@@ -692,7 +692,11 @@ function _proj_tree(root::AbstractString, dir::AbstractString; depth::Int = 0, h
                              "bytes" => (try; filesize(p); catch; 0; end),
                              "mtime" => (try; mtime(p); catch; 0.0; end))
         startswith(name, ".") && (n["hidden"] = true)
-        _is_notebook_file(p) && (n["notebook"] = true)     # openable as a notebook, not just editable
+        if _is_notebook_file(p)
+            n["notebook"] = true                           # openable as a notebook, not just editable
+        elseif lowercase(splitext(name)[2]) == ".jl" && _has_literate_markers(p)
+            n["notebook"] = true; n["literate"] = true     # a Literate source opens in place as one
+        end
         push!(nodes, n)
     end
     return nodes

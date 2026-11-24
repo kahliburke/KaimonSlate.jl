@@ -606,6 +606,8 @@ window.CELL_KINDS = [
     desc: 'Work that lands over time, in the background or on a cluster: a sweep, a campaign. Resumable, watchable, never blocks.' },
 ];
 window.kindOf = k => window.CELL_KINDS.find(x => x.k === k) || window.CELL_KINDS[0];
+// Whether this notebook can hold a cell of kind `k`. A Literate file holds code and markdown only.
+window.kindAllowed = k => !(window.__slateState || {}).literate || k === 'code' || k === 'md';
 
 // The cell's current kind, as a button. Names itself rather than offering the alternatives, so the
 // header answers "what is this?" at rest and only costs a click when you want to change it.
@@ -658,9 +660,7 @@ window.openKindPicker = function (id, ev) {
   }
   if (pop.classList.contains('show') && pop.dataset.cell === id) return closeKindPicker();
   pop.dataset.cell = id;
-  // A Literate file holds code and markdown only.
-  const kinds = (window.__slateState || {}).literate
-    ? window.CELL_KINDS.filter(x => x.k === 'code' || x.k === 'md') : window.CELL_KINDS;
+  const kinds = window.CELL_KINDS.filter(x => window.kindAllowed(x.k));
   pop.innerHTML = '<div class="kindpop-head">Cell type</div>' +
     kinds.map(x => window.kindRow(x, x.k === c.kind, x.k)).join('');
   pop.querySelectorAll('[data-kind]').forEach(b => {
