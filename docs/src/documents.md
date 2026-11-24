@@ -91,8 +91,12 @@ Cite a bibliography key from any **markdown** cell. Typing `[@` autocompletes ke
 | --- | --- | --- |
 | `[@knuth1984]` | `[1]` | a normal citation |
 | `[@knuth1984, pp. 33-35]` | `[1, pp. 33–35]` | with a page/locator |
-| `[@a; @b]` | `[1, 2]` | several at once |
-| `@knuth1984` | `Knuth (1984)` | a prose (author–year) mention |
+| `[@a; @b]` | `[1; 2]` | several at once |
+| `@knuth1984` | `Knuth [1]` | a prose mention, naming the authors in the sentence |
+
+In an author–date style such as APA the same forms read `(Knuth, 1984)`, `(Knuth, 1984; Lamport,
+1994)` and `Knuth (1984)`, and an author's works cited one after another are named once:
+`(Knuth, 1984, 1986)`.
 
 The bare `@key` prose form only converts keys that are actually defined, so an email address or
 a stray `@handle` stays literal. On export, citations render **linked** to the References section
