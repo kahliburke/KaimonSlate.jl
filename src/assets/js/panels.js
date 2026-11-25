@@ -305,6 +305,14 @@ let _closedByHub = false;   // a deliberate close (SSE "closed:") — no reconne
 // A deliberate close from the hub (slate.close / the TUI's [c]): back up in-flight edits,
 // stand down ALL recovery (the auto-reopen would respawn the notebook), and show the
 // closed overlay. Reopening restores the backed-up edits via the normal reconcile path.
+// The notebook now lives in another file (a Literate file converted to a Slate notebook): follow it
+// there, and treat the close that comes next as expected.
+async function _notebookMoved(path) {
+  _closedByHub = true;
+  if (_es) { try { _es.close(); } catch (_) {} _es = null; }
+  const d = await window.slateOpenPath(path);
+  if (d && d.url) location.href = d.url;
+}
 function _notebookClosed() {
   if (_closedByHub) return;
   _closedByHub = true;
@@ -533,6 +541,7 @@ function connectLive() {
   es.onopen = () => { if (_connDown) _probe(); };   // SSE back → confirm via state + dismiss
   es.onerror = () => { if (es.readyState !== EventSource.OPEN) _onConnTrouble(); };   // dropped
   es.onmessage = async (e) => {
+    if (e.data.startsWith('moved:')) { try { _notebookMoved(JSON.parse(e.data.slice(6)).path); } catch (_) {} return; }
     if (e.data.startsWith('closed:')) { _notebookClosed(); return; }   // deliberate close — overlay, no auto-reopen
     if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
     if (e.data.startsWith('refresh:')) { try { _queuePatch(JSON.parse(e.data.slice(8)).cells); } catch (_) {} return; }   // targeted: only the changed cells, inline

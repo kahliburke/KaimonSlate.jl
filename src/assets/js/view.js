@@ -2086,10 +2086,9 @@ async function literateMenu() {
     { label: 'Convert to Slate notebook', value: 'convert', cls: 'primary' },
   ]);
   if (choice !== 'convert') return;
+  // The hub sends every open tab, this one included, on to the new notebook.
   const r = await api('POST', '/api/literate-convert', {});
-  if (!r || !r.path) { await alertDark('Could not convert the notebook.'); return; }
-  const d = await slateOpenPath(r.path);
-  if (d && d.url) location.href = d.url;
+  if (!r || !r.path) await alertDark('Could not convert the notebook.');
 }
 window.literateMenu = literateMenu;
 // A notebook copied on this machine keeps the original's `docid`, so the two share one document:

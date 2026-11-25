@@ -167,6 +167,30 @@ end
     @test !haskey(nb.report.meta, "docid")
 end
 
+@testset "literate: converting moves the history to the Slate notebook" begin
+    NS = KaimonSlate.NotebookServer
+    SHist = NS.SlateHistory
+    p = joinpath(mktempdir(), "lit.jl"); write(p, LIT)
+    nb = NS.LiveNotebook("lit", p, RE.read_notebook_source(LIT), RE.InProcessKernel(), 1, String[], String[],
+        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    h = NS.Hub(Dict("lit" => nb), nothing, "127.0.0.1", 0, ReentrantLock(), false, false, Dict{String,Any}())
+    nb.report.cells[3].source = "The slope, estimated:"
+    NS._persist!(nb)
+    before = NS.nbdoc(nb)
+    @test isdir(SHist._dir(before))
+    out = NS.convert_literate!(h, nb)
+    @test read(p, String) == replace(LIT, "# The slope is:" => "# The slope, estimated:")   # the Literate file stays
+    newr = RE.read_notebook_source(read(out, String))
+    @test !RE.is_literate(newr)
+    @test [c.source for c in newr.cells] == [c.source for c in nb.report.cells]
+    docid = get(newr.meta, "docid", "")
+    @test !isempty(docid) && !haskey(nb.report.meta, "docid")
+    after = SHist.Doc(NS.doc_key(out, newr.meta), out)
+    @test isdir(SHist._dir(after)) && !isdir(SHist._dir(before))
+    @test SHist.known_paths(after) == [abspath(out)]
+    @test !haskey(h.notebooks, "lit")                               # the Literate session closed
+end
+
 @testset "literate: filtered lines and placeholder links render marked" begin
     md(src) = KaimonSlate.markdown_html(src)
     h = md("[![](b.svg)](@__NBVIEWER_ROOT_URL__/x.ipynb) <!-- #md -->\n\nBody.")

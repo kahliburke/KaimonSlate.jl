@@ -31,8 +31,14 @@ legacy_doc(nb::LiveNotebook) = SlateHistory.Doc(SlateHistory._key(nb.path), absp
 # store that is missing, or whose destination already exists, is simply left alone.
 function _adopt_doc_stores!(path, meta::AbstractDict)
     ap = abspath(String(path))
-    new = SlateHistory.Doc(doc_key(ap, meta), ap)
-    old = SlateHistory.Doc(SlateHistory._key(ap), ap)
+    return _move_doc_stores!(SlateHistory.Doc(SlateHistory._key(ap), ap), SlateHistory.Doc(doc_key(ap, meta), ap))
+end
+_adopt_doc_stores!(nb::LiveNotebook) = _adopt_doc_stores!(nb.path, nb.report.meta)
+
+# Move a document's history, chat log and preview from one key to another. A store that is missing, or
+# whose destination already exists, is left alone. When the document also moved to another file, the
+# history records the new path in place of the old one.
+function _move_doc_stores!(old::SlateHistory.Doc, new::SlateHistory.Doc)
     new.key == old.key && return false      # no docid yet → already on the only key it has
     moved = false
     try; moved |= SlateHistory.relocate!(old, new); catch; end
@@ -43,9 +49,9 @@ function _adopt_doc_stores!(path, meta::AbstractDict)
             mkpath(dirname(n)); mv(o, n); moved = true
         catch; end
     end
+    old.path == new.path || try; SlateHistory.rehome_path!(new, old.path, new.path); catch; end
     return moved
 end
-_adopt_doc_stores!(nb::LiveNotebook) = _adopt_doc_stores!(nb.path, nb.report.meta)
 
 # Other live locations of this same document: paths its store has recorded that are NOT this
 # notebook and STILL EXIST on disk. An empty result is the normal case, including the one that

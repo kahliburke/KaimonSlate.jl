@@ -633,6 +633,27 @@ function _write_beside(src::AbstractString, content::AbstractString)
     return abspath(out)
 end
 
+# Convert an open Literate notebook to a Slate notebook written beside it, with everything the session
+# holds that the Literate file couldn't (tags, controls, other cell kinds). The new notebook carries a
+# docid from the start and takes over the history, chat and preview, which the Literate file kept under
+# its path. Open tabs move to the new notebook and the Literate session closes. The Literate file is left
+# as it is, since a docs build may read it. Returns the new path.
+function convert_literate!(h::Hub, nb::LiveNotebook)
+    docid = _uuid4_str()
+    out = lock(nb.lock) do
+        nb.report.meta["docid"] = docid
+        s = try; serialize_report(nb.report); finally; delete!(nb.report.meta, "docid"); end
+        out = _write_beside(nb.path, s)
+        # Before anything can open the new file: an open records history under the new key, and a
+        # store that already exists there is not overwritten.
+        _move_doc_stores!(nbdoc(nb), SlateHistory.Doc(doc_key(out, Dict("docid" => docid)), out))
+        out
+    end
+    _broadcast(nb, "moved:" * JSON.json(Dict("path" => out)))
+    close_notebook!(h, nb.id)
+    return out
+end
+
 # The notebook's project root (its parent project dir — the `@asset` base). "" ⇒ in-process / no project.
 _proj_root(nb::LiveNotebook) = String(get(nb.report.meta, "assetbase", ""))
 
@@ -1404,13 +1425,9 @@ function _make_router(h::Hub)
         isfile(p) || return HTTP.Response(404, "no such file: $p")
         _json(Dict("path" => _write_beside(p, serialize_report(parse_report(read(p, String))))))
     end)
-    # Convert an open Literate notebook to a Slate notebook beside it, with everything the session holds
-    # that the Literate file couldn't (tags, controls, other cell kinds). The Literate file is left as it
-    # is, since a docs build may read it.
     HTTP.register!(router, "POST", "/api/{id}/literate-convert", req -> _withnb(h, req, nb -> begin
         is_literate(nb.report) || return HTTP.Response(400, "not a Literate notebook")
-        s = lock(nb.lock) do; serialize_report(nb.report); end
-        _json(Dict("path" => _write_beside(nb.path, s)))
+        _json(Dict("path" => convert_literate!(h, nb)))
     end))
     HTTP.register!(router, "POST", "/api/close", req -> begin
         file = abspath(expanduser(strip(String(get(_body(req), "path", "")))))
