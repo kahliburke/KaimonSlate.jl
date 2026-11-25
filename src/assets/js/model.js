@@ -215,7 +215,7 @@
       case 'setup': {
         const el = Math.max(0, Math.round(hubNow() - (+w.setupSince || 0)));
         const what = w.setupStage === 'loading' ? 'loading ' + (w.setupWhat || "the notebook's packages")
-                   : w.setupStage === 'reading' ? 'reading the exports of ' + (w.setupWhat || 'its packages')
+                   : w.setupWhat ? 'analyzing imports from ' + w.setupWhat
                    : "analyzing the notebook's imports";
         return what + ' · ' + el + 's';
       }

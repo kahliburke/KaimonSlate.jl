@@ -155,18 +155,18 @@ end
     @test NS._setup(nb, "") === nothing
     seen = NS._with_setup(nb, "", "loading"; pkgs = ["Statistics"], cell = "a") do
         outer = NS._setup(nb, "")
-        inner = NS._with_setup(() -> NS._setup(nb, ""), nb, "", "reading"; pkgs = ["Statistics", "Dates", "Random"])
+        inner = NS._with_setup(() -> NS._setup(nb, ""), nb, "", "analyzing"; pkgs = ["Statistics", "Dates", "Random"])
         (outer, inner, NS._setup(nb, ""))
     end
     outer, inner, after_inner = seen
     @test (outer.stage, outer.what, outer.cell) == ("loading", "Statistics", "a")
     # A nested stage keeps the clock of the setup it is part of, and hands the outer one back.
-    @test inner.stage == "reading" && inner.since == outer.since
+    @test inner.stage == "analyzing" && inner.since == outer.since
     @test after_inner == outer
     @test NS._setup(nb, "") === nothing
     @test NS._setup_face(outer) == "loading Statistics"
     # The pill has room for one name; more than one is counted, and the note names them.
-    @test NS._setup_face(inner) == "reading 3 packages" && inner.what == "Statistics, Dates and 1 more"
+    @test NS._setup_face(inner) == "analyzing imports" && inner.what == "Statistics, Dates and 1 more"
     # A failure inside a stage still ends it.
     @test_throws ErrorException NS._with_setup(() -> error("boom"), nb, "", "loading")
     @test NS._setup(nb, "") === nothing

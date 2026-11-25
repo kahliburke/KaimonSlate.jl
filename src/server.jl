@@ -2726,7 +2726,7 @@ const _SETUP_LOCK = ReentrantLock()
 _setup(nb::LiveNotebook, side::AbstractString) =
     lock(() -> get(_SETUP, (nb.id, String(side)), nothing), _SETUP_LOCK)
 
-# Run `f` with `side` in setup `stage` ("loading", "reading") of the packages `pkgs`, then put back
+# Run `f` with `side` in setup `stage` ("loading", "analyzing") of the packages `pkgs`, then put back
 # what was there before. `since` is kept from an enclosing stage, so the time shown is the whole setup's.
 function _with_setup(f, nb::LiveNotebook, side::AbstractString, stage::AbstractString;
                      pkgs = String[], cell::AbstractString = "")
@@ -2751,8 +2751,8 @@ end
 # What the worker's pill says during a stage: short, since the pill has little room. The packages by
 # name go in the worker's note.
 function _setup_face(su)
-    verb = su.stage == "loading" ? "loading" : su.stage == "reading" ? "reading" : return "analyzing"
-    return su.n == 1 ? verb * " " * su.what : su.n > 1 ? "$verb $(su.n) packages" : verb * " packages"
+    su.stage == "loading" || return "analyzing imports"
+    return su.n == 1 ? "loading " * su.what : su.n > 1 ? "loading $(su.n) packages" : "loading packages"
 end
 
 # The packages a cell's `using`/`import` statements load, as written: `using A, B.C: f` → ["A", "B.C"].
@@ -5942,7 +5942,7 @@ function _run_loop!(nb::LiveNotebook)
                 isempty(paths) && continue
                 k = isempty(side) ? nb.kernel : _region_kernel_if_active(nb, side)
                 k === nothing && continue
-                _with_setup(nb, side, "reading"; pkgs = paths) do
+                _with_setup(nb, side, "analyzing"; pkgs = paths) do
                     ReportEngine.resolve_usings!(nb.report, k, paths)
                 end && (resolved = true)
             end

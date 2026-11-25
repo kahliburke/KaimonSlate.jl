@@ -198,8 +198,8 @@ const eq = (label, got, want) => {
   const t = M.hubNow();
   eq('loading packages', M.workerNote({ noteCode: 'setup', setupStage: 'loading', setupWhat: 'CairoMakie', setupSince: t - 5 }),
      'loading CairoMakie · 5s');
-  eq('reading exports', M.workerNote({ noteCode: 'setup', setupStage: 'reading', setupWhat: 'A and B', setupSince: t }),
-     'reading the exports of A and B · 0s');
+  eq('analyzing imports', M.workerNote({ noteCode: 'setup', setupStage: 'analyzing', setupWhat: 'A and B', setupSince: t }),
+     'analyzing imports from A and B · 0s');
   eq('a loading worker is not ok yet', M.workerStatus({ status: 'connecting', connected: true, noteCode: 'setup' }), 'connecting');
 }
 
