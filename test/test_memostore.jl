@@ -257,15 +257,17 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
 
     @testset "jls: a value holding a notebook's closure decodes in another process" begin
         nb = Core.eval(Main, :(module SlateClosureNB end))
-        v = Core.eval(nb, :(let k = 10; (f = x -> x + k, g = r -> r.cost, n = 3); end))
+        # `h` builds another closure in its body, as a `@requirement` probe does: its code names that
+        # inner closure's type, which must travel too.
+        v = Core.eval(nb, :(let k = 10; (f = x -> x + k, g = r -> r.cost, h = q -> get(() -> k, q, :a) + 1, n = 3); end))
         mktempdir() do dir
             p = joinpath(dir, "v.jls")
             open(io -> _codec_encode(io, "jls", v), p, "w")
             # The other process has the notebook's module, as a worker does, and never saw the closures.
             code = "module SlateClosureNB end; using Serialization; v = open(deserialize, ARGS[1]); " *
-                   "print(v.f(2), ' ', v.g((; cost = 7)), ' ', v.n)"
+                   "print(v.f(2), ' ', v.g((; cost = 7)), ' ', v.h((; a = 1)), ' ', v.h((;)), ' ', v.n)"
             out = read(`$(Base.julia_cmd()) --startup-file=no -e $code $p`, String)
-            @test out == "12 7 3"
+            @test out == "12 7 2 11 3"
         end
     end
 

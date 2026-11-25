@@ -86,6 +86,23 @@ function Serialization.should_send_whole_type(s::_SlateSerializer, t::DataType)
     return !isdefined(mod, name) || t != typeof(getglobal(mod, name))
 end
 
+# A closure that builds another closure in its body names the inner one's type in its code, by a
+# global reference into the notebook's module. Written as a name it would fail in another process,
+# so the type itself is sent, as the standard serializer does for references into `Main`.
+function Serialization.serialize(s::_SlateSerializer, g::GlobalRef)
+    mod = g.mod
+    if mod !== Main && Base.moduleroot(mod) === Main && isdefined(mod, g.name) && isconst(mod, g.name)
+        v = getglobal(mod, g.name)
+        unw = Base.unwrap_unionall(v)
+        if unw isa DataType && v === unw.name.wrapper && Serialization.should_send_whole_type(s, unw)
+            Serialization.writetag(s.io, Serialization.FULL_GLOBALREF_TAG)
+            Serialization.serialize(s, v)
+            return
+        end
+    end
+    invoke(Serialization.serialize, Tuple{Serialization.AbstractSerializer,GlobalRef}, s, g)
+end
+
 function _serialize(io::IO, v)
     s = _SlateSerializer(io)
     Serialization.writeheader(s)
