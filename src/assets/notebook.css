@@ -1467,6 +1467,15 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md .admonition.warning, .md .admonition.caution { --adm:var(--gold); }
 .md .admonition.danger, .md .admonition.error,
 .md .admonition.compat                         { --adm:var(--red); }
+/* Footnotes: the reference is a superscript, each note a small row with its label in front. */
+.md a.footnote { font-size:.75em; vertical-align:super; line-height:0; text-decoration:none; }
+.md div.footnote { display:flex; gap:.6em; font-size:.88em; color:var(--dim); margin:.3em 0; }
+.md :not(div.footnote) + div.footnote { border-top:1px solid var(--border); padding-top:.6em; margin-top:1em; }
+.md div.footnote > * { margin:0; }
+.md div.footnote > .footnote-title { font-weight:600; }
+/* A task item shows its checkbox in place of the bullet. */
+.md li:has(> input[type=checkbox]:first-child) { list-style:none; margin-left:-1.3em; }
+.md li > input[type=checkbox]:first-child { margin:0 .4em 0 0; vertical-align:middle; }
 
 /* ── Web cell: 3-pane HTML/CSS/JS editor ── A stack of labelled section editors. Each pane has a small
    language tab; empty panes stay compact so a JS-only widget isn't three tall boxes. */

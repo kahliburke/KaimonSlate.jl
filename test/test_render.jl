@@ -122,6 +122,30 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
               occursin(raw"$a_i+b$", markdown_html(raw"$a_i+b$ then _real emphasis_"))
     end
 
+    @testset "Documenter math: ``x`` inline and a math fence" begin
+        m = markdown_html("Posterior ``p(\\theta \\mid x)`` here.\n\n```math\n\\hat{\\beta} = X^\\top y\n```\n")
+        @test occursin(raw"Posterior $p(\theta \mid x)$ here.", m)
+        @test occursin(raw"$$\hat{\beta} = X^\top y$$", m)
+        @test !occursin("<code", m)
+        # One, three or four backticks are code, and a math fence inside a code fence stays as written.
+        @test occursin("<code>a</code>", markdown_html("`a`"))
+        @test occursin("<code>```mermaid</code>", markdown_html("a ```` ```mermaid ```` fence"))
+        @test occursin("<code>`x`</code>", markdown_html("a ``` `x` ``` b"))
+        @test occursin("``y``", markdown_html("```julia\nz = ``y``\n```\n"))
+        # The other renderers read the same segments: PDF gets dollars, the docs page keeps Documenter's form.
+        @test ReportRender._math_parts("``a``") == ("a", false)
+        @test ReportRender._math_parts("```math\na\nb\n```") == ("a\nb", true)
+    end
+
+    @testset "strikethrough, task lists and footnotes" begin
+        @test occursin("<del>gone</del> and ~5 minutes", markdown_html("~~gone~~ and ~5 minutes"))
+        h = markdown_html("- [x] done\n- [ ] open\n- plain")
+        @test occursin("<input type=\"checkbox\" disabled checked> done", h) && occursin("<li>plain</li>", h)
+        h = markdown_html("Claim[^1].\n\n[^1]: The note, with \$x^2\$.")
+        @test occursin("<a href=\"#footnote-1\" class=\"footnote\">1</a>", h)
+        @test occursin("<p>The note, with \$x^2\$.</p>", h)
+    end
+
     @testset "text/latex output chunk → KaTeX div" begin
         r3 = parse_report(raw"""
         #%% code id=tex

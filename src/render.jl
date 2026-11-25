@@ -283,7 +283,11 @@ end
 # is not escaped and not followed by whitespace, the closing one is not preceded by whitespace and not
 # followed by a digit. Prose amounts ("$5 and $10", "$100k–$750k") stay prose. `\[…\]` and `\(…\)`
 # need no such rule: they do not occur by accident in prose.
+#
+# Documenter's spellings are math too, as in Julia's own markdown: a ```math fence for display, and a
+# span in exactly two backticks inline. A span in one, three or more backticks is still code.
 const _MD_SCAN = Regex(join((
+    raw"(?<dmath>^[ ]{0,3}(?<mfence>`{3,}|~{3,})math[ \t]*\n.*?^[ ]{0,3}\k<mfence>[`~]*[ \t]*$|(?<!`)``(?!`)[^`]+?(?<!`)``(?!`))",
     # code, literal: a fenced block (to its closing fence or the end), or an inline span
     raw"(?<code>^[ ]{0,3}(?<fence>`{3,}|~{3,})[^\n]*\n.*?(?:^[ ]{0,3}\k<fence>[`~]*[ \t]*$|\z)|(?<ticks>`+).+?(?<!`)\k<ticks>(?!`))",
     # math; display forms first so a `$…$` cannot split a `$$…$$`
@@ -295,14 +299,15 @@ const _MD_SCAN = Regex(join((
     _md_segments(s) -> Vector{Pair{Symbol,String}}
 
 Markdown split into `:code` (fenced blocks and inline spans), `:math` (a span in any of Slate's four
-delimiters, delimiters included), `:dollar` (a `\$` or `\\\$` that is prose) and `:text`.
+delimiters or Documenter's two, delimiters included), `:dollar` (a `\$` or `\\\$` that is prose) and
+`:text`.
 """
 function _md_segments(s::AbstractString)
     s = String(s)
     out = Pair{Symbol,String}[]; i = 1
     for m in eachmatch(_MD_SCAN, s)
         m.offset > i && push!(out, :text => s[i:prevind(s, m.offset)])
-        kind = m[:code] !== nothing ? :code : m[:math] !== nothing ? :math : :dollar
+        kind = m[:code] !== nothing ? :code : (m[:math] !== nothing || m[:dmath] !== nothing) ? :math : :dollar
         push!(out, kind => String(m.match))
         i = m.offset + ncodeunits(m.match)
     end
@@ -312,9 +317,20 @@ end
 
 "The TeX inside a `:math` segment, and whether it is display math."
 function _math_parts(m::AbstractString)
+    f = match(r"^[ ]{0,3}[`~]{3,}math[ \t]*\n(.*?)\n?[ ]{0,3}[`~]{3,}[ \t]*$"s, m)
+    f === nothing || return (String(f.captures[1]), true)
+    startswith(m, "``") && return (chop(m; head = 2, tail = 2), false)
     (startswith(m, "\$\$") || startswith(m, "\\[")) && return (chop(m; head = 2, tail = 2), true)
     startswith(m, "\\(") && return (chop(m; head = 2, tail = 2), false)
     return (chop(m; head = 1, tail = 1), false)
+end
+
+"A `:math` segment in delimiters KaTeX is configured for: Documenter's two spellings become dollars."
+function _katex_math(t::AbstractString)
+    s = lstrip(t)
+    (startswith(s, "``") || startswith(s, "~~~")) || return String(t)
+    tex, display = _math_parts(t)
+    return display ? string("\$\$", tex, "\$\$") : string("\$", tex, "\$")
 end
 
 _math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
@@ -485,7 +501,7 @@ function _md_html(src::AbstractString, interps = CellOutput[]; prose = identity)
     b = IOBuffer()
     for (kind, t) in _md_segments(tmpl)
         if kind === :math
-            push!(math, t); print(b, _math_token(length(math)))
+            push!(math, _katex_math(t)); print(b, _math_token(length(math)))
         elseif kind === :dollar
             print(b, _DOLLAR_TOKEN)
         else
@@ -502,6 +518,10 @@ function _md_html(src::AbstractString, interps = CellOutput[]; prose = identity)
     # Pandoc `:::` fenced divs → `<div class=…>`. Slides lay out and build with them (`::: columns`,
     # `::: {.column width="40%"}`, `::: step`, `::: incremental`); outside a deck they are plain divs.
     enable!(p, CommonMark.FencedDivRule())
+    # GitHub's `~~struck~~` and `- [x]` task items, and `[^1]` footnotes.
+    enable!(p, CommonMark.StrikethroughRule())
+    enable!(p, CommonMark.TaskListRule())
+    enable!(p, CommonMark.FootnoteRule())
     html = CommonMark.html(p(s))
     for (i, m) in enumerate(math)
         tex = m
