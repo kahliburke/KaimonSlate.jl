@@ -12,18 +12,57 @@ were written when they went out. They are marked.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-25
+
+### Added
+
+- While a notebook starts, its worker's pill stays amber until a cell can run, and names what it
+  waits on: starting the worker, loading the notebook's packages, precompiling (`k/N`), analyzing
+  imports. The run status says the same with a running clock and the number of cells queued.
+  Cells waiting in the run read QUEUED, and the cell whose packages are loading reads LOADING.
+- Markdown reads Documenter's forms: a span in two backticks and a ```` ```math ```` fence are math,
+  and strikethrough, task lists and footnotes render. The page, the PDF and the docs export agree.
+- A bibliography's references card signs in to a site that offers OAuth. Sign in opens the site's
+  approval page, and the hub keeps the tokens with its secrets and renews them. A pasted token
+  still works for a site with no sign-in.
+
+### Changed
+
+- A citation group renders as one citation in every view: the live page, the HTML and Markdown
+  exports and the docs bundle. Author-date styles name an author's consecutive works once, and the
+  bare `@key` form reads as a narrative citation, `Knuth (1984)`.
+- A work with no author is cited by its title, `(Water levels, 2026)`.
+- Adding a package to a notebook runs a plain `Pkg.add`, which is faster in a large environment.
+- The sign-in result page uses Slate's dark palette, and light only when the system asks for it.
+
 ### Fixed
 
+- A cold notebook environment precompiles, with its progress shown, before the cells run. On
+  Julia 1.13 the narrated pass never ran, and the first cell compiled everything with nothing shown.
+- A notebook's fork is kept when its rebuild fails, and so are the region workers' copies of it.
+  The footer's packages and the project's entries are checked against the registries by UUID
+  before a fork uses them, so a name listed under another package's UUID is reported.
+- A sweep's task environment builds from a project that is not a package.
+- Update works for a package the notebook inherits from its parent project.
+- A memo value holding a closure built inside another notebook closure restores in another process.
+- In the PDF, a bracketed key the bibliography lacks prints as the key, marked, and the export
+  completes.
+- A markdown cell whose prose shows a `#%%` line in a code block reads back whole.
+- A machine whose default Julia differs from the hub's keeps its built environment between starts.
+- A `using` cell that mirrors to a region is not treated as orphaned while the region comes up.
+- A replaced ssh session is announced as dropped only if it had signed in.
 - An image or video in a slide's markdown or output gives up height to fit the slide, as a
   `slide_figure` does, so the slide's text keeps its size.
 - `?deck=sheet`, `?deck=print` and `?deck=S.K` wait for the cells' images before they copy a slide.
   A markdown cell or an output with an image fills in only after the image decodes, so a capture
   taken at once showed the cell empty: a contact sheet with no figures and no markdown images.
+  (#89, @disberd)
 - `?deck=sheet` and `?deck=print` fit each slide again after its images load. The fit ran when the
   slide was drawn, and a copied image has no size then, so a slide with a markdown image kept full
-  size, ran past its box, and the footer cut the last lines.
+  size, ran past its box, and the footer cut the last lines. (#89, @disberd)
 - A tall slide in the PDF deck starts below the top margin. The fit shrinks the slide, but the
   page centred it at its height before the shrink, so the title sat above the page edge.
+  (#88, @disberd)
 
 ## [2.3.1] - 2026-11-23
 
