@@ -129,7 +129,8 @@ end
     # A project that can't be built says why.
     bad = project_dir("[deps]\nNoSuchPkg = \"44444444-4444-4444-4444-444444444444\"\n")
     e = try; RE.Sweep.task_env!(mktempdir(), bad, :parent); ""; catch err; sprint(showerror, err); end
-    @test occursin("could not prepare the task environment", e) && occursin("NoSuchPkg", e)
+    @test contains(e, "could not prepare the task environment")
+    @test contains(e, "NoSuchPkg")
 end
 
 # A worker whose environment can't be read answers with no packages and an error. Read as "this notebook
