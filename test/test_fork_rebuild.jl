@@ -117,6 +117,11 @@ end
     @test RE.pkg_error(lines) == "`Foo` is a direct dependency, but does not appear in the manifest. Run `Pkg.resolve()`."
     @test RE.pkg_error(["just a line"]) == "just a line"
     @test RE.pkg_error(String[]) == "the build failed"
+    # In colour, as a subprocess started with `--color=yes` writes it, and ending in a blank line.
+    coloured = ["\e[91m\e[1mERROR: \e[22m\e[39mexpected package `NoSuchPkg [44444444]` to be registered",
+                "Stacktrace:", ""]
+    @test RE.pkg_error(coloured) == "expected package `NoSuchPkg [44444444]` to be registered"
+    @test RE.pkg_error(["last words", "", ""]) == "last words"
 end
 
 @testset "a sweep's task environment builds from a project with no package" begin

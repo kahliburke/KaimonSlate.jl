@@ -403,7 +403,8 @@ The error a Pkg subprocess ended with, from the last lines of its output: the `E
 follows it up to the stacktrace.
 """
 function pkg_error(lines)
-    lines = [String(strip(l)) for l in lines]
+    # A subprocess started with `--color=yes` (a CI runner's flags carry over) colours the `ERROR:`.
+    lines = filter(!isempty, [String(strip(replace(l, r"\e\[[0-9;]*[A-Za-z]" => ""))) for l in lines])
     i = findlast(l -> startswith(l, "ERROR:"), lines)
     i === nothing && return isempty(lines) ? "the build failed" : last(lines)
     msg = String[strip(chopprefix(lines[i], "ERROR:"))]
