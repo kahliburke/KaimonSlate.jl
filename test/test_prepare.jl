@@ -104,3 +104,20 @@ include(joinpath(@__DIR__, "..", "src", "prepare.jl"))
         @test tr2.err && isempty(tr2.note)
     end
 end
+
+# The scripts that produce the stream above run as `julia -e`. One that fails to lower dies before it
+# precompiles anything, so the packages compile later inside the worker and the progress shows nowhere.
+@testset "the precompile scripts lower on this Julia" begin
+    src(f) = read(joinpath(@__DIR__, "..", "src", f), String)
+    function script(file, name)
+        s = src(file)
+        ex, _ = Meta.parse(s, findfirst("const $name =", s)[1])
+        return Core.eval(Module(), ex.args[1].args[2])
+    end
+    bad(a) = !(a isa LineNumberNode) && (l = Meta.lower(Module(), a); l isa Expr && l.head in (:error, :incomplete))
+    for (file, name) in (("worker.jl", "_PREP_SCRIPT"), ("remote.jl", "_PREP_TOTAL_SNIPPET"))
+        s = script(file, name)
+        @test occursin("@@SLATE_PREP total=", s)
+        @test !any(bad, Meta.parseall(s).args)
+    end
+end

@@ -1017,6 +1017,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
                    memo_force::Bool = false, memo_always::Bool = false,
                    memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[];
                    memo_restore_only::Bool = false, slate_ctx = nothing)
+    _await_prepare()
     cid = replace(filename, r"^cell:" => "")
     # What the cell's top-level definitions bind is re-established from source on restore
     # (`_replay_scaffold!`), so the entry stores only the rest. A function value can't be stored
@@ -2500,15 +2501,38 @@ function _bg_precompile_loop!()
     return nothing
 end
 
+# What `_prepare_env!` runs in its subprocess: the accurate full-closure total (`Base.isprecompiled` over
+# the manifest) as a control marker, then the precompile, whose combined output is what it classifies.
+const _PREP_SCRIPT = raw"""
+    using Pkg
+    try
+        local need = 0
+        for (uuid, info) in Pkg.dependencies()
+            info.name in ("KaimonGate", "Revise", "ExpressionExplorer") && continue
+            pid = Base.PkgId(uuid, info.name)
+            ready = (try; Base.in_sysimage(pid); catch; false; end) || (try; Base.isprecompiled(pid); catch; true; end)
+            ready || (need += 1)
+        end
+        println(stderr, "@@SLATE_PREP total=", need); flush(stderr)
+    catch; end
+    try
+        Pkg.precompile()
+    catch e
+        println(stderr, "@@SLATE_PREP error ", first(split(sprint(showerror, e), '\n')))
+    end
+    println(stderr, "@@SLATE_PREP done"); flush(stderr)
+"""
+
 # ── Proactive, NARRATED precompile on boot (the slow-Makie-open fix) ───────────────────────────────
 # A notebook whose env isn't precompiled pays that cost lazily, under the first cell's `using` — and
 # because cell output is capture-redirected, Julia's "Precompiling…" progress lands in the cell buffer,
 # INVISIBLE, so the topbar just shows a frozen "Running 0/N". Here we pay it up front instead: detect a
 # cold env, precompile it in a SUBPROCESS (in-process `Pkg.precompile()` crashes a live worker — see
 # `_bg_precompile_loop!`), and stream each package through the shared classifier onto `slate_prepare`, so
-# the browser narrates "Preparing packages · precompiling k/N · <pkg>". Non-blocking: cells and edits
-# proceed; a cell's own `using` that races this coordinates on Julia's per-package pidfile lock (it waits
-# on our compile rather than duplicating it). A warm env is a near-instant no-op — no subprocess, no banner.
+# the browser narrates "Preparing packages · precompiling k/N · <pkg>". Edits proceed; cells wait for it
+# (`_await_prepare`). They need its packages, and a cell's `using` that took the per-package precompile
+# lock first would compile them in this process, where the progress reaches no one, leaving the pass
+# here nothing to do. A warm env is a near-instant no-op — no subprocess, no banner.
 function _prepare_env!()
     projfile = try; Base.active_project(); catch; nothing; end
     projfile === nothing && return nothing
@@ -2524,29 +2548,8 @@ function _prepare_env!()
     cold || return nothing
     @info "slate prepare: env cold — precompiling in the background (one-time; narrated to the notebook)"
     tr = PrepareTracker(time())
-    # The subprocess computes the ACCURATE full-closure total (Base.isprecompiled over the manifest) and
-    # emits it as a control marker, then precompiles — its combined stdout/stderr is what we classify.
-    script = raw"""
-        using Pkg
-        try
-            need = 0
-            for (uuid, info) in Pkg.dependencies()
-                info.name in ("KaimonGate", "Revise", "ExpressionExplorer") && continue
-                pid = Base.PkgId(uuid, info.name)
-                ready = (try; Base.in_sysimage(pid); catch; false; end) || (try; Base.isprecompiled(pid); catch; true; end)
-                ready || (global need += 1)
-            end
-            println(stderr, "@@SLATE_PREP total=", need); flush(stderr)
-        catch; end
-        try
-            Pkg.precompile()
-        catch e
-            println(stderr, "@@SLATE_PREP error ", first(split(sprint(showerror, e), '\n')))
-        end
-        println(stderr, "@@SLATE_PREP done"); flush(stderr)
-    """
     out = Pipe()
-    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$proj -e $script`
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$proj -e $_PREP_SCRIPT`
     proc = try
         run(pipeline(cmd; stdout = out, stderr = out); wait = false)
     catch e
@@ -3663,6 +3666,18 @@ _prepare_env_task() = try; with_env_work(_prepare_env!); catch e
     @warn "slate worker: prepare pass died" exception = e
 end
 
+# Set while the boot's prepare pass runs, from before the gate opens, so no cell can start ahead of it.
+const _PREPARING = Ref{Union{Nothing,Base.Event}}(nothing)
+_await_prepare() = (ev = _PREPARING[]; ev === nothing || wait(ev); nothing)
+function _start_prepare!(ev::Base.Event)
+    try
+        _prepare_env_task()
+    finally
+        _PREPARING[] = nothing
+        notify(ev)
+    end
+end
+
 _telemetry_task(stats_path::String) = try; _telemetry_loop!(stats_path); catch e
     _closed_at_exit(e) || @warn "slate worker: telemetry sampler died" exception = e
 end
@@ -3754,6 +3769,8 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # the handshake that follows needs compiled code; while this function was still compiling the
     # tasks above, that handshake waited behind it and the hub's dial sat out its whole ping timeout.
     # Opened here, the port accepts only when the worker can answer at once.
+    prep = warm_deps ? nothing : Base.Event()
+    _PREPARING[] = prep
     _blog("start(): entering KaimonGate.serve")
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
@@ -3770,8 +3787,8 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # Cold-env narration (attached workers; pool workers already warm via `warm_deps` above). If this
     # notebook's project isn't precompiled — the classic slow Makie open — precompile it in the background
     # NOW and stream structured progress, so a cold open reads as "Preparing packages · precompiling k/N"
-    # instead of a frozen "Running 0/N". Non-blocking; a warm env is a near-instant no-op.
-    warm_deps || Threads.@spawn _prepare_env_task()
+    # instead of a frozen "Running 0/N". Cells wait for it; a warm env is a near-instant no-op.
+    prep === nothing || Threads.@spawn _start_prepare!(prep)
     # Sample every worker — local kernels too. The `.stats` sidecar is still remote-only (empty
     # stats_path skips it), but the `slate_telemetry` PUB now flows from every worker process, so the
     # hub's watchdog can see cpu/rss/gc on a local kernel and not just remote regions.
