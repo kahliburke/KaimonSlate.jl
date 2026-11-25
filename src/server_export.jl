@@ -1981,6 +1981,13 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-md .admonition>.admonition-title+*{margin-top:10px;}
 .exp-md .admonition>:last-child{margin-bottom:10px;}
 .exp-md .admonition code{background:color-mix(in srgb,var(--adm) 10%,var(--bg3));}
+.exp-md a.footnote{font-size:.75em;vertical-align:super;line-height:0;text-decoration:none;}
+.exp-md div.footnote{display:flex;gap:.6em;font-size:.88em;color:var(--dim);margin:.3em 0;}
+.exp-md :not(div.footnote)+div.footnote{border-top:1px solid var(--border);padding-top:.6em;margin-top:1em;}
+.exp-md div.footnote>*{margin:0;}
+.exp-md div.footnote>.footnote-title{font-weight:600;}
+.exp-md li:has(>input[type=checkbox]:first-child){list-style:none;margin-left:-1.3em;}
+.exp-md li>input[type=checkbox]:first-child{margin:0 .4em 0 0;vertical-align:middle;}
 .exp-md .admonition.note,.exp-md .admonition.info{--adm:var(--accent);}
 .exp-md .admonition.tip,.exp-md .admonition.hint,
 .exp-md .admonition.answer,.exp-md .admonition.solution{--adm:var(--green);}

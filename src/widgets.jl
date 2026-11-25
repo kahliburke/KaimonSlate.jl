@@ -126,8 +126,10 @@ function _desugar_fences(src::AbstractString)
             j += 1
         end
         lang = isempty(info) ? "" : lowercase(first(split(info)))
-        if isempty(lang)
-            append!(out, String.(lines[i:min(j, length(lines))]))   # untagged → leave it to CommonMark
+        # Untagged → leave it to CommonMark. A ```math fence is display math (Documenter's spelling),
+        # which the math scan in `_md_segments` reads.
+        if isempty(lang) || lang == "math"
+            append!(out, String.(lines[i:min(j, length(lines))]))
         else
             body = j > i + 1 ? join(lines[(i + 1):(j - 1)], '\n') : ""
             push!(out, string(indent, "{{ slate_render_fence(", repr(lang), ", ",
