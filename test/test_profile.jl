@@ -251,7 +251,11 @@ end
         clocks = [data[i - RE.Profile.META_OFFSET_CPUCYCLECLOCK] for i in eachindex(data) if RE.Profile.is_block_end(data, i)]
         RE.Profile.clear()
         toms = RE._clock_ms(r); run_ms = (r[4] - r[2]) / 1e6
-        @test !isempty(clocks) && all(c -> 0 <= toms(c) <= run_ms, clocks)
+        @test !isempty(clocks)
+        # A sample is stamped on whichever core the sampler ran on, and a virtual machine's cores
+        # need not agree on the counter to the cycle: allow a millisecond either side.
+        span = isempty(clocks) ? (0.0, 0.0) : extrema(toms, clocks)
+        @test -1 <= span[1] && span[2] <= run_ms + 1
         @test RE._clock_ms((UInt64(5), 0, UInt64(5), 10)) === nothing
     end
 
