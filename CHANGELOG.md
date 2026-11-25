@@ -14,6 +14,12 @@ were written when they went out. They are marked.
 
 ### Fixed
 
+- `?deck=sheet`, `?deck=print` and `?deck=S.K` wait for the cells' images before they copy a slide.
+  A markdown cell or an output with an image fills in only after the image decodes, so a capture
+  taken at once showed the cell empty: a contact sheet with no figures and no markdown images.
+- `?deck=sheet` and `?deck=print` fit each slide again after its images load. The fit ran when the
+  slide was drawn, and a copied image has no size then, so a slide with a markdown image kept full
+  size, ran past its box, and the footer cut the last lines.
 - A tall slide in the PDF deck starts below the top margin. The fit shrinks the slide, but the
   page centred it at its height before the shrink, so the title sat above the page edge.
 
