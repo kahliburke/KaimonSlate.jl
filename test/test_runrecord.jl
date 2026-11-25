@@ -140,3 +140,34 @@ cellof(nb, id) = nb.report.cells[findfirst(c -> c.id == id, nb.report.cells)]
         end
     end
 end
+
+# Between a worker connecting and its first cell, the hub loads the notebook's packages there and reads
+# their exports. Each step is published with the worker, so the page can say what the notebook waits on.
+@testset "the setup a worker does before the first cell is published" begin
+    @test NS._cell_packages("using CairoMakie, Dates\nusing DataFrames: DataFrame\nimport A.B as C\nusing .Local\nx = 1") ==
+          ["CairoMakie", "Dates", "DataFrames", "A.B"]
+    @test NS._cell_packages("this does not parse (") == String[]
+    @test NS._names_phrase(["A"]) == "A"
+    @test NS._names_phrase(["A", "B"]) == "A and B"
+    @test NS._names_phrase(["A", "B", "C", "D"]) == "A, B and 2 more"
+
+    nb = mknb("setup", "#%% code id=a\nusing Statistics\n")
+    @test NS._setup(nb, "") === nothing
+    seen = NS._with_setup(nb, "", "loading"; pkgs = ["Statistics"], cell = "a") do
+        outer = NS._setup(nb, "")
+        inner = NS._with_setup(() -> NS._setup(nb, ""), nb, "", "reading"; pkgs = ["Statistics", "Dates", "Random"])
+        (outer, inner, NS._setup(nb, ""))
+    end
+    outer, inner, after_inner = seen
+    @test (outer.stage, outer.what, outer.cell) == ("loading", "Statistics", "a")
+    # A nested stage keeps the clock of the setup it is part of, and hands the outer one back.
+    @test inner.stage == "reading" && inner.since == outer.since
+    @test after_inner == outer
+    @test NS._setup(nb, "") === nothing
+    @test NS._setup_face(outer) == "loading Statistics"
+    # The pill has room for one name; more than one is counted, and the note names them.
+    @test NS._setup_face(inner) == "reading 3 packages" && inner.what == "Statistics, Dates and 1 more"
+    # A failure inside a stage still ends it.
+    @test_throws ErrorException NS._with_setup(() -> error("boom"), nb, "", "loading")
+    @test NS._setup(nb, "") === nothing
+end

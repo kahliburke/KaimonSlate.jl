@@ -305,6 +305,10 @@ body:has(.filespanel.open) .cellmove { display:none; }
 .cell.state-stale   { border-left-color:var(--gold); }
 .cell.state-edited  { border-left-color:var(--orange); }
 .cell.state-running { border-left-color:var(--accent); animation:pulse 1s infinite; }   /* executing → blue, pulsing */
+/* QUEUED: stale, in a run that will reach it. LOADING: the worker is loading the packages this cell
+   imports before anything can run, which is this cell's work, so it pulses like a running one. */
+.cell.state-queued  { border-left-color:var(--accent); }
+.cell.state-loading { border-left-color:var(--accent); animation:pulse 1s infinite; }
 /* dep-focus filter view: banner shown while only a cell's dependency chain is rendered */
 .focusbar { position:sticky; top:0; z-index:25; cursor:pointer; margin:0 0 10px; padding:7px 12px;
   background:rgba(86,156,214,.14); border:1px solid var(--accent); border-radius:8px; color:var(--text); font-size:.82rem; }
@@ -701,6 +705,8 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
 .cell.state-stale   .badge { color:var(--gold); }
 .cell.state-edited  .badge { color:var(--orange); }
 .cell.state-running .badge { color:var(--accent); }
+.cell.state-queued  .badge { color:var(--dim); }
+.cell.state-loading .badge { color:var(--accent); }
 .cell.state-errored .badge { color:var(--red); }
 /* BLOCKED is a WAIT, not a failure — gold like STALE (work still to come), never red. The rail
    matches, so a notebook waiting on a cluster node does not read as a notebook full of errors. */
@@ -2579,8 +2585,11 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
    jump as the top worker changes, and the LABEL elides on overflow so a long region name can't blow out the
    bar. It carries the ranked dropdown of ALL workers, anchored to it. */
 .wpill-top { position:relative; min-width:150px; max-width:300px; }
-.wpill-top .wtopicon, .wpill-top .wstat { flex:0 0 auto; }
-.wpill-top .wtoplabel { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* The worker's name keeps its place (a long region name elides at its own cap); a status too long for
+   what is left elides, rather than pushing the name out or running past the pill's edge. */
+.wpill-top .wtopicon { flex:0 0 auto; }
+.wpill-top .wtoplabel { flex:0 0 auto; max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wpill-top .wstat { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .wpill-menu { position:absolute; top:calc(100% + 5px); left:0; z-index:60; min-width:230px; cursor:default;
   display:flex; flex-direction:column; gap:2px; padding:4px; background:var(--bg2);
   border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 26px rgba(0,0,0,.4); }

@@ -34,6 +34,11 @@
     return '';
   };
 
+  // Whether packages are being installed or precompiled right now (not finished, not failed).
+  window.slatePrepActive = function () {
+    return !!prep && (prep.phase === 'precompile' || prep.phase === 'resolve' || prep.phase === 'install');
+  };
+
   // A raw bring-up line arrived (worker boot output / remote provision stream) → the build log.
   window._prepPushRaw = function (line) {
     const s = String(line || '').trim();
@@ -44,8 +49,11 @@
     renderRaw();
   };
 
-  // Hydration ended (or errored) → drop everything so a later open starts clean.
+  // Hydration ended (or errored) → drop everything so a later open starts clean. A precompile still
+  // under way is kept: the notebook's first cells wait on it after the banner has gone, and its own
+  // last frame (done or error) ends it.
   window.clearPrepare = function () {
+    if (window.slatePrepActive()) return;
     prep = null; raw.length = 0;
   };
 

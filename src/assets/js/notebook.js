@@ -11,7 +11,7 @@ import { html, render } from 'htm/preact';
 import { Component } from 'preact';
 import { useRef, useEffect, useState } from 'preact/hooks';
 import { effect, signal } from '@preact/signals';
-import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal, editing as editingSignal, localDirty as dirtySignal, isDirty, srcEq, clearEdited } from './store.js';
+import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal, editing as editingSignal, localDirty as dirtySignal, runQueue as runQueueSignal, isDirty, srcEq, clearEdited } from './store.js';
 import { DebugStrip } from './debugger.js';
 
 const raw = s => ({ __html: s || '' });
@@ -411,6 +411,16 @@ function _keepFocus(host, rebuild) {
   } catch (_) {}
 }
 
+// Where a cell stands in a run under way: `loading` while the main worker loads the packages this
+// cell imports (before anything can run), `queued` while it waits for its turn. Neither is a server
+// state; both are a stale cell seen from the run that will bring it up to date.
+function _queuedState(c, state, queue) {
+  if (!queue) return state;
+  if (queue.setupCell === c.id && state !== 'running' && state !== 'edited') return 'loading';
+  if (state === 'stale' && queue.active && kindInfo(c.kind).runs_automatically) return 'queued';
+  return state;
+}
+
 // A fresh cell that leaves `fresh` only briefly keeps reading as fresh: `stale` or `running` shows
 // once it has lasted SETTLE_MS. A reactive push restales its reader cells and they re-run in tens of
 // milliseconds, so without this a cell refreshing at ~10 Hz flashed stale/running on every push. A
@@ -436,7 +446,7 @@ function useSettledState(state) {
   return state;
 }
 
-function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed }) {
+function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed, queue }) {
   const c = cell;
   const ref = useRef(null);
   const last = useRef({ bindKey: undefined, ctrlKey: undefined, out: undefined, vis: undefined });
@@ -449,6 +459,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     if (isDirty(c.id, c.source)) state = 'edited';
   }
   state = useSettledState(state);
+  state = _queuedState(c, state, queue);
 
   // Dep-focus: cells outside the focused cone collapse out of the flow (and expand back) rather
   // than unmounting, so the transition is smooth and editors/figures survive. Animate only on a
@@ -785,6 +796,9 @@ class MemoCell extends Component {
     if ((p.editingId === id) !== (next.editingId === id)) return true;
     if (!!(p.selSet && p.selSet.has(id)) !== !!(next.selSet && next.selSet.has(id))) return true;
     if ((p.live || {})[id] !== (next.live || {})[id]) return true;
+    const pq = p.queue || {}, nq = next.queue || {};
+    if ((pq.setupCell === id) !== (nq.setupCell === id)) return true;
+    if (next.cell.state === 'stale' && !!pq.active !== !!nq.active) return true;
     return false;
   }
   // The `.cellslot` (`display: contents`) is the node that preact keeps in order under #nb. The live
@@ -796,7 +810,7 @@ class MemoCell extends Component {
   componentWillUnmount() { window._deckSettle && window._deckSettle(); }
 }
 
-function Notebook({ cells, selectedId, selSet, live, focusId, editingId, cone }) {
+function Notebook({ cells, selectedId, selSet, live, focusId, editingId, cone, queue }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
     window.syncAgentTopSoon && window.syncAgentTopSoon();
@@ -806,7 +820,7 @@ function Notebook({ cells, selectedId, selSet, live, focusId, editingId, cone })
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
       title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${coneCount} cell${coneCount === 1 ? '' : 's'} — click to exit</div>` : null;
   // Render EVERY cell always; cells outside the cone collapse (see <Cell>) instead of unmounting.
-  const renderCell = c => html`<${MemoCell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} editingId=${editingId} collapsed=${!!(cone && !cone.has(c.id))} />`;
+  const renderCell = c => html`<${MemoCell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} editingId=${editingId} collapsed=${!!(cone && !cone.has(c.id))} queue=${queue} />`;
   // Side-by-side columns: a `column=N` tag (N≥2) places a cell in the Nth slot of the row anchored by
   // the preceding un-tagged (column 1, the default) cell — so you only tag the EXTRA columns. A plain
   // cell always starts a fresh row; a lone row renders as a normal full-width cell (no wrapper).
@@ -868,7 +882,7 @@ if (nbHost) {
     const selSet = selectedSetSignal.value;
     _updateSelCount(selSet);
     dirtySignal.value;   // <Cell> derives `edited` from it — read it here so the effect re-runs on a change
-    render(html`<${Notebook} cells=${cellsSignal.value} cone=${cone} selectedId=${selectedSignal.value} selSet=${selSet} live=${liveSignal.value} focusId=${fid} editingId=${editingSignal.value} />`, nbHost);
+    render(html`<${Notebook} cells=${cellsSignal.value} cone=${cone} selectedId=${selectedSignal.value} selSet=${selSet} live=${liveSignal.value} focusId=${fid} editingId=${editingSignal.value} queue=${runQueueSignal.value} />`, nbHost);
 
     if (beforeTop != null) {
       const t0 = performance.now();

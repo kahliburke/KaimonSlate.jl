@@ -2715,6 +2715,72 @@ function _side_label(nb::LiveNotebook, side::AbstractString)
     return "$side ($(r.host))"
 end
 
+# ── What a worker does before the notebook can run on it ─────────────────────────────────────────
+# A connected worker still has setup to do before its first cell: the notebook's packages are loaded
+# there (`_prime_namespace!`, which waits on any precompile they need) and the exports of its bare
+# `using`s are read (`_run_loop!`). On a cold depot that is minutes. The stage is published with the
+# worker (`_worker_entry`), so its pill, the run status and the cells waiting behind it say what it is.
+const _SETUP = Dict{Tuple{String,String},@NamedTuple{stage::String, what::String, n::Int, cell::String, since::Float64}}()
+const _SETUP_LOCK = ReentrantLock()
+
+_setup(nb::LiveNotebook, side::AbstractString) =
+    lock(() -> get(_SETUP, (nb.id, String(side)), nothing), _SETUP_LOCK)
+
+# Run `f` with `side` in setup `stage` ("loading", "reading") of the packages `pkgs`, then put back
+# what was there before. `since` is kept from an enclosing stage, so the time shown is the whole setup's.
+function _with_setup(f, nb::LiveNotebook, side::AbstractString, stage::AbstractString;
+                     pkgs = String[], cell::AbstractString = "")
+    key = (nb.id, String(side))
+    before = lock(_SETUP_LOCK) do
+        b = get(_SETUP, key, nothing)
+        _SETUP[key] = (; stage = String(stage), what = _names_phrase(pkgs), n = length(pkgs), cell = String(cell),
+                       since = b === nothing ? time() : b.since)
+        b
+    end
+    try; facts_changed!(); catch; end
+    try
+        return f()
+    finally
+        lock(_SETUP_LOCK) do
+            before === nothing ? delete!(_SETUP, key) : (_SETUP[key] = before)
+        end
+        try; facts_changed!(); catch; end
+    end
+end
+
+# What the worker's pill says during a stage: short, since the pill has little room. The packages by
+# name go in the worker's note.
+function _setup_face(su)
+    verb = su.stage == "loading" ? "loading" : su.stage == "reading" ? "reading" : return "analyzing"
+    return su.n == 1 ? verb * " " * su.what : su.n > 1 ? "$verb $(su.n) packages" : verb * " packages"
+end
+
+# The packages a cell's `using`/`import` statements load, as written: `using A, B.C: f` → ["A", "B.C"].
+# A relative path (`using .M`) names a module of the notebook, not a package, and is left out.
+function _cell_packages(src::AbstractString)
+    top = try; Meta.parseall(src); catch; return String[]; end
+    out = String[]
+    for s in (top isa Expr && top.head === :toplevel ? top.args : Any[top])
+        (s isa Expr && s.head in (:using, :import)) || continue
+        for a in s.args
+            p = a isa Expr && a.head === :(:) ? a.args[1] : a
+            p isa Expr && p.head === :as && (p = p.args[1])
+            (p isa Expr && p.head === :. && !isempty(p.args) && p.args[1] !== :.) || continue
+            push!(out, join(string.(p.args), "."))
+        end
+    end
+    return unique!(out)
+end
+
+# "A", "A and B", "A, B and 3 more".
+function _names_phrase(names)
+    n = length(names)
+    n == 0 && return ""
+    n == 1 && return names[1]
+    n == 2 && return names[1] * " and " * names[2]
+    return names[1] * ", " * names[2] * " and " * string(n - 2) * " more"
+end
+
 # Namespace parity primer: run the notebook's pure-`using`/`import` cells on kernel `k` so a side
 # that's about to RECEIVE a boundary value can DECODE it (a DataFrame needs DataFrames loaded there,
 # an Arrow blob needs Arrow, a JLS blob needs whatever types it holds). The env is the SAME fork
@@ -2806,10 +2872,12 @@ function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
                                    first(sprint(showerror, e), 160))
             end
             prime_src = _everywhere_replay_source(c)   # the marked statements when safe, else the whole cell
-            err = _replay_on(k, nb, prime_src, "cell:" * c.id * "#prime")
-            # Per-statement replay can fail if a marked statement referenced a cell-local name defined by
-            # an UNMARKED earlier statement — fall back to the whole cell source (always sufficient).
-            err !== nothing && prime_src != c.source && (err = _replay_on(k, nb, c.source, "cell:" * c.id * "#prime"))
+            err = _with_setup(nb, side, "loading"; pkgs = _cell_packages(prime_src), cell = c.id) do
+                e = _replay_on(k, nb, prime_src, "cell:" * c.id * "#prime")
+                # Per-statement replay can fail if a marked statement referenced a cell-local name defined
+                # by an UNMARKED earlier statement — fall back to the whole cell source (always sufficient).
+                (e !== nothing && prime_src != c.source) ? _replay_on(k, nb, c.source, "cell:" * c.id * "#prime") : e
+            end
             _note_setup!(nb, side, c.id, err)
             err === nothing && continue
             clean = false
@@ -5874,16 +5942,22 @@ function _run_loop!(nb::LiveNotebook)
                 isempty(paths) && continue
                 k = isempty(side) ? nb.kernel : _region_kernel_if_active(nb, side)
                 k === nothing && continue
-                ReportEngine.resolve_usings!(nb.report, k, paths) && (resolved = true)
+                _with_setup(nb, side, "reading"; pkgs = paths) do
+                    ReportEngine.resolve_usings!(nb.report, k, paths)
+                end && (resolved = true)
             end
-            resolved && lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
             # Same pre-run phasing for macro-recovered bindings: package macros (`@kwdef`, `@enum`,
             # `@chain`, …) are expandable as soon as their modules are imported (just above), so the
             # graph + memo keys see macro-hidden writes from the FIRST eval. Notebook-defined macros
             # resolve post-drain (refine_macros! below). Round-trip outside nb.lock, like the usings.
             pending = lock(nb.lock) do; ReportEngine.pending_macro_cells(nb.report); end
-            if !isempty(pending) && ReportEngine.resolve_macros!(nb.report, nb.kernel, pending)
-                lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+            if resolved || !isempty(pending)
+                _with_setup(nb, "", "analyzing") do
+                    resolved && lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+                    if !isempty(pending) && ReportEngine.resolve_macros!(nb.report, nb.kernel, pending)
+                        lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+                    end
+                end
             end
         end
         cancelled = false

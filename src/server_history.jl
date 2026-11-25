@@ -1517,6 +1517,17 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             end)
             # Started by the region's prepare for this notebook, which loads its packages before handing it over.
             (code == "bringup" && !isempty(side) && _env_preparing(nb, side)) && (d["face"] = "preparing")
+        elseif (su = _setup(nb, side)) !== nothing
+            # Connected, but the notebook can't run here yet: its packages are loading. Not "ok" until
+            # they have, since a cell asked to run now waits for them. Ahead of the busy check, which a
+            # package load sets off.
+            d["status"] = "connecting"
+            d["noteCode"] = "setup"
+            d["setupStage"] = su.stage
+            d["setupWhat"] = su.what
+            d["setupCell"] = su.cell
+            d["setupSince"] = round(su.since; digits = 1)
+            d["face"] = _setup_face(su)
         elseif (busy = get(_KERNEL_BUSY_SINCE, k, nothing)) !== nothing
             d["noteCode"] = "busy_no_reply"
             d["busySince"] = round(Float64(busy); digits = 1)
@@ -1757,6 +1768,14 @@ end
 # array and each touched cell are copied rather than written to.
 function _annotate_running!(nb::LiveNotebook, meta::AbstractDict)
     meta["now"] = time()
+    # The run under way, if any. Its start is announced once (`runbatch:`), and an open announces it
+    # before the page that shows it has connected: without this, a page saw nothing of the run until
+    # a cell started, which after a long package load reads as a notebook doing nothing.
+    since = lock(_RUNNER_LOCK) do
+        get(_RUNNERS, nb.id, false) ? get(_RUNNER_STARTED, nb.id, nothing) : nothing
+    end
+    since === nothing ||
+        (meta["run"] = Dict{String,Any}("pending" => _pending_count(nb.report), "since" => round(since; digits = 2)))
     live = _live_snapshot!(nb)
     (isempty(live) || !haskey(meta, "cells")) && return meta
     cells = meta["cells"] = Any[c for c in meta["cells"]]

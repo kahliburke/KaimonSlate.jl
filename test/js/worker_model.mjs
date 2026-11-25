@@ -193,6 +193,16 @@ const eq = (label, got, want) => {
   eq('no available-memory reading: memory unknown', M.reading({ cpu: 0, sys_mem_total: GB, sys_mem_free: 1 }).mem, null);
 }
 
+// A connected worker still loading the notebook's packages says which, and for how long.
+{
+  const t = M.hubNow();
+  eq('loading packages', M.workerNote({ noteCode: 'setup', setupStage: 'loading', setupWhat: 'CairoMakie', setupSince: t - 5 }),
+     'loading CairoMakie · 5s');
+  eq('reading exports', M.workerNote({ noteCode: 'setup', setupStage: 'reading', setupWhat: 'A and B', setupSince: t }),
+     'reading the exports of A and B · 0s');
+  eq('a loading worker is not ok yet', M.workerStatus({ status: 'connecting', connected: true, noteCode: 'setup' }), 'connecting');
+}
+
 if (fails.length) {
   console.error('worker_model: ' + fails.length + ' failure(s)');
   for (const f of fails) console.error('  - ' + f);

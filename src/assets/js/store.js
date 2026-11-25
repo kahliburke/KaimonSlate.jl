@@ -24,6 +24,14 @@ export const editing  = signal(null);
 export const liveStates = signal({});                        // transient per-cell state (running/edited) for instant feedback,
                                                              // until the authoritative server state arrives
 export const localDirty = signal({});                        // cells THIS browser has typed into and not yet applied
+// A run under way, as runstatus.js shows it: its stale cells are queued in it. `setupCell` is the cell
+// whose packages the main worker is loading before anything can run.
+export const runQueue = signal({ active: false, setupCell: '' });
+export function setRunQueue(active, setupCell) {
+  const q = runQueue.value;
+  if (q.active === !!active && q.setupCell === (setupCell || '')) return;
+  runQueue.value = { active: !!active, setupCell: setupCell || '' };
+}
 
 export const cells = computed(() => (nbState.value && nbState.value.cells) || []);
 export const title = computed(() => (nbState.value && nbState.value.title) || 'Notebook');
@@ -138,4 +146,4 @@ export function isDirty(id, source) {
 
 // Bridge for the classic (non-module) scripts, which can't `import`. They call these;
 // Preact components import the signals directly above.
-window.slateStore = { nbState, selected, selectedSet, focus, editing, cells, title, worker, liveStates, localDirty, applyState, setSelected, setSelection, toggleInSelection, setFocus, setEditingCell, setLiveState, clearLiveState, markDirty, clearEdited, isDirty, srcEq };
+window.slateStore = { nbState, selected, selectedSet, focus, editing, cells, title, worker, liveStates, localDirty, runQueue, setRunQueue, applyState, setSelected, setSelection, toggleInSelection, setFocus, setEditingCell, setLiveState, clearLiveState, markDirty, clearEdited, isDirty, srcEq };

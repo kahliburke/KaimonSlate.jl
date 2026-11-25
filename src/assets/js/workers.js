@@ -195,10 +195,14 @@ function _wpPaintBringup() {
   window.renderPrepare && window.renderPrepare();
 }
 window.wpBringupChanged = function () { _wpPaintBringup(); _wpPaintStrip(_wpPendingWs.length ? _wpPendingWs : _wpWorkers); };
+// A worker the notebook is waiting on: being started, or connected and loading the notebook's packages.
+// A precompile of those packages is the one step that has a count, so it is what the pill shows.
+const _wpWaitingOn = (w) => _wpBringingUp(w.side || '') || w.noteCode === 'setup';
+const _wpPrepFace = (w) => (_wpWaitingOn(w) && window.slatePrepActive && window.slatePrepActive()) ? window.slatePrepShort() : '';
 window.wpPrepTick = function () {
-  const b = window.__slateBringup; if (!b) return;
-  const pill = document.querySelector('#workerpills .wpill-top[data-side="' + (window.CSS && CSS.escape ? CSS.escape(b.side || '') : (b.side || '')) + '"] .wstat');
-  const t = window.slatePrepShort ? window.slatePrepShort() : '';
+  const w = (_wpWorkers || []).find(_wpWaitingOn); if (!w) return;
+  const pill = document.querySelector('#workerpills .wpill-top[data-side="' + (window.CSS && CSS.escape ? CSS.escape(w.side || '') : (w.side || '')) + '"] .wstat');
+  const t = _wpPrepFace(w);
   if (pill && t && pill.textContent !== t) pill.textContent = t;
 };
 
@@ -220,6 +224,8 @@ const _wpNoteText = (w) => window.slateModel.workerNote(w);
 
 function _wpFace(w) {
   const st = window.slateModel.workerStatus(w);
+  const prep = st === 'connecting' ? _wpPrepFace(w) : '';
+  if (prep) return prep;
   // A server-named state wins: "connecting" is a poor description of a region sitting in a
   // scheduler queue, and only the server knows which it is.
   if (w.face && st !== 'ok') return w.face;

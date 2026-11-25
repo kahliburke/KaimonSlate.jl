@@ -41,7 +41,30 @@
     .filter((c) => c.state === 'errored').map((c) => c.id);
 
   const now = () => performance.now();
+  let batchAt = 0;                     // when the current run was announced
   const fmt = (ms) => window.slateDuration(ms);
+
+  // What the run waits on before its first cell can start: the main worker starting, or loading the
+  // notebook's packages (with a precompile's count when there is one). null when it waits on nothing.
+  function waitLabel() {
+    const M = window.slateModel; if (!M) return null;
+    const w = (M.workerList() || []).find(x => !(x.side || ''));
+    if (!w || M.workerStatus(w) !== 'connecting') return null;
+    const prep = window.slatePrepActive && window.slatePrepActive() ? window.slatePrepShort() : '';
+    const label = prep || (w.noteCode === 'setup' ? w.face : 'starting worker');
+    return label ? label.charAt(0).toUpperCase() + label.slice(1) : null;
+  }
+  // The cell whose packages the main worker is loading, for <Cell> to show as `loading`.
+  function setupCell() {
+    const M = window.slateModel; if (!M) return '';
+    const w = (M.workerList() || []).find(x => !(x.side || ''));
+    return (w && w.noteCode === 'setup' && w.setupStage === 'loading' && w.setupCell) || '';
+  }
+  // Stale cells read `queued` only while the run is SHOWN: a fast reactive run that never reveals
+  // would otherwise flash every cell it restales.
+  function syncQueue() {
+    try { window.slateStore && window.slateStore.setRunQueue(revealed && active(), setupCell()); } catch (_) {}
+  }
   const esc = s => window.slateEscHtml(s);
   const setLive = (id, s) => { try { window.slateStore && window.slateStore.setLiveState(id, s); } catch (_) {} };
 
@@ -87,7 +110,11 @@
     }
     for (const el of document.querySelectorAll('.cell > .cellstop')) if (!seen.has(el.parentElement.dataset.cid)) el.remove();
   }
-  if (window.slateModel) window.slateModel.subscribe(() => renderStops());
+  if (window.slateModel) window.slateModel.subscribe(() => {
+    renderStops(); syncQueue();
+    // A worker that starts loading packages mid-run is something the run now waits on: say so.
+    if (active() && !revealed && waitLabel()) reveal();
+  });
 
   // Schedule a per-cell reveal: if THIS cell is still running after REVEAL_MS, show the run-status.
   function scheduleCellReveal(id) {
@@ -105,10 +132,22 @@
 
   function renderPill() {
     const pill = document.getElementById('runpill'); if (!pill) return;
+    syncQueue();
     if (active()) {
       if (!revealed) return;              // mid-run but not yet revealed → leave the pill as-is
-      let mx = 0; for (const t of running.values()) mx = Math.max(mx, now() - t);
       const n = Math.max(total, done + running.size);
+      // Nothing has started yet because the worker isn't ready: say what it is doing, and count from
+      // when the run was asked for. A "Running 0/N · 0 ms" that never moves reads as hung.
+      const wait = running.size === 0 ? waitLabel() : null;
+      if (wait) {
+        pill.className = 'runpill running waiting';
+        pill.innerHTML = `<span class="rring" style="--rp:0"></span>${esc(wait)}` +
+          `<span class="rp-detail"> · ${n - done} queued · ${fmt(now() - batchAt)}</span>`;
+        pill.style.display = '';
+        return;
+      }
+      let mx = 0; for (const t of running.values()) mx = Math.max(mx, now() - t);
+      if (running.size === 0 && done === 0) mx = now() - batchAt;   // queued behind something: the wait so far
       const k = Math.min(done + running.size, n);
       const frac = n ? Math.round((done / n) * 100) : 0;
       // Surface the two things a plain "k/N" hides: how many cells run AT ONCE (parallel batch) and how
@@ -287,11 +326,12 @@
     // few steps keeps `active()` true for minutes, so `done` never cleared and the pill counted
     // every cell of every cascade as if they belonged to one run — "Running 386/394" in a notebook
     // with 36 cells. The server now says which announcements start a run.
-    if (fresh || !active()) { done = 0; restored = 0; errCursor = 0; }
+    if (fresh || !active()) { done = 0; restored = 0; errCursor = 0; batchAt = now(); }
     total = done + n;
     // A real batch (startup / run-all) shows from the FIRST cell so a fast restore/parallel burst is
     // visible instead of snapping to "done"; a lone reactive cell stays deferred (BATCH_REVEAL_MIN).
-    if (n >= BATCH_REVEAL_MIN) reveal();
+    // So does any run that has to wait for the worker first.
+    if (n >= BATCH_REVEAL_MIN || waitLabel()) reveal();
     if (revealed) renderPill();           // refresh k/N (reveal() renders too; a mid-run re-emit lands here)
   };
 
@@ -355,6 +395,7 @@
         // refreshing at ~10 Hz never leaves a 600 ms gap, so a reveal held across it marked every
         // 30 ms re-run "running" for as long as the cell kept updating.
         revealed = false;
+        syncQueue();
         idleTimer = setTimeout(() => { total = 0; done = 0; restored = 0; renderPill(); }, 600);
         // Converge the topbar after a VISIBLE run: `celldone` patches update each cell, but the worker
         // dot and the "Run stale" count only recompute on a full state pull — and a parallel/initial
@@ -377,6 +418,16 @@
   window.onRunState = function (state) {
     const cells = (state && state.cells) || [];
     const hubNow = typeof state.now === 'number' ? state.now : null;
+    // A run under way that this page never saw announced (it started before the page connected, as an
+    // open's run does): take its size and start from the state.
+    const run = state && state.run;
+    if (run && run.pending > 0 && !active()) {
+      clearTimeout(idleTimer);
+      done = 0; restored = 0; errCursor = 0;
+      total = run.pending;
+      batchAt = now() - (hubNow !== null && typeof run.since === 'number' ? Math.max(0, (hubNow - run.since) * 1000) : 0);
+      if (total >= BATCH_REVEAL_MIN || waitLabel()) { reveal(); ensureTick(); renderPill(); }
+    }
     const seen = new Set();
     let adopted = false;
     for (const c of cells) {
@@ -401,6 +452,7 @@
     if (!state.hydrating) for (const id of [...running.keys()]) if (!seen.has(id)) window.onCellDone({ id, state: 'fresh' });
     if (!adopted) return;
     clearTimeout(idleTimer);
+    if (!batchAt) batchAt = Math.min(...running.values());
     total = Math.max(total, done + running.size);
     reveal();                             // these cells have been running for a while already
     for (const id of running.keys()) { setLive(id, 'running'); renderCellBars(id); }
