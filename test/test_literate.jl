@@ -165,6 +165,16 @@ end
     # No id is minted for a file that can't carry one.
     @test NS._ensure_docid!(nb) == NS.doc_key(nb)
     @test !haskey(nb.report.meta, "docid")
+    # Tags, folds and ids aren't offered: the file would drop them.
+    cid = nb.report.cells[2].id
+    NS.set_cell_tags!(nb, cid, ["cache", "mine"])
+    @test !NS.set_cell_flag!(nb, :collapsed, true; ids = [cid])
+    @test isempty(nb.report.cells[2].flags)
+    @test startswith(NS.agent_add_cell!(nb, "z = 1"; tags = "cache"), "⛔")
+    @test startswith(NS.agent_edit_cell!(nb, cid, "x = 2"; tags = "cache"), "⛔")
+    @test startswith(NS.agent_rename_cell!(nb, cid, "named"), "⛔")
+    @test nb.report.cells[2].id == cid
+    @test read(p, String) == before
 end
 
 @testset "literate: converting moves the history to the Slate notebook" begin

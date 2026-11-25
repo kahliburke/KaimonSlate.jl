@@ -608,6 +608,8 @@ window.CELL_KINDS = [
 window.kindOf = k => window.CELL_KINDS.find(x => x.k === k) || window.CELL_KINDS[0];
 // Whether this notebook can hold a cell of kind `k`. A Literate file holds code and markdown only.
 window.kindAllowed = k => !(window.__slateState || {}).literate || k === 'code' || k === 'md';
+// Whether a cell's tags, fold, hidden code and id can be set. A Literate file stores none of them.
+window.cellMetaAllowed = () => !(window.__slateState || {}).literate;
 
 // The cell's current kind, as a button. Names itself rather than offering the alternatives, so the
 // header answers "what is this?" at rest and only costs a click when you want to change it.
@@ -797,6 +799,7 @@ function cellHeaderInner(c) {
     ? `<button class="autoctl${_someOn ? ' on' : ''}" onclick="openControlPicker('${c.id}', event)" title="pick which @bind controls to surface on this cell (${bu.join(', ')})">🎛</button>` : '';
   // Extension-contributed toolbar buttons (slateRegisterCellAction). Each visible action becomes a
   // <button> in the action strip; the handler is looked up by id at click time (_slateRunCellAction).
+  const meta = window.cellMetaAllowed();
   const cellActions = (window._slateCellActions || [])
     .filter(a => { try { return a.show ? !!a.show(c) : true; } catch (e) { return false; } })
     .map(a => `<button class="cellact cellact-${_esc(a.id)}" onclick="_slateRunCellAction('${_esc(a.id)}','${c.id}',event)" title="${_esc(a.title || '')}">${a.icon || '•'}</button>`)
@@ -805,8 +808,8 @@ function cellHeaderInner(c) {
   // action buttons plus the run-info) that stays right-pinned at any width.
   return '<span class="cellhdr-lead">' +
     '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
-    `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
-    `<span class="cid" title="double-click to rename">${c.id}</span>` +
+    (meta ? `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` : '') + run +
+    `<span class="cid"${meta ? ' title="double-click to rename"' : ''}>${c.id}</span>` +
     // Mode marker. Always emitted, shown by CSS only while the cell carries `.editing`, so it costs
     // no plumbing through the header's innerHTML and can never disagree with the ring.
     '<span class="editchip" title="edit mode — keys go to the editor; Esc returns to command mode">✎ edit</span>' +
@@ -842,12 +845,12 @@ function cellHeaderInner(c) {
         return `<button class="dbgcell${on ? ' on' : ''}" onclick="window.slateDebugCell && window.slateDebugCell('${c.id}')" title="${on ? 'stop stepping this cell' : 'step this cell line by line'}">🐞</button>`;
       })() : '') +
       ((isCode && kindInfo(c.kind).profilable) ? `<button class="profcell" onclick="window.slateProfileCell && window.slateProfileCell('${c.id}')" title="profile this cell">🔥</button>` : '') +
-      (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
+      (isCode && meta ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
       // A sweep's SPEC — where it runs and under what limits — is configuration, not code. It gets
       // its own control rather than living in the free-form tag box, because walltime and partition
       // are what you change while a job is queued or after it was killed.
       (kindInfo(c.kind).editable
-        ? `<button class="tagbtn${(c.tags && c.tags.length) ? ' on' : ''}" onclick="openTagEditor('${c.id}', event)" title="cell tags${(c.tags && c.tags.length) ? ': ' + c.tags.join(', ') : ''}">🏷</button>` + editSrc
+        ? (meta ? `<button class="tagbtn${(c.tags && c.tags.length) ? ' on' : ''}" onclick="openTagEditor('${c.id}', event)" title="cell tags${(c.tags && c.tags.length) ? ': ' + c.tags.join(', ') : ''}">🏷</button>` : '') + editSrc
         : '') +
       // Move up / down are NOT here — they live on the reorder rail out in the page margin beside
       // the cell (notebook.js `renderCell`), where they cover no content and sit at the end the cell

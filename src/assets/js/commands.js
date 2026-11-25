@@ -244,9 +244,9 @@ R({ id: 'cell.toTool', label: 'Convert selected to tool call', group: 'Cells', c
 R({ id: 'cell.deps', label: 'Show the dependency chain of the selected cell', group: 'Cells',
     ctx: ['command'], available: _has('toggleDeps'), run: _onSel(t => _fn('toggleDeps', t.id)) });
 R({ id: 'cell.collapse', label: 'Fold / unfold the selected cell', group: 'Cells', ctx: ['command'],
-    available: _has('toggleCollapse'), run: _onSel(t => _fn('toggleCollapse', t.id)) });
+    available: () => _has('toggleCollapse')() && window.cellMetaAllowed(), run: _onSel(t => _fn('toggleCollapse', t.id)) });
 R({ id: 'cell.toggleCode', label: 'Hide / show the selected cell’s code', group: 'Cells',
-    ctx: ['command'], available: _has('toggleHideCode'), run: _onSel(t => _fn('toggleHideCode', t.id)) });
+    ctx: ['command'], available: () => _has('toggleHideCode')() && window.cellMetaAllowed(), run: _onSel(t => _fn('toggleHideCode', t.id)) });
 R({ id: 'cell.profile', label: 'Profile the selected cell', group: 'Cells', ctx: ['command'],
     available: _has('slateProfileCell'), run: _onSel(t => _fn('slateProfileCell', t.id)) });
 R({ id: 'cell.debug', label: 'Debug the selected cell (step through it line by line)', group: 'Cells',
@@ -381,13 +381,13 @@ R({ id: 'view.export', label: 'Export… (HTML · PDF · Markdown · standalone)
 R({ id: 'view.publish', label: 'Publish… (to GitHub Pages)', group: 'Panels', ctx: ['command'],
     available: _has('openPublish'), run: () => _fn('openPublish') });
 R({ id: 'view.hideCode', label: 'Hide all code (show only output)', group: 'Panels', ctx: ['command'],
-    available: _has('hideAllCode'), run: () => _fn('hideAllCode', true) });
+    available: () => _has('hideAllCode')() && window.cellMetaAllowed(), run: () => _fn('hideAllCode', true) });
 R({ id: 'view.showCode', label: 'Show all code', group: 'Panels', ctx: ['command'],
-    available: _has('hideAllCode'), run: () => _fn('hideAllCode', false) });
+    available: () => _has('hideAllCode')() && window.cellMetaAllowed(), run: () => _fn('hideAllCode', false) });
 R({ id: 'view.hidePlotCode', label: 'Hide code for all plot cells', group: 'Panels', ctx: ['command'],
-    available: _has('hideAllPlotCode'), run: () => _fn('hideAllPlotCode', true) });
+    available: () => _has('hideAllPlotCode')() && window.cellMetaAllowed(), run: () => _fn('hideAllPlotCode', true) });
 R({ id: 'view.showPlotCode', label: 'Show code for all plot cells', group: 'Panels', ctx: ['command'],
-    available: _has('hideAllPlotCode'), run: () => _fn('hideAllPlotCode', false) });
+    available: () => _has('hideAllPlotCode')() && window.cellMetaAllowed(), run: () => _fn('hideAllPlotCode', false) });
 R({ id: 'view.files', label: 'Files… (project browser)', group: 'Panels', ctx: ['command'],
     available: _has('toggleFiles'), run: () => _fn('toggleFiles') });
 R({ id: 'view.notebooks', label: 'All notebooks', group: 'Panels', ctx: ['command'],

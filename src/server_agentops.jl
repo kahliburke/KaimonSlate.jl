@@ -764,12 +764,15 @@ end
 # The end of a change an agent committed: renew its build floor and tell the browsers.
 _agent_done!(nb::LiveNotebook, caller::AbstractString) = (_renew_floor!(nb, caller); _agent_push!(nb))
 
+const _LITERATE_NO_TAGS = "a Literate.jl file stores no cell tags or ids; convert it to a Slate notebook to use them"
+
 function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
                          after::AbstractString = "", kind::AbstractString = "code",
                          id::AbstractString = "", tags::AbstractString = "",
                          caller::AbstractString = "", expected_version::Int = -1,
                          run::Bool = true, background::Bool = false, run_locked::Bool = false)
     errmsg = nothing; cid = ""
+    (is_literate(nb.report) && !isempty(strip(tags))) && return "⛔ $(_LITERATE_NO_TAGS)"
     rej = _guarded!(nb; caller = caller, expected_version = expected_version) do
         cells = nb.report.cells
         # An explicit id is sanitized to `#%%`-header-safe chars and MUST be unique; else auto-generate.
@@ -834,6 +837,7 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
                           run::Bool = true, background::Bool = false, run_locked::Bool = false)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     _cell_editable(nb, id) || return "(cell id=$id was written by a newer Slate; it can be moved or deleted, not edited)"
+    (is_literate(nb.report) && tags !== nothing && !isempty(strip(tags))) && return "⛔ $(_LITERATE_NO_TAGS)"
     rej = _guarded!(nb; caller = caller, expected_version = expected_version) do
         # Tags FIRST: the edit below marks the cell stale and its eval can begin immediately, so
         # tags applied after it race the run — a freshly `cache`-tagged cell would evaluate once
@@ -864,6 +868,7 @@ end
 function agent_rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractString;
                             caller::AbstractString = "", expected_version::Int = -1)
     _cell_exists(nb, oldid) || return "(no cell id=$oldid)"
+    is_literate(nb.report) && return "⛔ $(_LITERATE_NO_TAGS)"
     ok = false; msg = ""
     rej = _guarded!(nb; caller = caller, expected_version = expected_version) do
         ok, msg = rename_cell!(nb, oldid, newid)
@@ -1021,6 +1026,7 @@ end
 # Rename a cell's id (its "label"). Ids must be unique and `#%%`-header-safe
 # (letters/digits/underscore). Dependencies are by id, so rebuild them after.
 function rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractString)
+    is_literate(nb.report) && return (false, _LITERATE_NO_TAGS)
     nid = replace(strip(String(newid)), r"[^A-Za-z0-9_]+" => "_")   # fold spaces/punctuation to _
     isempty(nid) && return (false, "id cannot be empty")
     i = _index_of(nb.report.cells, oldid)
@@ -1208,6 +1214,8 @@ function _flag_history_label(flag::Symbol, value::Bool, changed::Vector{String},
 end
 
 function set_cell_flag!(nb::LiveNotebook, flag::Symbol, value::Bool; ids::Union{Nothing,AbstractVector} = nothing)
+    # `trace` is how a cell is inspected, which a Literate session can use; it isn't saved either way.
+    (is_literate(nb.report) && flag !== :trace) && return false
     idset = ids === nothing ? nothing : Set(String(x) for x in ids)
     restale = flag_reruns(flag)
     return lock(nb.lock) do
@@ -1267,6 +1275,7 @@ end
 function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
     unpin = nothing   # (kernel, oldkey) — an unlock's memo_pin! release, done OUTSIDE the lock (a gate RPC)
     store_held = false   # store the cell's current result once the lock is released (a gate RPC too)
+    is_literate(nb.report) && return nb          # a Literate file has nowhere to keep them
     lock(nb.lock) do
         i = _index_of(nb.report.cells, id); i === nothing && return nb
         c = nb.report.cells[i]

@@ -119,7 +119,7 @@ document.getElementById('nb').addEventListener('mousedown', e => {
   else selectCell(id);
 });
 document.getElementById('nb').addEventListener('dblclick', e => {
-  const span = e.target.closest('.cid'); if (span) startRename(span);
+  const span = e.target.closest('.cid'); if (span && window.cellMetaAllowed()) startRename(span);
 });
 function startRename(span) {
   const oldid = span.closest('.cell').dataset.cid;
