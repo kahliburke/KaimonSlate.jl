@@ -14,6 +14,8 @@ were written when they went out. They are marked.
 
 ### Fixed
 
+- An image or video in a slide's markdown or output gives up height to fit the slide, as a
+  `slide_figure` does, so the slide's text keeps its size.
 - `?deck=sheet`, `?deck=print` and `?deck=S.K` wait for the cells' images before they copy a slide.
   A markdown cell or an output with an image fills in only after the image decodes, so a capture
   taken at once showed the cell empty: a contact sheet with no figures and no markdown images.

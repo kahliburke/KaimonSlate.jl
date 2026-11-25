@@ -247,7 +247,7 @@
       r.el.style.removeProperty('view-transition-name');
       r.el.querySelectorAll('[style*="view-transition-name"]').forEach(n => n.style.removeProperty('view-transition-name'));
       r.el.querySelectorAll('.deck-ctl-hidden').forEach(n => n.classList.remove('deck-ctl-hidden'));
-      r.el.querySelectorAll('.slidefig').forEach(n => n.style.removeProperty('max-width'));
+      _fitTargets(r.el).forEach(n => n.style.removeProperty('max-width'));
       r.el.querySelectorAll('[data-deck-title]').forEach(m => { m.title = m.dataset.deckTitle; delete m.dataset.deckTitle; });
       _restoreCellCharts(r.el);
       if (r.slot.isConnected) r.slot.appendChild(r.el);
@@ -680,12 +680,18 @@
     _fitMath(body);
     if (over > 1 && _shrinkText(body)) body.classList.add('scroll');
   }
-  // Slide figures (`slide_figure`) give up height the way charts do; they keep their aspect, so a
-  // narrower box is a shorter one. Returns what still overflows.
+  // What gives up height on a slide the way a chart does: slide figures (`slide_figure`), and the images
+  // and videos of markdown and outputs. Each keeps its aspect, so a narrower box is a shorter one.
+  const _FIT_SEL = '.slidefig, .md img, .md video, .output img';
+  const _fitTargets = (root) => [...root.querySelectorAll(_FIT_SEL)]
+    .filter(n => n.matches('.slidefig') || !n.parentElement.closest('.slidefig'));
+  // Returns what still overflows. An image too small to matter (an icon in a line of text) keeps its size.
   function _fitFigures(body, over) {
-    const figs = [...body.querySelectorAll('.slidefig')];
+    let figs = _fitTargets(body);
     if (!figs.length) return over;
     figs.forEach(f => f.style.removeProperty('max-width'));
+    figs = figs.filter(f => f.clientHeight > body.clientHeight * 0.1);
+    if (!figs.length) return over;
     over = body.scrollHeight - body.clientHeight;
     for (let pass = 0; pass < 3 && over > 1; pass++) {
       const before = over;
