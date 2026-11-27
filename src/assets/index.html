@@ -23,7 +23,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .nb:hover{border-color:#569cd6;} .nb.has-err{border-left-color:#e57575;}
 .nbmain{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0;text-decoration:none;color:inherit;}
 .nbhead{display:flex;align-items:center;justify-content:space-between;gap:8px;}
-.nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:Menlo,monospace;font-size:.8rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:Menlo,monospace;font-size:.8rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;}
 .wport{font-size:.72rem;color:#56d364;font-family:Menlo,monospace;white-space:nowrap;flex:0 0 auto;}
 .wloc{font-size:.72rem;color:#e3b341;white-space:nowrap;flex:0 0 auto;border:1px solid #3a3320;border-radius:20px;padding:1px 8px;background:rgba(227,179,65,.08);}
 .wloc.local{color:#6a7090;border-color:#21253a;background:none;}
@@ -67,9 +67,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pathwrap input:focus{outline:none;border-color:#569cd6;}
 .comp{position:absolute;top:calc(100% + 3px);left:0;right:0;z-index:5;list-style:none;margin:0;padding:4px;
   background:#141828;border:1px solid #2a2e40;border-radius:8px;max-height:min(56vh,440px);overflow:auto;display:none;box-shadow:0 8px 24px rgba(0,0,0,.4);}
-.comp li{padding:4px 10px;border-radius:5px;cursor:pointer;font-family:Menlo,monospace;font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* Paths are clipped at the START (right-to-left box, the path itself kept left-to-right in a
+   <bdi>), so a long one still shows the end: the file and the folders nearest it. */
+.comp li{padding:4px 10px;border-radius:5px;cursor:pointer;font-family:Menlo,monospace;font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left;}
 .comp li.on{background:#569cd6;color:#0d1120;} .comp li:hover{background:#1a1e2e;}
-.comp li.more{color:#6a7090;cursor:default;font-style:italic;font-size:.76rem;}
+.comp li.more{color:#6a7090;cursor:default;font-style:italic;font-size:.76rem;direction:ltr;}
 .comp li.more:hover{background:none;}
 .open button{background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 16px;cursor:pointer;}
 .open button:hover{border-color:#569cd6;color:#569cd6;}
@@ -739,7 +741,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // opener acts on it; the New-notebook dialog deliberately doesn't (see nnSubmit).
   function makeCompleter(inp, comp, onSubmit){
     var items=[], sel=-1, moreTrunc=false, t;
-    function render(){var html=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
+    // A value the completer puts in the field: caret at the end and scrolled to it, as typing leaves it,
+    // so a long path shows its end rather than its start.
+    function setVal(v){inp.value=v;var n=v.length;try{inp.setSelectionRange(n,n);}catch(_){}inp.scrollLeft=inp.scrollWidth;}
+    function render(){var html=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'"><bdi dir="ltr">'+esc(c)+'</bdi></li>';}).join('');
       if(moreTrunc)html+='<li class="more">… more entries — keep typing to filter</li>';
       comp.innerHTML=html;comp.style.display=(items.length||moreTrunc)?'block':'none';}
     function fetchComp(){return fetch('/api/path-complete?q='+encodeURIComponent(inp.value))
@@ -762,21 +767,21 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     inp.addEventListener('keydown',function(e){
       if(e.key==='Tab'){e.preventDefault();
         if(!items.length)return;
-        if(e.shiftKey){sel=sel<=0?items.length-1:sel-1;inp.value=items[sel];render();return;}   // ⇧Tab cycles backwards
-        if(items.length===1){inp.value=items[0];fetchComp();}
+        if(e.shiftKey){sel=sel<=0?items.length-1:sel-1;setVal(items[sel]);render();return;}   // ⇧Tab cycles backwards
+        if(items.length===1){setVal(items[0]);fetchComp();}
         else{var cp=commonPrefix(items);
-          if(cp.length>inp.value.length){inp.value=cp;fetchComp();}
-          else{sel=(sel+1)%items.length;inp.value=items[sel];render();}}}
+          if(cp.length>inp.value.length){setVal(cp);fetchComp();}
+          else{sel=(sel+1)%items.length;setVal(items[sel]);render();}}}
       else if(e.key==='/'||e.key==='\\'){var pick=slashPick();   // commit a dir + descend
-        if(pick){e.preventDefault();inp.value=pick;fetchComp();}}
-      else if(e.key==='ArrowDown'){e.preventDefault();if(items.length){sel=(sel+1)%items.length;inp.value=items[sel];render();}}
-      else if(e.key==='ArrowUp'){e.preventDefault();if(items.length){sel=(sel-1+items.length)%items.length;inp.value=items[sel];render();}}
+        if(pick){e.preventDefault();setVal(pick);fetchComp();}}
+      else if(e.key==='ArrowDown'){e.preventDefault();if(items.length){sel=(sel+1)%items.length;setVal(items[sel]);render();}}
+      else if(e.key==='ArrowUp'){e.preventDefault();if(items.length){sel=(sel-1+items.length)%items.length;setVal(items[sel]);render();}}
       else if(e.key==='Enter'){e.preventDefault();onSubmit();}
       else if(e.key==='Escape'){items=[];render();}});
     // A click commits the suggestion: a directory descends, a file becomes the highlighted
     // item and submits — so `active()` reports what was clicked, not items[0].
     comp.addEventListener('mousedown',function(e){var li=e.target.closest('li');if(!li||li.classList.contains('more'))return;e.preventDefault();
-      var i=+li.dataset.i, pick=items[i];inp.value=pick;inp.focus();
+      var i=+li.dataset.i, pick=items[i];setVal(pick);inp.focus();
       if(isdir(pick)){fetchComp();return;}
       sel=i;render();onSubmit();});
     return {refresh:fetchComp,
@@ -961,7 +966,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
           '<span class="nbhead"><span class="t">'+esc(n.title)+'</span>'+
           (n.runLocation?'<span class="wloc" title="worker runs on '+esc(n.runLocation)+'">🖧 '+esc(n.runLocation)+'</span>':'<span class="wloc local" title="worker runs on this machine">💻 local</span>')+
           (n.port?'<span class="wport" title="gate worker port">● :'+n.port+'</span>':'')+'</span>'+
-          '<span class="p">'+esc(n.path)+'</span>'+
+          '<span class="p"><bdi dir="ltr">'+esc(n.path)+'</bdi></span>'+
           '<span class="meta">'+nbBadges(n)+'</span>'+nbFoot(n)+'</a>'+
           '<button class="kill" data-id="'+esc(n.id)+'" title="shut down this session">⨯ shutdown</button></div>';
       }).join('') : '<p class="empty">No notebooks open — open one above.</p>';
