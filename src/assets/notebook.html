@@ -100,6 +100,7 @@
       <button onclick="openPalette();closeTopMenu()">⌘K Command palette</button>
       <hr>
       <button onclick="openPublish();closeTopMenu()">☁ Publish…</button>
+      <button onclick="openCollab();closeTopMenu()" title="edit this notebook's markdown with others, through a knowledge base">🤝 Write together…</button>
       <button onclick="window.open('/#publishing','_blank');closeTopMenu()" title="Manage all publishing targets & see what's published where">🗂 Publishing manager…</button>
       <button onclick="openExport();closeTopMenu()">⬆ Export…</button>
       <hr>
@@ -808,6 +809,7 @@
 <script src="/assets/js/keymap.js"></script>    <!-- chord parsing, the lookup index, dispatch, persistence -->
 <script src="/assets/js/editor.js"></script>
 <script src="/assets/js/view.js"></script>
+<script src="/assets/js/collab.js"></script>   <!-- writing a notebook together through a knowledge base -->
 <!-- Built-in widget kinds whose UI is more than one <input>, implemented through the same public
      slateRegisterWidget seam a third-party widget uses. -->
 <script src="/assets/js/widget-fileupload.js"></script>

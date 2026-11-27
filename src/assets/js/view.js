@@ -1690,6 +1690,8 @@ async function commitSource(id) {
     const sed = cell.querySelector('.srcedit'); if (sed) sed.style.display = 'none';
     const d = _disp(cell); if (d) d.style.display = '';
   }
+  // Told to whoever follows commits (collab.js shares them with the others writing the notebook).
+  document.dispatchEvent(new CustomEvent('slate:source-committed', { detail: { id, source: src } }));
   applyAck(await api('POST', '/api/cell/' + id, { source: src }));   // a receipt now; the push re-renders it
 }
 function cancelSource(id) {

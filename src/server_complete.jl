@@ -493,6 +493,7 @@ end
 
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
 include("bib_remote.jl")     # a bibliography named by its address: fetched, cached, revalidated
+include("collab.jl")         # writing a notebook together: a ticket to its room at a knowledge base
 include("memostore.jl")      # MemoStore (server-side copy — stateless, root passed explicitly): pack/unpack
 include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl
 
@@ -2828,6 +2829,29 @@ function _make_router(h::Hub)
         _bib_declared(nb, url) || return HTTP.Response(404, "not a bibliography address of this notebook")
         callback = "http://" * HTTP.header(req, "Host", "127.0.0.1") * "/bib/signin/callback"
         to = try bib_signin_start(url, callback) catch e
+            return HTTP.Response(400, ["Content-Type" => "application/json"], JSON.json(Dict("error" => sprint(showerror, e))))
+        end
+        _json(Dict("to" => to))
+    end))
+    # Writing the notebook together (collab.jl): a ticket to its room at a knowledge base (body {kb,
+    # project}), and signing in there for it, with the scope contributing to a project needs.
+    HTTP.register!(router, "POST", "/api/{id}/collab/ticket", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        _json(collab_ticket(nb, String(get(b, "kb", "")), String(get(b, "project", ""))))
+    end))
+    # A knowledge base that does not offer signing in is given an API token (body {kb, token}; empty
+    # removes it), kept with the hub's secrets for that site as a bibliography's is.
+    HTTP.register!(router, "POST", "/api/{id}/collab/token", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        kb = _bib_origin(String(strip(get(b, "kb", ""))))
+        isempty(kb) && return HTTP.Response(400, ["Content-Type" => "application/json"], JSON.json(Dict("error" => "No knowledge base address")))
+        publish_secret_set!(bib_token_ref(kb), String(strip(get(b, "token", ""))))
+        _json(Dict("ok" => true))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/collab/signin", req -> _withnb(h, req, nb -> begin
+        kb = _bib_origin(String(strip(get(_body(req), "kb", ""))))
+        callback = "http://" * HTTP.header(req, "Host", "127.0.0.1") * "/bib/signin/callback"
+        to = try bib_signin_start(kb, callback; scope = COLLAB_SCOPE) catch e
             return HTTP.Response(400, ["Content-Type" => "application/json"], JSON.json(Dict("error" => sprint(showerror, e))))
         end
         _json(Dict("to" => to))

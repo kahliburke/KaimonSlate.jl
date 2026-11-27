@@ -185,13 +185,14 @@ const _BIB_SIGNIN_LOCK = ReentrantLock()
 const _BIB_SIGNIN_SECONDS = 600.0
 
 """
-    bib_signin_start(url, redirect) -> String
+    bib_signin_start(url, redirect; scope = "read") -> String
 
 Begin signing in to the site of bibliography address `url`: the address of its approval page for the
 person's browser. `redirect` is the hub's callback as that browser reaches it (see
-`bib_signin_finish`). The hub registers itself there once per callback address.
+`bib_signin_finish`). The hub registers itself there once per callback address. `scope` is what the
+token may do there: reading, or more for writing a notebook together (see collab.jl).
 """
-function bib_signin_start(url::AbstractString, redirect::AbstractString)
+function bib_signin_start(url::AbstractString, redirect::AbstractString; scope::AbstractString = "read")
     meta = bib_oauth_metadata(url)
     meta === nothing && error("$(_bib_origin(url)) does not offer signing in")
     saved = something(_bib_oauth_saved(url), Dict{String,Any}())
@@ -208,7 +209,7 @@ function bib_signin_start(url::AbstractString, redirect::AbstractString)
         _BIB_SIGNINS[state] = (; url = String(url), verifier, client, redirect = String(redirect),
                                  token_endpoint = String(meta["token_endpoint"]), at = time())
     end
-    q = _form(["response_type" => "code", "client_id" => client, "redirect_uri" => redirect, "state" => state, "scope" => "read",
+    q = _form(["response_type" => "code", "client_id" => client, "redirect_uri" => redirect, "state" => state, "scope" => scope,
                "code_challenge" => _b64url(SHA.sha256(verifier)), "code_challenge_method" => "S256"])
     return String(meta["authorization_endpoint"]) * "?" * q
 end

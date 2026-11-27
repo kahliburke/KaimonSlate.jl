@@ -512,7 +512,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed, q
     const _mine = _hasEd ? window.edText(c.id) : null;
     const _sent = (window._sentSrc || {})[c.id];
     if (_sent != null && _eq(c.source, _sent)) delete window._sentSrc[c.id];   // answered
-    switch (window.slateReconcileVerdict({ prevSrc: _prevSrc, prevHash: _prevHash,
+    // An editor bound to a shared text (collab.js) follows the text: the hub's source is a commit of it.
+    const _shared = !!(window.slateCollabBound && window.slateCollabBound(c.id));
+    if (!_shared) switch (window.slateReconcileVerdict({ prevSrc: _prevSrc, prevHash: _prevHash,
                                            source: c.source, hash: c.hash,
                                            mine: _mine, hasEditor: _hasEd, eq: _eq, sent: _sent })) {
       case 'forward':  window.edSetText(c.id, c.source); break;                          // no local edits → adopt it

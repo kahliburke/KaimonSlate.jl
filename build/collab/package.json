@@ -1,0 +1,18 @@
+{
+  "name": "kaimonslate-collab-bundle",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Yjs and its CodeMirror binding for writing a notebook together, vendored as src/assets/js/collab.bundle.js. CodeMirror itself comes from cm6.bundle.js (window.CM6), so editors and the binding share one instance.",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --format=iife --global-name=SlateY --minify --alias:@codemirror/state=./cm-state.cjs --alias:@codemirror/view=./cm-view.cjs --outfile=../../src/assets/js/collab.bundle.js"
+  },
+  "dependencies": {
+    "lib0": "^0.2",
+    "y-codemirror.next": "^0.3",
+    "y-protocols": "^1",
+    "yjs": "^13"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28"
+  }
+}
