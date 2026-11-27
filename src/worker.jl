@@ -12,6 +12,7 @@ import Serialization                         # slate_emit value → bytes (uncon
 import Base64                                # …then base64 so an arbitrary Julia value rides the string stream
 import Logging, Dates                        # timestamped worker log (legible after a slow bring-up / eval)
 import Sockets                               # TCP reachability probe for peer-route resolution
+import SHA                                   # a peer's granted cell is matched by its source's SHA-256
 
 # Cold-boot phase timing: start()'s socket bring-up self-reports into the worker log with the same
 # `[slate-boot]` prefix the boot script uses, timed from `__init__`.
@@ -1427,12 +1428,17 @@ const _PEER_POLICY = Ref((; keys = Dict{String,String}(), grants = Dict{String,A
 
 _peer_of_key(z85::String) = lock(() -> get(_PEER_POLICY[].keys, z85, nothing), _PEER_LOCK)
 
-"Set which keys are other people's hubs (`keys`: Z85 → peer id) and what each peer is granted (`grants`: peer id → grants). Replaces the whole policy; an empty one admits no one."
-function __slate_peer_policy(keys::AbstractDict, grants::AbstractDict = Dict{String,Any}())
-    k = Dict{String,String}(String(z) => String(id) for (z, id) in keys)
-    g = Dict{String,Any}(String(id) => v for (id, v) in grants)
+"""
+Set the whole peer policy from TOML text: `[keys]` maps each Z85 key to its peer id, and
+`[grants.<peer id>.<cell id>]` holds a granted cell's `hash` (SHA-256 of its source) and `source`.
+An empty policy admits no one. Returns `(; peers, cells)`.
+"""
+function __slate_peer_policy(policy::String)
+    p = Pkg.TOML.parse(policy)
+    k = Dict{String,String}(String(z) => String(id) for (z, id) in get(p, "keys", Dict()))
+    g = Dict{String,Any}(String(id) => v for (id, v) in get(p, "grants", Dict()))
     lock(() -> (_PEER_POLICY[] = (; keys = k, grants = g)), _PEER_LOCK)
-    return (; peers = length(k))
+    return (; peers = length(k), cells = sum(v -> v isa AbstractDict ? length(v) : 0, values(g); init = 0))
 end
 
 _peer_reply(d::AbstractDict) = sprint(Pkg.TOML.print, d)
@@ -1447,8 +1453,37 @@ function _peer_request(peer::String, text::String)
     admitted = lock(() -> peer in values(_PEER_POLICY[].keys), _PEER_LOCK)
     admitted || return _peer_reply(Dict("error" => "Not admitted"))
     verb = get(req, "verb", "")
-    verb == "hello" && return _peer_reply(Dict("peer" => peer, "verbs" => ["hello"]))
+    verb == "hello" && return _peer_reply(Dict("peer" => peer, "verbs" => ["hello", "run"]))
+    verb == "run" && return _peer_reply(_peer_run(peer, req))
     return _peer_reply(Dict("error" => "No verb $(repr(verb)) for a peer"))
+end
+
+"""
+    _peer_run(peer, req) -> Dict
+
+Run cell `req["cell"]` for peer `peer`, as granted: the grant (set by this worker's own hub, see
+`__slate_peer_policy`) holds the cell's source and its SHA-256, and the request must name that same
+hash. What runs is the grant's source, never anything the peer sent. The answer is the run's
+output: stdout and stderr, the value's text, its displays (MIME type and base64 data), any exception
+and the duration.
+"""
+function _peer_run(peer::String, req::AbstractDict)
+    cell, hash = String(get(req, "cell", "")), String(get(req, "hash", ""))
+    g = lock(_PEER_LOCK) do
+        grants = get(_PEER_POLICY[].grants, peer, nothing)
+        grants isa AbstractDict ? get(grants, cell, nothing) : nothing
+    end
+    g isa AbstractDict || return Dict("error" => "Cell $(repr(cell)) is not granted to you")
+    source = String(get(g, "source", ""))
+    want = String(get(g, "hash", ""))
+    (!isempty(want) && hash == want && bytes2hex(SHA.sha256(source)) == want) ||
+        return Dict("error" => "Cell $(repr(cell)) has changed since it was granted: ask its owner to grant it again")
+    w = __slate_eval(source; filename = "cell:" * cell, run_id = "peer:" * peer * ":" * cell)
+    return Dict{String,Any}(
+        "cell" => cell, "stdout" => String(w.stdout), "stderr" => String(w.stderr),
+        "value" => String(w.value_repr), "duration_ms" => Float64(w.duration_ms),
+        "exception" => w.exception === nothing ? "" : first(String(w.exception), 4000),
+        "displays" => [Dict("mime" => String(m), "data" => Base64.base64encode(d)) for (m, d) in w.mime])
 end
 
 # Install the peer hooks on a KaimonGate that has them (protocol v3); an older one admits no peers.
