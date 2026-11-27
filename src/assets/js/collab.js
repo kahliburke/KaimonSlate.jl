@@ -667,7 +667,9 @@
   function hubRows() {
     const h = S && S.hubs;
     if (!h || !h.peers || !h.peers.length) return '';
-    const row = x => `<tr><td>${esc(x.name || x.id)}</td><td>${esc(x.state === 'open' ? `direct ${x.local}↔${x.remote}` : x.state)}` +
+    const vouch = x => x.vouched ? `<small title="The knowledge base vouches for this hub's key as ${esc(x.vouched)}'s">✓ key</small>`
+                                 : (x.key ? '<small title="Its key is not one the knowledge base vouches for">key not vouched</small>' : '');
+    const row = x => `<tr><td>${esc(x.name || x.id)} ${vouch(x)}</td><td>${esc(x.state === 'open' ? `direct ${x.local}↔${x.remote}` : x.state)}` +
                      `${x.rtt_ms != null ? ' <small>· ' + esc(x.rtt_ms) + ' ms</small>' : ''}</td></tr>`;
     return '<table class="cw-peers"><tr><th>Hub</th><th>Reached</th></tr>' + h.peers.map(row).join('') + '</table>';
   }

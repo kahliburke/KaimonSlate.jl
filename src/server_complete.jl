@@ -494,6 +494,7 @@ end
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
 include("bib_remote.jl")     # a bibliography named by its address: fetched, cached, revalidated
 include("collab.jl")         # writing a notebook together: a ticket to its room at a knowledge base
+include("collab_keys.jl")    # whose hub a CURVE key is: the knowledge base vouches
 include("collab_hub.jl")     # the hub in the room: direct channels to the other participants' hubs
 include("memostore.jl")      # MemoStore (server-side copy — stateless, root passed explicitly): pack/unpack
 include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl

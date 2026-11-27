@@ -26,8 +26,10 @@ mutable struct HubPeer
     const waiting::Dict{String,Channel{Any}}  # replies awaited, by request id
     incoming::Any                            # a payload being received: (; id, bytes, sha, buf, t0)
     pair::Tuple{String,String}               # the selected candidates' types, read once the channel opens
+    key::String                              # the CURVE public key it said in its hello
+    vouched::Any                             # whose the key authority says that key is, or nothing
 end
-HubPeer(id, name) = HubPeer(id, name, nothing, nothing, :connecting, nothing, Dict{String,Channel{Any}}(), nothing, ("", ""))
+HubPeer(id, name) = HubPeer(id, name, nothing, nothing, :connecting, nothing, Dict{String,Channel{Any}}(), nothing, ("", ""), "", nothing)
 
 mutable struct HubLink
     const nb_id::String
@@ -38,6 +40,8 @@ mutable struct HubLink
     const peers::Dict{String,HubPeer}
     const lock::ReentrantLock                # the peers
     const sending::ReentrantLock             # the room's socket, apart: a stalled send holds up no one else
+    const key::String                        # this hub's CURVE public key
+    authority::Any                           # who vouches for the others' keys (collab_keys.jl)
     ws::Any
     closed::Bool
 end
@@ -66,11 +70,17 @@ to: kept as it is when already there, moved when the room changed.
 function collab_hub_join!(nb, t)
     lock(HUB_LINKS_LOCK) do
         old = get(HUB_LINKS, nb.id, nothing)
-        old !== nothing && !old.closed && old.room == t.room && return old
+        authority = ZemiKeys(t.origin, t.project, t.hub_keys)
+        if old !== nothing && !old.closed && old.room == t.room
+            old.authority = authority                 # a fresh ticket's word on the keys
+            return old
+        end
         old === nothing || _hub_leave!(old)
-        l = HubLink(nb.id, t.room, t.ws, bytes2hex(rand(UInt8, 6)), t.name, Dict{String,HubPeer}(), ReentrantLock(), ReentrantLock(), nothing, false)
+        l = HubLink(nb.id, t.room, t.ws, bytes2hex(rand(UInt8, 6)), t.name, Dict{String,HubPeer}(), ReentrantLock(), ReentrantLock(),
+                    t.hub_key, authority, nothing, false)
         HUB_LINKS[nb.id] = l
         errormonitor(Threads.@spawn _hub_run(l))
+        errormonitor(Threads.@spawn _hub_keys_watch(l))
         return l
     end
 end
@@ -111,6 +121,19 @@ function _hub_forget!(l::HubLink, p::HubPeer)
         get(l.peers, p.id, nothing) === p && delete!(l.peers, p.id)
     end
     _hub_drop!(p)
+end
+
+# Every minute, which keys the authority still vouches for: a peer whose key it no longer does is forgotten.
+function _hub_keys_watch(l::HubLink)
+    while !l.closed
+        sleep(60)
+        l.closed && break
+        gone = try refresh_keys!(l.authority) catch; String[] end
+        for p in lock(() -> collect(values(l.peers)), l.lock)
+            p.vouched = key_owner(l.authority, p.key)
+            p.key in gone && _hub_forget!(l, p)
+        end
+    end
 end
 
 # The room's WebSocket, kept open while the hub is in the room: reconnected with a growing pause.
@@ -226,11 +249,11 @@ function _hub_channel!(l::HubLink, p::HubPeer, dc)
     p.state = :open
     pair = try selected_candidate_pair(p.pc) catch; nothing end
     pair === nothing || (p.pair = (String(candidate_type(pair.local_candidate)), String(candidate_type(pair.remote_candidate))))
-    _hub_send(p, Dict("t" => "hello", "name" => l.name))
+    _hub_send(p, Dict("t" => "hello", "name" => l.name, "key" => l.key))
     errormonitor(Threads.@spawn _hub_pings(l, p))
     for msg in dc
         try
-            msg isa AbstractString ? _hub_control!(p, JSON.parse(msg)) : _hub_chunk!(p, msg)
+            msg isa AbstractString ? _hub_control!(l, p, JSON.parse(msg)) : _hub_chunk!(p, msg)
         catch e
             @debug "slate collab: a hub's message failed" exception = e
         end
@@ -240,10 +263,14 @@ end
 
 _hub_send(p::HubPeer, d) = DataChannels.send(p.dc, JSON.json(d))
 
-function _hub_control!(p::HubPeer, m)
+function _hub_control!(l::HubLink, p::HubPeer, m)
     t = get(m, "t", "")
     if t == "hello"
         p.name = string(get(m, "name", p.name))
+        # The key it says is its own: vouched for or not. A hello proves nothing; the CURVE handshake to
+        # a worker does (gate protocol v3), this tells who to expect there.
+        p.key = string(get(m, "key", ""))
+        p.vouched = isempty(p.key) ? nothing : key_owner(l.authority, p.key)
     elseif t == "ping"
         _hub_send(p, Dict("t" => "pong", "id" => m["id"]))
     elseif t == "probe"
@@ -324,9 +351,10 @@ function collab_hubs(nb)
     l === nothing && return (; room = "", connected = false, peers = NamedTuple[])
     # Read from what the peers hold, never from libdatachannel: a list asked for every few seconds must not wait on it.
     peers = map(collect(lock(() -> collect(values(l.peers)), l.lock))) do p
-        (; id = p.id, name = p.name, state = String(p.state), var"local" = p.pair[1], remote = p.pair[2], rtt_ms = p.rtt_ms)
+        (; id = p.id, name = p.name, state = String(p.state), var"local" = p.pair[1], remote = p.pair[2], rtt_ms = p.rtt_ms,
+           key = p.key, vouched = p.vouched === nothing ? "" : p.vouched.name)
     end
-    return (; room = l.room, connected = l.ws !== nothing, peers)
+    return (; room = l.room, connected = l.ws !== nothing, peers, key = l.key, vouched_keys = length(l.authority.keys))
 end
 
 """

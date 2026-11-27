@@ -11,15 +11,20 @@ const COLLAB_SCOPE = "read tasks.view tasks.edit"
     collab_ticket(nb, kb, project) -> NamedTuple
 
 A ticket to notebook `nb`'s room in `project` at knowledge base `kb` (its address): `(; ok = true,
-ws, room, name, expires, rooms)`, `ws` the WebSocket to open, `name` the person's as the knowledge
-base knows them, and `rooms` the project's rooms with someone in them; or `(; ok = false, status, signin, error)`, `signin` when signing in there would help.
+ws, room, name, expires, rooms, origin, project, hub_key, hub_keys)`, `ws` the WebSocket to open,
+`name` the person's as the knowledge base knows them, `rooms` the project's rooms with someone in
+them, `hub_key` this hub's CURVE public key and `hub_keys` the keys the knowledge base vouches for
+in the room; or `(; ok = false, status, signin, error)`, `signin` when signing in there would help.
 """
 function collab_ticket(nb, kb::AbstractString, project::AbstractString)
     origin = _bib_origin(String(strip(kb)))
     isempty(origin) && return (; ok = false, status = 400, signin = false, error = "A knowledge base's address starts with http:// or https://")
     key = uppercase(strip(project))
     occursin(r"^[A-Z][A-Z0-9]{0,15}$", key) || return (; ok = false, status = 400, signin = false, error = "A project's key is letters and digits")
-    body = JSON.json(Dict("document" => _ensure_docid!(nb)))
+    # The hub's CURVE public key goes with it: the knowledge base keeps it as this person's hub's,
+    # and answers with the keys it vouches for in the room (see collab_keys.jl).
+    hub_key = ReportEngine._hub_client_pubkey()
+    body = JSON.json(Dict("document" => _ensure_docid!(nb), "hub_key" => hub_key, "hub_label" => gethostname()))
     url = origin * "/api/projects/" * key * "/collab/ticket"
     ask(token) = _BIB_POST[](url, ["Content-Type" => "application/json", "Accept" => "application/json",
                                    (isempty(token) ? Pair{String,String}[] : ["Authorization" => "Bearer " * token])...], body)
@@ -43,7 +48,7 @@ function collab_ticket(nb, kb::AbstractString, project::AbstractString)
     t = JSON.parse(String(resp.body))
     ws = replace(origin, r"^http"i => "ws") * String(t["path"]) * "?ticket=" * String(t["ticket"])
     return (; ok = true, ws, room = String(t["room"]), name = String(get(t, "name", "")), expires = String(get(t, "expires", "")),
-            rooms = get(t, "rooms", Any[]))
+            rooms = get(t, "rooms", Any[]), origin, project = key, hub_key, hub_keys = get(t, "hub_keys", Any[]))
 end
 
 # ── The room's changes, applied here ─────────────────────────────────────────────────────────────
