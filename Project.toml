@@ -10,6 +10,7 @@ CancellationTokens = "2e8d271d-f2e2-407b-a864-17eb2156783e"
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
 CodecZstd = "6b39b394-51ab-5f42-8807-6242bab2b4c2"
 CommonMark = "a80b9123-70ca-4bc0-993e-6e3bcb318db6"
+DataChannels = "83c0d7a3-d828-4ea0-8e66-15e3681034ee"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 ExpressionExplorer = "21656369-7473-754a-2065-74616d696c43"
 FileWatching = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
@@ -44,6 +45,10 @@ ripgrep_jll = "e10fc14b-37cd-5cbc-b289-ad01b12ebaad"
 [weakdeps]
 Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
 
+[sources]
+DataChannels = {path = "lib/DataChannels"}
+SlateExtensionsBase = {path = "lib/SlateExtensionsBase"}
+
 [extensions]
 KaimonSlateTablesExt = "Tables"
 
@@ -56,6 +61,7 @@ CancellationTokens = "2.3"
 CodecZlib = "0.7.8"
 CodecZstd = "0.8"
 CommonMark = "1.0.2"
+DataChannels = "0.1"
 DataFrames = "1"
 Dates = "1.11.0"
 ExpressionExplorer = "1.1.4"

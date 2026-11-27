@@ -627,6 +627,7 @@
           kb, project, mode, room: t.room, name: t.name, others: t.rooms || [], started: Date.now() };
     S.provider = new Room(SY, { ws: t.ws, room: t.room, doc, awareness, mode, onChange: () => { decorate(); ui.render(); } });
     sessionStorage.setItem(inRoomKey(), JSON.stringify({ kb, project, mode }));
+    S.hubTimer = setInterval(pollHubs, 3000);
     S.committed.observe(ev => { if (!ev.transaction.local && S.base) for (const id of ev.keysChanged) applyCommit(id); });
     S.texts.observeDeep(evs => {
       if (!S.base || evs.every(e => e.transaction.local)) return;
@@ -654,10 +655,25 @@
     S = null;
     bindAll();                         // editors let go of the shared texts
     s.provider.close();
+    clearInterval(s.hubTimer);
+    api('POST', '/api/collab/leave').catch(() => {});
     s.awareness.destroy();
     s.doc.destroy();
     decorate();
     ui.render();
+  }
+
+  // The hubs this one is connected to (collab_hub.jl): the channels code and values will travel over.
+  function hubRows() {
+    const h = S && S.hubs;
+    if (!h || !h.peers || !h.peers.length) return '';
+    const row = x => `<tr><td>${esc(x.name || x.id)}</td><td>${esc(x.state === 'open' ? `direct ${x.local}↔${x.remote}` : x.state)}` +
+                     `${x.rtt_ms != null ? ' <small>· ' + esc(x.rtt_ms) + ' ms</small>' : ''}</td></tr>`;
+    return '<table class="cw-peers"><tr><th>Hub</th><th>Reached</th></tr>' + h.peers.map(row).join('') + '</table>';
+  }
+  async function pollHubs() {
+    if (!S) return;
+    try { S.hubs = await api('GET', '/api/collab/hubs'); ui.render(); } catch (_) {}
   }
 
   // ── The panel ───────────────────────────────────────────────────────────────────────────────────
@@ -730,7 +746,7 @@
           `<div class="cw-field"><span class="cw-label">In the room</span><div class="cw-people">${people.join('') || '—'}</div></div>` +
           (elsewhere.length ? `<div class="cw-msg warn" title="A copy with another document id is another room">In another copy's room: ${esc(elsewhere.join(', '))}</div>` : '') +
           '<table class="cw-peers"><tr><th>Peer</th><th>Reached</th><th class="n" title="Messages received directly / through the relay">Msgs</th></tr>' +
-          rows + '</table>' +
+          rows + '</table>' + hubRows() +
           msg + '<div class="cw-actions"><button class="cw-btn leave" data-act="leave">Leave</button></div></div>';
       }
       el.querySelectorAll('[data-act]').forEach(b => b.onclick = () => this.act(b.dataset.act));

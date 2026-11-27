@@ -1,0 +1,19 @@
+name = "DataChannels"
+uuid = "83c0d7a3-d828-4ea0-8e66-15e3681034ee"
+version = "0.1.0"
+
+[deps]
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
+libdatachannel_jll = "a9336cb3-2ff0-5b58-948f-a453a6f195b0"
+
+[compat]
+Sockets = "1"
+julia = "1.12"
+libdatachannel_jll = "0.20"
+
+[extras]
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["SHA", "Test"]

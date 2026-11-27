@@ -494,6 +494,7 @@ end
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
 include("bib_remote.jl")     # a bibliography named by its address: fetched, cached, revalidated
 include("collab.jl")         # writing a notebook together: a ticket to its room at a knowledge base
+include("collab_hub.jl")     # the hub in the room: direct channels to the other participants' hubs
 include("memostore.jl")      # MemoStore (server-side copy — stateless, root passed explicitly): pack/unpack
 include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl
 
@@ -2837,7 +2838,11 @@ function _make_router(h::Hub)
     # project}), and signing in there for it, with the scope contributing to a project needs.
     HTTP.register!(router, "POST", "/api/{id}/collab/ticket", req -> _withnb(h, req, nb -> begin
         b = _body(req)
-        _json(collab_ticket(nb, String(get(b, "kb", "")), String(get(b, "project", ""))))
+        t = collab_ticket(nb, String(get(b, "kb", "")), String(get(b, "project", "")))
+        t.ok && try collab_hub_join!(nb, t) catch e
+            @warn "slate collab: the hub could not join the room" exception = e
+        end
+        _json(t)
     end))
     # A knowledge base that does not offer signing in is given an API token (body {kb, token}; empty
     # removes it), kept with the hub's secrets for that site as a bibliography's is.
@@ -2859,6 +2864,19 @@ function _make_router(h::Hub)
         b = _body(req)
         _json(Dict("html" => collab_render(nb, String(get(b, "id", "")), String(get(b, "source", "")))))
     end))
+    # The hubs this one has met in the room and how each is reached; a probe of a channel's speed
+    # (body {peer, bytes}); and leaving the room.
+    HTTP.register!(router, "GET", "/api/{id}/collab/hubs", req -> _withnb(h, req, nb -> _json(collab_hubs(nb))))
+    HTTP.register!(router, "POST", "/api/{id}/collab/probe", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        r = try
+            collab_probe(nb, String(get(b, "peer", "")), clamp(Int(get(b, "bytes", 1_000_000)), 0, 1_000_000_000))
+        catch e
+            return HTTP.Response(400, ["Content-Type" => "application/json"], JSON.json(Dict("error" => sprint(showerror, e))))
+        end
+        _json(r)
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/collab/leave", req -> _withnb(h, req, nb -> (collab_hub_leave!(nb); _json(Dict("ok" => true)))))
     HTTP.register!(router, "POST", "/api/{id}/collab/signin", req -> _withnb(h, req, nb -> begin
         kb = _bib_origin(String(strip(get(_body(req), "kb", ""))))
         callback = "http://" * HTTP.header(req, "Host", "127.0.0.1") * "/bib/signin/callback"
