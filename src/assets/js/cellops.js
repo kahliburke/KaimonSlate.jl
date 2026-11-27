@@ -19,6 +19,7 @@ async function runCell(id, force = false) {
   const wasSrc = srcMap[id];
   srcMap[id] = sent;
   (window._sentSrc || (window._sentSrc = {}))[id] = sent;
+  document.dispatchEvent(new CustomEvent('slate:source-committed', { detail: { id, source: sent, run: true } }));
   let ack;
   try {
     ack = await api('POST', '/api/cell/' + id, { source: sent, force: !!force });

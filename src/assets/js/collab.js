@@ -1,10 +1,10 @@
 // Writing a notebook together (see collab.jl). The browsers of the people editing a notebook meet in
 // its room at a knowledge base: a WebSocket there carries their WebRTC handshake, and relays the
 // notebook's updates between browsers that cannot connect directly. Each browser keeps the shared
-// document (Yjs) in step with its own hub. A markdown cell's text is shared as it is typed, in the
-// editors of those who have it open, and a commit (Shift-Enter) on one side is committed on the
-// others', whose hubs render it. Only markdown cells are shared, and only those the notebook had when
-// the room was started.
+// document (Yjs) in step with its own hub: the cells, their order, kinds and tags, and their text,
+// typed into live in the editors of those who have a cell open. A commit (Shift-Enter, or a run) is
+// committed on the others' hubs: a markdown cell is rendered there, any other saved without running.
+// Nothing the others write runs on this machine until someone here runs it.
 //
 // Modes: `auto` connects directly and relays for a peer it cannot reach; `direct` never relays the
 // document; `relay` never connects directly. The panel shows, for each peer, how it is reached.
@@ -16,6 +16,9 @@
   const RELAY_AFTER_MS = 5000;           // how long a direct connection gets before the relay carries a peer
   const saved = () => { try { return JSON.parse(localStorage.getItem('slateCollab') || '{}'); } catch (_) { return {}; } };
   let S = null;                          // the session while in a room
+  const style = document.createElement('style');
+  style.textContent = '.md.collab-preview{outline:1px dashed rgba(229,192,123,.6);outline-offset:4px}';
+  document.head.appendChild(style);
 
   const loadBundle = () => window.SlateY ? Promise.resolve(window.SlateY) : new Promise((ok, no) => {
     const s = document.createElement('script');
@@ -230,62 +233,217 @@
     }
   }
 
-  // ── The notebook's side: markdown cells' texts, their commits, and who is in which cell ─────────
+  // ── The notebook in the room ────────────────────────────────────────────────────────────────────
+  // The room's document holds the notebook: `order` (the cells' ids), `meta` (each cell's kind and
+  // tags), `text` (each cell's text, typed into live) and `committed` (each cell's text as last
+  // committed, Shift-Enter or a run). Each browser keeps its hub in step with it. Changes are found by
+  // comparing this hub's notebook and the room's with `base`, what both last agreed on: what differs
+  // here from `base` was done here and goes to the room; what differs in the room was done by the
+  // others and is applied here, through the hub's `collab/apply`, which runs nothing. Cells this copy
+  // had and the room did not when it joined stay out of it (`unshared`).
   const cells = () => ((window.__slateState || window.nbState || {}).cells) || [];
-  const isProse = c => c && window.kindInfo && window.kindInfo(c.kind).prose;
+  const isProse = kind => !!(window.kindInfo && window.kindInfo(kind).prose);
   const srcEq = (a, b) => window.slateStore && window.slateStore.srcEq ? window.slateStore.srcEq(a, b) : a === b;
   const bindAll = () => document.dispatchEvent(new CustomEvent('slate:collab'));
+  const metaOf = c => ({ kind: c.kind, tags: [...(c.tags || [])].sort() });
+  const metaEq = (a, b) => !!a && !!b && a.kind === b.kind && a.tags.join('\u0000') === b.tags.join('\u0000');
+  const listEq = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
-  // Start the room from this notebook's markdown cells, unless someone already has.
-  function seed() {
-    if (!S || S.texts.size > 0) return;
-    const { Y } = S.SY;
-    S.doc.transact(() => {
-      for (const c of cells()) {
-        if (!isProse(c)) continue;
-        S.texts.set(c.id, new Y.Text(c.source || ''));
-        S.committed.set(c.id, c.source || '');
-      }
-    });
-    bindAll();
-    ui.render();
+  function localNb() {
+    const order = [], meta = {}, source = {};
+    for (const c of cells()) {
+      if (S.unshared.has(c.id)) continue;
+      order.push(c.id); meta[c.id] = metaOf(c); source[c.id] = c.source || '';
+    }
+    return { order, meta, source };
+  }
+  function roomNb() {
+    const order = S.order.toArray(), meta = {};
+    for (const id of order) { const m = S.meta.get(id); if (m) meta[id] = { kind: m.kind, tags: [...(m.tags || [])] }; }
+    return { order, meta };
   }
 
-  // Another's commit of cell `id`: committed here too, which renders it.
+  // Put cell `id` into the room after `after` (first when not in the room).
+  function roomInsert(id, meta, source, after) {
+    const { Y } = S.SY;
+    const at = after == null ? -1 : S.order.toArray().indexOf(after);
+    S.order.insert(at + 1, [id]);
+    S.meta.set(id, meta);
+    S.texts.set(id, new Y.Text(source));
+    S.committed.set(id, source);
+  }
+  function roomDelete(id) {
+    const i = S.order.toArray().indexOf(id);
+    if (i >= 0) S.order.delete(i, 1);
+    S.meta.delete(id); S.texts.delete(id); S.committed.delete(id);
+  }
+
+  // Start the room from this notebook, unless someone already has.
+  function seed() {
+    if (S.order.length > 0) return false;
+    S.doc.transact(() => {
+      let prev = null;
+      for (const c of cells()) { roomInsert(c.id, metaOf(c), c.source || '', prev); prev = c.id; }
+    }, 'local');
+    S.base = roomNb();
+    return true;
+  }
+
+  // Joining a room that has a notebook: what both have is agreed; the room's cells this copy lacks
+  // are added here by the first reconcile; this copy's cells the room lacks stay out of it.
+  function adopt() {
+    const R = roomNb(), here = new Set(cells().map(c => c.id));
+    S.unshared = new Set([...here].filter(id => !(id in R.meta)));
+    const order = R.order.filter(id => here.has(id)), meta = {};
+    for (const id of order) meta[id] = R.meta[id];
+    S.base = { order, meta };
+  }
+
+  let pending = null;
+  function reconcileSoon() {
+    if (!S || !S.base) return;
+    clearTimeout(pending);
+    pending = setTimeout(reconcile, 120);
+  }
+
+  async function reconcile() {
+    if (!S || !S.base) return;
+    if (S.applying) { S.again = true; return; }
+    const L = localNb(), B = S.base;
+    // What was done here goes to the room.
+    S.doc.transact(() => {
+      let R = roomNb();
+      L.order.forEach((id, i) => {
+        if (id in B.meta || id in R.meta) return;
+        let after = null;
+        for (let j = i - 1; j >= 0; j--) if (L.order[j] in R.meta) { after = L.order[j]; break; }
+        roomInsert(id, L.meta[id], L.source[id], after);
+        R = roomNb();
+      });
+      for (const id of B.order) if (!(id in L.meta) && id in R.meta) roomDelete(id);
+      R = roomNb();
+      const common = new Set(L.order.filter(id => id in R.meta && id in B.meta));
+      const Lc = L.order.filter(id => common.has(id)), Bc = B.order.filter(id => common.has(id));
+      if (!listEq(Lc, Bc)) {
+        // Moved here: the room takes this order, its cells this copy lacks kept after the cell before them.
+        const next = [];
+        const rest = R.order.filter(id => !common.has(id));
+        const placed = new Set();
+        for (const id of Lc) {
+          next.push(id); placed.add(id);
+          for (const r of rest) if (!placed.has(r) && R.order[R.order.indexOf(r) - 1] === id) { next.push(r); placed.add(r); }
+        }
+        for (const r of rest) if (!placed.has(r)) next.push(r);
+        if (!listEq(next, R.order)) { S.order.delete(0, S.order.length); S.order.insert(0, next); }
+      }
+      for (const id of common) if (!metaEq(L.meta[id], B.meta[id]) && !metaEq(L.meta[id], R.meta[id])) S.meta.set(id, L.meta[id]);
+    }, 'local');
+    bindAll();                         // an editor opened before its cell was in the room binds now
+    // What the others did comes here.
+    const R = roomNb(), ops = [];
+    const have = new Set(L.order);
+    R.order.forEach((id, i) => {
+      if (have.has(id) || id in B.meta || S.unshared.has(id)) return;
+      const yt = S.texts.get(id);
+      ops.push({ op: 'insert', id, kind: R.meta[id].kind, tags: R.meta[id].tags, source: yt ? yt.toString() : '',
+                 after: i > 0 ? R.order[i - 1] : '' });
+      have.add(id);
+    });
+    for (const id of B.order) if (!(id in R.meta) && id in L.meta) ops.push({ op: 'delete', id });
+    const common = R.order.filter(id => id in L.meta && id in B.meta);
+    const Lc = L.order.filter(id => common.includes(id)), Bc = B.order.filter(id => common.includes(id));
+    if (listEq(Lc, Bc) && !listEq(common, Bc)) {
+      common.forEach((id, i) => { if (Lc.indexOf(id) !== i) ops.push({ op: 'move', id, after: i > 0 ? common[i - 1] : '' }); });
+    }
+    for (const id of common) {
+      const r = R.meta[id], l = L.meta[id], b = B.meta[id];
+      if (metaEq(l, b) && !metaEq(r, b)) {
+        if (r.kind !== l.kind) ops.push({ op: 'kind', id, kind: r.kind });
+        if (r.tags.join('\u0000') !== l.tags.join('\u0000')) ops.push({ op: 'tags', id, tags: r.tags });
+      }
+    }
+    S.base = R;
+    if (ops.length) {
+      S.applying = true;
+      try {
+        const st = await api('POST', '/api/collab/apply', { ops });
+        if (st && st.cells && window.renderAll) window.renderAll(st);
+      } catch (e) { console.warn('collab: the room\'s changes were not applied', e); }
+      S.applying = false;
+      bindAll();
+    }
+    decorate();
+    ui.render();
+    if (S && S.again) { S.again = false; reconcileSoon(); }
+  }
+
+  // Another's commit of cell `id`, committed here: a markdown cell is rendered (as Shift-Enter does),
+  // any other cell's text is saved without running it.
   async function applyCommit(id) {
     if (!S) return;
     const src = S.committed.get(id);
-    if (typeof src !== 'string') return;
-    if (!cells().some(c => c.id === id)) { console.warn('collab: no cell ' + id + ' here'); return; }
-    if (srcEq(src, (window.srcMap || {})[id] || '')) return;
-    window.srcMap[id] = src;
-    try { window.applyAck && window.applyAck(await api('POST', '/api/cell/' + id, { source: src })); }
-    catch (e) { console.warn('collab: could not commit ' + id, e); }
+    const c = cells().find(x => x.id === id);
+    if (typeof src !== 'string' || !c || srcEq(src, c.source || '')) return;
+    try {
+      if (isProse(c.kind)) {
+        window.srcMap[id] = src;
+        window.applyAck && window.applyAck(await api('POST', '/api/cell/' + id, { source: src }));
+      } else {
+        const st = await api('POST', '/api/collab/apply', { ops: [{ op: 'source', id, source: src }] });
+        if (st && st.cells && window.renderAll) window.renderAll(st);
+      }
+    } catch (e) { console.warn('collab: could not commit ' + id, e); }
+    const el = document.querySelector('#cell-' + CSS.escape(id) + ' .md');
+    if (el) el.classList.remove('collab-preview');
   }
 
-  // Who is in which cell, on each cell's header.
-  function markEditing() {
+  // A markdown cell another is typing in, rendered as they pause, when it is not open here.
+  const previewTimers = {};
+  function previewSoon(id) {
+    clearTimeout(previewTimers[id]);
+    previewTimers[id] = setTimeout(async () => {
+      if (!S || S.bound.has(id) || !S.texts.has(id)) return;
+      const c = cells().find(x => x.id === id);
+      if (!c || !isProse(c.kind)) return;
+      const source = S.texts.get(id).toString();
+      if (srcEq(source, c.source || '')) return;
+      try {
+        const r = await api('POST', '/api/collab/render', { id, source });
+        const el = document.querySelector('#cell-' + CSS.escape(id) + ' .md');
+        if (el && r && typeof r.html === 'string') {
+          el.innerHTML = r.html;
+          el.classList.add('collab-preview');
+          el.title = 'Being written by others: not committed yet';
+        }
+      } catch (_) {}
+    }, 400);
+  }
+
+  // Who is in which cell, and which cells are not in the room, on the cells' headers.
+  function decorate() {
     document.querySelectorAll('.collab-who').forEach(el => el.remove());
-    if (!S) return;
+    if (!S) { document.querySelectorAll('.collab-preview').forEach(el => el.classList.remove('collab-preview')); return; }
     const by = {};
     S.awareness.getStates().forEach((st, client) => {
       if (client === S.awareness.clientID || !st.cell || !st.user) return;
       (by[st.cell] = by[st.cell] || []).push(st.user);
     });
-    for (const [id, users] of Object.entries(by)) {
+    const tag = (id, html) => {
       const head = document.querySelector('#cell-' + CSS.escape(id) + ' .cellhead');
-      if (!head) continue;
+      if (!head) return;
       const span = document.createElement('span');
       span.className = 'collab-who';
       span.style.cssText = 'margin-left:8px;font-size:11px;opacity:.9';
-      span.innerHTML = users.map(u => `<span style="color:${esc(u.color)}">✎ ${esc(u.name)}</span>`).join(' ');
+      span.innerHTML = html;
       head.appendChild(span);
-    }
+    };
+    for (const [id, users] of Object.entries(by)) tag(id, users.map(u => `<span style="color:${esc(u.color)}">✎ ${esc(u.name)}</span>`).join(' '));
+    for (const id of S.unshared) tag(id, '<span style="opacity:.7" title="This copy had this cell when it joined; the room does not">not shared</span>');
   }
 
-  // A markdown cell's editor, bound to the cell's shared text while in a room that shares it.
+  // A cell's editor (markdown or code; not a web cell's panes), bound to the cell's text in the room.
   const editorExtension = ctx => {
-    if (!ctx || !ctx.markdown || !ctx.cellId || !window.CM6) return [];
+    if (!ctx || !ctx.cellId || ctx.lang || !window.CM6) return [];
     const { ViewPlugin, Compartment, Transaction, Prec, keymap } = window.CM6;
     const comp = new Compartment(), id = ctx.cellId;
     return [comp.of([]), ViewPlugin.define(view => {
@@ -302,6 +460,8 @@
           annotations: Transaction.addToHistory.of(false),
         });
         S.bound.set(id, view);
+        const md = document.querySelector('#cell-' + CSS.escape(id) + ' .md');
+        if (md) md.classList.remove('collab-preview');
         if (view.hasFocus) S.awareness.setLocalStateField('cell', id);   // focused before it was bound
       };
       const unbind = () => {
@@ -309,7 +469,11 @@
         try { view.dispatch({ effects: comp.reconfigure([]) }); } catch (_) {}
         undo.destroy(); undo = null;
       };
-      const onSession = () => queueMicrotask(() => (S ? bind() : unbind()));
+      const onSession = () => queueMicrotask(() => {
+        if (!S) return unbind();
+        if (undo && S.bound.get(id) !== view) unbind();   // a new room: bind again to its text
+        bind();
+      });
       const focus = on => () => { if (S && undo) S.awareness.setLocalStateField('cell', on ? id : null); };
       const fin = focus(true), fout = focus(false);
       document.addEventListener('slate:collab', onSession);
@@ -333,32 +497,60 @@
   // An editor bound to a shared text follows the text: the hub's source is only a commit of it.
   window.slateCollabBound = id => !!(S && S.bound.has(id));
   document.addEventListener('slate:source-committed', e => {
-    if (!S || !e.detail || !S.texts.has(e.detail.id)) return;
+    if (!S || !S.base || !e.detail || !S.texts.has(e.detail.id)) return;
     S.committed.set(e.detail.id, e.detail.source);
   });
+  document.addEventListener('slate:state', () => { if (S && S.base && !S.applying) reconcileSoon(); decorate(); });
 
-  async function join({ kb, project, mode, start }) {
+  // Until the room's notebook has arrived from the others: at once when nobody else is there, at
+  // most a few seconds otherwise (the relay takes over a peer not reached directly after five).
+  function whenSynced(done) {
+    const t0 = Date.now();
+    const check = () => {
+      if (!S) return;
+      const waited = Date.now() - t0, peers = S.provider.peers.size;
+      if (S.order.length > 0 || (peers === 0 && waited > 2000) || waited > 9000) done();
+      else setTimeout(check, 200);
+    };
+    check();
+  }
+
+  async function join({ kb, project, mode }) {
     if (S) leave();
     localStorage.setItem('slateCollab', JSON.stringify({ kb, project, mode }));
     ui.say('Asking ' + kb + ' for a ticket…');
     let t;
     try { t = await api('POST', '/api/collab/ticket', { kb, project }); }
     catch (e) { ui.say('The hub did not answer'); return; }
-    if (!t.ok) { ui.say(t.error || 'No ticket', t.signin ? kb : null, !t.signin && (t.status === 401 || t.status === 403) ? { kb, project, mode, start } : null); return; }
+    if (!t.ok) { ui.say(t.error || 'No ticket', t.signin ? kb : null, !t.signin && (t.status === 401 || t.status === 403) ? { kb, project, mode } : null); return; }
     let SY;
     try { SY = await loadBundle(); } catch (e) { ui.say(String(e.message || e)); return; }
     const doc = new SY.Y.Doc();
     const awareness = new SY.awareness.Awareness(doc);
     const color = COLORS[doc.clientID % COLORS.length];
     awareness.setLocalStateField('user', { name: t.name || 'Someone', color, colorLight: color + '33' });
-    S = { SY, doc, awareness, texts: doc.getMap('text'), committed: doc.getMap('committed'), bound: new Map(),
-          kb, project, mode, room: t.room, name: t.name, started: Date.now() };
-    S.provider = new Room(SY, { ws: t.ws, room: t.room, doc, awareness, mode, onChange: () => { markEditing(); ui.render(); } });
-    S.committed.observe(ev => { if (!ev.transaction.local) for (const id of ev.keysChanged) applyCommit(id); });
-    S.texts.observe(ev => { if (!ev.transaction.local) bindAll(); });
-    if (start) setTimeout(seed, 1500);
-    ui.say('');
-    ui.render();
+    S = { SY, doc, awareness, order: doc.getArray('order'), meta: doc.getMap('meta'), texts: doc.getMap('text'),
+          committed: doc.getMap('committed'), bound: new Map(), unshared: new Set(), base: null, applying: false,
+          kb, project, mode, room: t.room, name: t.name, others: t.rooms || [], started: Date.now() };
+    S.provider = new Room(SY, { ws: t.ws, room: t.room, doc, awareness, mode, onChange: () => { decorate(); ui.render(); } });
+    S.committed.observe(ev => { if (!ev.transaction.local && S.base) for (const id of ev.keysChanged) applyCommit(id); });
+    S.texts.observeDeep(evs => {
+      if (!S.base || evs.every(e => e.transaction.local)) return;
+      for (const e of evs) { const id = e.path && e.path[0]; if (typeof id === 'string') previewSoon(id); }
+      bindAll();
+    });
+    const roomChanged = ev => { if (!ev.transaction.local && S.base) reconcileSoon(); };
+    S.order.observe(roomChanged);
+    S.meta.observe(roomChanged);
+    ui.say('Joining ' + t.room + '…');
+    whenSynced(() => {
+      if (!S) return;
+      const started = seed();
+      if (!started) adopt();
+      ui.say(started ? 'You started the room from this copy.' : '');
+      bindAll();
+      reconcile();
+    });
   }
 
   function leave() {
@@ -369,7 +561,7 @@
     s.provider.close();
     s.awareness.destroy();
     s.doc.destroy();
-    markEditing();
+    decorate();
     ui.render();
   }
 
@@ -406,8 +598,8 @@
           `<label style="display:block;margin:4px 0">Project <input data-f="project" style="width:100%" value="${esc(v.project || '')}"></label>` +
           `<label style="display:block;margin:4px 0">Connect <select data-f="mode">` +
           ['auto', 'direct', 'relay'].map(m => `<option${(v.mode || 'auto') === m ? ' selected' : ''}>${m}</option>`).join('') + '</select></label>' +
-          '<div style="margin-top:8px;display:flex;gap:6px"><button data-act="start" title="Share this notebook\'s markdown cells, as they are here">Start from this copy</button>' +
-          '<button data-act="join" title="Take the room\'s cells, as whoever started it has them">Join</button></div>' + msg + signin;
+          '<div style="margin-top:8px"><button data-act="join" title="Join this notebook\'s room: the first in starts it from their copy, the others take its cells">Join</button></div>' +
+          msg + signin;
       } else {
         const p = S.provider, states = S.awareness.getStates();
         const nameOf = peer => { for (const c of peer.clients) { const st = states.get(c); if (st && st.user) return st.user.name; } return peer.id; };
@@ -415,9 +607,17 @@
           const how = peer.state === 'direct' ? `direct ${peer.kind}${peer.rtt != null ? ' · ' + peer.rtt + ' ms' : ''}` : peer.state;
           return `<tr><td>${esc(nameOf(peer))}</td><td>${esc(how)}</td><td style="text-align:right">${peer.direct}/${peer.relayed}</td></tr>`;
         }).join('') || '<tr><td colspan="3" style="opacity:.7">Nobody else yet</td></tr>';
+        const people = [];
+        states.forEach((st, c) => { if (st && st.user) people.push(c === S.awareness.clientID ? st.user.name + ' (you)' : st.user.name); });
+        // Others of the project in another room: a copy whose document id differs is a different room.
+        const elsewhere = (S.others || []).filter(r => r.room !== S.room).flatMap(r => r.people.map(x => `${x.name} (${r.document.slice(0, 8)}…)`));
         el.innerHTML = head +
-          `<div>${esc(S.room)} · ${esc(S.mode)} · signaling ${esc(p.sockState)}</div>` +
-          `<div style="opacity:.8">You: ${esc(S.name || '')} · ${S.texts.size} shared cell(s)</div>` +
+          `<div title="The room is the project and this notebook's document id">${esc(S.room)}</div>` +
+          `<div style="opacity:.8">${esc(S.mode)} · signaling ${esc(p.sockState)} · ${S.order.length} cell(s) in the room` +
+          (S.unshared.size ? ` · ${S.unshared.size} here not shared` : '') + '</div>' +
+          `<div style="margin-top:4px">In the room: ${esc(people.join(', ') || '—')}</div>` +
+          (elsewhere.length ? `<div style="margin-top:4px;color:#e5c07b">In another copy's room: ${esc(elsewhere.join(', '))}. ` +
+                              'A copy with another document id is another room.</div>' : '') +
           '<table style="width:100%;margin:8px 0;border-collapse:collapse"><tr style="opacity:.7"><td>Peer</td><td>Reached</td>' +
           '<td style="text-align:right" title="messages received directly / through the relay">msgs</td></tr>' + rows + '</table>' +
           '<button data-act="leave">Leave</button>' + msg;
@@ -442,7 +642,7 @@
       }
       const kb = this.field('kb').replace(/\/+$/, ''), project = this.field('project').toUpperCase(), mode = this.field('mode') || 'auto';
       if (!kb || !project) return this.say('Give the knowledge base and the project');
-      join({ kb, project, mode, start: a === 'start' });
+      join({ kb, project, mode });
     },
   };
   window.openCollab = () => ui.open();

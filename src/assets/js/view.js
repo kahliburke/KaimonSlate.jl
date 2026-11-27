@@ -1933,6 +1933,8 @@ function _publishState(state) {
   // Remember this notebook's file path so a reconnect after a server restart can ask the server
   // to re-open it by path (the in-memory registry is empty after a restart — see panels.js _probe).
   if (state && state.path) { try { localStorage.setItem('slate:path:' + NB_ID, state.path); } catch (_) {} }
+  // Told to whoever follows the notebook's shape (collab.js shares it with the others writing it).
+  queueMicrotask(() => document.dispatchEvent(new CustomEvent('slate:state')));
   window.__slateState = state;                  // latest state, always — so the store (a deferred
                                                 // module) can seed from it even if it loads AFTER
                                                 // this first ran (the boot reload() is async).

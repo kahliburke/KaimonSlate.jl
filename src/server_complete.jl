@@ -2848,6 +2848,17 @@ function _make_router(h::Hub)
         publish_secret_set!(bib_token_ref(kb), String(strip(get(b, "token", ""))))
         _json(Dict("ok" => true))
     end))
+    # The others' changes to the notebook (body {ops}, see `collab_apply!`), applied without running
+    # anything; and a markdown cell's text rendered without committing it (body {id, source}).
+    HTTP.register!(router, "POST", "/api/{id}/collab/apply", req -> _withnb(h, req, nb -> begin
+        ops = get(_body(req), "ops", Any[])
+        n = ops isa AbstractVector ? collab_apply!(nb, ops) : 0
+        j = state_json(nb); j["applied"] = n; _json(j)
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/collab/render", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        _json(Dict("html" => collab_render(nb, String(get(b, "id", "")), String(get(b, "source", "")))))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/collab/signin", req -> _withnb(h, req, nb -> begin
         kb = _bib_origin(String(strip(get(_body(req), "kb", ""))))
         callback = "http://" * HTTP.header(req, "Host", "127.0.0.1") * "/bib/signin/callback"
