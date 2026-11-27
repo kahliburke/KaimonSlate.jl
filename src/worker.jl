@@ -1415,6 +1415,50 @@ function __slate_authorize_client(pubkey::String)
     end
 end
 
+# ── Other people's hubs (gate protocol v3) ───────────────────────────────────────────────────────
+# Besides its own hub, this worker's gate may admit the hubs of the others writing the notebook with
+# its owner. Which keys are whose, and what each may ask, is the owner's hub's to say, through
+# `__slate_peer_policy` (protocol v2, so only the owner's hub can call it). A peer's messages reach
+# `_peer_request` as TOML text, never deserialized: a verb and its fields, answered with TOML.
+
+const _PEER_LOCK = ReentrantLock()
+"Who's who among peers' hubs (key Z85 → peer id) and what each is granted (peer id → grants)."
+const _PEER_POLICY = Ref((; keys = Dict{String,String}(), grants = Dict{String,Any}()))
+
+_peer_of_key(z85::String) = lock(() -> get(_PEER_POLICY[].keys, z85, nothing), _PEER_LOCK)
+
+"Set which keys are other people's hubs (`keys`: Z85 → peer id) and what each peer is granted (`grants`: peer id → grants). Replaces the whole policy; an empty one admits no one."
+function __slate_peer_policy(keys::AbstractDict, grants::AbstractDict = Dict{String,Any}())
+    k = Dict{String,String}(String(z) => String(id) for (z, id) in keys)
+    g = Dict{String,Any}(String(id) => v for (id, v) in grants)
+    lock(() -> (_PEER_POLICY[] = (; keys = k, grants = g)), _PEER_LOCK)
+    return (; peers = length(k))
+end
+
+_peer_reply(d::AbstractDict) = sprint(Pkg.TOML.print, d)
+
+"Answer one message from peer `peer` (its text; see `KaimonGate.set_peer_handler!`)."
+function _peer_request(peer::String, text::String)
+    req = try
+        Pkg.TOML.parse(text)
+    catch
+        return _peer_reply(Dict("error" => "A request is TOML: a verb and its fields"))
+    end
+    admitted = lock(() -> peer in values(_PEER_POLICY[].keys), _PEER_LOCK)
+    admitted || return _peer_reply(Dict("error" => "Not admitted"))
+    verb = get(req, "verb", "")
+    verb == "hello" && return _peer_reply(Dict("peer" => peer, "verbs" => ["hello"]))
+    return _peer_reply(Dict("error" => "No verb $(repr(verb)) for a peer"))
+end
+
+# Install the peer hooks on a KaimonGate that has them (protocol v3); an older one admits no peers.
+function _install_peer_hooks!()
+    isdefined(KaimonGate, :set_peer_keys!) || return false
+    KaimonGate.set_peer_keys!(_peer_of_key)
+    KaimonGate.set_peer_handler!(_peer_request)
+    return true
+end
+
 "Revoke a previously-authorised peer client `pubkey` from THIS worker's blob-channel allow-list
 (post-transfer cleanup). Returns (; status) — \"removed\"/\"absent\"."
 function __slate_revoke_client(pubkey::String)
@@ -2013,6 +2057,7 @@ end
 const _CONTROL_TOOLS = Set([
     "__slate_running", "__slate_cancel", "__slate_cancel_cells", "__slate_ports",
     "__slate_client_key", "__slate_server_key", "__slate_authorize_client", "__slate_revoke_client",
+    "__slate_peer_policy",
     "__slate_probe_peer",
     # The hub's answer to a cluster operation a task here is parked on. Queued behind the default
     # lane, it waits on the very calls that are waiting for it.
@@ -2973,6 +3018,7 @@ end
 
 function tools()
     return KaimonGate.GateTool[
+        KaimonGate.GateTool("__slate_peer_policy", __slate_peer_policy),
         KaimonGate.GateTool("__slate_cluster_status", __slate_cluster_status),
         KaimonGate.GateTool("__slate_cluster_forget", __slate_cluster_forget),
         KaimonGate.GateTool("__slate_matrix_render", __slate_matrix_render),
@@ -3745,6 +3791,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # Opened here, the port accepts only when the worker can answer at once.
     prep = warm_deps ? nothing : Base.Event()
     _PREPARING[] = prep
+    _install_peer_hooks!()      # before the gate opens: no peer is admitted until the owner's hub sets a policy
     _blog("start(): entering KaimonGate.serve")
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
