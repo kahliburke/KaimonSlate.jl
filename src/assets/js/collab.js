@@ -80,7 +80,7 @@
   color:#111;font:700 10.5px/1 system-ui,sans-serif;font-style:normal;box-shadow:0 0 0 2px var(--bg,#0d1120)}
 #cowrite-status i:first-of-type{margin-left:0}
 #cowrite-status i.me{outline:1px solid color-mix(in srgb,var(--text,#d4d8e8) 50%,transparent);outline-offset:1px}
-.md.collab-preview{outline:1px dashed color-mix(in srgb,var(--gold,#ffd700) 60%,transparent);outline-offset:4px}`;
+.md[data-collab-preview]{outline:1px dashed color-mix(in srgb,var(--gold,#ffd700) 60%,transparent);outline-offset:4px}`;
   document.head.appendChild(style);
 
   const loadBundle = () => window.SlateY ? Promise.resolve(window.SlateY) : new Promise((ok, no) => {
@@ -457,7 +457,7 @@
       }
     } catch (e) { console.warn('collab: could not commit ' + id, e); }
     const el = document.querySelector('#cell-' + CSS.escape(id) + ' .md');
-    if (el) el.classList.remove('collab-preview');
+    if (el) delete el.dataset.collabPreview;
   }
 
   // A markdown cell another is typing in, rendered as they type (at most every PREVIEW_MS, and once
@@ -478,7 +478,7 @@
         const el = document.querySelector('#cell-' + CSS.escape(id) + ' .md');
         if (el && r && typeof r.html === 'string') {
           el.innerHTML = r.html;
-          el.classList.add('collab-preview');
+          el.dataset.collabPreview = '1';
           el.title = 'Being written by others: not committed yet';
         }
       } catch (_) {}
@@ -514,7 +514,7 @@
   function decorate() {
     topbar();
     document.querySelectorAll('.collab-who').forEach(el => el.remove());
-    if (!S) { document.querySelectorAll('.collab-preview').forEach(el => el.classList.remove('collab-preview')); return; }
+    if (!S) { document.querySelectorAll('[data-collab-preview]').forEach(el => delete el.dataset.collabPreview); return; }
     const by = {};
     S.awareness.getStates().forEach((st, client) => {
       if (client === S.awareness.clientID || !st.cell || !st.user) return;
@@ -552,7 +552,7 @@
         });
         S.bound.set(id, view);
         const md = document.querySelector('#cell-' + CSS.escape(id) + ' .md');
-        if (md) md.classList.remove('collab-preview');
+        if (md) delete md.dataset.collabPreview;
         if (view.hasFocus) S.awareness.setLocalStateField('cell', id);   // focused before it was bound
       };
       const unbind = () => {
