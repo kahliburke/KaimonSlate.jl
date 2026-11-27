@@ -671,9 +671,18 @@
                      `${x.rtt_ms != null ? ' <small>· ' + esc(x.rtt_ms) + ' ms</small>' : ''}</td></tr>`;
     return '<table class="cw-peers"><tr><th>Hub</th><th>Reached</th></tr>' + h.peers.map(row).join('') + '</table>';
   }
+  // A hub that restarted has left the room while this page stayed in it: a ticket asked for again
+  // (which the hub takes as joining) puts it back.
   async function pollHubs() {
     if (!S) return;
-    try { S.hubs = await api('GET', '/api/collab/hubs'); ui.render(); } catch (_) {}
+    try {
+      S.hubs = await api('GET', '/api/collab/hubs');
+      if (S && S.base && S.hubs && S.hubs.room !== S.room && !S.rejoiningHub) {
+        S.rejoiningHub = true;
+        try { await api('POST', '/api/collab/ticket', { kb: S.kb, project: S.project }); } finally { if (S) S.rejoiningHub = false; }
+      }
+      ui.render();
+    } catch (_) {}
   }
 
   // ── The panel ───────────────────────────────────────────────────────────────────────────────────
