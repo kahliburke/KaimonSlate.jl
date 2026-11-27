@@ -495,7 +495,8 @@ include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Ty
 include("bib_remote.jl")     # a bibliography named by its address: fetched, cached, revalidated
 include("collab.jl")         # writing a notebook together: a ticket to its room at a knowledge base
 include("collab_keys.jl")    # whose hub a CURVE key is: the knowledge base vouches
-include("collab_hub.jl")     # the hub in the room: direct channels to the other participants' hubs
+include("collab_hub.jl")
+include("collab_peer.jl")    # running a cell on another participant's worker, as its owner granted it     # the hub in the room: direct channels to the other participants' hubs
 include("memostore.jl")      # MemoStore (server-side copy — stateless, root passed explicitly): pack/unpack
 include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl
 
@@ -2876,6 +2877,20 @@ function _make_router(h::Hub)
             return HTTP.Response(400, ["Content-Type" => "application/json"], JSON.json(Dict("error" => sprint(showerror, e))))
         end
         _json(r)
+    end))
+    # Granting a cell to another hub in the room, taking it back, and running a cell granted to this one
+    # (collab_peer.jl). Bodies {cell, peer} and {cell}.
+    _collab_json(f) = try _json(f()) catch e
+        HTTP.Response(400, ["Content-Type" => "application/json"], JSON.json(Dict("error" => sprint(showerror, e))))
+    end
+    HTTP.register!(router, "POST", "/api/{id}/collab/grant", req -> _withnb(h, req, nb -> begin
+        b = _body(req); _collab_json(() -> collab_grant!(nb, String(get(b, "cell", "")), String(get(b, "peer", ""))))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/collab/revoke", req -> _withnb(h, req, nb -> begin
+        b = _body(req); _collab_json(() -> collab_revoke!(nb, String(get(b, "cell", "")), String(get(b, "peer", ""))))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/collab/run-granted", req -> _withnb(h, req, nb -> begin
+        b = _body(req); _collab_json(() -> collab_run_granted(nb, String(get(b, "cell", ""))))
     end))
     HTTP.register!(router, "POST", "/api/{id}/collab/leave", req -> _withnb(h, req, nb -> (collab_hub_leave!(nb); _json(Dict("ok" => true)))))
     HTTP.register!(router, "POST", "/api/{id}/collab/signin", req -> _withnb(h, req, nb -> begin

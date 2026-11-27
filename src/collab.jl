@@ -23,7 +23,7 @@ function collab_ticket(nb, kb::AbstractString, project::AbstractString)
     occursin(r"^[A-Z][A-Z0-9]{0,15}$", key) || return (; ok = false, status = 400, signin = false, error = "A project's key is letters and digits")
     # The hub's CURVE public key goes with it: the knowledge base keeps it as this person's hub's,
     # and answers with the keys it vouches for in the room (see collab_keys.jl).
-    hub_key = ReportEngine._hub_client_pubkey()
+    hub_key = try first(hub_keypair()) catch; "" end
     body = JSON.json(Dict("document" => _ensure_docid!(nb), "hub_key" => hub_key, "hub_label" => gethostname()))
     url = origin * "/api/projects/" * key * "/collab/ticket"
     ask(token) = _BIB_POST[](url, ["Content-Type" => "application/json", "Accept" => "application/json",

@@ -42,6 +42,7 @@ mutable struct HubLink
     const sending::ReentrantLock             # the room's socket, apart: a stalled send holds up no one else
     const key::String                        # this hub's CURVE public key
     authority::Any                           # who vouches for the others' keys (collab_keys.jl)
+    const received::Dict{String,NamedTuple}  # cells other hubs granted this one: cell id → where to ask (collab_peer.jl)
     ws::Any
     closed::Bool
 end
@@ -77,7 +78,7 @@ function collab_hub_join!(nb, t)
         end
         old === nothing || _hub_leave!(old)
         l = HubLink(nb.id, t.room, t.ws, bytes2hex(rand(UInt8, 6)), t.name, Dict{String,HubPeer}(), ReentrantLock(), ReentrantLock(),
-                    t.hub_key, authority, nothing, false)
+                    t.hub_key, authority, Dict{String,NamedTuple}(), nothing, false)
         HUB_LINKS[nb.id] = l
         errormonitor(Threads.@spawn _hub_run(l))
         errormonitor(Threads.@spawn _hub_keys_watch(l))
@@ -273,6 +274,20 @@ function _hub_control!(l::HubLink, p::HubPeer, m)
         p.vouched = isempty(p.key) ? nothing : key_owner(l.authority, p.key)
     elseif t == "ping"
         _hub_send(p, Dict("t" => "pong", "id" => m["id"]))
+    elseif t == "grant"
+        # A cell its owner's hub lets this one run on its worker (collab_peer.jl): where, and as which hash.
+        cell = string(get(m, "cell", ""))
+        isempty(cell) && return
+        g = (; from = p.id, name = p.name, hash = string(get(m, "hash", "")), server_key = string(get(m, "server_key", "")),
+               endpoint = string(get(m, "endpoint", "")))
+        lock(() -> (l.received[cell] = g), l.lock)
+    elseif t == "revoke"
+        cell = string(get(m, "cell", ""))
+        lock(l.lock) do
+            for (c, g) in collect(l.received)
+                g.from == p.id && (isempty(cell) || c == cell) && delete!(l.received, c)
+            end
+        end
     elseif t == "probe"
         p.incoming = (; id = string(m["id"]), bytes = Int(m["bytes"]), sha = string(m["sha"]), buf = IOBuffer(), t0 = time())
         Int(m["bytes"]) == 0 && _hub_probe_done!(p)
@@ -354,7 +369,8 @@ function collab_hubs(nb)
         (; id = p.id, name = p.name, state = String(p.state), var"local" = p.pair[1], remote = p.pair[2], rtt_ms = p.rtt_ms,
            key = p.key, vouched = p.vouched === nothing ? "" : p.vouched.name)
     end
-    return (; room = l.room, connected = l.ws !== nothing, peers, key = l.key, vouched_keys = length(l.authority.keys))
+    received = lock(() -> [(; cell = c, from = g.name, hash = g.hash) for (c, g) in l.received], l.lock)
+    return (; room = l.room, connected = l.ws !== nothing, peers, key = l.key, vouched_keys = length(l.authority.keys), received)
 end
 
 """

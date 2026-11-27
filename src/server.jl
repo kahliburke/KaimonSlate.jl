@@ -17,6 +17,7 @@ import Base64
 import Serialization                          # a worker's cluster-operation results, back over the gate
 import Sockets                                # claim the hub's port before HTTP's accept loop does
 import SHA                                    # vendored assets: the hashes their lock records
+import ZMQ                                    # asking another participant's worker to run a granted cell (collab_peer.jl)
 import SlateExtensionsBase                    # the dtype table the page's decoders are generated from
 import Dates                                  # publish dates for the multi-doc site manifest
 import Logging                                # standalone serve: route hub log detail to a file
