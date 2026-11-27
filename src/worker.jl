@@ -1375,7 +1375,7 @@ public half (the same key the blob server binds with). Public key only; the secr
 process. Symmetric with `__slate_client_key`."
 function __slate_server_key()
     try
-        pub = try; KaimonGate._CURVE_SERVER_PUBLIC[]; catch; ""; end
+        pub = KaimonGate._curve_server_public()
         isempty(pub) && ((pub, _) = KaimonGate._load_or_create_server_keypair())
         return (; key = pub)
     catch e
@@ -3134,6 +3134,8 @@ end
 _blob_enforce() = blob_enforce()      # gateauth.jl, where it is unit-tested
 
 const _BLOB_ZAP_DOMAIN = "kaimon-blob"
+# The blob ZAP handler runs while this is set; cleared when the worker stops serving.
+const _BLOB_ZAP_ON = Ref(true)
 const _BLOB_CTX = Ref{Any}(nothing)   # anchor the blob ZMQ context so GC can't finalize it mid-serve
 # The blob data port this worker ACTUALLY bound: the pinned `gate+2` on a `:direct` worker (firewall/peer
 # constraint), or a VERIFIED-FREE port on a `:tunnel` worker (never `gate+2`; see `start`). `__slate_ports`
@@ -3142,43 +3144,15 @@ const _BLOB_CTX = Ref{Any}(nothing)   # anchor the blob ZMQ context so GC can't 
 const _BLOB_DATA_PORT = Ref(0)
 const _STREAM_PORT = Ref(0)
 
-# The blob channel's OWN ZAP REP handler (RFC 27), bound on the blob `ctx`. Answers 200/400 per CURVE
-# handshake from the UNION of the gate's control clients and the blob-only allow-list, re-read each
-# handshake (handshakes are rare) so authorize/revoke apply live without a restart. Must bind BEFORE
-# the blob server socket; runs for the gate's lifetime.
-function _start_blob_zap!(ctx)
-    Z = KaimonGate.ZMQ
-    zap = KaimonGate._zmq_socket(ctx, Z.REP)
-    Z.bind(zap, KaimonGate._ZAP_ENDPOINT)
-    zap.rcvtimeo = 250; zap.linger = 0
-    Threads.@spawn :interactive begin
-        try
-            while KaimonGate._RUNNING[]
-                frames = try
-                    Z.recv_multipart(zap, Vector{UInt8})
-                catch e
-                    _is_zmq_timeout(Z, e) && continue   # re-check _RUNNING
-                    KaimonGate._RUNNING[] || break
-                    continue
-                end
-                try
-                    # ZAP 1.0 CURVE request: [version, request_id, domain, address, identity,
-                    # mechanism, credentials(=32 raw client key bytes)].
-                    length(frames) >= 7 || continue
-                    z85 = try; KaimonGate._z85_encode(frames[7]); catch; ""; end
-                    ok = z85 in _authorized_blob_clients() || z85 in KaimonGate._authorized_clients()
-                    Z.send_multipart(zap, Any["1.0", frames[2], ok ? "200" : "400",
-                                              ok ? "OK" : "denied", "", ""])
-                catch e
-                    @debug "blob ZAP handler error" exception = e
-                end
-            end
-        finally
-            try; close(zap); catch; end
-        end
-    end
-    return nothing
-end
+# The blob channel's own ZAP handler (`blob_zap!`, blobchannel.jl), bound on the blob `ctx`: a key
+# is let in when it is on the union of the gate's control clients and the blob-only allow-list,
+# re-read on each handshake (handshakes are rare) so authorize/revoke apply without a restart. Bound
+# before the blob server socket; runs while `_BLOB_ZAP_ON`.
+_start_blob_zap!(ctx) =
+    blob_zap!(KaimonGate.ZMQ, ctx, raw -> begin
+        z85 = try; KaimonGate._z85_encode(raw); catch; ""; end
+        !isempty(z85) && (z85 in _authorized_blob_clients() || z85 in KaimonGate._authorized_clients())
+    end; running = _BLOB_ZAP_ON)
 
 function _blob_server!(host::String, port::Int; curve::Bool = true)
     ctx = KaimonGate.ZMQ.Context()          # OWN context → OWN ZAP handler (never the gate's shared one)
@@ -3186,12 +3160,12 @@ function _blob_server!(host::String, port::Int; curve::Bool = true)
     enforce = curve && _blob_enforce()
     enforce && _start_blob_zap!(ctx)        # bind the handler BEFORE the server socket
     configure! = curve ? function (sock)
-        sec = try; KaimonGate._CURVE_SERVER_SECRET[]; catch; ""; end
+        sec = KaimonGate._curve_server_secret()
         isempty(sec) && ((_, sec) = KaimonGate._load_or_create_server_keypair())
         KaimonGate.make_curve_server!(sock, sec)
-        # Set the ZAP domain ONLY when we started a handler — a domain with no handler hangs every
-        # handshake. No handler ⇒ CURVE encryption-only (the `:tunnel`/allow_any posture).
-        enforce && KaimonGate._setsockopt_str(sock, KaimonGate._ZMQ_ZAP_DOMAIN, _BLOB_ZAP_DOMAIN)
+        # The ZAP domain, enforced, only when we started a handler: then a handshake the handler does not
+        # answer is refused. No handler ⇒ CURVE encryption-only (the `:tunnel`/allow_any posture).
+        enforce && blob_zap_domain!(KaimonGate.ZMQ, sock, _BLOB_ZAP_DOMAIN)
     end : nothing
     blob_server!(KaimonGate.ZMQ, host, port, _memo_dir(); ctx = ctx, configure! = configure!,
                  control_handler = _xfer_control,   # transfer-control plane rides the blob channel (X/S verbs)
