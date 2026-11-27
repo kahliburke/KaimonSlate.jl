@@ -574,7 +574,7 @@
     let t;
     try { t = await api('POST', '/api/collab/ticket', { kb, project }); }
     catch (e) { ui.say('The hub did not answer'); return; }
-    if (!t.ok) { ui.say(t.error || 'No ticket', t.signin ? kb : null, !t.signin && (t.status === 401 || t.status === 403) ? { kb, project, mode } : null); return; }
+    if (!t.ok) { ui.say(t.error || 'No ticket', t.signin ? kb : null, t.status === 401 || t.status === 403 ? { kb, project, mode } : null); return; }
     let SY;
     try { SY = await loadBundle(); } catch (e) { ui.say(String(e.message || e)); return; }
     const doc = new SY.Y.Doc();
