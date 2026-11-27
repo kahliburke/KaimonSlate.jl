@@ -450,11 +450,14 @@
     if (el) el.classList.remove('collab-preview');
   }
 
-  // A markdown cell another is typing in, rendered as they pause, when it is not open here.
+  // A markdown cell another is typing in, rendered as they type (at most every PREVIEW_MS, and once
+  // when they stop), when it is not open here.
+  const PREVIEW_MS = 400;
   const previewTimers = {};
   function previewSoon(id) {
-    clearTimeout(previewTimers[id]);
+    if (previewTimers[id]) return;     // one already due: it reads the text as it is then
     previewTimers[id] = setTimeout(async () => {
+      delete previewTimers[id];
       if (!S || S.bound.has(id) || !S.texts.has(id)) return;
       const c = cells().find(x => x.id === id);
       if (!c || !isProse(c.kind)) return;
@@ -469,7 +472,7 @@
           el.title = 'Being written by others: not committed yet';
         }
       } catch (_) {}
-    }, 400);
+    }, PREVIEW_MS);
   }
 
   // Who is in which cell, and which cells are not in the room, on the cells' headers.
