@@ -70,6 +70,14 @@
 .collab-who .cw-tag{padding:0 7px;font-size:10.5px;white-space:nowrap;color:var(--c);border-radius:9px;
   border:1px solid color-mix(in srgb,var(--c) 55%,transparent);background:color-mix(in srgb,var(--c) 12%,transparent)}
 .collab-who .cw-tag.unshared{--c:var(--dim,#6a7090);border-style:dashed}
+#cowrite-status{display:inline-flex;align-items:center;gap:0;padding-right:8px}
+#cowrite-status .cw-dot{width:7px;height:7px;margin-right:7px;border-radius:50%;background:var(--dim,#6a7090)}
+#cowrite-status .cw-dot.ok{background:var(--green,#56d364)} #cowrite-status .cw-dot.wait{background:var(--gold,#ffd700)}
+#cowrite-status .cw-dot.bad{background:var(--red,#e57575)}
+#cowrite-status i{display:grid;place-items:center;width:20px;height:20px;margin-left:-4px;border-radius:50%;background:var(--c);
+  color:#111;font:700 10.5px/1 system-ui,sans-serif;font-style:normal;box-shadow:0 0 0 2px var(--bg,#0d1120)}
+#cowrite-status i:first-of-type{margin-left:0}
+#cowrite-status i.me{outline:1px solid color-mix(in srgb,var(--text,#d4d8e8) 50%,transparent);outline-offset:1px}
 .md.collab-preview{outline:1px dashed color-mix(in srgb,var(--gold,#ffd700) 60%,transparent);outline-offset:4px}`;
   document.head.appendChild(style);
 
@@ -476,7 +484,33 @@
   }
 
   // Who is in which cell, and which cells are not in the room, on the cells' headers.
+  // The room in the top bar, beside the menu: how it is connected, and who is in it by their initials.
+  function topbar() {
+    let el = document.getElementById('cowrite-status');
+    if (!S) { if (el) el.remove(); return; }
+    if (!el) {
+      const bar = document.querySelector('.topbar-actions');
+      if (!bar) return;
+      el = document.createElement('button');
+      el.id = 'cowrite-status';
+      el.onclick = () => ui.open();
+      bar.insertBefore(el, bar.querySelector('.menuwrap'));
+    }
+    const p = S.provider, peers = [...p.peers.values()];
+    const level = p.sockState !== 'open' && !peers.some(x => x.state === 'direct') ? 'bad'
+                : peers.some(x => x.state !== 'direct') ? 'wait' : 'ok';
+    const people = [];
+    S.awareness.getStates().forEach((st, c) => { if (st && st.user) people.push({ ...st.user, me: c === S.awareness.clientID }); });
+    people.sort((a, b) => b.me - a.me);
+    const how = peers.map(x => x.state === 'direct' ? `direct ${x.kind}${x.rtt != null ? ', ' + x.rtt + ' ms' : ''}` : x.state);
+    el.title = `Writing together: ${S.room}\n` + people.map(x => x.name + (x.me ? ' (you)' : '')).join(', ') +
+               (how.length ? '\n' + how.join('; ') : '');
+    el.innerHTML = `<span class="cw-dot ${level}"></span>` +
+      people.map(x => `<i style="--c:${esc(x.color || '#888')}"${x.me ? ' class="me"' : ''}>${esc((x.name || '?').charAt(0).toUpperCase())}</i>`).join('');
+  }
+
   function decorate() {
+    topbar();
     document.querySelectorAll('.collab-who').forEach(el => el.remove());
     if (!S) { document.querySelectorAll('.collab-preview').forEach(el => el.classList.remove('collab-preview')); return; }
     const by = {};
@@ -582,7 +616,9 @@
     try { SY = await loadBundle(); } catch (e) { ui.say(String(e.message || e)); return; }
     const doc = new SY.Y.Doc();
     const awareness = new SY.awareness.Awareness(doc);
-    const color = COLORS[doc.clientID % COLORS.length];
+    // A colour by name, so a person keeps theirs across visits and two people rarely share one.
+    const nameHash = [...(t.name || '')].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7);
+    const color = COLORS[nameHash % COLORS.length];
     awareness.setLocalStateField('user', { name: t.name || 'Someone', color, colorLight: color + '33' });
     S = { SY, doc, awareness, order: doc.getArray('order'), meta: doc.getMap('meta'), texts: doc.getMap('text'),
           committed: doc.getMap('committed'), bound: new Map(), unshared: new Set(), base: null, applying: false,
