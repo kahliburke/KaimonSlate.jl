@@ -16,8 +16,61 @@
   const RELAY_AFTER_MS = 5000;           // how long a direct connection gets before the relay carries a peer
   const saved = () => { try { return JSON.parse(localStorage.getItem('slateCollab') || '{}'); } catch (_) { return {}; } };
   let S = null;                          // the session while in a room
+  // The panel and the marks on cells, in the theme's own colours.
   const style = document.createElement('style');
-  style.textContent = '.md.collab-preview{outline:1px dashed rgba(229,192,123,.6);outline-offset:4px}';
+  style.textContent = `
+#collabpanel{position:fixed;right:16px;top:56px;z-index:900;width:370px;max-height:calc(100vh - 80px);overflow:auto;
+  background:var(--bg2,#141828);color:var(--text,#d4d8e8);border:1px solid var(--border,#2a2e40);border-radius:10px;
+  box-shadow:0 14px 40px rgba(0,0,0,.45);font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+#collabpanel .cw-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border,#2a2e40)}
+#collabpanel .cw-title{flex:1;font-weight:600;color:var(--strong,#fff)}
+#collabpanel .cw-x{background:none;border:0;color:var(--dim,#6a7090);cursor:pointer;font-size:14px;padding:1px 5px;border-radius:5px}
+#collabpanel .cw-x:hover{color:var(--text,#d4d8e8);background:var(--bg3,#1a1e2e)}
+#collabpanel .cw-body{display:flex;flex-direction:column;gap:11px;padding:11px 12px 12px}
+#collabpanel .cw-field{display:flex;flex-direction:column;gap:3px}
+#collabpanel .cw-label{color:var(--dim,#6a7090);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em}
+#collabpanel .cw-in{box-sizing:border-box;width:100%;padding:5px 8px;font:inherit;color:var(--text,#d4d8e8);
+  background:var(--bg,#0d1120);border:1px solid var(--border,#2a2e40);border-radius:6px}
+#collabpanel .cw-in:focus{outline:none;border-color:var(--accent,#569cd6)}
+#collabpanel .cw-actions{display:flex;gap:8px;justify-content:flex-end}
+#collabpanel .cw-btn{padding:5px 14px;font:inherit;color:var(--text,#d4d8e8);background:var(--bg3,#1a1e2e);
+  border:1px solid var(--border,#2a2e40);border-radius:7px;cursor:pointer}
+#collabpanel .cw-btn:hover{border-color:var(--dim,#6a7090)}
+#collabpanel .cw-btn.go{color:var(--strong,#fff);border-color:var(--accent,#569cd6);
+  background:color-mix(in srgb,var(--accent,#569cd6) 22%,transparent)}
+#collabpanel .cw-btn.go:hover{background:color-mix(in srgb,var(--accent,#569cd6) 34%,transparent)}
+#collabpanel .cw-btn.leave:hover{color:var(--red,#e57575);border-color:var(--red,#e57575)}
+#collabpanel .cw-msg{padding:6px 9px;border-left:3px solid var(--accent,#569cd6);border-radius:4px;
+  background:color-mix(in srgb,var(--accent,#569cd6) 10%,transparent)}
+#collabpanel .cw-msg.warn{border-left-color:var(--gold,#ffd700);background:color-mix(in srgb,var(--gold,#ffd700) 10%,transparent)}
+#collabpanel .cw-room{font:11.5px/1.35 Menlo,Consolas,monospace;color:var(--dim,#6a7090);word-break:break-all}
+#collabpanel .cw-stats,#collabpanel .cw-people{display:flex;flex-wrap:wrap;gap:6px}
+#collabpanel .cw-chip{display:inline-flex;align-items:center;gap:5px;padding:1px 8px;font-size:11.5px;color:var(--dim,#6a7090);
+  background:var(--bg3,#1a1e2e);border:1px solid var(--border,#2a2e40);border-radius:10px}
+#collabpanel .cw-chip b{font-weight:600;color:var(--text,#d4d8e8)}
+#collabpanel .cw-chip.warn{color:var(--gold,#ffd700);border-color:color-mix(in srgb,var(--gold,#ffd700) 45%,transparent)}
+#collabpanel .cw-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--dim,#6a7090)}
+#collabpanel .cw-dot.ok{background:var(--green,#56d364)} #collabpanel .cw-dot.wait{background:var(--gold,#ffd700)}
+#collabpanel .cw-dot.bad{background:var(--red,#e57575)}
+#collabpanel .cw-person{display:inline-flex;align-items:center;gap:6px;padding:2px 9px 2px 3px;font-size:12px;
+  background:var(--bg3,#1a1e2e);border-radius:12px}
+#collabpanel .cw-person i{display:grid;place-items:center;width:18px;height:18px;border-radius:50%;background:var(--c);
+  color:#111;font:700 10px/1 system-ui,sans-serif}
+#collabpanel .cw-person small{color:var(--dim,#6a7090)}
+#collabpanel .cw-peers{width:100%;border-collapse:collapse;font-size:12px}
+#collabpanel .cw-peers th{padding:0 4px 4px;text-align:left;font-weight:500;font-size:10.5px;color:var(--dim,#6a7090);
+  text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border,#2a2e40)}
+#collabpanel .cw-peers td{padding:5px 4px;white-space:nowrap;border-bottom:1px solid color-mix(in srgb,var(--border,#2a2e40) 50%,transparent)}
+#collabpanel .cw-peers td:first-child{max-width:120px;overflow:hidden;text-overflow:ellipsis}
+#collabpanel .cw-peers .n{text-align:right;font-variant-numeric:tabular-nums;color:var(--dim,#6a7090)}
+#collabpanel .cw-peers .none{text-align:center;color:var(--dim,#6a7090);padding:9px}
+#collabpanel .cw-how{display:inline-flex;align-items:center;gap:6px}
+#collabpanel .cw-how small{color:var(--dim,#6a7090)}
+.collab-who{display:inline-flex;gap:4px;margin-left:8px;vertical-align:middle}
+.collab-who .cw-tag{padding:0 7px;font-size:10.5px;white-space:nowrap;color:var(--c);border-radius:9px;
+  border:1px solid color-mix(in srgb,var(--c) 55%,transparent);background:color-mix(in srgb,var(--c) 12%,transparent)}
+.collab-who .cw-tag.unshared{--c:var(--dim,#6a7090);border-style:dashed}
+.md.collab-preview{outline:1px dashed color-mix(in srgb,var(--gold,#ffd700) 60%,transparent);outline-offset:4px}`;
   document.head.appendChild(style);
 
   const loadBundle = () => window.SlateY ? Promise.resolve(window.SlateY) : new Promise((ok, no) => {
@@ -433,12 +486,11 @@
       if (!head) return;
       const span = document.createElement('span');
       span.className = 'collab-who';
-      span.style.cssText = 'margin-left:8px;font-size:11px;opacity:.9';
       span.innerHTML = html;
       head.appendChild(span);
     };
-    for (const [id, users] of Object.entries(by)) tag(id, users.map(u => `<span style="color:${esc(u.color)}">✎ ${esc(u.name)}</span>`).join(' '));
-    for (const id of S.unshared) tag(id, '<span style="opacity:.7" title="This copy had this cell when it joined; the room does not">not shared</span>');
+    for (const [id, users] of Object.entries(by)) tag(id, users.map(u => `<span class="cw-tag" style="--c:${esc(u.color)}">✎ ${esc(u.name)}</span>`).join(''));
+    for (const id of S.unshared) tag(id, '<span class="cw-tag unshared" title="In this copy, not in the room">not shared</span>');
   }
 
   // A cell's editor (markdown or code; not a web cell's panes), bound to the cell's text in the room.
@@ -572,9 +624,6 @@
       if (!this.el) {
         this.el = document.createElement('div');
         this.el.id = 'collabpanel';
-        this.el.style.cssText = 'position:fixed;right:16px;top:56px;z-index:900;width:340px;background:var(--panel-bg,#151a2c);' +
-          'color:var(--fg,#d4d8e8);border:1px solid var(--border,#2a3150);border-radius:8px;padding:12px;font:13px system-ui,sans-serif;' +
-          'box-shadow:0 8px 24px rgba(0,0,0,.4)';
         document.body.appendChild(this.el);
       }
       this.el.style.display = '';
@@ -585,42 +634,61 @@
     say(msg, signinKb = null, tokenFor = null) { this.msg = msg; this.signinKb = signinKb; this.tokenFor = tokenFor; this.render(); },
     render() {
       const el = this.el; if (!el || el.style.display === 'none') return;
-      const head = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
-        '<b>Write together</b><button data-act="close" style="background:none;border:0;color:inherit;cursor:pointer">✕</button></div>';
-      const msg = this.msg ? `<div style="margin:6px 0;color:#e5c07b">${esc(this.msg)}</div>` : '';
-      const signin = (this.signinKb ? `<button data-act="signin">Sign in to ${esc(this.signinKb)}</button>` : '') +
-        (this.tokenFor ? `<label style="display:block;margin:6px 0">API token for ${esc(this.tokenFor.kb)} <input data-f="token" type="password" style="width:100%" autocomplete="off"></label>` +
-                         '<button data-act="token">Save and join</button>' : '');
+      const sock = S && S.provider ? S.provider.sockState : '';
+      const head = '<div class="cw-head">' +
+        (S ? `<span class="cw-dot ${sock === 'open' ? 'ok' : sock === 'closed' ? 'bad' : 'wait'}" title="signaling ${esc(sock)}"></span>` : '') +
+        '<span class="cw-title">Write together</span><button class="cw-x" data-act="close" title="Close">✕</button></div>';
+      const msg = this.msg ? `<div class="cw-msg">${esc(this.msg)}</div>` : '';
+      const signin = (this.signinKb ? `<div class="cw-actions"><button class="cw-btn go" data-act="signin">Sign in to ${esc(this.signinKb)}</button></div>` : '') +
+        (this.tokenFor ? `<label class="cw-field"><span class="cw-label">API token for ${esc(this.tokenFor.kb)}</span>` +
+                         '<input class="cw-in" data-f="token" type="password" autocomplete="off"></label>' +
+                         '<div class="cw-actions"><button class="cw-btn go" data-act="token">Save and join</button></div>' : '');
       if (!S) {
-        const v = saved();
-        el.innerHTML = head +
-          `<label style="display:block;margin:4px 0">Knowledge base <input data-f="kb" style="width:100%" value="${esc(v.kb || 'http://localhost:8000')}"></label>` +
-          `<label style="display:block;margin:4px 0">Project <input data-f="project" style="width:100%" value="${esc(v.project || '')}"></label>` +
-          `<label style="display:block;margin:4px 0">Connect <select data-f="mode">` +
-          ['auto', 'direct', 'relay'].map(m => `<option${(v.mode || 'auto') === m ? ' selected' : ''}>${m}</option>`).join('') + '</select></label>' +
-          '<div style="margin-top:8px"><button data-act="join" title="Join this notebook\'s room: the first in starts it from their copy, the others take its cells">Join</button></div>' +
-          msg + signin;
+        const v = saved(), mode = v.mode || 'auto';
+        el.innerHTML = head + '<div class="cw-body">' +
+          `<label class="cw-field"><span class="cw-label">Knowledge base</span><input class="cw-in" data-f="kb" value="${esc(v.kb || 'http://localhost:8000')}"></label>` +
+          `<label class="cw-field"><span class="cw-label">Project</span><input class="cw-in" data-f="project" value="${esc(v.project || '')}"></label>` +
+          '<div class="cw-field"><span class="cw-label">Connect</span><div class="slate-seg">' +
+          ['auto', 'direct', 'relay'].map(m => `<button type="button" data-mode="${m}"${m === mode ? ' class="on"' : ''}>${m}</button>`).join('') +
+          `</div><input type="hidden" data-f="mode" value="${esc(mode)}"></div>` +
+          '<div class="cw-actions"><button class="cw-btn go" data-act="join" title="The first in starts the room from this copy; the others take its cells">Join</button></div>' +
+          msg + signin + '</div>';
+        el.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => {
+          el.querySelector('[data-f="mode"]').value = b.dataset.mode;
+          el.querySelectorAll('[data-mode]').forEach(x => x.classList.toggle('on', x === b));
+        });
       } else {
         const p = S.provider, states = S.awareness.getStates();
-        const nameOf = peer => { for (const c of peer.clients) { const st = states.get(c); if (st && st.user) return st.user.name; } return peer.id; };
+        const userOf = peer => { for (const c of peer.clients) { const st = states.get(c); if (st && st.user) return st.user; } return null; };
         const rows = [...p.peers.values()].map(peer => {
-          const how = peer.state === 'direct' ? `direct ${peer.kind}${peer.rtt != null ? ' · ' + peer.rtt + ' ms' : ''}` : peer.state;
-          return `<tr><td>${esc(nameOf(peer))}</td><td>${esc(how)}</td><td style="text-align:right">${peer.direct}/${peer.relayed}</td></tr>`;
-        }).join('') || '<tr><td colspan="3" style="opacity:.7">Nobody else yet</td></tr>';
+          const u = userOf(peer), who = u ? u.name : peer.id;
+          const cls = peer.state === 'direct' ? 'ok' : peer.state === 'relay' ? 'wait' : peer.state === 'lost' ? 'bad' : '';
+          const how = peer.state === 'direct' ? `direct <small>${esc(peer.kind || '')}${peer.rtt != null ? ' · ' + peer.rtt + ' ms' : ''}</small>` : esc(peer.state);
+          return `<tr><td>${u ? `<span style="color:${esc(u.color)}">●</span> ` : ''}${esc(who)}</td>` +
+                 `<td><span class="cw-how"><span class="cw-dot ${cls}"></span>${how}</span></td>` +
+                 `<td class="n">${peer.direct} / ${peer.relayed}</td></tr>`;
+        }).join('') || '<tr><td class="none" colspan="3">No peers</td></tr>';
         const people = [];
-        states.forEach((st, c) => { if (st && st.user) people.push(c === S.awareness.clientID ? st.user.name + ' (you)' : st.user.name); });
+        states.forEach((st, c) => {
+          if (!st || !st.user) return;
+          const me = c === S.awareness.clientID, n = String(st.user.name || '?');
+          people.push(`<span class="cw-person" style="--c:${esc(st.user.color || '#888')}"><i>${esc(n.charAt(0).toUpperCase())}</i>` +
+                      `${esc(n)}${me ? ' <small>you</small>' : ''}</span>`);
+        });
         // Others of the project in another room: a copy whose document id differs is a different room.
         const elsewhere = (S.others || []).filter(r => r.room !== S.room).flatMap(r => r.people.map(x => `${x.name} (${r.document.slice(0, 8)}…)`));
-        el.innerHTML = head +
-          `<div title="The room is the project and this notebook's document id">${esc(S.room)}</div>` +
-          `<div style="opacity:.8">${esc(S.mode)} · signaling ${esc(p.sockState)} · ${S.order.length} cell(s) in the room` +
-          (S.unshared.size ? ` · ${S.unshared.size} here not shared` : '') + '</div>' +
-          `<div style="margin-top:4px">In the room: ${esc(people.join(', ') || '—')}</div>` +
-          (elsewhere.length ? `<div style="margin-top:4px;color:#e5c07b">In another copy's room: ${esc(elsewhere.join(', '))}. ` +
-                              'A copy with another document id is another room.</div>' : '') +
-          '<table style="width:100%;margin:8px 0;border-collapse:collapse"><tr style="opacity:.7"><td>Peer</td><td>Reached</td>' +
-          '<td style="text-align:right" title="messages received directly / through the relay">msgs</td></tr>' + rows + '</table>' +
-          '<button data-act="leave">Leave</button>' + msg;
+        el.innerHTML = head + '<div class="cw-body">' +
+          `<div class="cw-room" title="Project and this notebook's document id">${esc(S.room)}</div>` +
+          '<div class="cw-stats">' +
+          `<span class="cw-chip"><b>${esc(S.mode)}</b></span>` +
+          `<span class="cw-chip">signaling <b>${esc(p.sockState)}</b></span>` +
+          `<span class="cw-chip"><b>${S.order.length}</b> cells in the room</span>` +
+          (S.unshared.size ? `<span class="cw-chip warn"><b>${S.unshared.size}</b> here not shared</span>` : '') + '</div>' +
+          `<div class="cw-field"><span class="cw-label">In the room</span><div class="cw-people">${people.join('') || '—'}</div></div>` +
+          (elsewhere.length ? `<div class="cw-msg warn" title="A copy with another document id is another room">In another copy's room: ${esc(elsewhere.join(', '))}</div>` : '') +
+          '<table class="cw-peers"><tr><th>Peer</th><th>Reached</th><th class="n" title="Messages received directly / through the relay">Msgs</th></tr>' +
+          rows + '</table>' +
+          msg + '<div class="cw-actions"><button class="cw-btn leave" data-act="leave">Leave</button></div></div>';
       }
       el.querySelectorAll('[data-act]').forEach(b => b.onclick = () => this.act(b.dataset.act));
     },
