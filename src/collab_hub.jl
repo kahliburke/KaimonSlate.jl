@@ -25,8 +25,9 @@ mutable struct HubPeer
     rtt_ms::Union{Nothing,Float64}
     const waiting::Dict{String,Channel{Any}}  # replies awaited, by request id
     incoming::Any                            # a payload being received: (; id, bytes, sha, buf, t0)
+    pair::Tuple{String,String}               # the selected candidates' types, read once the channel opens
 end
-HubPeer(id, name) = HubPeer(id, name, nothing, nothing, :connecting, nothing, Dict{String,Channel{Any}}(), nothing)
+HubPeer(id, name) = HubPeer(id, name, nothing, nothing, :connecting, nothing, Dict{String,Channel{Any}}(), nothing, ("", ""))
 
 mutable struct HubLink
     const nb_id::String
@@ -35,7 +36,8 @@ mutable struct HubLink
     const me::String
     const name::String
     const peers::Dict{String,HubPeer}
-    const lock::ReentrantLock
+    const lock::ReentrantLock                # the peers
+    const sending::ReentrantLock             # the room's socket, apart: a stalled send holds up no one else
     ws::Any
     closed::Bool
 end
@@ -50,7 +52,7 @@ function _hub_publish(l::HubLink, data)
     ws === nothing && return
     msg = JSON.json(Dict("type" => "publish", "topic" => _hub_topic(l), "data" => data))
     try
-        lock(() -> HTTP.WebSockets.send(ws, msg), l.lock)
+        lock(() -> HTTP.WebSockets.send(ws, msg), l.sending)
     catch
     end
 end
@@ -66,7 +68,7 @@ function collab_hub_join!(nb, t)
         old = get(HUB_LINKS, nb.id, nothing)
         old !== nothing && !old.closed && old.room == t.room && return old
         old === nothing || _hub_leave!(old)
-        l = HubLink(nb.id, t.room, t.ws, bytes2hex(rand(UInt8, 6)), t.name, Dict{String,HubPeer}(), ReentrantLock(), nothing, false)
+        l = HubLink(nb.id, t.room, t.ws, bytes2hex(rand(UInt8, 6)), t.name, Dict{String,HubPeer}(), ReentrantLock(), ReentrantLock(), nothing, false)
         HUB_LINKS[nb.id] = l
         errormonitor(Threads.@spawn _hub_run(l))
         return l
@@ -92,12 +94,23 @@ function _hub_leave!(l::HubLink)
 end
 
 function _hub_drop!(p::HubPeer)
+    p.state == :closed && p.pc === nothing && return
     p.state = :closed
     pc = p.pc
-    pc === nothing || try; close(pc); catch; end
+    p.pc = nothing
     for (_, ch) in p.waiting
         try; close(ch); catch; end
     end
+    # Closed apart from the caller: deleting a peer connection waits for libdatachannel's threads.
+    pc === nothing || errormonitor(Threads.@spawn try close(pc) catch end)
+end
+
+# Peer `p` of `l` is gone (its connection failed or closed, or it stopped answering): out of the room's list.
+function _hub_forget!(l::HubLink, p::HubPeer)
+    lock(l.lock) do
+        get(l.peers, p.id, nothing) === p && delete!(l.peers, p.id)
+    end
+    _hub_drop!(p)
 end
 
 # The room's WebSocket, kept open while the hub is in the room: reconnected with a growing pause.
@@ -108,7 +121,7 @@ function _hub_run(l::HubLink)
             HTTP.WebSockets.open(l.ws_url) do ws
                 l.ws = ws
                 pause = 1.0
-                lock(() -> HTTP.WebSockets.send(ws, JSON.json(Dict("type" => "subscribe", "topics" => [_hub_topic(l)]))), l.lock)
+                lock(() -> HTTP.WebSockets.send(ws, JSON.json(Dict("type" => "subscribe", "topics" => [_hub_topic(l)]))), l.sending)
                 _hub_publish(l, Dict("type" => "announce", "from" => l.me, "name" => l.name))
                 for raw in ws
                     l.closed && break
@@ -175,8 +188,15 @@ function _hub_pc!(l::HubLink, p::HubPeer)
     catch e
         e isa InvalidStateException || p.state == :closed || @debug "slate collab: no channel from a hub" exception = e
     end
+    # A peer whose connection fails, closes or goes quiet is forgotten, so nothing calls into it again.
+    gone = Threads.@spawn try
+        DataChannels.wait_state(pc, :disconnected, :failed, :closed)
+        _hub_forget!(l, p)
+    catch
+    end
     errormonitor(say)
     errormonitor(take)
+    errormonitor(gone)
     return pc
 end
 
@@ -204,8 +224,10 @@ function _hub_channel!(l::HubLink, p::HubPeer, dc)
     wait_open(dc; timeout = HUB_TIMEOUT) || (p.state = :closed; return)
     p.dc = dc
     p.state = :open
+    pair = try selected_candidate_pair(p.pc) catch; nothing end
+    pair === nothing || (p.pair = (String(candidate_type(pair.local_candidate)), String(candidate_type(pair.remote_candidate))))
     _hub_send(p, Dict("t" => "hello", "name" => l.name))
-    errormonitor(Threads.@spawn _hub_pings(p))
+    errormonitor(Threads.@spawn _hub_pings(l, p))
     for msg in dc
         try
             msg isa AbstractString ? _hub_control!(p, JSON.parse(msg)) : _hub_chunk!(p, msg)
@@ -213,7 +235,7 @@ function _hub_channel!(l::HubLink, p::HubPeer, dc)
             @debug "slate collab: a hub's message failed" exception = e
         end
     end
-    p.state = :closed
+    _hub_forget!(l, p)
 end
 
 _hub_send(p::HubPeer, d) = DataChannels.send(p.dc, JSON.json(d))
@@ -275,13 +297,17 @@ function _hub_ask(p::HubPeer, m::AbstractDict; timeout::Real = HUB_TIMEOUT, payl
     end
 end
 
-function _hub_pings(p::HubPeer)
+# A round trip every 10 s while the channel is open; three unanswered in a row and the peer is gone.
+function _hub_pings(l::HubLink, p::HubPeer)
+    missed = 0
     while p.state == :open
         try
             t0 = time()
             _hub_ask(p, Dict("t" => "ping"); timeout = 10)
             p.rtt_ms = round((time() - t0) * 1000; digits = 1)
+            missed = 0
         catch
+            (missed += 1) >= 3 && (_hub_forget!(l, p); break)
         end
         sleep(10)
     end
@@ -296,11 +322,9 @@ The hubs notebook `nb`'s hub has met in its room: `(; id, name, state, local, re
 function collab_hubs(nb)
     l = lock(() -> get(HUB_LINKS, nb.id, nothing), HUB_LINKS_LOCK)
     l === nothing && return (; room = "", connected = false, peers = NamedTuple[])
-    peers = map(collect(values(l.peers))) do p
-        pair = p.pc === nothing ? nothing : try selected_candidate_pair(p.pc) catch; nothing end
-        (; id = p.id, name = p.name, state = String(p.state),
-           var"local" = pair === nothing ? "" : String(candidate_type(pair.local_candidate)),
-           remote = pair === nothing ? "" : String(candidate_type(pair.remote_candidate)), rtt_ms = p.rtt_ms)
+    # Read from what the peers hold, never from libdatachannel: a list asked for every few seconds must not wait on it.
+    peers = map(collect(lock(() -> collect(values(l.peers)), l.lock))) do p
+        (; id = p.id, name = p.name, state = String(p.state), var"local" = p.pair[1], remote = p.pair[2], rtt_ms = p.rtt_ms)
     end
     return (; room = l.room, connected = l.ws !== nothing, peers)
 end
