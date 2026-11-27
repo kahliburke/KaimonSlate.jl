@@ -1,9 +1,8 @@
 # Unit tests for the blob DATA CHANNEL transport (src/blobchannel.jl) — the REP server and the
 # direct-pull REQ client that move content-addressed blobs between processes. Drives REAL ZMQ
 # sockets over loopback against fresh mktempdirs. Covers the transport: ranged multi-chunk pull,
-# dedup, content/sha verification, and the error paths. (The CURVE allow-list GATE that guards a
-# real cross-worker pull is exercised end-to-end by KaimonGate's own test_curve.jl and verified live
-# against these functions; it needs KaimonGate, deliberately kept out of Slate's test deps.)
+# dedup, content/sha verification, the error paths, and who may connect: CURVE with the channel's
+# own ZAP handler, driven through plain ZMQ (KaimonGate is deliberately kept out of Slate's test deps).
 using ReTest
 include(joinpath(@__DIR__, "freeport.jl"))
 import ZMQ
@@ -24,6 +23,41 @@ function serve(root)
 end
 
 @testset "blobchannel" begin
+
+    @testset "who may connect: a key the handler allows, and nobody once it stops" begin
+        function keypair()
+            p, q = zeros(UInt8, 41), zeros(UInt8, 41)
+            ccall((:zmq_curve_keypair, ZMQ.lib.libzmq), Cint, (Ptr{UInt8}, Ptr{UInt8}), p, q) == 0 || error("no CURVE in this libzmq")
+            unsafe_string(pointer(p)), unsafe_string(pointer(q))
+        end
+        rawkey(z85) = (out = zeros(UInt8, 32); ccall((:zmq_z85_decode, ZMQ.lib.libzmq), Ptr{UInt8}, (Ptr{UInt8}, Cstring), out, z85); out)
+        (spub, ssec), (apub, asec), (bpub, bsec) = keypair(), keypair(), keypair()
+        ctx = ZMQ.Context()
+        on = Ref(true)
+        handler = blob_zap!(ZMQ, ctx, key -> key == rawkey(apub); running = on)
+        port = freeport(); ready = Ref(false); serving = Ref(true)
+        curve!(sock) = (_zsetopt(ZMQ, sock, 47, 1); _zsetopt(ZMQ, sock, 49, ssec); blob_zap_domain!(ZMQ, sock, "test-blob"))
+        Threads.@spawn blob_server!(ZMQ, "127.0.0.1", port, mktempdir(); ctx, configure! = curve!, running = serving,
+                                    on_ready = () -> (ready[] = true))
+        t0 = time(); while !ready[] && time() - t0 < 5; sleep(0.01); end
+        # A version probe as client `pub`/`sec`: the server's answer, or nothing when the handshake is refused.
+        function probe(pub, sec)
+            c = ZMQ.Socket(ZMQ.REQ); c.linger = 0; c.rcvtimeo = 1500
+            _zsetopt(ZMQ, c, 50, spub); _zsetopt(ZMQ, c, 48, pub); _zsetopt(ZMQ, c, 49, sec)
+            ZMQ.connect(c, "tcp://127.0.0.1:$port")
+            ZMQ.send(c, "V")
+            r = try String(ZMQ.recv(c)) catch e; e isa ZMQ.TimeoutError ? nothing : rethrow() end
+            close(c)
+            r
+        end
+        @test probe(apub, asec) == "2"
+        @test probe(bpub, bsec) === nothing            # a key the handler does not allow
+        on[] = false
+        t0 = time(); while !istaskdone(handler) && time() - t0 < 5; sleep(0.05); end
+        @test istaskdone(handler)
+        @test probe(apub, asec) === nothing            # no handler answering: refused, not admitted
+        serving[] = false
+    end
 
     @testset "ranged multi-chunk pull round-trips + content-verifies" begin
         mktempdir() do a

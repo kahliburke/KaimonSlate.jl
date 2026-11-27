@@ -67,6 +67,73 @@ end
 
 _is_zmq_timeout(Z, e) =(T = try; Z.TimeoutError; catch; nothing; end; T !== nothing && e isa T)
 
+# ── Who may connect: a ZAP handler (RFC 27) over the channel's own context ───────────────────────
+const ZAP_ENDPOINT = "inproc://zeromq.zap.01"
+const _ZMQ_ZAP_DOMAIN = 55
+# A draft option in libzmq 4.3, present in ZeroMQ_jll's build: a handshake no ZAP handler answers is
+# refused. Without it libzmq admits the client, so a handler that died would leave a channel encrypted
+# but open to any key.
+const _ZMQ_ZAP_ENFORCE_DOMAIN = 93
+
+function _zsetopt(Z, sock, opt::Integer, v::Integer)
+    rc = Z.lib.zmq_setsockopt(sock, Cint(opt), Ref{Cint}(v), sizeof(Cint))
+    rc == 0 || error("zmq_setsockopt($opt) failed: errno $(Libc.errno())")
+end
+function _zsetopt(Z, sock, opt::Integer, s::AbstractString)
+    bytes = codeunits(String(s))
+    rc = GC.@preserve bytes Z.lib.zmq_setsockopt(sock, Cint(opt), pointer(bytes), length(bytes))
+    rc == 0 || error("zmq_setsockopt($opt) failed: errno $(Libc.errno())")
+end
+
+"""
+    blob_zap_domain!(Z, sock, domain)
+
+Put CURVE server socket `sock` under the ZAP handler of its context, for `domain`, enforced: a
+handshake the handler does not answer, or answers with anything but 200, is refused. Call before
+`bind`, with [`blob_zap!`](@ref) bound on the same context.
+"""
+function blob_zap_domain!(Z, sock, domain::AbstractString)
+    _zsetopt(Z, sock, _ZMQ_ZAP_DOMAIN, domain)
+    _zsetopt(Z, sock, _ZMQ_ZAP_ENFORCE_DOMAIN, 1)
+    return sock
+end
+
+"""
+    blob_zap!(Z, ctx, allowed; running = Ref(true)) -> Task
+
+Answer the CURVE handshakes on context `ctx`'s sockets: `allowed(key)` decides, `key` the client's
+raw 32-byte long-term public key. Binds the context's ZAP endpoint at once (before the server socket
+binds) and serves until `running[]` goes false or the context closes.
+"""
+function blob_zap!(Z, ctx, allowed; running::Ref{Bool} = Ref(true))
+    zap = Z.Socket(ctx, Z.REP)
+    Z.bind(zap, ZAP_ENDPOINT)
+    zap.rcvtimeo = 250; zap.linger = 0
+    return Threads.@spawn begin
+        try
+            while running[]
+                frames = try
+                    Z.recv_multipart(zap, Vector{UInt8})
+                catch e
+                    _is_zmq_timeout(Z, e) && continue
+                    isopen(zap) || break            # the context closed under it
+                    continue
+                end
+                try
+                    # ZAP 1.0 CURVE request: [version, request_id, domain, address, identity,
+                    # mechanism, credentials(= the client's 32-byte public key)].
+                    ok = length(frames) >= 7 && length(frames[7]) == 32 && allowed(frames[7]) === true
+                    Z.send_multipart(zap, Any["1.0", frames[2], ok ? "200" : "400", ok ? "OK" : "denied", "", ""])
+                catch e
+                    @debug "blob ZAP handler error" exception = e
+                end
+            end
+        finally
+            try; close(zap); catch; end
+        end
+    end
+end
+
 """
     blob_server!(Z, host, port, root; ctx=nothing, configure!=nothing,
                  running=Ref(true), on_ready=nothing)
