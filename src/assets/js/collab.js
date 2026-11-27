@@ -16,6 +16,8 @@
   const RELAY_AFTER_MS = 5000;           // how long a direct connection gets before the relay carries a peer
   const saved = () => { try { return JSON.parse(localStorage.getItem('slateCollab') || '{}'); } catch (_) { return {}; } };
   let S = null;                          // the session while in a room
+  // Which room this tab is in, kept for the tab alone (sessionStorage), so a reload rejoins it.
+  const inRoomKey = () => 'slateCollab:in:' + (typeof NB_ID !== 'undefined' ? NB_ID : location.pathname);
   // The panel and the marks on cells, in the theme's own colours.
   const style = document.createElement('style');
   style.textContent = `
@@ -624,6 +626,7 @@
           committed: doc.getMap('committed'), bound: new Map(), unshared: new Set(), base: null, applying: false,
           kb, project, mode, room: t.room, name: t.name, others: t.rooms || [], started: Date.now() };
     S.provider = new Room(SY, { ws: t.ws, room: t.room, doc, awareness, mode, onChange: () => { decorate(); ui.render(); } });
+    sessionStorage.setItem(inRoomKey(), JSON.stringify({ kb, project, mode }));
     S.committed.observe(ev => { if (!ev.transaction.local && S.base) for (const id of ev.keysChanged) applyCommit(id); });
     S.texts.observeDeep(evs => {
       if (!S.base || evs.every(e => e.transaction.local)) return;
@@ -645,6 +648,7 @@
   }
 
   function leave() {
+    sessionStorage.removeItem(inRoomKey());
     if (!S) return;
     const s = S;
     S = null;
@@ -754,4 +758,14 @@
   };
   window.openCollab = () => ui.open();
   window.slateCollab = { join, leave, get session() { return S; } };
+
+  // A tab in a room goes back into it after a reload, once the notebook has loaded; Leave stops that.
+  (function rejoin() {
+    let r = null;
+    try { r = JSON.parse(sessionStorage.getItem(inRoomKey()) || 'null'); } catch (_) {}
+    if (!r || !r.kb || !r.project) return;
+    const loaded = () => cells().length > 0 && typeof api === 'function';
+    const go = () => (loaded() ? join(r) : setTimeout(go, 300));
+    go();
+  })();
 })();
